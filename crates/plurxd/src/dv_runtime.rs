@@ -189,6 +189,10 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 impl ToolSet {
+    #[cfg(unix)]
+    pub(crate) fn scanner_digest(&self) -> String {
+        hash(&serde_json::to_vec(&self.identity).expect("validated backend identity serializes"))
+    }
     /// Configuration is captured by the worker, never supplied by a playback
     /// request. Absence preserves ordinary output and the saved preference.
     pub(crate) async fn capture() -> Result<Option<Arc<Self>>, String> {

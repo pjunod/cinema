@@ -208,6 +208,11 @@ WITH provided AS (SELECT json($1) AS body), input AS MATERIALIZED (
   FROM request
 ), classified AS MATERIALIZED (
   SELECT *, CASE
+    WHEN json_extract(body,'$.payload.kind')='dv_title_scan' AND NOT EXISTS(
+      SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+      WHERE d.revision=json_extract(body,'$.payload.probe_revision') AND d.file_id=json_extract(body,'$.payload.file_id')
+      AND d.scanner_digest=json_extract(body,'$.payload.scanner_digest') AND d.terminal=0
+      AND f.size=json_extract(body,'$.payload.source_size') AND f.mtime=json_extract(body,'$.payload.source_mtime')) THEN 'no_demand'
     WHEN json_type(body, '$.legacy_key') IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM background_job_legacy WHERE legacy_key = json_extract(body, '$.legacy_key')
         AND state = 'awaiting_import'
@@ -487,6 +492,11 @@ UPDATE background_jobs SET
 WHERE id = json_extract($1, '$.job_id')
   AND revision = json_extract($1, '$.expected_revision')
   AND kind = json_extract($1, '$.kind') AND payload_version = json_extract($1, '$.payload_version')
+  AND (kind!='dv_title_scan' OR EXISTS(SELECT 1 FROM dv_title_jobs_demand d JOIN files f ON f.id=d.file_id
+    WHERE d.revision=json_extract(background_jobs.payload_json,'$.probe_revision')
+    AND d.file_id=json_extract(background_jobs.payload_json,'$.file_id') AND d.terminal=0
+    AND d.scanner_digest=json_extract(background_jobs.payload_json,'$.scanner_digest')
+    AND f.size=json_extract(background_jobs.payload_json,'$.source_size') AND f.mtime=json_extract(background_jobs.payload_json,'$.source_mtime')))
   AND (kind NOT IN ('subtitle_translation_prepare','subtitle_translation_range') OR ("#,
     translation_admission!(
         "background_jobs.payload_json",
@@ -705,6 +715,7 @@ pub enum JobKind {
     ArtworkDerivative,
     SemanticEmbedding,
     MediaProbe,
+    DvTitleScan,
 }
 
 impl JobKind {
@@ -726,7 +737,8 @@ impl JobKind {
             | Self::ArtifactVerify
             | Self::ArtworkDerivative
             | Self::SemanticEmbedding
-            | Self::MediaProbe => true,
+            | Self::MediaProbe
+            | Self::DvTitleScan => true,
             Self::LibraryScan | Self::MetadataRefresh => false,
         }
     }
@@ -988,6 +1000,13 @@ pub enum JobPayload {
         source_mtime: i64,
         coordinator: super::background_jobs_probe::ProbeCoordinator,
     },
+    DvTitleScan {
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        probe_revision: i64,
+        scanner_digest: String,
+    },
 }
 
 impl JobPayload {
@@ -1010,6 +1029,7 @@ impl JobPayload {
             Self::ArtworkDerivative { .. } => JobKind::ArtworkDerivative,
             Self::SemanticEmbedding { .. } => JobKind::SemanticEmbedding,
             Self::MediaProbe { .. } => JobKind::MediaProbe,
+            Self::DvTitleScan { .. } => JobKind::DvTitleScan,
         }
     }
 
@@ -1231,6 +1251,19 @@ impl JobPayload {
                     && digest(model_sha256)
                     && identifier(adapter_contract)
                     && identifier(target_node_id)
+            }
+            Self::DvTitleScan {
+                file_id,
+                source_size,
+                source_mtime,
+                probe_revision,
+                scanner_digest,
+            } => {
+                *file_id > 0
+                    && *source_size >= 0
+                    && *source_mtime >= 0
+                    && *probe_revision > 0
+                    && digest(scanner_digest)
             }
             Self::MediaProbe {
                 file_id,
@@ -1873,6 +1906,23 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError>;
+    async fn dv_title_demands(
+        &self,
+        scanner: &str,
+        after: i64,
+    ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError>;
+    async fn bind_dv_title_demand(&self, revision: i64, scanner: &str) -> Result<bool, StoreError>;
+    async fn publish_dv_title_job(
+        &self,
+        request: super::dv_title_jobs::PublishTitleJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
+    async fn probe_can_preempt_title(
+        &self,
+        probe_id: &str,
+        title_id: &str,
+        node: &str,
+        now: i64,
+    ) -> Result<bool, StoreError>;
     async fn transcode_verification_candidates(
         &self,
         node_id: &str,
@@ -2359,6 +2409,31 @@ LIMIT 1
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError> {
         super::background_jobs_probe::apply(self, request).await
+    }
+    async fn dv_title_demands(
+        &self,
+        scanner: &str,
+        after: i64,
+    ) -> Result<Vec<super::dv_title_jobs::TitleDemand>, StoreError> {
+        super::dv_title_jobs::demands(self, scanner, after).await
+    }
+    async fn bind_dv_title_demand(&self, revision: i64, scanner: &str) -> Result<bool, StoreError> {
+        super::dv_title_jobs::bind(self, revision, scanner).await
+    }
+    async fn publish_dv_title_job(
+        &self,
+        request: super::dv_title_jobs::PublishTitleJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        super::dv_title_jobs::publish(self, request).await
+    }
+    async fn probe_can_preempt_title(
+        &self,
+        probe_id: &str,
+        title_id: &str,
+        node: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        super::dv_title_jobs::probe_can_preempt(self, probe_id, title_id, node, now).await
     }
     async fn transcode_verification_candidates(
         &self,

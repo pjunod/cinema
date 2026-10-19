@@ -1,0 +1,119 @@
+-- The demand is an outbox, not another execution queue. Only the common
+-- background job token owns execution. AUTOINCREMENT prevents source/reprobe ABA.
+CREATE TABLE IF NOT EXISTS dv_title_jobs_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=1));
+-- next statement
+INSERT INTO dv_title_jobs_schema VALUES(1,1) ON CONFLICT(singleton) DO NOTHING;
+-- next statement
+CREATE TABLE IF NOT EXISTS dv_title_jobs_demand(
+ revision INTEGER PRIMARY KEY AUTOINCREMENT,
+ file_id INTEGER NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
+ scanner_digest TEXT,
+ terminal INTEGER NOT NULL DEFAULT 0 CHECK(terminal IN (0,1))
+) STRICT;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_invalidate
+AFTER DELETE ON dv_title_jobs_demand
+BEGIN
+ UPDATE background_jobs SET state=CASE WHEN state='queued' THEN 'cancelled' ELSE 'cancelling' END,
+  last_error_code='title_source_changed',revision=revision+1
+ WHERE kind='dv_title_scan' AND state IN ('queued','running')
+  AND json_extract(payload_json,'$.probe_revision')=OLD.revision
+  AND revision<9223372036854775807;
+ UPDATE background_job_waiters SET state='cancelled'
+ WHERE state='pending' AND job_id IN (SELECT id FROM background_jobs
+  WHERE kind='dv_title_scan' AND json_extract(payload_json,'$.probe_revision')=OLD.revision);
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_scanner_changed
+AFTER UPDATE OF scanner_digest ON dv_title_jobs_demand
+WHEN OLD.scanner_digest IS NOT NEW.scanner_digest
+BEGIN
+ UPDATE background_jobs SET state=CASE WHEN state='queued' THEN 'cancelled' ELSE 'cancelling' END,
+  last_error_code='title_scanner_changed',revision=revision+1
+ WHERE kind='dv_title_scan' AND state IN ('queued','running')
+  AND json_extract(payload_json,'$.probe_revision')=NEW.revision
+  AND json_extract(payload_json,'$.scanner_digest') IS NOT NEW.scanner_digest
+  AND revision<9223372036854775807;
+ UPDATE background_job_waiters SET state='cancelled'
+ WHERE state='pending' AND job_id IN (SELECT id FROM background_jobs
+  WHERE kind='dv_title_scan' AND json_extract(payload_json,'$.probe_revision')=NEW.revision
+  AND json_extract(payload_json,'$.scanner_digest') IS NOT NEW.scanner_digest);
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_file_insert
+AFTER INSERT ON files
+WHEN NEW.video_codec='hevc' AND NEW.dv_profile IN (5,7,8) AND NEW.dv_rpu_present=1
+ AND json_valid(NEW.probe_json)
+BEGIN
+ INSERT INTO dv_title_jobs_demand(file_id) VALUES(NEW.id);
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_file_update
+AFTER UPDATE OF path,size,mtime,probe_json ON files
+WHEN NOT EXISTS(SELECT 1 FROM background_job_commands command
+ WHERE ((command.operation='publish_dv_title' AND json_extract(command.result_json,'$.outcome')='published')
+ OR (command.operation='bind_dv_title' AND json_extract(command.result_json,'$.bound')=1))
+ AND json_extract(command.result_json,'$.file_id')=NEW.id)
+BEGIN
+ -- Remove first so the outer invalidation also removes nested demand when
+ -- recursive_triggers is enabled. Source-only changes await fresh probe facts.
+ UPDATE files SET probe_json=json_remove(probe_json,'$.plurx_dv_title_v1')
+ WHERE id=NEW.id AND json_valid(probe_json)
+  AND json_type(probe_json,'$.plurx_dv_title_v1') IS NOT NULL;
+ DELETE FROM dv_title_jobs_demand WHERE file_id=NEW.id;
+ INSERT INTO dv_title_jobs_demand(file_id)
+ SELECT NEW.id WHERE NEW.video_codec='hevc' AND NEW.dv_profile IN (5,7,8)
+  AND NEW.dv_rpu_present=1 AND json_valid(NEW.probe_json)
+  AND NEW.path IS OLD.path AND NEW.size IS OLD.size AND NEW.mtime IS OLD.mtime;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_file_delete
+BEFORE DELETE ON files
+BEGIN
+ DELETE FROM dv_title_jobs_demand WHERE file_id=OLD.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_terminal
+AFTER UPDATE OF state ON background_jobs
+WHEN NEW.kind='dv_title_scan' AND NEW.state IN ('succeeded','failed','cancelled')
+BEGIN
+ UPDATE dv_title_jobs_demand SET terminal=1
+ WHERE revision=json_extract(NEW.payload_json,'$.probe_revision')
+ AND scanner_digest=json_extract(NEW.payload_json,'$.scanner_digest');
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_publish
+AFTER INSERT ON background_job_commands WHEN NEW.operation='publish_dv_title'
+BEGIN
+ UPDATE files SET probe_json=json_set(probe_json,'$.plurx_dv_title_v1',
+  json(json_extract(NEW.request_json,'$.output.stats')))
+ WHERE id=json_extract(NEW.request_json,'$.output.file_id')
+  AND json_extract(NEW.result_json,'$.outcome')='published';
+ UPDATE background_jobs SET state='succeeded',result_ref=json_extract(NEW.result_json,'$.result_ref'),
+  owner_node_id=NULL,owner_boot_id=NULL,claim_id=NULL,lease_expires_ms=NULL,
+  revision=revision+1,updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE id=json_extract(NEW.result_json,'$.job_id')
+  AND json_extract(NEW.result_json,'$.outcome')='published';
+ UPDATE background_job_waiters SET state='succeeded',result_ref='dv-title:'||job_id,
+  updated_at_ms=json_extract(NEW.request_json,'$.now_ms')
+ WHERE job_id=json_extract(NEW.result_json,'$.job_id') AND state='pending'
+  AND json_extract(NEW.result_json,'$.outcome')='published';
+ DELETE FROM background_job_commands WHERE id=NEW.id;
+END;
+-- next statement
+CREATE TRIGGER IF NOT EXISTS dv_title_jobs_bind
+AFTER INSERT ON background_job_commands WHEN NEW.operation='bind_dv_title'
+BEGIN
+ UPDATE dv_title_jobs_demand SET scanner_digest=json_extract(NEW.request_json,'$.scanner'),terminal=0
+ WHERE revision=json_extract(NEW.result_json,'$.revision') AND json_extract(NEW.result_json,'$.changed')=1;
+ UPDATE files SET probe_json=json_remove(probe_json,'$.plurx_dv_title_v1')
+ WHERE id=json_extract(NEW.result_json,'$.file_id') AND json_extract(NEW.result_json,'$.changed')=1;
+ DELETE FROM background_job_commands WHERE id=NEW.id;
+END;
+-- next statement
+-- Existing probed titles acquire demand once during migration; bootstrap replay
+-- does not resurrect a terminal request or replace an active revision.
+INSERT INTO dv_title_jobs_demand(file_id)
+SELECT id FROM files WHERE video_codec='hevc' AND dv_profile IN (5,7,8)
+ AND dv_rpu_present=1 AND json_valid(probe_json)
+ON CONFLICT(file_id) DO NOTHING;

@@ -1172,19 +1172,27 @@ impl TranscodeManager {
     }
 
     pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(self.software_budget().await.max(1))
+            .await
+    }
+
+    /// The title scanner has one software decoder thread and never uses a GPU.
+    #[cfg(unix)]
+    pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
+        self.admit_source_work(1).await
+    }
+
+    async fn admit_source_work(&self, threads: usize) -> Option<FragmentAdmission> {
         if !self.pretranscode_worker_idle() {
             return None;
         }
         let heavy = Arc::clone(&self.background_heavy)
             .try_acquire_owned()
             .ok()?;
-        // Copy indexing can still run CPU transforms. Reserve the available
-        // software budget conservatively until a per-pipeline estimate exists.
-        let threads = self.software_budget().await.max(1);
         self.admissions
             .try_admit_bundle(
                 self.max_hw_sessions().await,
-                threads,
+                self.software_budget().await,
                 &TranscodeResourceEstimate {
                     hardware_slot: false,
                     cpu_threads: threads,

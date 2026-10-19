@@ -2043,6 +2043,7 @@ impl HiqliteAuthStore {
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
+        store.install_dv_title_jobs_schema(None).await?;
         Ok(store)
     }
 
@@ -2228,7 +2229,8 @@ impl HiqliteAuthStore {
                     self.install_invitation_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
-                    return self.install_library_annotations_schema(admission).await;
+                    self.install_library_annotations_schema(admission).await?;
+                    return self.install_dv_title_jobs_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4032,6 +4034,59 @@ impl HiqliteAuthStore {
         result?;
         Err(StoreError::Migration(
             "progressive translation subtitle schema install did not settle".into(),
+        ))
+    }
+
+    async fn dv_title_jobs_schema_version(&self) -> Result<Option<i64>, StoreError> {
+        // authority: committed extension shape and marker fence title-job migration.
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(
+                super::dv_title_jobs_schema::SHAPE_SQL,
+                params!(),
+            )
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|r| (r.name, r.sql))
+            .collect::<Vec<_>>();
+        let version = super::dv_title_jobs_schema::version(&shape)?;
+        if version == Some(1) {
+            // authority: exact committed extension marker, not a local cache.
+            let rows = self
+                .client()
+                .query_consistent_map::<CountRow, _>(
+                    super::dv_title_jobs_schema::MARKER_SQL,
+                    params!(),
+                )
+                .await?;
+            if !matches!(rows.as_slice(), [row] if row.count == 1) {
+                return Err(StoreError::Migration("title jobs marker missing".into()));
+            }
+        }
+        Ok(version)
+    }
+
+    async fn install_dv_title_jobs_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        admit_schema_migration(admission)?;
+        if self.dv_title_jobs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        let statements = super::dv_title_jobs_schema::statements()
+            .into_iter()
+            .map(|sql| (sql, params!()))
+            .collect::<Vec<_>>();
+        admit_schema_migration(admission)?;
+        let result = self.schema_migration_transaction(statements).await;
+        if self.dv_title_jobs_schema_version().await? == Some(1) {
+            return Ok(());
+        }
+        result?;
+        Err(StoreError::Migration(
+            "title jobs schema install did not settle".into(),
         ))
     }
 

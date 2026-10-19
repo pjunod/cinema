@@ -1,5 +1,8 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
+#[cfg(unix)]
 mod dv_title;
+#[cfg(unix)]
+mod title_work;
 
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};
@@ -39,17 +42,71 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut idle = crate::background_jobs::IdlePoll::new();
+    #[cfg(unix)]
+    let mut title: Option<title_work::TitleTask> = None;
+    #[cfg(unix)]
+    let mut title_after = 0;
     loop {
         if shutdown.is_cancelled() {
+            #[cfg(unix)]
+            if let Some(work) = title.take() {
+                work.stop().await;
+            }
             return;
         }
-        let published = match pass(&state, &boot, &mut cursor, &shutdown).await {
-            Ok(published) => published,
-            Err(error) => {
-                tracing::warn!(%error, "leaf probe pass failed");
-                false
+        #[cfg(unix)]
+        let mut yielded = false;
+        #[cfg(unix)]
+        if let Some(work) = title.as_ref() {
+            match work.should_yield(&state).await {
+                Ok(true) => {
+                    if let Some(work) = title.take() {
+                        work.stop().await;
+                    }
+                    yielded = true;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error,"title priority observation unavailable"),
             }
+        }
+        #[cfg(unix)]
+        let ordinary_idle = title.is_none();
+        #[cfg(not(unix))]
+        let ordinary_idle = true;
+        let published = if ordinary_idle {
+            let published = match pass(&state, &boot, &mut cursor, &shutdown).await {
+                Ok(published) => published,
+                Err(error) => {
+                    tracing::warn!(%error, "leaf probe pass failed");
+                    false
+                }
+            };
+            published
+        } else {
+            false
         };
+        #[cfg(unix)]
+        if title.is_none() && !yielded && !published && !shutdown.is_cancelled() {
+            match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
+                Ok(work) => title = work,
+                Err(error) => tracing::warn!(%error,"title demand unavailable"),
+            }
+        }
+        #[cfg(unix)]
+        {
+            let title_poll = async {
+                match title.as_mut() {
+                    Some(work) => work.work.as_mut().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = shutdown.cancelled() => {},
+                _ = title_poll => { title = None; },
+                () = tokio::time::sleep(idle.after_completion(published)) => {},
+            }
+        }
+        #[cfg(not(unix))]
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(idle.after_completion(published)) => {}
@@ -233,7 +290,7 @@ async fn execute(
         &cancel,
         shutdown,
         progress.as_ref(),
-        dv_title::probe(&file),
+        probe::probe_single_threaded(&file.path),
     )
     .await;
     // Bounded process cancellation kills and reaps before returning above.
@@ -306,18 +363,16 @@ async fn execute(
 
 /// Cancellation is observed while awaiting the child, never by dropping its
 /// collector. bounded::cancellable returns only after the process is reaped.
-async fn run_admitted_probe<F>(
+async fn run_admitted_probe<F, T, E>(
     transcode: &crate::transcode::TranscodeManager,
     admission: &crate::transcode::FragmentAdmission,
     cancel: &CancellationToken,
     shutdown: &CancellationToken,
     progress: Option<&crate::state::AnalysisProgressGuard>,
     work: F,
-) -> Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>
+) -> Result<T, E>
 where
-    F: std::future::Future<
-        Output = Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>,
-    >,
+    F: std::future::Future<Output = Result<T, E>>,
 {
     if shutdown.is_cancelled() || !transcode.fragment_worker_idle(admission) {
         cancel.cancel();
@@ -343,7 +398,7 @@ pub(crate) async fn probe_title_for_control(
     file: &plurx_core::domain::MediaFile,
 ) -> Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError> {
     let admission = transcode
-        .admit_fragment()
+        .admit_dv_title()
         .await
         .expect("title probe admission");
     run_admitted_probe(
@@ -352,7 +407,25 @@ pub(crate) async fn probe_title_for_control(
         &CancellationToken::new(),
         &CancellationToken::new(),
         None,
-        dv_title::probe(file),
+        async {
+            let mut result = probe::probe_single_threaded(&file.path).await?;
+            let tools = crate::vodencode::dv_runtime::ToolSet::capture()
+                .await
+                .map_err(plurx_core::error::ProbeError::Parse)?
+                .ok_or_else(|| {
+                    plurx_core::error::ProbeError::Parse("title scanner unavailable".into())
+                })?;
+            let stats = dv_title::scan(file, result.raw_json.as_deref().unwrap_or("{}"), &tools)
+                .await
+                .map_err(plurx_core::error::ProbeError::Parse)?;
+            let mut document: serde_json::Value =
+                serde_json::from_str(result.raw_json.as_deref().unwrap_or("{}"))
+                    .map_err(|e| plurx_core::error::ProbeError::Parse(e.to_string()))?;
+            document[plurx_core::scan::dv_title::PROBE_FIELD] = serde_json::to_value(stats)
+                .map_err(|e| plurx_core::error::ProbeError::Parse(e.to_string()))?;
+            result.raw_json = Some(document.to_string());
+            Ok(result)
+        },
     )
     .await
 }

@@ -14,19 +14,34 @@
   L1 and per-frame target-operation receipts are asserted, not yet exercised.
   Production wrappers still select master. The unchanged helper bundle has
   static packaging/ABI proof; no numerical or physical qualification is claimed.
-- **Known architectural correction remaining:** the current scanner awaits a
-  complete-title software decode before normal probe publication. Ordinary
-  probe facts must publish independently; title acquisition needs a durable,
-  deduplicated, source-fenced background stage with one-CPU admission and atomic
-  aggregate attachment. Do not treat the synchronous implementation as ready
-  for final review. Actual FEL-catalog B landing/reconciliation, this correction,
-  current affected compilation, final independent review and the once-only
-  qualification batch remain before merge.
+- **Durable acquisition correction authored, not compiled/qualified:** ordinary
+  facts again use production `leaf-probe-v2`; comparison with pre-C source found
+  no changed ordinary conclusions warranting a library-wide reprobe. A shared
+  SQLite/Hiqlite demand outbox seeds current DV facts. `DvTitleScan` v1 contains
+  only file identity, size/mtime, monotonic probe revision and scanner digest,
+  never caller paths/tools. The existing scheduler owns the cancellable title
+  future with one-CPU admission and common durable source-I/O reservation.
+  Locally readable compatible higher-priority probes with live coordinators
+  cause cancellation, child reap and release before ordinary admission. No new
+  detached loop, watchdog or feature gate. Yield restarts the whole scan;
+  sustained ordinary work can starve completion, with no partial eligibility.
+- Manual cancellation suppresses the same generation, unlike scheduler Yield.
+  Source/probe/scanner changes invalidate old work. Aggregate attachment and
+  settlement share a live-attempt/source-fenced transaction; attachment does not
+  self-enqueue. Old unfiltered list/detail and UUID cancellation were inspected
+  in source only; explicit new-kind filters hit a closed old enum, while retry
+  and execution reject unsupported kinds. No mixed-version execution claim.
+  Migration 114 is provisional behind this snapshot's existing 113; actual main/B
+  schema numbering must be reconciled before landing.
+- Remaining: pinned controller compilation, lifecycle/race regression coverage
+  (source/scanner ABA, cancellation versus Yield, backend parity and resource
+  handoff), actual B integration, independent review/fixes and the once-only
+  qualification batch. This checkpoint is not ready for final review.
 - Baseline Rust 1.97.1 all-target checking and helper compilation against the
   pinned libplacebo API 374 succeeded; these are baseline, not candidate receipts.
 - Complete-title scan groundwork is being implemented: one software base decoder,
   no GPU or render, exact decoded-frame accounting and clean EOF/drain. Typed
-  aggregates live in `probe_json.plurx_dv_title_v1` under the admitted probe job's
+  aggregates live in `probe_json.plurx_dv_title_v1` under the dedicated title job's
   existing source/publication fence. Unknown versions, partial scans and old
   documents cannot establish eligibility. L6/L9 are constant, unknown or
   inconsistent; a missing observation is not silently replaced by the last one.
