@@ -1,0 +1,147 @@
+#!/bin/bash
+# Assemble one architecture slice of "Plurx Server.app", the macOS menu-bar
+# companion (docs/features/DESKTOP-TRAY-IMPLEMENTATION.md, task M3).
+#
+#   clients/server-tray/macos/build --configuration release|debug \
+#       --version SEMVER --output "/abs/path/Plurx Server.app" \
+#       [--arch arm64|x86_64] [--build-id COMMIT] [--controller /abs/plurx-control] \
+#       [--sign-identity ID] [--release-repository OWNER/REPO] [--scratch DIR]
+#
+# One native slice per invocation; scripts/package-macos combines slices with
+# lipo and re-signs inside-out. --controller copies an already-built
+# plurx-control to Contents/MacOS/plurx-control (the only path the app ever
+# runs); without it the packager inserts that file and re-signs. The default
+# signature is ad-hoc ("-"): this is not Developer ID or notarization.
+#
+# A cross-architecture slice (x86_64 on an Apple Silicon builder) is a compile
+# product only. It is not evidence that the app runs on physical Intel Macs.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd "$here/../../.." && pwd)"
+bundle_id="tv.plurx.Server"
+display_name="Plurx Server"
+minimum_os="13.0"
+
+configuration=""
+version=""
+output=""
+arch="$(uname -m)"
+build_id="unknown"
+controller=""
+identity="-"
+release_repository="pjunod/cinema"
+scratch="$here/.build"
+
+die() { echo "build: $*" >&2; exit 2; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --configuration) configuration="${2:-}"; shift 2 ;;
+        --version) version="${2:-}"; shift 2 ;;
+        --output) output="${2:-}"; shift 2 ;;
+        --arch) arch="${2:-}"; shift 2 ;;
+        --build-id) build_id="${2:-}"; shift 2 ;;
+        --controller) controller="${2:-}"; shift 2 ;;
+        --sign-identity) identity="${2:-}"; shift 2 ;;
+        --release-repository) release_repository="${2:-}"; shift 2 ;;
+        --scratch) scratch="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+[[ "$configuration" == release || "$configuration" == debug ]] || die "--configuration must be release or debug"
+semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+[[ "$version" =~ $semver ]] || die "--version must be SemVer without a leading v (got '$version')"
+core_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+[[ "$output" == /* ]] || die "--output must be an absolute path"
+[[ "$output" == *.app ]] || die "--output must name a .app bundle"
+[[ "$(basename "$output")" == "$display_name.app" ]] || die "--output bundle must be named '$display_name.app'"
+[[ "$arch" == arm64 || "$arch" == x86_64 ]] || die "--arch must be arm64 or x86_64"
+[[ "$build_id" =~ ^[0-9A-Za-z._+-]{1,80}$ ]] || die "--build-id has unexpected characters"
+[[ "$release_repository" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "--release-repository must be OWNER/REPO"
+if [[ -n "$controller" ]]; then
+    [[ "$controller" == /* && -f "$controller" && -x "$controller" ]] || die "--controller must be an absolute executable file"
+    lipo "$controller" -verify_arch "$arch" 2>/dev/null || die "--controller does not contain a $arch slice"
+fi
+
+echo "build: swift build -c $configuration --arch $arch" >&2
+swift build --package-path "$here" --scratch-path "$scratch" -c "$configuration" --arch "$arch" \
+    --product PlurxServerTray >&2
+bin_dir="$(swift build --package-path "$here" --scratch-path "$scratch" -c "$configuration" --arch "$arch" --show-bin-path)"
+executable="$bin_dir/PlurxServerTray"
+[[ -x "$executable" ]] || die "swift build produced no executable at $executable"
+lipo "$executable" -verify_arch "$arch" || die "executable is not $arch"
+
+parent="$(dirname "$output")"
+mkdir -p "$parent"
+staging="$(mktemp -d "$parent/.plurx-server-app.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+app="$staging/$display_name.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+install -m 0755 "$executable" "$app/Contents/MacOS/$display_name"
+if [[ -n "$controller" ]]; then
+    install -m 0755 "$controller" "$app/Contents/MacOS/plurx-control"
+fi
+install -m 0644 "$repo/LICENSE" "$app/Contents/Resources/LICENSE"
+printf 'APPL????' > "$app/Contents/PkgInfo"
+
+# App icon from the committed brand renders (no network, no generation).
+iconset="$staging/AppIcon.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    cp "$repo/brand/export/icon-$size.png" "$iconset/icon_${size}x${size}.png"
+    double=$((size * 2))
+    if [[ -f "$repo/brand/export/icon-$double.png" ]]; then
+        cp "$repo/brand/export/icon-$double.png" "$iconset/icon_${size}x${size}@2x.png"
+    fi
+done
+iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" "$iconset"
+rm -rf "$iconset"
+
+plist="$app/Contents/Info.plist"
+pb() { /usr/libexec/PlistBuddy -c "$1" "$plist" >/dev/null; }
+cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict/></plist>
+PLIST
+pb "Add :CFBundleDevelopmentRegion string en"
+pb "Add :CFBundleExecutable string $display_name"
+pb "Add :CFBundleIdentifier string $bundle_id"
+pb "Add :CFBundleInfoDictionaryVersion string 6.0"
+pb "Add :CFBundleName string $display_name"
+pb "Add :CFBundleDisplayName string $display_name"
+pb "Add :CFBundlePackageType string APPL"
+pb "Add :CFBundleShortVersionString string $core_version"
+pb "Add :CFBundleVersion string $core_version"
+pb "Add :CFBundleIconFile string AppIcon"
+pb "Add :LSMinimumSystemVersion string $minimum_os"
+pb "Add :LSUIElement bool true"
+pb "Add :LSApplicationCategoryType string public.app-category.utilities"
+pb "Add :NSHighResolutionCapable bool true"
+pb "Add :NSHumanReadableCopyright string Apache-2.0"
+pb "Add :PlurxVersion string $version"
+pb "Add :PlurxBuild string $build_id"
+pb "Add :PlurxReleaseRepository string $release_repository"
+plutil -lint "$plist" >&2
+
+# Inside-out: the helper first, then the bundle (which seals Resources and
+# the main executable). Hardened runtime; no entitlements are needed.
+if [[ -f "$app/Contents/MacOS/plurx-control" ]]; then
+    codesign --force --options runtime --timestamp=none --sign "$identity" \
+        --identifier tv.plurx.control "$app/Contents/MacOS/plurx-control"
+fi
+codesign --force --options runtime --timestamp=none --sign "$identity" "$app"
+codesign --verify --strict --deep "$app"
+
+# Replace atomically: a previous bundle at the output path is moved aside,
+# the new one renamed in, and the old one removed only afterwards.
+if [[ -e "$output" ]]; then
+    previous="$staging/previous.app"
+    mv "$output" "$previous"
+fi
+mv "$app" "$output"
+echo "$output"

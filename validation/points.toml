@@ -218,6 +218,16 @@ missing = "skip"
 timeout_seconds = 1800
 
 [[checks]]
+id = "desktop-macos"
+title = "Native macOS server tray build and unit contracts"
+command = "make desktop-macos-check"
+profiles = ["ci", "full", "nightly"]
+platforms = ["darwin"]
+requires = ["make", "swift", "xcodebuild", "xcrun", "codesign"]
+missing = "skip"
+timeout_seconds = 900
+
+[[checks]]
 id = "apple-simulators"
 title = "Shared iOS and tvOS XCTest suite"
 command = "make apple-test"
@@ -1335,6 +1345,13 @@ paths = [
   "clients/android/settings.gradle.kts",
 ]
 checks = ["mobile-version", "operations-contract"]
+
+[[points]]
+id = "desktop.macos"
+title = "Native macOS server tray"
+contract = "The independently built macOS server tray preserves controller protocol and menu state, compiles for Apple Silicon and Intel, and executes its Swift and AppKit contracts on the native runner without changing login or server startup policy."
+paths = ["clients/server-tray/macos/**"]
+checks = ["desktop-macos"]
 
 [[points]]
 id = "apple.client"
