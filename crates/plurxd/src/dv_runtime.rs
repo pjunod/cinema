@@ -803,6 +803,9 @@ impl RuntimeRecipe {
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
                 export_raster: Some(export_raster),
+                // Viewer/caps selection remains a later PR. This preserves the
+                // current master route while the explicit control API develops.
+                display_target: None,
                 request: crate::dv_segment::SegmentRequest {
                     renderer: self.tools.renderer.clone(),
                     renderer_env,

@@ -821,6 +821,8 @@ pub(crate) struct StreamingSegmentRequest {
     pub(crate) window: Option<SegmentWindow>,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) export_raster: Option<(u32, u32)>,
+    /// Explicit producer policy only; this layer never reads client caps.
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
 }
 
 #[cfg(any(target_os = "linux", test, plurx_dv_segment_probe))]
@@ -981,6 +983,17 @@ async fn run_streaming(
             height.to_string(),
             "pq-bilinear-yuv420p10-v1".into(),
         ]);
+    }
+    if let Some(target) = stream.display_target {
+        if !windowed || stream.export_raster.is_none() {
+            return Err(
+                "display targeting requires an explicit bounded window/export policy".into(),
+            );
+        }
+        // Helper argv[10]: executable is not part of this Vec. Title endpoints
+        // follow the export policy; no environment-dependent renderer defaults.
+        args[9] = target.output_policy();
+        args.extend(target.endpoint_args());
     }
     let renderer_env: Vec<_> = request
         .renderer_env
@@ -1184,6 +1197,7 @@ async fn probe_spawn(request: SegmentRequest, streaming: bool) -> Result<Segment
         #[cfg(target_os = "linux")]
         return spawn_streaming(StreamingSegmentRequest {
             export_raster: None,
+            display_target: None,
             mode: plurx_core::transcode::dv_processing::DvProcessingMode::Fel,
             request,
             renderer_deadline: Instant::now() + Duration::from_secs(30),
