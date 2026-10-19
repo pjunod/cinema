@@ -31,17 +31,18 @@ mod vod;
 
 pub use avc_qualification::QualifiedSdrAvc;
 pub use decode::{
-    plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
-    AutoQualityRateProfile, CapabilityStatus, CompletedReconstructedOutputPlan, DecodeBackend,
-    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
-    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, Deinterlace, DynamicRangeClass,
-    FrameDomain, FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry,
-    OutputBandwidth, OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding,
-    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
-    StreamSelectionProvenance, SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions,
-    TranscodeRequest, VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
-    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
+    continuous_avc_envelope_accepts, plan_can_name_decoder, resolve_transcode,
+    ArtifactQualification, AttemptRestrictions, AutoQualityRateProfile, CapabilityStatus,
+    CompletedReconstructedOutputPlan, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities,
+    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
+    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain, FrameRate,
+    FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
+    OutputMetadataPolicy, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
+    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
+    SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    VideoSampleEnvelope, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
+    UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use dolby::{
     LinuxDolbyContext, LinuxDolbyExecutionBinding, LinuxDolbyIdentity, LinuxDolbyObservation,

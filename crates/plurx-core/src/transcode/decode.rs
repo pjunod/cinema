@@ -2153,7 +2153,7 @@ pub enum VideoSampleEnvelope {
 /// Level 5.0 frame-size and macroblock-rate limits, using the exact rational
 /// output cadence. VBR admission bounds both the 3/2 peak and the two-second
 /// coded-picture buffer below High's conservative VCL limits.
-pub(super) fn continuous_avc_envelope_accepts(
+pub fn continuous_avc_envelope_accepts(
     width: u32,
     height: u32,
     rate_numerator: u32,
