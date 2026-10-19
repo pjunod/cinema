@@ -134,6 +134,37 @@ class QualificationCase(unittest.TestCase):
             self.assertEqual(release["version"], "1.0.1")
             subprocess.run(["md5sum", "-c", "DEBIAN/md5sums"], cwd=extracted, check=True, capture_output=True)
 
+    def test_native_refusal_requires_dedicated_exit_and_no_gui_or_controller(self):
+        spec = importlib.util.spec_from_file_location("qualification_linux_refusal", HERE / "linux-host.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        directory = Path(__file__).resolve().parents[2] / "target/desktop-qualification-tests"
+        directory.mkdir(parents=True, exist_ok=True)
+        valid = {"schema": "plurx-tray-smoke-v1", "platform": "linux",
+                 "session": {"eligible": False, "reason": "running inside a container"},
+                 "tray": {"item_registered": False}, "window": {"present": False},
+                 "controller": {"first_status": {"ok": False, "failure": "not run: session ineligible"}}}
+        variants = [(3, valid), (0, valid), (1, valid), (2, valid), (3, None),
+                    (3, {**valid, "schema": "unknown"}),
+                    (3, {**valid, "session": {"eligible": False, "reason": ""}}),
+                    (3, {**valid, "tray": {}}),
+                    (3, {**valid, "tray": {"item_registered": True}}),
+                    (3, {**valid, "window": {"present": True}}),
+                    (3, {**valid, "controller": {"first_status": {"ok": True}}})]
+        with tempfile.TemporaryDirectory(dir=directory) as fixture:
+            for index, (code, value) in enumerate(variants):
+                def execute(command, **_kwargs):
+                    if value is not None:
+                        Path(command[command.index("--smoke-receipt") + 1]).write_text(json.dumps(value))
+                    return subprocess.CompletedProcess(command, code, "", "")
+                with self.subTest(index=index), patch.object(module.os, "chown"), patch.object(module, "run", execute):
+                    arguments = (Path(fixture), str(index), [], {}, os.getuid(), os.getgid())
+                    if index == 0:
+                        module.check_refusal(*arguments)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            module.check_refusal(*arguments)
+
     def test_session_setup_masks_only_the_production_autostart_entry(self):
         spec = importlib.util.spec_from_file_location("qualification_linux_host", HERE / "linux-host.py")
         module = importlib.util.module_from_spec(spec)

@@ -38,13 +38,19 @@ def check_refusal(output, label, prefix, env, uid, gid):
     observation = {"scope": "native-refusal", "case": label, "returncode": result.returncode,
                    "stdout": result.stdout[-4000:], "stderr": result.stderr[-4000:]}
     write_json(directory / "process.json", observation)
-    if result.returncode != 1 or not ui_receipt.is_file():
+    if result.returncode != 3 or not ui_receipt.is_file():
         raise RuntimeError(f"{label} did not produce an explicit failed eligibility receipt")
     value = json.loads(ui_receipt.read_bytes())
-    if value["session"].get("eligible") is not False or not value["session"].get("reason"):
+    if value.get("schema") != "plurx-tray-smoke-v1" or value.get("platform") != "linux":
+        raise RuntimeError(f"{label} returned an unsupported refusal receipt")
+    session = value.get("session") or {}
+    if session.get("eligible") is not False or not isinstance(session.get("reason"), str) or not session["reason"]:
         raise RuntimeError(f"{label} did not prove explicit session ineligibility")
-    if value["tray"].get("item_registered") or (value.get("window") or {}).get("present"):
-        raise RuntimeError(f"{label} created an automatic tray/window in an ineligible context")
+    if (value.get("tray") or {}).get("item_registered") is not False or (value.get("window") or {}).get("present") is not False:
+        raise RuntimeError(f"{label} created or failed to report an automatic tray/window in an ineligible context")
+    controller = (value.get("controller") or {}).get("first_status") or {}
+    if controller.get("ok") is not False or controller.get("failure") != "not run: session ineligible":
+        raise RuntimeError(f"{label} called or failed to account for the controller in an ineligible context")
 
 
 def write_session_autostart(home, output, candidate, kind):
