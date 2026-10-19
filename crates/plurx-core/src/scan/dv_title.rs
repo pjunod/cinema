@@ -100,6 +100,7 @@ impl DvTitleStats {
             || matches!(self.mastering_luminance,
                 TitleConstant::Consistent(value)
                 if value.max_nits == 0 || value.max_nits > 10_000
+                    || value.min_1e4_nits > 10_000
                     || u64::from(value.min_1e4_nits) >= u64::from(value.max_nits) * 10_000)
             || matches!(self.mastering_primaries,
                 TitleConstant::Consistent(value)
@@ -126,6 +127,7 @@ impl DvTitleStats {
             TitleConstant::Consistent(value)
                 if value.max_nits > 0
                     && value.max_nits <= 10_000
+                    && value.min_1e4_nits <= 10_000
                     && u64::from(value.min_1e4_nits) < u64::from(value.max_nits) * 10_000 =>
             {
                 value

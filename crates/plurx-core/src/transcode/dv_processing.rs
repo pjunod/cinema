@@ -11,6 +11,12 @@ use sha2::{Digest, Sha256};
 use super::{DecodeBackend, DecodeCacheIdentity, DecodeSourceIdentity, Encoder, PlanSourceBinding};
 use crate::domain::DolbyVisionFacts;
 
+mod display_target;
+pub use display_target::{
+    DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline, DISPLAY_TARGET_BUCKETS,
+    DISPLAY_TARGET_METHOD,
+};
+
 fn encoder_token(encoder: Encoder) -> &'static str {
     match encoder {
         Encoder::Software => "software",
@@ -503,6 +509,7 @@ pub enum DvOperation {
     LinearNlqResidual,
     RpuColorConversion,
     TargetMapping,
+    DisplayTargetMapping { nits: u32 },
     CreativeTrimApplication,
     MetadataAdaptation,
     Bt2020NclConversion,
@@ -746,6 +753,8 @@ pub struct DvTargetPolicy {
     revision: u32,
     peak_millinit: u32,
     black_millinit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    black_1e4_nits: Option<u32>,
     parameters: DvDigest,
 }
 impl DvTargetPolicy {
@@ -763,6 +772,7 @@ impl DvTargetPolicy {
             revision,
             peak_millinit,
             black_millinit,
+            black_1e4_nits: None,
             parameters,
         })
     }
@@ -1253,12 +1263,44 @@ pub enum DvExportPolicy {
     PqBilinearYuv420p10V1 {
         raster: (u32, u32),
     },
+    DisplayTargetYuv420p10V1 {
+        raster: (u32, u32),
+        target: DvDisplayTarget,
+    },
 }
 impl DvExportPolicy {
+    pub fn display_target(self) -> Option<DvDisplayTarget> {
+        match self {
+            Self::DisplayTargetYuv420p10V1 { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+    pub fn output_policy(self) -> String {
+        self.display_target().map_or_else(
+            || "bt2020-pq-master-clip".into(),
+            DvDisplayTarget::output_policy,
+        )
+    }
+    /// Elision returns the original master variant, including its exact digest.
+    pub fn for_display_target(
+        raster: (u32, u32),
+        nits: u32,
+        stats: Option<crate::scan::dv_title::DvTitleStats>,
+    ) -> Result<(Self, Option<DvDisplayTargetDecline>), DvContractError> {
+        Ok(match DvDisplayTarget::for_title(nits, stats)? {
+            DvDisplayTargetChoice::Target(target) => {
+                (Self::DisplayTargetYuv420p10V1 { raster, target }, None)
+            }
+            DvDisplayTargetChoice::Master { reason } => {
+                (Self::PqBilinearYuv420p10V1 { raster }, Some(reason))
+            }
+        })
+    }
     pub fn raster(self, native: (u32, u32)) -> Result<(u32, u32), DvContractError> {
         let raster = match self {
             Self::NativeRgb48V1 => native,
-            Self::PqBilinearYuv420p10V1 { raster } => raster,
+            Self::PqBilinearYuv420p10V1 { raster }
+            | Self::DisplayTargetYuv420p10V1 { raster, .. } => raster,
         };
         if raster.0 < 32
             || raster.1 < 32
@@ -1278,6 +1320,10 @@ impl DvExportPolicy {
             Self::PqBilinearYuv420p10V1 { .. } => {
                 serde_json::to_vec(&("bt2020-pq-master-clip-export-v3", self))
                     .expect("bounded export policy serializes")
+            }
+            Self::DisplayTargetYuv420p10V1 { .. } => {
+                serde_json::to_vec(&(DISPLAY_TARGET_METHOD, self))
+                    .expect("bounded targeted export policy serializes")
             }
         };
         DvDigest(hex::encode(Sha256::digest(bytes)))
@@ -1327,6 +1373,11 @@ pub fn dv_plan_completed_window(
         ));
     }
     let full_fel = input.mode == DvProcessingMode::Fel;
+    if input.export_policy.display_target().is_some() && input.destination != DvDestination::Hdr10 {
+        return Err(invalid(
+            "display targeting cannot change native/P8.1 delivery",
+        ));
+    }
     if !full_fel && input.destination != DvDestination::Hdr10 {
         return Err(invalid(
             "completed DV window: base-RPU mode has no Profile 8.1 destination",
@@ -1375,6 +1426,7 @@ pub fn dv_plan_completed_window(
     if matches!(
         input.export_policy,
         DvExportPolicy::PqBilinearYuv420p10V1 { .. }
+            | DvExportPolicy::DisplayTargetYuv420p10V1 { .. }
     ) && export_raster != input.raster
     {
         return Err(invalid(
@@ -1417,6 +1469,9 @@ pub fn dv_plan_completed_window(
         input.source_rpus.len(),
     )?;
     for raw in input.source_rpus {
+        if let Some(target) = input.export_policy.display_target() {
+            target.validate_rpu(raw)?;
+        }
         if full_fel {
             if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
                 return Err(invalid(
@@ -1487,12 +1542,34 @@ pub fn dv_plan_completed_window(
             output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
         },
     );
+    let target = if let Some(display) = input.export_policy.display_target() {
+        pixels.insert(
+            index + 1,
+            DvGraphEdge {
+                operation: DvOperation::DisplayTargetMapping {
+                    nits: display.nits(),
+                },
+                input: DvIntermediateDomain::TargetMappedBt2020PqRgb,
+                output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
+            },
+        );
+        let floor = display.mastering().min_1e4_nits;
+        let mut target = DvTargetPolicy::new(
+            2,
+            display.nits() * 1000,
+            floor / 10,
+            input.export_policy.target_parameters(),
+        )?;
+        target.black_1e4_nits = Some(floor);
+        target
+    } else {
+        DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?
+    };
     let graph = DvGraph {
         strategy,
         pixels,
         adapt_metadata_to_reconstructed_base: input.destination == DvDestination::Profile81,
     };
-    let target = DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?;
     let capability = DvCapabilityEvidence {
         scope: DvEvidenceScope::ProductionRoute,
         completed_window_checked: true,
