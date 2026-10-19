@@ -82,6 +82,8 @@ sealed interface Phase {
 
 data class HomeState(
     val hubs: Hubs = Hubs(),
+    val watchlist: List<Item> = emptyList(),
+    val favorites: List<Item> = emptyList(),
     val libraries: List<Library> = emptyList(),
     val libraryItems: Map<Long, List<Item>> = emptyMap(),
     val loading: Boolean = true,
@@ -382,6 +384,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 coroutineScope {
                     val hubs = async { api().hubs() }
+                    // The reader's lists never cost Home its load.
+                    val watchlist = async { catchingUnlessCancelled { api().list("watchlist").items }.getOrDefault(emptyList()) }
+                    val favorites = async { catchingUnlessCancelled { api().list("favorite").items }.getOrDefault(emptyList()) }
                     val libraries = async { api().libraries() }
                     val libs = libraries.await()
                     _home.value = _home.value.copy(libraries = libs, loading = false)
@@ -394,7 +399,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             }.getOrDefault(emptyList())
                         }
                     }
-                    _home.value = _home.value.copy(hubs = hubs.await(), loading = false)
+                    _home.value = _home.value.copy(hubs = hubs.await(), watchlist = watchlist.await(), favorites = favorites.await(), loading = false)
                     previews.forEach { (id, items) ->
                         _home.value = _home.value.copy(
                             libraryItems = _home.value.libraryItems + (id to items.await()),
@@ -864,6 +869,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             api().decisionForContext(fileContext, snapshot.legacyQuery + request)
         }
         return PlaybackDecision(decision, snapshot)
+    }
+
+    suspend fun annotations(itemId: Long): ItemAnnotations = api().annotations(itemId)
+
+    /** Put an item on, or take it off, the reader's `watchlist` or `favorite` list. */
+    suspend fun setListed(itemId: Long, list: String, listed: Boolean) {
+        if (listed) api().addToList(itemId, list) else api().removeFromList(itemId, list)
     }
 
     suspend fun setWatched(itemId: Long, watched: Boolean): Int = if (watched) {

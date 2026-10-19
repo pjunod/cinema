@@ -129,6 +129,27 @@ data class Hubs(
     val recently_added: List<Item> = emptyList(),
 )
 
+/** One review-site score: `imdb` out of 10, `rotten_tomatoes` / `metacritic` / `tmdb` out of 100. */
+@Serializable
+data class Rating(
+    val source: String,
+    val value: Double,
+    val scale: Int,
+    val votes: Long? = null,
+)
+
+/** `GET items/{id}/annotations`: scores and the reader's list flags. */
+@Serializable
+data class ItemAnnotations(
+    val ratings: List<Rating> = emptyList(),
+    val watchlist: Boolean = false,
+    val favorite: Boolean = false,
+)
+
+/** `GET lists/{list}`: the reader's watchlist or favorites, newest first. */
+@Serializable
+data class ItemList(val items: List<Item> = emptyList())
+
 @Serializable
 data class Page(
     val items: List<Item> = emptyList(),

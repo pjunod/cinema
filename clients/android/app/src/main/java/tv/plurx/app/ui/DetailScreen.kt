@@ -1,6 +1,7 @@
 package tv.plurx.app.ui
 
 import tv.plurx.app.remote.*
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
@@ -37,7 +38,11 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -68,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import tv.plurx.app.data.ItemAnnotations
 import tv.plurx.app.data.Item
 import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.MediaFileDto
@@ -194,6 +200,13 @@ private fun DetailContent(
     val item = detail.item
     val scope = rememberCoroutineScope()
     var startingEpisodeId by remember(item.id) { mutableStateOf<Long?>(null) }
+    // Scores and list flags arrive beside the item, never holding the page.
+    var annotations by remember(item.id) { mutableStateOf<ItemAnnotations?>(null) }
+    LaunchedEffect(item.id) {
+        if (item.kind == "movie" || item.kind == "show") {
+            annotations = catchingUnlessCancelled { vm.annotations(item.id) }.getOrNull()
+        }
+    }
     // The viewer's pre-play track choice, per file, for this item only. Keyed
     // on the item so opening the next one starts from the server's defaults
     // again — the choice belongs to one playback and is never written back as
@@ -267,10 +280,15 @@ private fun DetailContent(
                             }
                             if (item.isPlayableVideo) Text(englishAvailability(file), color = Muted, style = MaterialTheme.typography.bodySmall)
                         }
+                        annotations?.ratings?.takeIf { it.isNotEmpty() }?.let { ratings ->
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                ratings.forEach { RatingChip(it) }
+                            }
+                        }
                     }
                 }
                 item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
-                Actions(vm = vm, item = item, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
+                Actions(vm = vm, item = item, annotations = annotations, onAnnotations = { annotations = it }, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
                     seriesPlayback = seriesPlayback, resumeMs = resumeMs, canResume = canResume,
                     trackChoices = trackChoices, requestInitialFocus = formFactor == FormFactor.Television,
                     reading = detail.reading, onPlay = onPlay, onViewPhoto = onViewPhoto,
@@ -447,6 +465,8 @@ internal fun AncestorBreadcrumb(
 private fun Actions(
     vm: AppViewModel,
     item: Item,
+    annotations: ItemAnnotations?,
+    onAnnotations: (ItemAnnotations) -> Unit,
     files: List<MediaFileDto>,
     seriesPlayback: EpisodePlaybackTarget?,
     resumeMs: Long,
@@ -668,6 +688,33 @@ private fun Actions(
             item {
                 TvOutlinedButton(onClick = { onMakeChannel(item) }) {
                     Text("Make channel")
+                }
+            }
+        }
+
+        annotations?.let { a ->
+            item {
+                TvOutlinedButton(onClick = {
+                    val next = a.copy(watchlist = !a.watchlist)
+                    onAnnotations(next)
+                    scope.launch {
+                        if (catchingUnlessCancelled { vm.setListed(item.id, "watchlist", next.watchlist) }.isFailure) onAnnotations(a)
+                    }
+                }) {
+                    Icon(if (a.watchlist) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text(if (a.watchlist) "  On watchlist" else "  Watchlist")
+                }
+            }
+            item {
+                TvOutlinedButton(onClick = {
+                    val next = a.copy(favorite = !a.favorite)
+                    onAnnotations(next)
+                    scope.launch {
+                        if (catchingUnlessCancelled { vm.setListed(item.id, "favorite", next.favorite) }.isFailure) onAnnotations(a)
+                    }
+                }) {
+                    Icon(if (a.favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text(if (a.favorite) "  Favorited" else "  Favorite")
                 }
             }
         }

@@ -174,6 +174,8 @@ fun HomeScreen(
                 val visibleShelfKeys = buildList {
                     if (continueShelfItems.isNotEmpty()) add("continue")
                     if (state.hubs.next_up.isNotEmpty()) add("next")
+                    if (state.watchlist.isNotEmpty()) add("watchlist")
+                    if (state.favorites.isNotEmpty()) add("favorites")
                     if (state.hubs.recently_added.isNotEmpty()) add("recent")
                     if (state.libraries.isNotEmpty()) add(GROUPING_KEY)
                     collections.filter { it.items.isNotEmpty() }.forEach {
@@ -182,7 +184,7 @@ fun HomeScreen(
                 }
                 RemoteOrder(buildList {
                     if (meridian) addAll(listOf("meridian:feature:play", "meridian:feature:details")) else addAll(homeHeaderRemoteKeys(features))
-                    listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
+                    listOf("Continue watching" to continueShelfItems, "Next up" to state.hubs.next_up, "Watchlist" to state.watchlist, "Favorites" to state.favorites, "Recently added" to state.hubs.recently_added).forEach { (key, items) -> items.forEach { add("row:" + key + ":item:" + it.id) } }
                     add("choice:Group by")
                     collections.forEach { collection ->
                         val key = "collection:" + collection.libraries.joinToString(",") { it.id.toString() }
@@ -270,6 +272,24 @@ fun HomeScreen(
                         rowFocusRequester = shelfFocus["next"],
                         previousRowFocusRequester = previousShelf("next"),
                         nextRowFocusRequester = nextShelf("next"),
+                        onOpen = { onOpenItem(it.id) },
+                    )
+                    MediaRow(
+                        "Watchlist",
+                        state.watchlist,
+                        posterWidth,
+                        rowFocusRequester = shelfFocus["watchlist"],
+                        previousRowFocusRequester = previousShelf("watchlist"),
+                        nextRowFocusRequester = nextShelf("watchlist"),
+                        onOpen = { onOpenItem(it.id) },
+                    )
+                    MediaRow(
+                        "Favorites",
+                        state.favorites,
+                        posterWidth,
+                        rowFocusRequester = shelfFocus["favorites"],
+                        previousRowFocusRequester = previousShelf("favorites"),
+                        nextRowFocusRequester = nextShelf("favorites"),
                         onOpen = { onOpenItem(it.id) },
                     )
                     MediaRow(
