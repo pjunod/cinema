@@ -46,7 +46,7 @@ async fn probe_unix(file: &MediaFile) -> Result<ProbeResult, ProbeError> {
     {
         let scanned = async {
             let index = selected_video_index(&document).ok_or("unknown selected video stream")?;
-            let tools = crate::dv_runtime::ToolSet::capture()
+            let tools = crate::vodencode::dv_runtime::ToolSet::capture()
                 .await?
                 .ok_or("DV title scanner not installed")?;
             let mut command = tokio::process::Command::new(&tools.scanner);
