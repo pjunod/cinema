@@ -6,6 +6,19 @@ first.
 
 <!-- status: insert new efforts below this line -->
 
+## Processed VOD successor root reuse
+
+Owner: Sol (implementation), coordinator (publication/native compiler).
+In progress on `codex/cinema-processed-successor-reuse`; not deployed.
+Exact-parent reuse no longer asks an already admitted graph to prove fresh
+throughput or create private qualification readers. Identity, reservation,
+source, executable and final attachment fences remain mandatory. Regression
+source covers idle, near-end and fully materialized roots under saturated
+capacity, single-worker custody and cancelled capture. Compilation and final
+independent review/affected qualification remain outstanding. Private staged
+successor provenance and owner/epoch reconstruction is the remaining source
+work; ordinary serialized descriptors still grant no execution authority.
+
 ## Native server tray, startup policy and release upgrades
 
 **Source built and reviewed on `effort/desktop-tray`; [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213) records main promotion; not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra completed the PR #1220 review; root addresses all eight findings and owns passing unit tests and merge gates. Controller, daemon, native UI and packaging source is built in cohort PR #1220. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes passing review regressions, repository merge evidence and remaining native distribution acceptance.

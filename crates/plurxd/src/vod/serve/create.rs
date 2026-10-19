@@ -1467,7 +1467,6 @@ impl VodServe {
             children: Vec::new(),
             root_admission,
             processed_reuse_scope,
-            processed_probes: Vec::new(),
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,
@@ -1598,29 +1597,11 @@ impl VodServe {
                     .as_ref()
                     .is_some_and(|permit| reuse.matches(previous, permit))
             });
-            #[cfg(any(target_os = "linux", test))]
-            let production_current = replacement.root_admission.as_ref().is_some_and(|permit| {
-                rendition
-                    .recipe
-                    .encoding
-                    .as_ref()
-                    .and_then(|encoding| reuse.production_evidence(encoding, permit))
-                    .is_some_and(|proof| {
-                        proof.milli_realtime >= 1150
-                            && proof.active_ms >= 2000
-                            && proof.completed_segments >= 2
-                    })
-            });
-            #[cfg(not(any(target_os = "linux", test)))]
-            let production_current = false;
-            if !valid || !production_current {
+            if !valid {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_preparation_changed",
                     "the exact processing predecessor ended or changed",
                 ));
-            }
-            if let Some(lease) = reuse.probe.as_ref() {
-                lease.probe.revoke();
             }
         }
         if let Some(previous_readers) = previous_readers.as_mut() {
@@ -2324,7 +2305,6 @@ impl VodServe {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
-            processed_probes: Vec::new(),
             preferred_start_ms: super::vod_serve_delivery::preferred_playlist_start_ms(
                 req.start_seconds,
                 duration_ms,

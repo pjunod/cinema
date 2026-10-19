@@ -1476,15 +1476,10 @@ impl TranscodeManager {
                     }
                 }
             };
-            if root.reused_parent.is_some() {
-                tokio::time::timeout_at(
-                    deadline,
-                    self.vod
-                        .refresh_processed_root(&mut root, request.start_seconds),
-                )
-                .await
-                .map_err(|_| "processed owner refresh exceeded its admitted deadline")??;
-            }
+            // Exact-root reuse retains already admitted capacity, not a claim
+            // that this producer can sustain a new graph. Idle/slow/complete
+            // roots need no extra private windows or throughput qualification.
+            // Attachment rechecks the exact live parent and reservation.
             let encoding = &mut root.encoding;
             let Some(runtime) = encoding.dv_runtime.as_ref().cloned() else {
                 return Err("the processed trial has no processing runtime".into());
@@ -2595,7 +2590,7 @@ impl TranscodeManager {
             active_production: std::sync::Mutex::new(
                 crate::vodencode::ActiveProductionWindow::default(),
             ),
-            processed_samplers: std::sync::Mutex::new(Vec::new()),
+
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),

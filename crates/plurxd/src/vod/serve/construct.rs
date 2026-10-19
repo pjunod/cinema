@@ -264,7 +264,7 @@ impl VodServe {
                 children: Vec::new(),
                 root_admission: None,
                 processed_reuse_scope: None,
-                processed_probes: Vec::new(),
+
                 preferred_start_ms: None,
                 passive_grant: None,
                 retained_output: None,

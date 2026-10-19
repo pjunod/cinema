@@ -575,11 +575,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
-                .filter(|reader| {
-                    !reader.authority_only
-                        && reader.processing_probe.is_none()
-                        && !reader.draining_after_prepared_commit
-                })
+                .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
             (demands, ledgers)
@@ -1033,7 +1029,7 @@ pub(super) fn playback_demands(
         .filter(|request| {
             !readers
                 .get(&request.session)
-                .is_some_and(|reader| reader.authority_only || reader.processing_probe.is_some())
+                .is_some_and(|reader| reader.authority_only)
         })
         .collect::<Vec<_>>();
     let mut nearest = HashMap::new();
@@ -1092,11 +1088,7 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
-            .filter(|reader| {
-                !reader.authority_only
-                    && reader.processing_probe.is_none()
-                    && !reader.draining_after_prepared_commit
-            })
+            .filter(|reader| !reader.authority_only && !reader.draining_after_prepared_commit)
             .map(|reader| match reader.preparation_frontier {
                 Some(frontier) => {
                     // Admission records an actual bounded Prepare request,
@@ -1113,19 +1105,7 @@ pub(super) fn playback_demands(
                 None => Demand::idle_at(reader.frontier),
             }),
     );
-    demands.extend(readers.values().filter_map(|reader| {
-        let probe = reader.processing_probe.as_ref()?;
-        if !probe.live() || probe.sampler.qualified() {
-            return None;
-        }
-        let next = manifest
-            .next_gap(probe.sampler.next_entry())
-            .filter(|next| *next <= probe.through)?;
-        let mut demand = Demand::waiting_on(next);
-        demand.foreground = true;
-        demand.bounded_preparation = true;
-        Some(demand)
-    }));
+
     demands
 }
 

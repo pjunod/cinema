@@ -1061,21 +1061,6 @@ impl VodServe {
         delivery: Arc<crate::meter::Meter>,
         custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Result<SegmentReady, VodError> {
-        self.blocked_wait_for_with_probe(rendition, reader, index, budget, delivery, custody, None)
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn blocked_wait_for_with_probe(
-        &self,
-        rendition: &Arc<Rendition>,
-        reader: (&str, &str),
-        index: u32,
-        budget: Duration,
-        delivery: Arc<crate::meter::Meter>,
-        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
-        probe: Option<&ProcessedRootProbe>,
-    ) -> Result<SegmentReady, VodError> {
         let deadline = tokio::time::Instant::now() + budget;
         let key = WaitKey {
             rendition: rendition.key.clone(),
@@ -1101,12 +1086,7 @@ impl VodServe {
                 .arm_materialize_watchdog_locked(rendition, index, &mut clocks);
             (wait, demand)
         };
-        // Registration and this recheck have no await between them. A prior
-        // revoke rejects this new wait; a later revoke retires it synchronously.
-        if probe.is_some_and(|probe| !probe.live()) {
-            drop(wait);
-            return Err(VodError::Gone(Terminal::Superseded));
-        }
+
         // Admission comes before any persistent demand or deadline state. A
         // refused GET is not work owed by this rendition.
         rendition.kick();
