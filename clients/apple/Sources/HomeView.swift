@@ -386,14 +386,18 @@ private struct HomeDashboard: View {
     }
 
     private var remoteKeys: [String] {
-        let shelves = [HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? []), model.hubs.nextUp ?? [], model.hubs.recentlyAdded ?? []]
+        // Shelf ids are stable names, not positions: the list rows sit after
+        // Next Up on screen but keep their own ids so Coming Soon stays shelf 3.
+        let shelves: [(Int, [Item])] = [(0, HomeLayoutPolicy.continueWatchingShelfItems(model.hubs.continueWatching ?? [])),
+                                       (1, model.hubs.nextUp ?? []), (4, model.watchlist), (5, model.favorites),
+                                       (2, model.hubs.recentlyAdded ?? [])]
         #if os(tvOS)
         let tabs = model.layout == .standard ? ["tab:libraries", "tab:search"] : []
         #else
         let tabs: [String] = []
         #endif
         let featureKeys = theaterFeature == nil ? [] : ["home-feature:play", "home-feature:details"]
-        return tabs + featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.enumerated().flatMap { index, items in
+        return tabs + featureKeys + (model.homeError == nil ? [] : ["home:retry"]) + shelves.flatMap { index, items in
             items.map { "shelf:\(index):item:\($0.id)" }
         } + model.comingSoon.filter { $0.itemId != nil }.map { "shelf:3:comingsoon:" + $0.id }
     }
@@ -453,6 +457,18 @@ private struct HomeDashboard: View {
             style: .landscape
         )
         .id("shelf:1")
+        MediaRow(
+            title: "Watchlist",
+            remoteShelf: "shelf:4",
+            items: model.watchlist
+        )
+        .id("shelf:4")
+        MediaRow(
+            title: "Favorites",
+            remoteShelf: "shelf:5",
+            items: model.favorites
+        )
+        .id("shelf:5")
         MediaRow(
             title: "Recently Added",
             remoteShelf: "shelf:2",

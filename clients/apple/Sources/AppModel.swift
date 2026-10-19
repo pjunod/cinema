@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     @Published var authError: String?
 
     @Published var hubs = Hubs()
+    /// The reader's lists, newest first; empty hides their Home rows.
+    @Published var watchlist: [Item] = []
+    @Published var favorites: [Item] = []
     @Published var comingSoon: [ComingSoonEntry] = []
     @Published var libraries: [Library] = []
     @Published var libraryPreviews: [Int: [Item]] = [:]
@@ -434,11 +437,16 @@ final class AppModel: ObservableObject {
             // Shared libraries or Library channels reaches the tab bar on the
             // next launch, sign-in, foreground or pull-to-refresh.
             async let loadedFeatures = api.features()
+            // The reader's lists never cost Home its load.
+            async let loadedWatchlist = try? api.list("watchlist")
+            async let loadedFavorites = try? api.list("favorite")
             let loadedHubs = try await h
             let loadedLibraries = try await l
             guard ownsHomeLoad(owner) else { return }
             hubs = loadedHubs
             libraries = loadedLibraries
+            watchlist = await loadedWatchlist ?? []
+            favorites = await loadedFavorites ?? []
             // Paint as soon as the responses that make a home screen useful
             // have arrived, not once the last shelf preview has.
             homeLoading = false
