@@ -335,6 +335,28 @@ where
     }
 }
 
+/// Physical qualification uses the real fenced scanner and physical admission,
+/// without exposing a second production probe/publication entrypoint.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) async fn probe_title_for_control(
+    transcode: &crate::transcode::TranscodeManager,
+    file: &plurx_core::domain::MediaFile,
+) -> Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError> {
+    let admission = transcode
+        .admit_fragment()
+        .await
+        .expect("title probe admission");
+    run_admitted_probe(
+        transcode,
+        &admission,
+        &CancellationToken::new(),
+        &CancellationToken::new(),
+        None,
+        dv_title::probe(file),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

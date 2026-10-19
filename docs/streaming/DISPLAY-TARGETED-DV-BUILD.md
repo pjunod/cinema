@@ -5,6 +5,23 @@
 
 ## PR A implementation checkpoint
 
+- Draft PR #1216 is published at `59d23e4674d8`; the ignored physical harness
+  continuation is being prepared separately. It reads the test-only
+  `PLURX_DV_WINDOW_TARGET_NITS` strictly as 1000 or 1600, requires an actual
+  complete-title scan, excludes native Profile 8.1, and explicitly targets
+  windows 0/1/2/360 through the admitted runtime. Initial master preparation
+  is labelled separately. Helper method, bucket, fixed title endpoints, raw
+  L1 and per-frame target-operation receipts are asserted, not yet exercised.
+  Production wrappers still select master. The unchanged helper bundle has
+  static packaging/ABI proof; no numerical or physical qualification is claimed.
+- **Known architectural correction remaining:** the current scanner awaits a
+  complete-title software decode before normal probe publication. Ordinary
+  probe facts must publish independently; title acquisition needs a durable,
+  deduplicated, source-fenced background stage with one-CPU admission and atomic
+  aggregate attachment. Do not treat the synchronous implementation as ready
+  for final review. Actual FEL-catalog B landing/reconciliation, this correction,
+  current affected compilation, final independent review and the once-only
+  qualification batch remain before merge.
 - Baseline Rust 1.97.1 all-target checking and helper compilation against the
   pinned libplacebo API 374 succeeded; these are baseline, not candidate receipts.
 - Complete-title scan groundwork is being implemented: one software base decoder,

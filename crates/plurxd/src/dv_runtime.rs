@@ -1234,6 +1234,7 @@ struct RenderRow {
 /// Exact requested policy and raw-RPU values, not membership in a supported set.
 #[cfg(target_os = "linux")]
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct DisplayTargetRow {
     frame: u8,
     nits: u32,
@@ -1325,6 +1326,9 @@ pub(crate) struct ObservedPicture {
 #[cfg(target_os = "linux")]
 pub(crate) struct ObservedWindow {
     pub(crate) pictures: Vec<ObservedPicture>,
+    /// Validated helper rows retained only for the ignored physical controls.
+    #[cfg(test)]
+    pub(crate) display_target_rows: Vec<serde_json::Value>,
     pub(crate) source_trace: DvDigest,
     pub(crate) source_tick: (u32, u32),
     pub(crate) runtime_device: DvDigest,
@@ -1574,6 +1578,11 @@ impl PrivateWindow {
             return Err("source window has no proved end boundary".into());
         }
         let mut pictures = Vec::with_capacity(frames);
+        #[cfg(test)]
+        let display_target_rows = targets
+            .values()
+            .map(|row| serde_json::to_value(row).expect("integer target trace serializes"))
+            .collect();
         let mut trace = Vec::new();
         let timing = self.evidence.timing()?;
         let expected_timing = String::from_utf8(timing).map_err(|e| e.to_string())?;
@@ -1718,6 +1727,8 @@ impl PrivateWindow {
             .map_err(|e| e.to_string())?;
         Ok(ObservedWindow {
             pictures,
+            #[cfg(test)]
+            display_target_rows,
             source_trace: digest(&trace)?,
             source_tick: tick,
             runtime_device,
