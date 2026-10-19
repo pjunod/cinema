@@ -533,10 +533,8 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
     stale_processed.sustainable = false;
     let mut with_description = vec![stale_processed];
     with_description.extend(offered.clone());
-    assert!(
-        auto_encode_fallback(&with_description, None, 1080).is_some_and(|row| !row.processed_hdr10),
-        "stale descriptive identity cannot become ordinary Auto fallback"
-    );
+    assert!(auto_encode_fallback(&with_description, None, 1080)
+        .is_some_and(|row| !row.processed_hdr10), "stale descriptive identity cannot become ordinary Auto fallback");
     let now = 10 * NETWORK_PRIOR_STARVED_TTL_MS;
     let prior = NetworkPrior {
         link_worst_rung_height: Some(1080),
@@ -594,100 +592,51 @@ fn d6_unknown_aspect_fallback_lands_below_the_starved_rung_instead_of_refusing()
 fn processed_requalification_replaces_hint_once_and_refuses_full_recipe_collision() {
     use plurx_core::playback::candidate::CandidateId;
     let mut candidate = crate::transcode::continuous_test_candidate_context(
-        CandidateId::for_recipe_digest([7; 32]),
-        [7; 32],
-        720,
-    )
-    .selected_candidate;
+        CandidateId::for_recipe_digest([7; 32]), [7; 32], 720).selected_candidate;
     candidate.processed_hdr10 = true;
     candidate.planned_codec = Some("hevc".into());
     candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
     candidate.sustainable = false;
     let mut hint = crate::media_pool::WorkerQualityCandidate {
-        node_id: "node-a".into(),
-        candidate,
-        binding: Some(crate::media_pool::PlanningBinding {
-            generation: 1,
-            source_digest: "a".repeat(64),
-        }),
-        partial: false,
-        dispatch_supported: true,
+        node_id: "node-a".into(), candidate,
+        binding: Some(crate::media_pool::PlanningBinding { generation: 1, source_digest: "a".repeat(64) }),
+        partial: false, dispatch_supported: true,
     };
     let mut catalog = crate::media_pool::QualityCatalogResult {
-        candidates: vec![hint.clone(), hint.clone()],
-        complete: false,
-        causes: vec![crate::media_pool::CatalogCause::LocalDeadline],
-        authority_refused: false,
+        candidates: vec![hint.clone(), hint.clone()], complete: false,
+        causes: vec![crate::media_pool::CatalogCause::LocalDeadline], authority_refused: false,
     };
     let mut partial_ordinary = hint.clone();
     partial_ordinary.candidate = crate::transcode::continuous_test_candidate_context(
-        CandidateId::for_recipe_digest([9; 32]),
-        [9; 32],
-        720,
-    )
-    .selected_candidate;
+        CandidateId::for_recipe_digest([9; 32]), [9; 32], 720).selected_candidate;
     partial_ordinary.partial = true;
     let mixed = vec![hint.clone(), partial_ordinary.clone()];
     let initial = eligible_quality_workers(&mixed, true, "node-a");
-    assert!(
-        initial
-            .iter()
-            .any(|row| row.candidate.id == partial_ordinary.candidate.id),
-        "stale complete description cannot suppress local partial ordinary Auto fallback"
-    );
-    assert!(auto_encode_fallback(
-        &initial
-            .iter()
-            .map(|row| row.candidate.clone())
-            .collect::<Vec<_>>(),
-        None,
-        720
-    )
-    .is_some_and(|row| !row.processed_hdr10));
+    assert!(initial.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
+        "stale complete description cannot suppress local partial ordinary Auto fallback");
+    assert!(auto_encode_fallback(&initial.iter().map(|row| row.candidate.clone()).collect::<Vec<_>>(), None, 720)
+        .is_some_and(|row| !row.processed_hdr10));
     for ceiling in [None, Some(720)] {
         let prepared = preparation_catalog_workers(&mixed, "node-a", true, ceiling);
-        assert!(
-            prepared
-                .iter()
-                .any(|row| row.candidate.id == partial_ordinary.candidate.id),
-            "unplayable complete processed hints cannot suppress fitting ordinary preparation"
-        );
-        assert!(
-            !preparation_catalog_workers(&mixed, "node-a", false, ceiling)
-                .iter()
-                .any(|row| row.candidate.id == partial_ordinary.candidate.id),
-            "explicit preparation cannot borrow Auto's partial fallback"
-        );
+        assert!(prepared.iter().any(|row| row.candidate.id == partial_ordinary.candidate.id),
+            "unplayable complete processed hints cannot suppress fitting ordinary preparation");
+        assert!(!preparation_catalog_workers(&mixed, "node-a", false, ceiling).iter()
+            .any(|row| row.candidate.id == partial_ordinary.candidate.id),
+            "explicit preparation cannot borrow Auto's partial fallback");
     }
     let explicit = eligible_quality_workers(&mixed, false, "node-a");
-    assert_eq!(
-        explicit.len(),
-        1,
-        "explicit known identity keeps independent completeness"
-    );
+    assert_eq!(explicit.len(), 1, "explicit known identity keeps independent completeness");
     assert_eq!(explicit[0].candidate.id, hint.candidate.id);
     hint.candidate.sustainable = true;
-    upsert_processed_worker_candidate(&mut catalog, hint.clone())
-        .expect("admitted requalification");
-    assert_eq!(
-        catalog.candidates.len(),
-        1,
-        "one selected descriptor can bind recovery and link receipts"
-    );
+    upsert_processed_worker_candidate(&mut catalog, hint.clone()).expect("admitted requalification");
+    assert_eq!(catalog.candidates.len(), 1, "one selected descriptor can bind recovery and link receipts");
     assert!(catalog.candidates[0].candidate.playable());
-    assert!(
-        !catalog.complete,
-        "independent descriptor does not complete ordinary discovery"
-    );
+    assert!(!catalog.complete, "independent descriptor does not complete ordinary discovery");
     let mut collision = hint.clone();
     collision.candidate.recipe_digest = [8; 32];
     catalog.candidates.push(collision);
     assert!(upsert_processed_worker_candidate(&mut catalog, hint).is_err());
-    assert_eq!(
-        catalog.candidates.len(),
-        2,
-        "collision refusal leaves the prior catalog untouched"
-    );
+    assert_eq!(catalog.candidates.len(), 2, "collision refusal leaves the prior catalog untouched");
 }
 
 #[tokio::test]
@@ -2478,11 +2427,9 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     );
     unsupported.dispatch_supported = true;
     unsupported.partial = true;
-    assert!(
-        continuous_candidates_from_workers_at_24(&[primary, unsupported])
-            .pairs
-            .is_empty()
-    );
+    assert!(continuous_candidates_from_workers_at_24(&[primary, unsupported])
+        .pairs
+        .is_empty());
 }
 
 /// Animals (2160p, 24/1) on a Pixel: the catalog offered a 2160p primary,
@@ -2519,8 +2466,7 @@ fn continuous_catalog_offers_only_rows_inside_the_avc_level_envelope() {
     let uhd = candidate(1, 2160, 3840, 2160);
     let hd = candidate(2, 1080, 1920, 1080);
     let sd = candidate(3, 720, 1280, 720);
-    let at =
-        |rate| continuous_candidates_from_workers(&[uhd.clone(), hd.clone(), sd.clone()], rate);
+    let at = |rate| continuous_candidates_from_workers(&[uhd.clone(), hd.clone(), sd.clone()], rate);
     let film = at(Rational::new(24, 1));
     assert!(!film.candidates.iter().any(|row| row.id == uhd.candidate.id));
     assert!(film
@@ -2533,10 +2479,7 @@ fn continuous_catalog_offers_only_rows_inside_the_avc_level_envelope() {
         .iter()
         .any(|pair| pair.primary_candidate_id == hd.candidate.id
             && pair.companion_candidate_id == sd.candidate.id));
-    assert!(
-        at(None).pairs.is_empty(),
-        "an unmeasured rate offers no family"
-    );
+    assert!(at(None).pairs.is_empty(), "an unmeasured rate offers no family");
     // 1440p fits at 24 fps but not at 60 (macroblock rate).
     let qhd = candidate(4, 1440, 2560, 1440);
     let pair = |rate| {
@@ -5611,70 +5554,36 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
     file.dolby_vision.el_present = Some(true);
     file.dolby_vision.rpu_present = Some(true);
     file.audio_streams = vec![plurx_core::domain::AudioStream {
-        index: 2,
-        codec: "eac3".into(),
-        channels: Some(6),
-        sample_rate: Some(48_000),
-        channel_layout: Some("5.1".into()),
-        language: None,
-        title: None,
-        default: true,
+        index: 2, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+        channel_layout: Some("5.1".into()), language: None, title: None, default: true,
     }];
-    let caps = caps_v2(
-        r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","hdr10"],"max_height":2160}],
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","hdr10"],"max_height":2160}],
         "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
         "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
-            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#,
-    );
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
     let candidate = QualityCandidate {
-        id: CandidateId::for_recipe_digest([0x81; 32]),
-        recipe_digest: [0x81; 32],
-        route: CandidateRoute::Encode,
-        planned_codec: Some("hevc".into()),
-        processed_hdr10: false,
-        normalized_geometry: true,
-        width: 320,
-        height: 180,
-        target_height: 180,
-        average_bps: Some(1_000_000),
-        peak_bps: Some(2_000_000),
-        grade: plurx_core::transcode::OutputGrade::Hdr10,
-        decoder_compatible: true,
-        complete_cache: false,
-        sustainable: true,
+        id: CandidateId::for_recipe_digest([0x81; 32]), recipe_digest: [0x81; 32],
+        route: CandidateRoute::Encode, planned_codec: Some("hevc".into()),
+        processed_hdr10: false, normalized_geometry: true, width: 320, height: 180,
+        target_height: 180, average_bps: Some(1_000_000), peak_bps: Some(2_000_000),
+        grade: plurx_core::transcode::OutputGrade::Hdr10, decoder_compatible: true,
+        complete_cache: false, sustainable: true,
     };
     let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
-        file: file.clone(),
-        probe_json: None,
-        settings: Default::default(),
-        generation: 1,
-        item_title: None,
+        file: file.clone(), probe_json: None, settings: Default::default(),
+        generation: 1, item_title: None,
     };
     for hdr in [false, true] {
-        snapshot
-            .settings
-            .insert(keys::DV_HDR_PROCESSING.into(), u8::from(hdr).to_string());
-        snapshot
-            .settings
-            .insert(keys::DV_FEL_REENCODE.into(), "1".into());
-        snapshot
-            .settings
-            .insert(keys::DV_CONVERT.into(), "1".into());
+        snapshot.settings.insert(keys::DV_HDR_PROCESSING.into(), u8::from(hdr).to_string());
+        snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+        snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
         let body = || CreateSession {
-            playback_id: "real-ingress-p81".into(),
-            copy: Some(true),
-            preserve_dolby_vision: Some(true),
-            audio: Some(2),
-            audio_offset_ms: Some(175),
-            caps: Some(caps.clone()),
-            ..bare_create()
+            playback_id: "real-ingress-p81".into(), copy: Some(true),
+            preserve_dolby_vision: Some(true), audio: Some(2), audio_offset_ms: Some(175),
+            caps: Some(caps.clone()), ..bare_create()
         };
-        let review =
-            || review_client_plan(&caps, None, &file, &capable_node(), true, false, NOW_MS);
-        assert!(
-            review().convert_dolby_vision,
-            "actual service conversion verdict"
-        );
+        let review = || review_client_plan(&caps, None, &file, &capable_node(), true, false, NOW_MS);
+        assert!(review().convert_dolby_vision, "actual service conversion verdict");
         // Same producer as resolve_plan, before geometry/Encode normalization.
         let query = body().selection_catalog_request(&file, &caps, Some(&review()));
         assert_eq!(query.copy_contract, Some((false, true, true)));
@@ -5686,40 +5595,25 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
         context.canonical_caps = Some(caps.clone());
         context.planning_snapshot = Some(Arc::new(snapshot.clone()));
         request.candidate_context = Some(Box::new(context));
-        assert_eq!(
-            request.durable_intent_fingerprint(&principal),
-            fingerprint,
-            "catalog provenance does not change original client intent bytes"
-        );
+        assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint,
+            "catalog provenance does not change original client intent bytes");
         apply_plan_review(&mut request, review());
         // Both the original converted Copy and selected Encode must qualify.
         for encode in [false, true] {
             let mut selected = request.clone();
             normalize_catalog_selection(&mut selected, 180, !encode).expect("real normalization");
-            assert!(
-                selected.dv_processing_destination.is_none(),
-                "ordinary fallback stays ordinary"
-            );
-            let (trial, projected) =
-                TranscodeManager::processed_qualification_input(&snapshot, &selected, 180)
-                    .expect("converted catalog input reaches P81 qualification");
+            assert!(selected.dv_processing_destination.is_none(), "ordinary fallback stays ordinary");
+            let (trial, projected) = TranscodeManager::processed_qualification_input(&snapshot, &selected, 180)
+                .expect("converted catalog input reaches P81 qualification");
             assert_eq!(trial.kind, SessionKind::Transcode { height: 180 });
-            assert_eq!(
-                trial.dv_processing_destination,
-                Some(DvDestination::Profile81)
-            );
+            assert_eq!(trial.dv_processing_destination, Some(DvDestination::Profile81));
             assert_eq!(projected.copy_contract, query.copy_contract);
             assert_eq!(trial.audio_index, Some(2));
             assert_eq!(trial.audio_offset_ms, 175);
-            assert!(
-                matches!(projected.audio_delivery.as_ref().expect("audio").action,
-                AudioAction::Encode { ref codec, channels: 2, sample_rate: 48_000, .. } if codec == "aac")
-            );
-            assert!(matches!(
-                TranscodeManager::vod_dv_processing_from_snapshot(&snapshot, &trial)
-                    .expect("preflight"),
-                DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)
-            ));
+            assert!(matches!(projected.audio_delivery.as_ref().expect("audio").action,
+                AudioAction::Encode { ref codec, channels: 2, sample_rate: 48_000, .. } if codec == "aac"));
+            assert!(matches!(TranscodeManager::vod_dv_processing_from_snapshot(&snapshot, &trial).expect("preflight"),
+                DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)));
         }
         normalize_catalog_selection(&mut request, 180, false).expect("Encode selection");
         let mut described = candidate.clone();
@@ -5729,56 +5623,28 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
         context.selected_candidate = described.clone();
         state.transcode.remember_processed_candidate(&remembered);
         let lookup = body().selection_catalog_request(&file, &caps, Some(&review()));
-        let descriptions = state
-            .transcode
-            .processed_quality_descriptions(&snapshot, &lookup);
-        let reselected = descriptions
-            .iter()
-            .find(|row| row.id == described.id)
-            .expect("same P81 description rediscovered");
+        let descriptions = state.transcode.processed_quality_descriptions(&snapshot, &lookup);
+        let reselected = descriptions.iter().find(|row| row.id == described.id).expect("same P81 description rediscovered");
         let mut context = TranscodeManager::candidate_context(reselected);
         context.catalog_query = Some(lookup);
         context.canonical_caps = Some(caps.clone());
         request.candidate_context = Some(Box::new(context));
         normalize_catalog_selection(&mut request, 180, false).expect("reselected Encode");
-        assert_eq!(
-            TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
-                .expect("description re-enters fresh qualification")
-                .0
-                .dv_processing_destination,
-            Some(DvDestination::Profile81)
-        );
-        assert!(request
-            .candidate_context
-            .as_ref()
-            .expect("description only")
-            .prepared_processing
-            .is_none());
+        assert_eq!(TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
+            .expect("description re-enters fresh qualification").0.dv_processing_destination,
+            Some(DvDestination::Profile81));
+        assert!(request.candidate_context.as_ref().expect("description only").prepared_processing.is_none());
 
-        for (copy, native, conversion, fel) in [
-            (true, true, true, true),
-            (false, false, true, true),
-            (true, false, false, true),
-            (true, false, true, false),
-        ] {
+        for (copy, native, conversion, fel) in [(true, true, true, true), (false, false, true, true),
+            (true, false, false, true), (true, false, true, false)] {
             let mut current = snapshot.clone();
-            current
-                .settings
-                .insert(keys::DV_CONVERT.into(), u8::from(conversion).to_string());
-            current
-                .settings
-                .insert(keys::DV_FEL_REENCODE.into(), u8::from(fel).to_string());
+            current.settings.insert(keys::DV_CONVERT.into(), u8::from(conversion).to_string());
+            current.settings.insert(keys::DV_FEL_REENCODE.into(), u8::from(fel).to_string());
             let mut current_caps = caps.clone();
-            if native {
-                current_caps.video[0].dv_profiles.push(7);
-            }
+            if native { current_caps.video[0].dv_profiles.push(7); }
             let mut node = capable_node();
             node.dolby_vision_convert = conversion;
-            let body = CreateSession {
-                copy: Some(copy),
-                caps: Some(current_caps.clone()),
-                ..body()
-            };
+            let body = CreateSession { copy: Some(copy), caps: Some(current_caps.clone()), ..body() };
             let review = review_client_plan(&current_caps, None, &file, &node, true, hdr, NOW_MS);
             let query = body.selection_catalog_request(&file, &current_caps, Some(&review));
             let mut ordinary = body.into_request(file.id, 180);
@@ -5789,21 +5655,11 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
             apply_plan_review(&mut ordinary, review);
             normalize_catalog_selection(&mut ordinary, 180, false).expect("ordinary Encode");
             let outcome = TranscodeManager::processed_qualification_input(&current, &ordinary, 180);
-            assert!(
-                !outcome
-                    .as_ref()
-                    .is_ok_and(|(trial, _)| trial.dv_processing_destination
-                        == Some(DvDestination::Profile81)),
-                "native/numeric/disabled conversion or FEL must not acquire P81"
-            );
+            assert!(!outcome.as_ref().is_ok_and(|(trial, _)| trial.dv_processing_destination == Some(DvDestination::Profile81)),
+                "native/numeric/disabled conversion or FEL must not acquire P81");
             if !copy && hdr {
-                assert_eq!(
-                    outcome
-                        .expect("ordinary HDR10 remains eligible")
-                        .0
-                        .dv_processing_destination,
-                    Some(DvDestination::Hdr10)
-                );
+                assert_eq!(outcome.expect("ordinary HDR10 remains eligible").0.dv_processing_destination,
+                    Some(DvDestination::Hdr10));
             }
         }
     }
@@ -6231,312 +6087,89 @@ async fn legacy_manual_to_auto_preparation_binds_a_real_non_upgrading_candidate(
     // Start below the ordinary cold Auto rung so loss of the bootstrap ceiling
     // would cause a real upgrade, without assuming unmeasured1080p production.
     let incumbent_height = 360;
-    state
-        .store
-        .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
-        .await
-        .expect("Auto policy");
-    let library = state
-        .store
-        .create_library(&NewLibrary {
-            name: "Auto bootstrap".into(),
-            kind: LibraryKind::Movies,
-            paths: vec![],
-            anime: false,
-        })
-        .await
-        .expect("library");
-    let item = state
-        .store
-        .insert_item(&NewItem {
-            library_id: library.id,
-            kind: ItemKind::Movie,
-            parent_id: None,
-            title: "Auto bootstrap".into(),
-            year: None,
-            season_number: None,
-            episode_number: None,
-        })
-        .await
-        .expect("item");
+    state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("Auto policy");
+    let library = state.store.create_library(&NewLibrary { name: "Auto bootstrap".into(), kind: LibraryKind::Movies, paths: vec![], anime: false }).await.expect("library");
+    let item = state.store.insert_item(&NewItem { library_id: library.id, kind: ItemKind::Movie, parent_id: None, title: "Auto bootstrap".into(), year: None, season_number: None, episode_number: None }).await.expect("item");
     let id = state.store.upsert_file(item, "/media/bootstrap.mkv", 4096, 1, &ProbeResult {
         container: Some("mkv".into()), video_codec: Some("h264".into()), width: Some(1920), height: Some(1080), bit_depth: Some(8),
         audio_streams: vec![plurx_core::domain::AudioStream { index: 0, codec: "aac".into(), channels: Some(2), sample_rate: Some(48000), channel_layout: Some("stereo".into()), language: None, title: None, default: true }],
         raw_json: Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","width":1920,"height":1080,"pix_fmt":"yuv420p","sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"channel_layout":"stereo","sample_rate":"48000"}]}).to_string()), ..Default::default()
     }).await.expect("file");
-    let source = state
-        .store
-        .get_file(id)
-        .await
-        .expect("read")
-        .expect("source");
-    let route = crate::media_sessions::takeover_eligible_route(
-        "bootstrap-old",
-        "00000000-0000-4000-8000-0000000000a1",
-    );
+    let source = state.store.get_file(id).await.expect("read").expect("source");
+    let route = crate::media_sessions::takeover_eligible_route("bootstrap-old", "00000000-0000-4000-8000-0000000000a1");
     let mut predecessor = staged_predecessor_recipe(&route);
     predecessor.request.file_id = id;
     predecessor.request.automatic = false;
-    predecessor.request.kind = crate::transcode::SessionKind::Transcode {
-        height: incumbent_height,
-    };
-    let caps = caps_v2(
-        r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#,
-    );
-    predecessor.decoder_caps = Some(
-        crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"),
-    );
-    let selection = crate::playback_control::ClientSelection {
-        quality: crate::playback_control::QualitySelection::Auto {
-            height: None,
-            candidate_id: None,
-        },
-        audio_track: None,
-        subtitle: crate::playback_control::SubtitleSelection {
-            mode: crate::playback_control::SubtitleMode::Off,
-            track: None,
-        },
-        audio_offset_ms: 0,
-        codec: crate::playback_control::CodecPolicy::Auto,
-        dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
-    };
-    let ordinary = resolve_plan(
-        PlanInputs {
-            snapshot: None,
-            state: &state,
-            user_id: 1,
-            file_id: id,
-            source: Some(&source),
-            network_prior: None,
-            network_identity: None,
-            incumbent_receipt: None,
-        },
-        None,
-        CreateSession {
-            playback_id: "ordinary-auto".into(),
-            quality_auto: Some(true),
-            copy: Some(false),
-            caps: Some(caps.clone()),
-            ..bare_create()
-        },
-    )
-    .await
-    .expect("unbounded ordinary Auto");
-    assert!(
-        ordinary.height > incumbent_height,
-        "the ordinary Auto control must be a genuine upgrade over the incumbent"
-    );
+    predecessor.request.kind = crate::transcode::SessionKind::Transcode { height: incumbent_height };
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["aac"],"containers":["mkv","mp4"],"transports":["hls"],"display":{"presentation_target":{"width_px":2436,"height_px":1125,"revision":1}}}"#);
+    predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder"));
+    let selection = crate::playback_control::ClientSelection { quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None }, audio_track: None, subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None }, audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
+    let ordinary = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None,
+        CreateSession { playback_id: "ordinary-auto".into(), quality_auto: Some(true), copy: Some(false), caps: Some(caps.clone()), ..bare_create() }).await.expect("unbounded ordinary Auto");
+    assert!(ordinary.height > incumbent_height, "the ordinary Auto control must be a genuine upgrade over the incumbent");
     // The control decoder snapshot has no sink facts. Only the accepted
     // initial playback claim supplies audio authority during a quality replan.
     let mut initial_caps = caps.clone();
-    initial_caps.audio_sinks = vec![plurx_core::playback::AudioSink {
-        codec: "aac".into(),
-        max_channels: 2,
-        passthrough: false,
-        sample_rates_hz: vec![48000],
-    }];
-    let claim = plurx_core::playback::audio::AudioClaim::from_caps(&initial_caps)
-        .expect("valid initial audio sinks")
-        .expect("actual initial claim");
+    initial_caps.audio_sinks = vec![plurx_core::playback::AudioSink { codec: "aac".into(), max_channels: 2, passthrough: false, sample_rates_hz: vec![48000] }];
+    let claim = plurx_core::playback::audio::AudioClaim::from_caps(&initial_caps).expect("valid initial audio sinks").expect("actual initial claim");
     assert!(caps.audio_sinks.is_empty());
     predecessor.request.audio_claim = Some(claim.clone());
-    predecessor.request.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
-        source.audio_streams.first(),
-        &claim.profile(),
-        plurx_core::playback::audio::AudioRoute::EncodedVod,
-        0,
-    ));
-    let request = plan_preparation_candidate(
-        &state,
-        &predecessor,
-        Some(&caps),
-        None,
-        &selection,
-        &source,
-        incumbent_height,
-    )
-    .await
-    .expect("authoritative bootstrap");
-    assert_eq!(
-        request.audio_claim.as_ref(),
-        Some(&claim),
-        "replanning retains the accepted audio authority"
-    );
-    assert_eq!(
-        request.audio_delivery.as_ref(),
-        predecessor.request.audio_delivery.as_ref(),
-        "the actual output audio recipe remains unchanged"
-    );
-    assert!(
-        request
-            .audio_delivery
-            .as_ref()
-            .and_then(|audio| audio.presentation_identity())
-            .is_some(),
-        "the fixture exercises real AAC output, not an absent audio track"
-    );
+    predecessor.request.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(source.audio_streams.first(), &claim.profile(), plurx_core::playback::audio::AudioRoute::EncodedVod, 0));
+    let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, incumbent_height).await.expect("authoritative bootstrap");
+    assert_eq!(request.audio_claim.as_ref(), Some(&claim), "replanning retains the accepted audio authority");
+    assert_eq!(request.audio_delivery.as_ref(), predecessor.request.audio_delivery.as_ref(), "the actual output audio recipe remains unchanged");
+    assert!(request.audio_delivery.as_ref().and_then(|audio| audio.presentation_identity()).is_some(), "the fixture exercises real AAC output, not an absent audio track");
     assert!(request.automatic);
-    let context = request
-        .candidate_context
-        .as_ref()
-        .expect("actual route binding");
-    assert!(
-        request
-            .quality_catalog
-            .as_ref()
-            .expect("canonical catalog")
-            .candidates
-            .iter()
-            .any(|entry| i64::from(entry.candidate.target_height) > incumbent_height),
-        "the bootstrap ceiling never erases later upgrade candidates"
-    );
-    let selected = request
-        .quality_catalog
-        .as_ref()
-        .expect("canonical catalog")
-        .candidates
-        .iter()
-        .find(|entry| entry.candidate.id == context.candidate_id)
-        .expect("bound catalog identity");
+    let context = request.candidate_context.as_ref().expect("actual route binding");
+    assert!(request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().any(|entry| i64::from(entry.candidate.target_height) > incumbent_height), "the bootstrap ceiling never erases later upgrade candidates");
+    let selected = request.quality_catalog.as_ref().expect("canonical catalog").candidates.iter().find(|entry| entry.candidate.id == context.candidate_id).expect("bound catalog identity");
     assert!(selected.candidate.identity_matches());
-    assert!(
-        i64::from(selected.candidate.height) <= incumbent_height
-            && i64::from(selected.candidate.target_height) <= incumbent_height,
-        "a manual body is not upgrade proof"
-    );
+    assert!(i64::from(selected.candidate.height) <= incumbent_height && i64::from(selected.candidate.target_height) <= incumbent_height, "a manual body is not upgrade proof");
     assert_eq!(context.recipe_digest, selected.candidate.recipe_digest);
-    assert_eq!(
-        plurx_core::playback::audio::AudioClaim::from_caps(
-            context
-                .canonical_caps
-                .as_ref()
-                .expect("actual planned caps")
-        )
-        .expect("valid context audio"),
-        Some(claim.clone())
-    );
+    assert_eq!(plurx_core::playback::audio::AudioClaim::from_caps(context.canonical_caps.as_ref().expect("actual planned caps")).expect("valid context audio"), Some(claim.clone()));
     let mut no_claim = predecessor.clone();
     no_claim.request.audio_claim = None;
     no_claim.request.audio_delivery = None;
-    let unattributed = plan_preparation_candidate(
-        &state,
-        &no_claim,
-        Some(&caps),
-        None,
-        &selection,
-        &source,
-        incumbent_height,
-    )
-    .await
-    .expect("legacy no-claim route");
-    assert!(
-        unattributed.audio_claim.is_none(),
-        "a video snapshot never fabricates an audio claim"
-    );
+    let unattributed = plan_preparation_candidate(&state, &no_claim, Some(&caps), None, &selection, &source, incumbent_height).await.expect("legacy no-claim route");
+    assert!(unattributed.audio_claim.is_none(), "a video snapshot never fabricates an audio claim");
     let mut invalid_claim = predecessor.clone();
-    invalid_claim
-        .request
-        .audio_claim
-        .as_mut()
-        .expect("claim")
-        .sinks[0]
-        .max_channels = 0;
-    assert!(
-        plan_preparation_candidate(
-            &state,
-            &invalid_claim,
-            Some(&caps),
-            None,
-            &selection,
-            &source,
-            incumbent_height
-        )
-        .await
-        .is_err(),
-        "invalid retained audio authority is refused"
-    );
-    assert!(
-        predecessor.candidate_id.is_none(),
-        "the incumbent remains honestly unattributed"
-    );
+    invalid_claim.request.audio_claim.as_mut().expect("claim").sinks[0].max_channels = 0;
+    assert!(plan_preparation_candidate(&state, &invalid_claim, Some(&caps), None, &selection, &source, incumbent_height).await.is_err(), "invalid retained audio authority is refused");
+    assert!(predecessor.candidate_id.is_none(), "the incumbent remains honestly unattributed");
     predecessor.request.presentation = crate::transcode::Presentation::Live;
-    assert!(
-        plan_preparation_candidate(
-            &state,
-            &predecessor,
-            Some(&caps),
-            None,
-            &selection,
-            &source,
-            incumbent_height
-        )
-        .await
-        .is_err(),
-        "a VOD candidate identity cannot authorize rolling bytes"
-    );
+    assert!(plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, incumbent_height).await.is_err(), "a VOD candidate identity cannot authorize rolling bytes");
 }
 
 #[test]
 fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     let row = |node: &str, seed: u8, height, partial| crate::media_pool::WorkerQualityCandidate {
-        node_id: node.into(),
-        binding: None,
-        partial,
-        dispatch_supported: true,
-        candidate: QualityCandidate {
-            processed_hdr10: false,
-            id: CandidateId::for_recipe_digest([seed; 32]),
-            recipe_digest: [seed; 32],
-            route: CandidateRoute::Encode,
-            planned_codec: None,
-            normalized_geometry: true,
-            width: 1280,
-            height,
-            target_height: height,
-            average_bps: None,
-            peak_bps: None,
-            grade: plurx_core::transcode::OutputGrade::Sdr,
-            decoder_compatible: true,
-            complete_cache: false,
-            sustainable: true,
-        },
+        node_id: node.into(), binding: None, partial, dispatch_supported: true,
+        candidate: QualityCandidate { processed_hdr10: false, id: CandidateId::for_recipe_digest([seed;32]), recipe_digest:[seed;32],
+            route: CandidateRoute::Encode, planned_codec:None, normalized_geometry:true, width:1280,height,target_height:height,
+            average_bps:None,peak_bps:None,grade:plurx_core::transcode::OutputGrade::Sdr,decoder_compatible:true,complete_cache:false,sustainable:true }
     };
-    let local = row("local", 1, 720, true);
-    let mut forged = local.clone();
-    forged.candidate.recipe_digest = [11; 32];
-    let mut incompatible = local.clone();
-    incompatible.candidate.decoder_compatible = false;
-    let mut larger_actual = local.clone();
-    larger_actual.candidate.height = 1080;
-    let mut larger_rung = local.clone();
-    larger_rung.candidate.target_height = 1080;
-    let mut cold = local.clone();
-    cold.candidate.sustainable = false;
+    let local = row("local",1,720,true);
+    let mut forged = local.clone(); forged.candidate.recipe_digest = [11;32];
+    let mut incompatible = local.clone(); incompatible.candidate.decoder_compatible = false;
+    let mut larger_actual = local.clone(); larger_actual.candidate.height = 1080;
+    let mut larger_rung = local.clone(); larger_rung.candidate.target_height = 1080;
+    let mut cold = local.clone(); cold.candidate.sustainable = false;
     assert_eq!(preparation_catalog_workers(&[cold.clone()],"local",true,Some(720)).len(),1,"unknown production may stage a bounded first attachment, without claiming sustainable proof");
-    assert!(
-        !cold.candidate.playable(),
-        "bootstrap admission does not manufacture measured production"
-    );
+    assert!(!cold.candidate.playable(),"bootstrap admission does not manufacture measured production");
     let ordinary_cold = cold.candidate.clone();
-    assert!(
-        auto_bootstrap_encode_fallback(std::slice::from_ref(&ordinary_cold), 720).is_some(),
-        "ordinary first-window admission needs no fabricated production proof"
-    );
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&ordinary_cold), 720).is_some(),
+        "ordinary first-window admission needs no fabricated production proof");
     let mut processed_cold = ordinary_cold.clone();
     processed_cold.processed_hdr10 = true;
     processed_cold.grade = plurx_core::transcode::OutputGrade::Hdr10;
     processed_cold.planned_codec = Some("hevc".into());
-    assert!(
-        auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_cold), 720).is_none(),
-        "a descriptive processed recipe cannot borrow ordinary cold admission"
-    );
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_cold), 720).is_none(),
+        "a descriptive processed recipe cannot borrow ordinary cold admission");
     let mut processed = processed_cold.clone();
     processed.sustainable = true;
-    assert!(
-        auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 720).is_some(),
-        "qualified executable processed output can stage within the ceiling"
-    );
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 720).is_some(),
+        "qualified executable processed output can stage within the ceiling");
     let mut wrong_grade = processed.clone();
     wrong_grade.grade = plurx_core::transcode::OutputGrade::Sdr;
     let mut wrong_codec = processed.clone();
@@ -6544,107 +6177,52 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     for refused in [processed_cold, wrong_grade, wrong_codec] {
         assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&refused), 720).is_none());
         let mixed = [refused, ordinary_cold.clone()];
-        assert!(
-            auto_bootstrap_encode_fallback(&mixed, 720)
-                .is_some_and(|candidate| !candidate.processed_hdr10),
-            "stale processed hints cannot replace a usable ordinary bootstrap"
-        );
+        assert!(auto_bootstrap_encode_fallback(&mixed, 720).is_some_and(|candidate| !candidate.processed_hdr10),
+            "stale processed hints cannot replace a usable ordinary bootstrap");
     }
-    assert!(
-        auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 480).is_none(),
-        "processed output never escapes the actual bootstrap height ceiling"
-    );
-    let mut zero_geometry = local.clone();
-    zero_geometry.candidate.width = 0;
-    let mut parser_only = local.clone();
-    parser_only.dispatch_supported = false;
-    assert!(
-        preparation_catalog_workers(
-            &[
-                forged,
-                incompatible,
-                larger_actual,
-                larger_rung,
-                zero_geometry,
-                parser_only
-            ],
-            "local",
-            true,
-            Some(720)
-        )
-        .is_empty(),
-        "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission"
-    );
-    let foreign = row("foreign", 2, 720, true);
-    let high_complete = row("foreign", 3, 1080, false);
-    let workers = [local.clone(), foreign, high_complete];
-    let bootstrap = preparation_catalog_workers(&workers, "local", true, Some(720));
-    assert_eq!(bootstrap.len(), 1);
-    assert_eq!(bootstrap[0].candidate.id, local.candidate.id);
-    assert!(
-        preparation_catalog_workers(&workers, "local", false, Some(720)).is_empty(),
-        "named routes never borrow partial admission"
-    );
-    assert_eq!(
-        preparation_catalog_workers(&workers, "local", true, None).len(),
-        1,
-        "ordinary complete1080 excludes partial rows"
-    );
-    let mut complete = local.clone();
-    complete.partial = false;
-    assert_eq!(
-        preparation_catalog_workers(&[local, complete], "local", true, Some(720)).len(),
-        1,
-        "a fitting complete route suppresses partial fallback"
-    );
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 480).is_none(),
+        "processed output never escapes the actual bootstrap height ceiling");
+    let mut zero_geometry = local.clone(); zero_geometry.candidate.width = 0;
+    let mut parser_only = local.clone(); parser_only.dispatch_supported = false;
+    assert!(preparation_catalog_workers(&[forged,incompatible,larger_actual,larger_rung,zero_geometry,parser_only],"local",true,Some(720)).is_empty(), "bounded bootstrap rejects invalid identity/decoder/raster/rung/work admission");
+    let foreign = row("foreign",2,720,true);
+    let high_complete = row("foreign",3,1080,false);
+    let workers = [local.clone(),foreign,high_complete];
+    let bootstrap = preparation_catalog_workers(&workers,"local",true,Some(720));
+    assert_eq!(bootstrap.len(),1); assert_eq!(bootstrap[0].candidate.id,local.candidate.id);
+    assert!(preparation_catalog_workers(&workers,"local",false,Some(720)).is_empty(),"named routes never borrow partial admission");
+    assert_eq!(preparation_catalog_workers(&workers,"local",true,None).len(),1,"ordinary complete1080 excludes partial rows");
+    let mut complete = local.clone(); complete.partial=false;
+    assert_eq!(preparation_catalog_workers(&[local,complete],"local",true,Some(720)).len(),1,"a fitting complete route suppresses partial fallback");
 }
 
 #[test]
 fn acquisition_query_preserves_integer_offsets_and_legacy_relay_wire_shape() {
     let query = Query::<PlaylistQuery>::try_from_uri(
-        &"/index.m3u8?acquisition_start_ms=296065&native=1"
-            .parse()
-            .expect("uri"),
-    )
-    .expect("integer query")
-    .0;
+        &"/index.m3u8?acquisition_start_ms=296065&native=1".parse().expect("uri"),
+    ).expect("integer query").0;
     assert_eq!(query.acquisition_start_ms, Some(296_065));
     assert_eq!(query.native, Some(1));
-    let absent = Query::<PlaylistQuery>::try_from_uri(&"/index.m3u8".parse().expect("uri"))
-        .expect("legacy query")
-        .0;
+    let absent = Query::<PlaylistQuery>::try_from_uri(&"/index.m3u8".parse().expect("uri")).expect("legacy query").0;
     assert!(absent.acquisition_start_ms.is_none());
     let invalid = Query::<PlaylistQuery>::try_from_uri(
         &"/index.m3u8?acquisition_start_ms=-1".parse().expect("uri"),
-    )
-    .expect("offset validation belongs to frozen rendition")
-    .0;
+    ).expect("offset validation belongs to frozen rendition").0;
     assert_eq!(invalid.acquisition_start_ms, Some(-1));
     for value in ["NaN", "1.5", "9223372036854775808"] {
         assert!(Query::<PlaylistQuery>::try_from_uri(
-            &format!("/index.m3u8?acquisition_start_ms={value}")
-                .parse()
-                .expect("uri"),
-        )
-        .is_err());
+            &format!("/index.m3u8?acquisition_start_ms={value}").parse().expect("uri"),
+        ).is_err());
     }
     #[derive(serde::Deserialize)]
     #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
     enum LegacyResource {
-        Playlist {
-            native: Option<u8>,
-            subtitle: Option<i64>,
-        },
+        Playlist { native: Option<u8>, subtitle: Option<i64> },
     }
-    let resource = RelayResource::Playlist {
-        native: query.native,
-        subtitle: query.subtitle,
-        acquisition_start_ms: None,
-    };
+    let resource = RelayResource::Playlist { native: query.native, subtitle: query.subtitle, acquisition_start_ms: None };
     let wire = serde_json::to_value(resource).expect("legacy wire");
     assert!(wire.get("acquisition_start_ms").is_none());
-    let LegacyResource::Playlist { native, subtitle } =
-        serde_json::from_value(wire).expect("old strict peer accepts original envelope");
+    let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(wire).expect("old strict peer accepts original envelope");
     assert_eq!(native, Some(1));
     assert_eq!(subtitle, None);
 }
@@ -6652,46 +6230,17 @@ fn acquisition_query_preserves_integer_offsets_and_legacy_relay_wire_shape() {
 #[test]
 fn acquisition_relay_sends_extension_only_to_proven_peer() {
     #[derive(serde::Deserialize)]
-    #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
-    enum LegacyResource {
-        Playlist {
-            native: Option<u8>,
-            subtitle: Option<i64>,
-        },
-    }
-    let resource = RelayResource::Playlist {
-        native: None,
-        subtitle: Some(2),
-        acquisition_start_ms: Some(296_065),
-    };
-    let legacy =
-        serde_json::to_value(resource.for_acquisition_peer(false)).expect("legacy serialization");
+    #[serde(tag="resource",rename_all="snake_case",deny_unknown_fields)]
+    enum LegacyResource { Playlist { native: Option<u8>, subtitle: Option<i64> } }
+    let resource = RelayResource::Playlist { native: None, subtitle: Some(2), acquisition_start_ms: Some(296_065) };
+    let legacy = serde_json::to_value(resource.for_acquisition_peer(false)).expect("legacy serialization");
     assert!(legacy.get("acquisition_start_ms").is_none());
-    let LegacyResource::Playlist { native, subtitle } =
-        serde_json::from_value(legacy.clone()).expect("old peer accepts original shape");
-    assert_eq!(native, None);
-    assert_eq!(subtitle, Some(2));
-    let restored: RelayResource =
-        serde_json::from_value(legacy).expect("new peer accepts absent field");
-    assert!(matches!(
-        restored,
-        RelayResource::Playlist {
-            acquisition_start_ms: None,
-            ..
-        }
-    ));
-    let updated = serde_json::to_value(resource.for_acquisition_peer(true))
-        .expect("negotiated serialization");
-    assert_eq!(updated["acquisition_start_ms"], 296_065);
-    assert!(
-        serde_json::from_value::<LegacyResource>(updated.clone()).is_err(),
-        "must never send extension to an old strict peer"
-    );
-    assert!(matches!(
-        serde_json::from_value::<RelayResource>(updated).expect("updated owner"),
-        RelayResource::Playlist {
-            acquisition_start_ms: Some(296_065),
-            ..
-        }
-    ));
+    let LegacyResource::Playlist { native, subtitle } = serde_json::from_value(legacy.clone()).expect("old peer accepts original shape");
+    assert_eq!(native,None); assert_eq!(subtitle,Some(2));
+    let restored: RelayResource = serde_json::from_value(legacy).expect("new peer accepts absent field");
+    assert!(matches!(restored,RelayResource::Playlist{acquisition_start_ms:None,..}));
+    let updated = serde_json::to_value(resource.for_acquisition_peer(true)).expect("negotiated serialization");
+    assert_eq!(updated["acquisition_start_ms"],296_065);
+    assert!(serde_json::from_value::<LegacyResource>(updated.clone()).is_err(),"must never send extension to an old strict peer");
+    assert!(matches!(serde_json::from_value::<RelayResource>(updated).expect("updated owner"),RelayResource::Playlist{acquisition_start_ms:Some(296_065),..}));
 }
