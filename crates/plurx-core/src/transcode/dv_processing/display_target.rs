@@ -141,8 +141,8 @@ mod tests {
         let master = DvExportPolicy::PqBilinearYuv420p10V1 { raster };
         let mut identities = std::collections::BTreeSet::new();
         for nits in DISPLAY_TARGET_BUCKETS {
-            let (target, reason) =
-                DvExportPolicy::for_display_target(raster, nits, Some(stats())).unwrap();
+            let (target, reason) = DvExportPolicy::for_display_target(raster, nits, Some(stats()))
+                .expect("supported bucket and complete high-peak title");
             assert!(reason.is_none());
             assert_ne!(target.target_parameters(), master.target_parameters());
             assert!(identities.insert(target.target_parameters()));
@@ -155,7 +155,7 @@ mod tests {
                     ..stats()
                 }),
             )
-            .unwrap();
+            .expect("supported bucket and complete zero-peak title permit elision");
             assert_eq!(elided, master);
             assert_eq!(elided.target_parameters(), master.target_parameters());
             assert!(matches!(
@@ -168,7 +168,8 @@ mod tests {
     fn targeting_requires_every_title_frame_and_exact_buckets() {
         for nits in DISPLAY_TARGET_BUCKETS {
             let DvDisplayTargetChoice::Target(target) =
-                DvDisplayTarget::for_title(nits, Some(stats())).unwrap()
+                DvDisplayTarget::for_title(nits, Some(stats()))
+                    .expect("supported bucket and complete high-peak title")
             else {
                 panic!("eligible high-peak title");
             };
@@ -196,7 +197,8 @@ mod tests {
             }),
         ] {
             assert!(matches!(
-                DvDisplayTarget::for_title(1000, stats).unwrap(),
+                DvDisplayTarget::for_title(1000, stats)
+                    .expect("supported bucket permits master fallback for unqualified title"),
                 DvDisplayTargetChoice::Master { .. }
             ));
         }
@@ -208,7 +210,7 @@ mod tests {
                     ..stats()
                 })
             )
-            .unwrap(),
+            .expect("supported bucket and complete zero-peak title permit elision"),
             DvDisplayTargetChoice::Master {
                 reason: DvDisplayTargetDecline::TitleFits { nits: 1000 }
             }

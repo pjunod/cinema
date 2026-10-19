@@ -1745,19 +1745,24 @@ mod helper_decoder_tests {
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
         };
-        let DvDisplayTargetChoice::Target(target) =
-            DvDisplayTarget::for_title(1600, Some(stats)).unwrap()
+        let DvDisplayTargetChoice::Target(target) = DvDisplayTarget::for_title(1600, Some(stats))
+            .expect("1600-nit bucket and complete high-peak title")
         else {
             panic!("target");
         };
         let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
-        let (max, avg) = target.validate_rpu(raw).unwrap();
+        let (max, avg) = target
+            .validate_rpu(raw)
+            .expect("retained P7 fixture has valid L1 for the target title");
         let valid = serde_json::json!({
             "frame":0, "nits":1600, "method":DISPLAY_TARGET_METHOD,
             "curve":"annex-b2-rgb", "max_pq":max, "avg_pq":avg,
             "max0_fallback":max == 0, "title_min_1e4":50, "title_peak":4000,
         });
-        let parse = |row| serde_json::from_value::<super::DisplayTargetRow>(row).unwrap();
+        let parse = |row| {
+            serde_json::from_value::<super::DisplayTargetRow>(row)
+                .expect("synthetic target trace has the expected JSON shape")
+        };
         assert!(parse(valid.clone()).validate(target, raw).is_ok());
         // Both 600 and 1600 are allowed. Only the requested one is admissible.
         for (field, value) in [

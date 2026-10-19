@@ -839,7 +839,8 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
     master.capability.target.parameters = master_export.target_parameters();
     let mut digests = std::collections::BTreeSet::new();
     for nits in DISPLAY_TARGET_BUCKETS {
-        let (export, _) = DvExportPolicy::for_display_target((64, 64), nits, Some(stats)).unwrap();
+        let (export, _) = DvExportPolicy::for_display_target((64, 64), nits, Some(stats))
+            .expect("supported bucket and complete high-peak title");
         let mut target = master.clone();
         target.capability.target.parameters = export.target_parameters();
         assert_ne!(master.semantic_digest(), target.semantic_digest());
@@ -855,7 +856,7 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
                 ..stats
             }),
         )
-        .unwrap();
+        .expect("supported bucket and consistent mastering luminance");
         let mut changed = target.clone();
         changed.capability.target.parameters = other.target_parameters();
         assert_ne!(target.semantic_digest(), changed.semantic_digest());
@@ -867,7 +868,7 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
                 ..stats
             }),
         )
-        .unwrap();
+        .expect("supported bucket and complete zero-peak title permit elision");
         let mut same = master.clone();
         same.capability.target.parameters = elided.target_parameters();
         assert_eq!(master.semantic_digest(), same.semantic_digest());
