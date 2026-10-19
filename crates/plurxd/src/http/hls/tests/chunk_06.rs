@@ -2339,6 +2339,12 @@ fn quality_schedule_failures_separate_final_refusals_from_transient_ones() {
     );
 }
 
+fn continuous_candidates_from_workers_at_24(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+) -> ContinuousCandidatesResponse {
+    continuous_candidates_from_workers(workers, plurx_core::transcode::Rational::new(24, 1))
+}
+
 #[test]
 fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
@@ -2369,7 +2375,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let primary = candidate("one", 1, 1080, 1920, 1080);
     let other_node = candidate("two", 2, 720, 1280, 720);
     let alias = candidate("one", 3, 900, 1920, 1080);
-    assert!(continuous_candidates_from_workers(&[
+    assert!(continuous_candidates_from_workers_at_24(&[
         primary.clone(),
         other_node.clone(),
         alias.clone()
@@ -2380,7 +2386,7 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let mut hevc = primary.clone();
     hevc.candidate.planned_codec = Some("hevc".into());
     assert!(
-        continuous_candidates_from_workers(&[hevc.clone(), companion.clone()])
+        continuous_candidates_from_workers_at_24(&[hevc.clone(), companion.clone()])
             .pairs
             .is_empty(),
         "HEVC is not offered in an AVC family"
@@ -2388,12 +2394,12 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let mut avc = primary.clone();
     avc.candidate.planned_codec = Some("h264".into());
     assert!(
-        !continuous_candidates_from_workers(&[avc, companion.clone()])
+        !continuous_candidates_from_workers_at_24(&[avc, companion.clone()])
             .pairs
             .is_empty(),
         "explicit AVC and legacy AVC coexist"
     );
-    let response = continuous_candidates_from_workers(&[
+    let response = continuous_candidates_from_workers_at_24(&[
         primary.clone(),
         other_node,
         alias,
@@ -2408,22 +2414,82 @@ fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
     let mut unsupported = companion;
     unsupported.candidate.normalized_geometry = false;
     assert!(
-        continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()])
+        continuous_candidates_from_workers_at_24(&[primary.clone(), unsupported.clone()])
             .pairs
             .is_empty()
     );
     unsupported.candidate.normalized_geometry = true;
     unsupported.dispatch_supported = false;
     assert!(
-        continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()])
+        continuous_candidates_from_workers_at_24(&[primary.clone(), unsupported.clone()])
             .pairs
             .is_empty()
     );
     unsupported.dispatch_supported = true;
     unsupported.partial = true;
-    assert!(continuous_candidates_from_workers(&[primary, unsupported])
+    assert!(continuous_candidates_from_workers_at_24(&[primary, unsupported])
         .pairs
         .is_empty());
+}
+
+/// Animals (2160p, 24/1) on a Pixel: the catalog offered a 2160p primary,
+/// which H.264 High@5.0 cannot carry, so the continuous plan was refused at
+/// session creation and the fallback start answered 500. Only rows inside
+/// the envelope at the source's measured cadence form a family.
+#[test]
+fn continuous_catalog_offers_only_rows_inside_the_avc_level_envelope() {
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::transcode::Rational;
+    let candidate = |seed: u8, target, width, height| crate::media_pool::WorkerQualityCandidate {
+        node_id: "one".into(),
+        binding: None,
+        dispatch_supported: true,
+        partial: false,
+        candidate: QualityCandidate {
+            processed_hdr10: false,
+            id: CandidateId::for_recipe_digest([seed; 32]),
+            recipe_digest: [seed; 32],
+            route: CandidateRoute::Encode,
+            planned_codec: None,
+            normalized_geometry: true,
+            width,
+            height,
+            target_height: target,
+            average_bps: Some(8_000_000),
+            peak_bps: None,
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        },
+    };
+    let uhd = candidate(1, 2160, 3840, 2160);
+    let hd = candidate(2, 1080, 1920, 1080);
+    let sd = candidate(3, 720, 1280, 720);
+    let at = |rate| continuous_candidates_from_workers(&[uhd.clone(), hd.clone(), sd.clone()], rate);
+    let film = at(Rational::new(24, 1));
+    assert!(!film.candidates.iter().any(|row| row.id == uhd.candidate.id));
+    assert!(film
+        .pairs
+        .iter()
+        .all(|pair| pair.primary_candidate_id != uhd.candidate.id
+            && pair.companion_candidate_id != uhd.candidate.id));
+    assert!(film
+        .pairs
+        .iter()
+        .any(|pair| pair.primary_candidate_id == hd.candidate.id
+            && pair.companion_candidate_id == sd.candidate.id));
+    assert!(at(None).pairs.is_empty(), "an unmeasured rate offers no family");
+    // 1440p fits at 24 fps but not at 60 (macroblock rate).
+    let qhd = candidate(4, 1440, 2560, 1440);
+    let pair = |rate| {
+        continuous_candidates_from_workers(&[qhd.clone(), hd.clone()], rate)
+            .pairs
+            .iter()
+            .any(|pair| pair.primary_candidate_id == qhd.candidate.id)
+    };
+    assert!(pair(Rational::new(24, 1)));
+    assert!(!pair(Rational::new(60, 1)));
 }
 
 #[test]
