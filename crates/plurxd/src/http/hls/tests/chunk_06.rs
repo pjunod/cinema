@@ -5672,6 +5672,7 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
     use crate::transcode::{copy_candidate_recipe_digest, SessionKind, TranscodeManager};
     use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
     use plurx_core::store::keys;
+    #[cfg(target_os = "linux")]
     let state = resolver_state();
     let mut file = dolby_vision_p7_file();
     file.dolby_vision.el_present = Some(true);
