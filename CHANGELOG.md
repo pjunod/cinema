@@ -10,11 +10,14 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Dolby Vision HDR10-E (server-processed HDR10) plays at every resolution. The processing helper decodes on the GPU (VA-API, mapped zero-copy into the renderer, with a software or host-copy fallback it reports) and converts to 10-bit Y'CbCr on the GPU. Reconstructed frames carry their frame duration and BT.2020 PQ colour description, every display-metadata version is accepted, and the 720p cap, the speed qualification, the Auto-only rule and the other silent gates are gone. Every decline after the Developer setting is named in the plan notes, and an explicitly chosen rung is no longer filtered by Auto's link evidence. Receipts and the effective-processing report record whether the window was GPU-decoded.
 - Apple TV Meridian: choosing a different source from the navigation panel opens that source and focuses its library tools again.
 - Apple Resume retries interrupted native seeks once and retains the saved position when preparation fails or the player closes.
 - Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout; framework-owned tabs preserve fullscreen playback after switching destinations.
 
 ### Added
+
+- Web player shows the Dolby Vision enhancement the server reports: FEL / RPU / DYN pills after the dynamic-range badge for what is active, and an Enhancement row in Playback info with one neutral line per enhancement explaining it or why it is unused. Processed-HDR10 pills appear only while a current HDR10-E report is held.
 
 - Web Meridian layout and independent theme, with collapsible source navigation, responsive phone destinations and cinematic Home/detail presentation. Layout changes retain the current page, library controls and playback session.
 

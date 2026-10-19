@@ -988,8 +988,110 @@ struct EffectiveProcessingReport: Equatable, Codable {
     }
 }
 
+/// What Dolby Vision enhancement the delivered picture carries, computed by
+/// the server (`plurx_core::playback::enhancement`) so every client shows the
+/// same thing: a pill per *active* enhancement (FEL, RPU, DYN) and one plain
+/// line per enhancement that applies, active or not.
+///
+/// Absent for a non-DV source, for SDR, and from an older server. Additive
+/// and never load-bearing: a malformed value decodes to an empty answer that
+/// shows nothing, and never refuses the session it rides on.
+struct PlaybackEnhancement: Equatable, Codable {
+    /// The badges this client can draw. A badge it does not know is dropped
+    /// from the pills rather than rendered under an invented label.
+    enum Badge: String, Equatable, Codable, CaseIterable {
+        case fel = "FEL"
+        case rpu = "RPU"
+        case dyn = "DYN"
+    }
+
+    struct Detail: Equatable, Codable {
+        /// The raw badge name, kept even when this client does not know it:
+        /// the line is server-authored text and stays readable either way.
+        var badge: String
+        var active: Bool
+        var text: String
+
+        private enum CodingKeys: String, CodingKey { case badge, active, text }
+        init(from decoder: Decoder) throws {
+            let values = try? decoder.container(keyedBy: CodingKeys.self)
+            badge = (try? values?.decode(String.self, forKey: .badge)) ?? ""
+            active = (try? values?.decode(Bool.self, forKey: .active)) ?? false
+            text = (try? values?.decode(String.self, forKey: .text)) ?? ""
+        }
+
+        init(badge: String, active: Bool, text: String) {
+            self.badge = badge
+            self.active = active
+            self.text = text
+        }
+    }
+
+    /// Active enhancements only, in the server's display order.
+    var active: [Badge]
+    var details: [Detail]
+    /// The pills (and the row) of a processed HDR10 delivery are shown only
+    /// while the player holds a current, generation-matching
+    /// `EffectiveProcessingReport`. Omitted by the server when false.
+    var requiresEffectiveProcessing: Bool
+
+    private enum CodingKeys: String, CodingKey { case active, details, requiresEffectiveProcessing }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        var seen = Set<Badge>()
+        active = ((try? values?.decode([String].self, forKey: .active)) ?? [])
+            .compactMap(Badge.init(rawValue:))
+            .filter { seen.insert($0).inserted }
+        details = (try? values?.decode([Detail].self, forKey: .details)) ?? []
+        requiresEffectiveProcessing = (try? values?.decode(Bool.self, forKey: .requiresEffectiveProcessing)) ?? false
+    }
+
+    init(active: [Badge], details: [Detail], requiresEffectiveProcessing: Bool = false) {
+        self.active = active
+        self.details = details
+        self.requiresEffectiveProcessing = requiresEffectiveProcessing
+    }
+
+    /// One neutral line per enhancement, blank server lines dropped.
+    var detailLines: [String] {
+        details
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// What the player may show right now, or nil for nothing at all — no
+    /// pills and no info-panel row.
+    ///
+    /// A delivery that `requiresEffectiveProcessing` is shown only while the
+    /// report is current for the active generation, by the same test the
+    /// HDR10-E badge uses, so the pills clear on seek, fallback or
+    /// replacement together with it.
+    func presented(
+        effectiveProcessing: EffectiveProcessingReport?,
+        activeGeneration: String?,
+        delivered: String?
+    ) -> PlaybackEnhancement? {
+        if requiresEffectiveProcessing {
+            guard let report = effectiveProcessing,
+                  report.matches(generation: activeGeneration, delivered: delivered)
+            else { return nil }
+        }
+        guard !active.isEmpty || !detailLines.isEmpty else { return nil }
+        return self
+    }
+
+    /// The accessibility text for one pill: the server's own line for it.
+    func accessibilityLabel(for badge: Badge) -> String {
+        details.first { $0.active && $0.badge == badge.rawValue && !$0.text.isEmpty }?.text
+            ?? "Dolby Vision \(badge.rawValue) active"
+    }
+}
+
 struct HlsStart: Codable {
     var effectiveProcessing: EffectiveProcessingReport?
+    /// Server-computed Dolby Vision enhancement (FEL / RPU / DYN). Absent
+    /// for a non-DV source and from an older server.
+    var enhancement: PlaybackEnhancement?
     let sessionId: String
     let playlistUrl: String
     var durationMs: Int?

@@ -41,7 +41,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 8] = [
+    let inputs: [(&str, &[u8]); 9] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -74,6 +74,10 @@ fn renderer_source_identity() -> String {
             "segment_decode_render.c",
             include_bytes!("../../../tools/dv_processing/segment_decode_render.c"),
         ),
+        (
+            "yuv420p10.h",
+            include_bytes!("../../../tools/dv_processing/yuv420p10.h"),
+        ),
     ];
     let mut identity = Sha256::new();
     for (name, bytes) in inputs {
@@ -82,6 +86,40 @@ fn renderer_source_identity() -> String {
         identity.update(Sha256::digest(bytes));
     }
     hex::encode(identity.finalize())
+}
+/// Decode on the GPU the renderer already draws on. The helper maps VA-API
+/// surfaces straight into its Vulkan renderer; a host copy of a decoded 4K
+/// picture costs more than decoding it in software. The VA-API runtime and
+/// drivers are the media runtime's (the same ones the encoder uses), so its
+/// library directory follows the bundle's own on the search path.
+fn gpu_decode_environment(
+    environment: &mut Vec<(String, std::ffi::OsString)>,
+    device: &str,
+    ffmpeg: &str,
+) {
+    if !Path::new(device).exists() {
+        return;
+    }
+    environment.push(("PLURX_DV_DECODE_DEVICE".into(), device.into()));
+    let Some(media_lib) = Path::new(ffmpeg)
+        .parent()
+        .map(|bin| bin.join("lib"))
+        .filter(|lib| lib.join("libva.so.2").exists())
+    else {
+        return;
+    };
+    match environment
+        .iter_mut()
+        .find(|(name, _)| name == "LD_LIBRARY_PATH")
+    {
+        Some((_, value)) => {
+            let mut joined = value.clone();
+            joined.push(":");
+            joined.push(media_lib.as_os_str());
+            *value = joined;
+        }
+        None => environment.push(("LD_LIBRARY_PATH".into(), media_lib.into_os_string())),
+    }
 }
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -436,7 +474,7 @@ pub(crate) fn completed_window_encoder(
     preferred: plurx_core::transcode::Encoder,
     vaapi_upload_proved: bool,
     plan: &plurx_core::transcode::ResolvedTranscode,
-    grid: plurx_core::transcode::VodFrameGrid,
+    _grid: plurx_core::transcode::VodFrameGrid,
 ) -> plurx_core::transcode::Encoder {
     use plurx_core::transcode::Encoder;
     if preferred == Encoder::Nvenc {
@@ -446,8 +484,8 @@ pub(crate) fn completed_window_encoder(
         && plan
             .completed_reconstructed_output(Encoder::Vaapi)
             .is_some()
-        && u64::from(grid.numerator) <= 30 * u64::from(grid.denominator)
     {
+        // Any raster and cadence: the window's HEVC level follows them.
         Encoder::Vaapi
     } else {
         Encoder::Software
@@ -714,13 +752,12 @@ impl RuntimeRecipe {
                 .effective_width()
                 .zip(plan.output_contract().effective_height())
                 .ok_or("no immutable output raster")?;
-            let export_policy = if self.destination
-                == plurx_core::transcode::dv_processing::DvDestination::Hdr10
-            {
-                plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 { raster }
-            } else {
-                plurx_core::transcode::dv_processing::DvExportPolicy::NativeRgb48V1
-            };
+            // Both destinations leave the GPU as 10-bit YCbCr at the output
+            // raster: the encoder only uploads it, it never converts colour.
+            let export_policy =
+                plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
+                    raster,
+                };
             let export_raster = export_policy
                 .raster(self.native_bl)
                 .map_err(|e| e.to_string())?;
@@ -735,6 +772,8 @@ impl RuntimeRecipe {
                 self.source_clock,
             )
             .map_err(str::to_owned)?;
+            tracing::debug!(target: "plurxd::dv", entry = entry.index, encoder = ?args,
+                "processed window encoder recipe");
             let deadline = crate::media_pool::create_stage_deadline(self.preparation_budget);
             let deadline = absolute_deadline.map_or(deadline, |absolute| deadline.min(absolute));
             let mut renderer_env = self.tools.renderer_env.clone();
@@ -745,13 +784,14 @@ impl RuntimeRecipe {
                 ),
                 ("MESA_SHADER_CACHE_MAX_SIZE".into(), "64M".into()),
             ]);
+            gpu_decode_environment(
+                &mut renderer_env,
+                &plurx_core::transcode::vaapi_device(),
+                &crate::ffmpeg::ffmpeg_bin(),
+            );
             let request = crate::dv_segment::StreamingSegmentRequest {
                 mode: self.mode,
-                export_raster: matches!(
-                    export_policy,
-                    plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 { .. }
-                )
-                .then_some(export_raster),
+                export_raster: Some(export_raster),
                 request: crate::dv_segment::SegmentRequest {
                     renderer: self.tools.renderer.clone(),
                     renderer_env,
@@ -877,6 +917,7 @@ impl RuntimeRecipe {
                 .zip(plan.output_contract().effective_height())
                 .ok_or("no immutable output raster")?;
             let trace = observed.source_trace.clone();
+            let decoder = observed.decoder;
             let mut verified = private
                 .finalize(
                     observed,
@@ -912,6 +953,7 @@ impl RuntimeRecipe {
                 raster,
                 export_policy,
                 source_trace: trace,
+                decoder,
                 observed_at: i64::try_from(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -985,7 +1027,10 @@ pub(crate) async fn run_private_window(
                     .read_to_end(&mut bytes)
                     .await
                     .map_err(|e| e.to_string())?;
-                if bytes.is_empty() || bytes.len() as u64 > OUTPUT_LIMIT {
+                // Only an over-limit spool fails here: the reader stopped,
+                // so the encoder can never finish. An empty spool waits for
+                // the helper and encoder outcomes, which name the real cause.
+                if bytes.len() as u64 > OUTPUT_LIMIT {
                     return Err("DV encoder private-output bound exceeded".to_owned());
                 }
                 Ok(bytes)
@@ -1014,17 +1059,14 @@ pub(crate) async fn run_private_window(
                         .await
                         .map_err(|e| e.to_string())?
                     {
-                        return if status.success() {
-                            Ok(())
-                        } else {
-                            Err(format!("DV encoder failed: {status}"))
-                        };
+                        return Ok(status);
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             };
-            let (bytes, _, (), ()) = tokio::try_join!(output, diagnostic, completed_helper, exit)?;
-            Ok::<_, String>(bytes)
+            let (bytes, diagnostic, (), status) =
+                tokio::try_join!(output, diagnostic, completed_helper, exit)?;
+            private_window_outcome(bytes, &diagnostic, status)
         };
         tokio::pin!(capture);
         tokio::select! {
@@ -1043,6 +1085,47 @@ pub(crate) async fn run_private_window(
         evidence,
         registration,
     })
+}
+
+/// Decide a completed private window from its encoder outcome. The helper's
+/// own refusal already failed the join; what remains is the encoder's exit
+/// status, its last diagnostic line and whether it wrote anything.
+#[cfg(target_os = "linux")]
+fn private_window_outcome(
+    bytes: Vec<u8>,
+    diagnostic: &[u8],
+    status: std::process::ExitStatus,
+) -> Result<Vec<u8>, String> {
+    if !status.success() {
+        return Err(match encoder_diagnostic_tail(diagnostic) {
+            Some(line) => format!("DV encoder failed: {status}: {line}"),
+            None => format!("DV encoder failed: {status}"),
+        });
+    }
+    if bytes.is_empty() {
+        return Err(match encoder_diagnostic_tail(diagnostic) {
+            Some(line) => format!("DV encoder exited cleanly with no output: {line}"),
+            None => "DV encoder exited cleanly with no output".to_owned(),
+        });
+    }
+    Ok(bytes)
+}
+
+/// The last ffmpeg message that is not a `-progress` key=value line, bounded
+/// for a log/plan note.
+#[cfg(any(target_os = "linux", test))]
+fn encoder_diagnostic_tail(diagnostic: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(diagnostic);
+    let line = text.lines().rev().map(str::trim).find(|line| {
+        !line.is_empty()
+            && !line.split_once('=').is_some_and(|(key, _)| {
+                !key.is_empty()
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            })
+    })?;
+    Some(line.chars().take(300).collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -1070,6 +1153,7 @@ struct RenderRow {
     pts: String,
     duration: String,
     rgb_sha256: Option<String>,
+    yuv10_sha256: Option<String>,
     width: u32,
     height: u32,
     el_bound: bool,
@@ -1136,6 +1220,34 @@ pub(crate) struct ObservedWindow {
     pub(crate) source_trace: DvDigest,
     pub(crate) source_tick: (u32, u32),
     pub(crate) runtime_device: DvDigest,
+    /// The helper's own account of how it decoded the source pictures.
+    pub(crate) decoder: plurx_core::transcode::DecodeBackend,
+}
+/// Read the helper's decoder report. A GPU decode that fell back (no device,
+/// no HEVC Main10 decode, surfaces the Vulkan device could not import) is
+/// still a valid window; the reason is logged so the fallback is visible.
+#[cfg(target_os = "linux")]
+fn helper_decoder(
+    value: &serde_json::Value,
+) -> Result<plurx_core::transcode::DecodeBackend, String> {
+    use plurx_core::transcode::DecodeBackend;
+    let mode = value
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("decoder report has no mode")?;
+    let reason = value
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let backend = match mode {
+        "vaapi" | "vaapi-host-copy" => DecodeBackend::Vaapi,
+        "software" | "vaapi-software-fallback" => DecodeBackend::Software,
+        _ => return Err("decoder report names an unknown mode".into()),
+    };
+    if mode != "vaapi" && reason != "no-decode-device" {
+        tracing::debug!(target: "plurxd::dv", mode, reason, "processed window decoder fallback");
+    }
+    Ok(backend)
 }
 #[cfg(target_os = "linux")]
 fn rational(value: &str) -> Result<(i64, u32), String> {
@@ -1195,6 +1307,7 @@ impl PrivateWindow {
         let mut segment = None;
         let mut gpu = None;
         let mut base_complete = None;
+        let mut decoder = None;
         for line in events
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
@@ -1241,6 +1354,11 @@ impl PrivateWindow {
                             .map_err(|e| e.to_string())?,
                     );
                 }
+                Some("decoder") => {
+                    if decoder.replace(helper_decoder(&value)?).is_some() {
+                        return Err("duplicate decoder report".into());
+                    }
+                }
                 Some("segment_complete") => {
                     if segment.replace(value).is_some() {
                         return Err("duplicate renderer completion".into());
@@ -1257,6 +1375,7 @@ impl PrivateWindow {
         }
         let complete = complete.ok_or("no source window completion")?;
         let segment = segment.ok_or("no renderer completion")?;
+        let decoder = decoder.ok_or("no decoder report")?;
         if mode == DvProcessingMode::BaseRpu {
             let base = base_complete
                 .as_ref()
@@ -1364,7 +1483,7 @@ impl PrivateWindow {
                 || rendered.render_errors != 0
                 || pair.bl_width == 0
                 || pair.bl_height == 0
-                || pair.bl_width > 3840
+                || pair.bl_width > 4096
                 || pair.bl_height > 2160
                 || (mode == DvProcessingMode::Fel
                     && (pair.el_width == 0
@@ -1449,6 +1568,7 @@ impl PrivateWindow {
             optional_digest(pair.bl_sha256)?;
             optional_digest(pair.el_sha256)?;
             optional_digest(rendered.rgb_sha256)?;
+            optional_digest(rendered.yuv10_sha256)?;
         }
         if observed_timing != expected_timing
             || pictures.first().map(|frame| frame.key.pts)
@@ -1464,6 +1584,126 @@ impl PrivateWindow {
             source_trace: digest(&trace)?,
             source_tick: tick,
             runtime_device,
+            decoder,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod helper_decoder_tests {
+    use super::helper_decoder;
+    use plurx_core::transcode::DecodeBackend;
+
+    #[test]
+    fn the_helper_decoder_report_names_the_backend() {
+        for (mode, backend) in [
+            ("vaapi", DecodeBackend::Vaapi),
+            ("vaapi-host-copy", DecodeBackend::Vaapi),
+            ("vaapi-software-fallback", DecodeBackend::Software),
+            ("software", DecodeBackend::Software),
+        ] {
+            let row = serde_json::json!({"kind": "decoder", "mode": mode, "reason": ""});
+            assert_eq!(helper_decoder(&row), Ok(backend), "{mode}");
+        }
+        assert!(helper_decoder(&serde_json::json!({"kind": "decoder"})).is_err());
+        assert!(helper_decoder(&serde_json::json!({"kind": "decoder", "mode": "cuda"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod private_window_outcome_tests {
+    use super::encoder_diagnostic_tail;
+
+    #[test]
+    fn diagnostic_tail_skips_progress_lines_and_is_bounded() {
+        let stderr = b"[hevc_vaapi @ 0x1] Failed to create encode pipeline\n\
+            Error while opening encoder\nframe=0\nfps=0.0\nprogress=end\n";
+        assert_eq!(
+            encoder_diagnostic_tail(stderr).as_deref(),
+            Some("Error while opening encoder")
+        );
+        assert_eq!(encoder_diagnostic_tail(b"frame=1\nprogress=end\n"), None);
+        let long = "x".repeat(1000);
+        assert_eq!(encoder_diagnostic_tail(long.as_bytes()).unwrap().len(), 300);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_or_failed_encoder_output_names_its_cause() {
+        use super::private_window_outcome;
+        use std::os::unix::process::ExitStatusExt;
+        let ok = std::process::ExitStatus::from_raw(0);
+        let failed = std::process::ExitStatus::from_raw(1 << 8);
+        let stderr = b"Impossible to convert between the formats\nprogress=end\n";
+        let error = private_window_outcome(Vec::new(), stderr, ok).unwrap_err();
+        assert!(error.contains("no output"), "{error}");
+        assert!(error.contains("Impossible to convert"), "{error}");
+        assert!(!error.contains("bound exceeded"), "{error}");
+        let error = private_window_outcome(vec![1], stderr, failed).unwrap_err();
+        assert!(error.starts_with("DV encoder failed:"), "{error}");
+        assert!(error.contains("Impossible to convert"), "{error}");
+        assert_eq!(private_window_outcome(vec![7], b"", ok).unwrap(), vec![7]);
+    }
+}
+
+#[cfg(test)]
+mod processed_selection_has_no_software_gates {
+    /// The processed HDR10 entry point: processing is the selected delivery
+    /// once the Developer setting is on and the first window verifies. These
+    /// were silent gates (720p clamp, speed qualification, Auto only) that
+    /// kept HDR10-E from ever playing; they must not return.
+    fn entry_body() -> &'static str {
+        let source = include_str!("transcode/manager/create.rs");
+        source
+            .split_once("pub(crate) async fn prepare_processed_hdr10(")
+            .expect("processed HDR10 entry point")
+            .1
+            .split_once("pub(super) async fn prepare_vod_encoding_with_preference(")
+            .expect("entry point end")
+            .0
+    }
+
+    #[test]
+    fn no_resolution_clamp_speed_threshold_or_auto_only_gate() {
+        let body = entry_body();
+        assert!(!body.contains(".min(720)"), "resolution clamp is back");
+        assert!(
+            !body.contains("milli_realtime"),
+            "speed qualification is back"
+        );
+        assert!(
+            !body.contains("request.automatic"),
+            "Auto-only gate is back"
+        );
+        // Every decline after the setting check, to the end of the entry
+        // point, is reported, never silent.
+        let after_setting = body
+            .split_once("// The setting is on for a DV source")
+            .expect("setting check")
+            .1;
+        assert!(!after_setting.contains("Ok(None)"), "{after_setting}");
+    }
+
+    #[test]
+    fn every_catalog_start_is_offered_processing() {
+        let source = include_str!("http/hls/create.rs");
+        let guard = source
+            .split_once(".prepare_processed_hdr10(")
+            .expect("processed call")
+            .0;
+        let guard = &guard[guard.rfind("    if ").expect("call guard")..];
+        assert!(!guard.contains("candidate_auto_policy"), "{guard}");
+        assert!(!guard.contains("continuous.is_none()"), "{guard}");
+    }
+
+    #[test]
+    fn prepared_processing_admission_has_no_speed_proof() {
+        let source = include_str!("transcode/manager/create.rs");
+        let admit = source
+            .split_once("admitted processed executable changed")
+            .expect("prepared admission")
+            .0;
+        let admit = &admit[admit.len().saturating_sub(2500)..];
+        assert!(!admit.contains("production_evidence"), "{admit}");
     }
 }

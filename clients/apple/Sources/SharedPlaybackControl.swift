@@ -385,7 +385,7 @@ struct SharedPreparedOffer: Equatable {
     var controlAction: ControlAction {
         ControlAction(type: PlaybackControl.prepareActionType, actionId: action.actionId, sessionId: action.sessionId,
                       playlistUrl: action.playlistUrl, mediaOriginMs: action.mediaOriginMs,
-                      effectiveSelection: action.effectiveSelection)
+                      effectiveSelection: action.effectiveSelection, enhancement: action.enhancement)
     }
 
     /// The whole offer, or a protocol error. The successor must be another

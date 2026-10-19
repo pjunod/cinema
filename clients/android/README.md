@@ -20,7 +20,14 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.7.0**, build `174` — Meridian adds independent layout/theme
+> Status: **v0.7.0**, build `175` — the player shows the server's Dolby
+> Vision enhancement: one teal `FEL` / `RPU` / `DYN` pill per active
+> enhancement after the dynamic-range chip, and an "Enhancement" info row
+> with one line per enhancement (why it is or is not in use). A processed
+> HDR10 delivery shows them only while a current effective-processing report
+> holds. JVM tests only; not yet installed on hardware.
+>
+> Build `174` — Meridian adds independent layout/theme
 > choices, native phone/tablet/TV navigation and cinematic browsing. Focused
 > production-host emulator evidence is recorded with the implementation PR;
 > physical-device and complete playback acceptance remain open.

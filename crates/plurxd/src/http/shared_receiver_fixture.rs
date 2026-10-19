@@ -1771,6 +1771,7 @@ async fn actual_pinned_prepared_handoff(
         control,
         media_origin_ms,
         effective_selection,
+        ..
     } = watched.offered(&directed).await
     else {
         panic!("an offered preparation carries prepare");

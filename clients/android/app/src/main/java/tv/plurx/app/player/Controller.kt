@@ -629,6 +629,17 @@ class Controller internal constructor(
         private set
     var effectiveProcessingGeneration: String? by mutableStateOf(null)
         private set
+
+    /**
+     * The open session's server-computed Dolby Vision enhancement (FEL / RPU /
+     * DYN). Set by the session that reports it and cleared with the session
+     * wherever [effectiveProcessing] is cleared on a session change; a seek
+     * leaves it standing, because a processed delivery's badges are already
+     * gated on [effectiveProcessing] matching the current generation
+     * ([tv.plurx.app.data.PlaybackEnhancement.shown]).
+     */
+    var enhancement: tv.plurx.app.data.PlaybackEnhancement? by mutableStateOf(null)
+        private set
     var deliveredRange: String? by mutableStateOf(plan.deliveredDynamicRange)
         private set
 
@@ -2189,6 +2200,7 @@ class Controller internal constructor(
     fun release() {
         effectiveProcessing = null
         effectiveProcessingGeneration = null
+        enhancement = null
         if (!playbackControlBootstrapFence.isActive()) return
         playbackTelemetry.cancelPending()
         playbackControlBootstrapFence.release()
@@ -3072,6 +3084,7 @@ class Controller internal constructor(
         // Both halves, for the same reason they are adopted together.
         effectiveProcessing = null
         effectiveProcessingGeneration = null
+        enhancement = null
         deliveredRange = plan.deliveredDynamicRange
         deliveredDolbyVisionProfile = plan.deliveredDolbyVisionProfile
     }
@@ -3270,6 +3283,10 @@ class Controller internal constructor(
         val claim = playbackControlBootstrapFence.claim(hls.session_id)
         effectiveProcessing = null
         effectiveProcessingGeneration = null
+        // Session-level, so it is taken even from a session the server does
+        // not consider controllable; a processed delivery's badges stay hidden
+        // there anyway because no effective-processing report can arrive.
+        enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(hls.enhancement)
         val bootstrap = hls.control
         if (bootstrap == null || !bootstrap.isValid) {
             return
@@ -3348,6 +3365,7 @@ class Controller internal constructor(
     ) {
         effectiveProcessing = null
         effectiveProcessingGeneration = null
+        enhancement = null
         playbackControlBootstrapFence.invalidate()
         if (settling != null) {
             playbackControl.endAfterFinalExchange(
@@ -4554,6 +4572,7 @@ class Controller internal constructor(
     private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
         effectiveProcessing = null
         effectiveProcessingGeneration = null
+        enhancement = null
         playbackTelemetry.cancelPending()
         val attached = mediaMutationEpoch
         if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
@@ -4841,6 +4860,7 @@ class Controller internal constructor(
         val activeMediaPath: String?,
         val deliveredRange: String?,
         val deliveredDolbyVisionProfile: Int?,
+        val enhancement: tv.plurx.app.data.PlaybackEnhancement?,
         val encoder: String?,
         val sessionStatus: PlaybackSessionStatus?,
         val sessionStatusObservedAtMs: Long?,
@@ -5392,6 +5412,7 @@ class Controller internal constructor(
             activeMediaPath = activeMediaPath,
             deliveredRange = deliveredRange,
             deliveredDolbyVisionProfile = deliveredDolbyVisionProfile,
+            enhancement = enhancement,
             encoder = encoder,
             sessionStatus = sessionStatus,
             sessionStatusObservedAtMs = sessionStatusObservedAtMs,
@@ -5455,6 +5476,10 @@ class Controller internal constructor(
         ).let {
             effectiveProcessing = null
             effectiveProcessingGeneration = null
+            // The successor's own enhancement, as its prepare action carries it;
+            // null when the server sent none. Still gated by `shown`, so a
+            // processed delivery's pills wait for a current report.
+            enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(action.enhancement)
             deliveredRange = it.range
             deliveredDolbyVisionProfile = it.dolbyVisionProfile
         }
@@ -5593,6 +5618,7 @@ class Controller internal constructor(
         activeMediaPath = predecessor.activeMediaPath
         effectiveProcessing = null
         effectiveProcessingGeneration = null
+        enhancement = predecessor.enhancement
         deliveredRange = predecessor.deliveredRange
         deliveredDolbyVisionProfile = predecessor.deliveredDolbyVisionProfile
         encoder = predecessor.encoder

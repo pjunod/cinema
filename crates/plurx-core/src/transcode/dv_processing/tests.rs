@@ -26,7 +26,7 @@ fn completed_vaapi_policy_separates_backend_identity_without_leaking_to_other_en
 #[test]
 fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity() {
     let native = (3840, 2160);
-    let export = DvExportPolicy::PqBilinearRgb48V1 {
+    let export = DvExportPolicy::PqBilinearYuv420p10V1 {
         raster: (1280, 720),
     };
     assert_eq!(export.raster(native).expect("bounded export"), (1280, 720));
@@ -46,7 +46,7 @@ fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity(
     );
     assert_ne!(
         export.target_parameters(),
-        DvExportPolicy::PqBilinearRgb48V1 {
+        DvExportPolicy::PqBilinearYuv420p10V1 {
             raster: (1920, 1080)
         }
         .target_parameters()
@@ -59,7 +59,7 @@ fn explicit_export_policy_keeps_native_shapes_and_separates_resampling_identity(
         (0, 0),
         (16, 16),
     ] {
-        assert!(DvExportPolicy::PqBilinearRgb48V1 { raster }
+        assert!(DvExportPolicy::PqBilinearYuv420p10V1 { raster }
             .raster(native)
             .is_err());
     }
@@ -442,7 +442,7 @@ fn production_registry_is_empty_even_for_relabelled_synthetic_evidence() {
     let mut input = input(DvDestination::Hdr10);
     assert!(matches!(
         resolve_dv_processing(&input).expect("valid synthetic control"),
-        DvSelection::KeepExisting(DvFallbackReason::ProductionUnqualified)
+        DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)
     ));
     let scope: DvEvidenceScope =
         serde_json::from_str("\"production_route\"").expect("valid synthetic control");
@@ -457,7 +457,7 @@ fn production_registry_is_empty_even_for_relabelled_synthetic_evidence() {
         .scope = scope;
     assert!(matches!(
         resolve_inner(&input, true).expect("valid synthetic control"),
-        DvSelection::KeepExisting(DvFallbackReason::ProductionUnqualified)
+        DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)
     ));
 }
 #[test]
@@ -1178,6 +1178,90 @@ fn base_rpu_accepts_signalled_bounded_curve_extents_without_replacing_them() {
     }
 }
 
+/// The master reconstruction applies none of the display metadata (L2, L8,
+/// L9, L10, L11, L254, L255), so every version of it that a real title carries
+/// is accepted. The Uprising's first refused window carried an L8 trim of a
+/// length the old subset refused.
+#[test]
+fn every_display_metadata_version_the_master_reconstruction_ignores_is_accepted() {
+    use dolby_vision::rpu::dovi_rpu::DoviRpu;
+    use dolby_vision::rpu::extension_metadata::blocks::{
+        ExtMetadataBlock, ExtMetadataBlockLevel10, ExtMetadataBlockLevel11,
+        ExtMetadataBlockLevel255, ExtMetadataBlockLevel8, ExtMetadataBlockLevel9,
+    };
+    use dolby_vision::rpu::extension_metadata::{CmV40DmData, DmData};
+    fn widen(fixture: &[u8]) -> Vec<u8> {
+        let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture RPU");
+        let dm = rpu.vdr_dm_data.as_mut().expect("display metadata");
+        if dm.cmv40_metadata.is_none() {
+            dm.cmv40_metadata = Some(DmData::V40(CmV40DmData::new_with_l254_402()));
+        }
+        for block in [
+            ExtMetadataBlock::Level8(ExtMetadataBlockLevel8 {
+                length: 13,
+                target_display_index: 1,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level9(ExtMetadataBlockLevel9 {
+                length: 1,
+                source_primary_index: 2,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level10(ExtMetadataBlockLevel10 {
+                length: 5,
+                target_display_index: 2,
+                target_max_pq: 2081,
+                target_min_pq: 62,
+                target_primary_index: 2,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level11(ExtMetadataBlockLevel11 {
+                content_type: 1,
+                reference_mode_flag: true,
+                ..Default::default()
+            }),
+            ExtMetadataBlock::Level255(ExtMetadataBlockLevel255 {
+                dm_run_mode: 0,
+                dm_run_version: 1,
+                ..Default::default()
+            }),
+        ] {
+            dm.replace_metadata_block(block).expect("CM v4.0 block");
+        }
+        rpu.modified = true;
+        let raw = rpu.write_hevc_unspec62_nalu().expect("widened RPU");
+        let reread = DoviRpu::parse_unspec62_nalu(&raw).expect("widened RPU parses");
+        let dm = reread.vdr_dm_data.expect("display metadata");
+        match dm.get_block(8) {
+            Some(ExtMetadataBlock::Level8(level8)) => assert_eq!(level8.length, 13),
+            other => panic!("no L8 trim: {other:?}"),
+        }
+        assert!(
+            matches!(dm.get_block(9), Some(ExtMetadataBlock::Level9(level9))
+            if level9.source_primary_index == 2)
+        );
+        assert!(dm.get_block(11).is_some());
+        raw
+    }
+    let fel = widen(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/frame-000.nal"
+    ));
+    let parsed = DvParsedMetadata::from_raw_rpu(&fel).expect("FEL RPU parses");
+    let carried: BTreeSet<u8> = parsed
+        .other_metadata_levels
+        .union(&parsed.creative_trim_levels)
+        .copied()
+        .collect();
+    for level in [8, 9, 10, 11, 255] {
+        assert!(carried.contains(&level), "L{level} is carried: {carried:?}");
+    }
+    assert!(parsed.runtime_supported(), "{parsed:?}");
+    let base = widen(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/p8-piecewise.nal"
+    ));
+    DvBaseMetadata::from_raw_rpu(&base, (64, 64)).expect("base RPU with every trim version");
+}
+
 #[test]
 fn completed_window_report_binds_publication_without_pixel_checksum_authority() {
     let mut raw = dolby_vision::rpu::dovi_rpu::DoviRpu::parse_unspec62_nalu(include_bytes!(
@@ -1205,7 +1289,7 @@ fn completed_window_report_binds_publication_without_pixel_checksum_authority() 
     let mut plan = plan(DvDestination::Hdr10);
     plan.capability.scope = DvEvidenceScope::ProductionRoute;
     plan.capability.completed_window_checked = true;
-    plan.capability.subset = DvMetadataSubset::RuntimeP7MasterDomainLinearDzV1;
+    plan.capability.subset = DvMetadataSubset::RuntimeP7MasterDomainLinearDzV2;
     let mut receipt = dv_receipt_completed_window(&plan, &[key(0)], &[duration()], &[raw])
         .expect("completed receipt");
     let session = "00000000-0000-0000-0000-000000000001";

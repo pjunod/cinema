@@ -18,6 +18,7 @@ pub mod candidate;
 pub mod caps;
 pub mod continuous_quality;
 pub mod desired;
+pub mod enhancement;
 pub mod geometry;
 pub mod intent;
 use crate::transcode::OutputGrade;

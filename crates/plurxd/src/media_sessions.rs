@@ -1504,6 +1504,11 @@ pub(crate) struct RemoteStartResponse {
     /// Owner answer carried separately from the strict legacy JSON body.
     #[serde(skip)]
     pub processed_dv_profile: Option<u8>,
+    /// Whether the selected processing plan reconstructs the FEL. Local to
+    /// the node that holds the plan: an ingress for a remote owner falls back
+    /// to the owner's effective-processing report for the indicator.
+    #[serde(skip)]
+    pub processed_fel: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1688,6 +1693,7 @@ impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
             processed_dv_profile: info.processed_dv_profile,
+            processed_fel: info.processed_fel,
             retained_output: info.retained_output,
             audio_delivery: info.audio_delivery,
             session_id: info.session_id,

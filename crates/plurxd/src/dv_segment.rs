@@ -56,9 +56,9 @@ impl SegmentShape {
         let (w, h) = self.bl;
         let (ew, eh) = self.el;
         if !(1..=64).contains(&self.max_frames)
-            || !(64..=3840).contains(&w)
+            || !(64..=4096).contains(&w)
             || !(64..=2160).contains(&h)
-            || !(32..=3840).contains(&ew)
+            || !(32..=4096).contains(&ew)
             || !(32..=2160).contains(&eh)
             || [w, h, ew, eh].iter().any(|v| v % 2 != 0)
             || !((w == ew && h == eh) || (w == 2 * ew && h == 2 * eh))
@@ -486,7 +486,6 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
             || !filters[0][1].contains("format=p010le")
             || [
                 ("-profile:v", "main10"),
-                ("-level:v", "4"),
                 ("-async_depth", "1"),
                 ("-bf", "0"),
             ]
@@ -496,8 +495,20 @@ fn check_encoder_budget(args: &[String], cpu: usize) -> Result<(), String> {
                     output.windows(2).filter(|pair| pair[0] == *flag).collect();
                 occurrences.len() != 1 || occurrences[0][1] != *value
             })
+            || {
+                // The level describes the window's raster and cadence
+                // (`hevc_level_for`), so any defined Main-tier step is valid.
+                let levels: Vec<_> = output
+                    .windows(2)
+                    .filter(|pair| pair[0] == "-level:v")
+                    .collect();
+                levels.len() != 1
+                    || !["4", "4.1", "5", "5.1", "5.2", "6", "6.1"].contains(&levels[0][1].as_str())
+            }
         {
-            return Err("VAAPI requires the bounded P010/Main10/level4 upload graph".into());
+            return Err(
+                "VAAPI requires the bounded P010/Main10 upload graph with one HEVC level".into(),
+            );
         }
         return Ok(());
     }
@@ -960,7 +971,7 @@ async fn run_streaming(
         }
     }
     if let Some((width, height)) = stream.export_raster {
-        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearRgb48V1 {
+        plurx_core::transcode::dv_processing::DvExportPolicy::PqBilinearYuv420p10V1 {
             raster: (width, height),
         }
         .raster(request.shape.bl)
@@ -968,7 +979,7 @@ async fn run_streaming(
         args.extend([
             width.to_string(),
             height.to_string(),
-            "pq-bilinear-rgb48-v1".into(),
+            "pq-bilinear-yuv420p10-v1".into(),
         ]);
     }
     let renderer_env: Vec<_> = request
@@ -1814,7 +1825,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn reconstructed_vaapi_selection_requires_actual_raster_cadence_and_upload_proof() {
+    fn reconstructed_vaapi_selection_requires_only_the_upload_proof() {
         use plurx_core::transcode::*;
         let mut source = encoded_recipe_source(true);
         source.width = Some(3840);
@@ -1836,7 +1847,7 @@ mod tests {
                     );
                     assert_eq!(
                         actual,
-                        if proved && height <= 1080 && rate <= 30 {
+                        if proved {
                             Encoder::Vaapi
                         } else {
                             Encoder::Software

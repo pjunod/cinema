@@ -10,11 +10,14 @@
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/dovi_meta.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/opt.h>
 #include <libavutil/sha.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <va/va.h>
 
 #define PAIR_WINDOW 16
 static bool base_only;
@@ -22,6 +25,14 @@ static int source_profile;
 static int expected_w[2], expected_h[2], frame_cap, emitted;
 static bool debug_frames, initialized, window_mode, window_done, first_pair;
 static bool source_eof, discover_el;
+// GPU decode: PLURX_DV_DECODE_DEVICE names the admitted VA-API render node.
+// Surfaces stay on the GPU and are mapped into the renderer; a host copy of
+// a decoded 4K picture costs more than software decoding it.
+// Without a usable device the helper decodes in software, as before GPU
+// decode existed, and says why in its decoder trace.
+static AVBufferRef *hw_device;
+static bool hw_fell_back;
+static const char *software_reason = "no-decode-device";
 static unsigned preroll, paired, preroll_cap;
 struct rational {
   int64_t num;
@@ -204,16 +215,19 @@ static void open_nut(const char *path) {
   AVCodecParameters *p = nut_stream->codecpar;
   p->codec_type = AVMEDIA_TYPE_VIDEO;
   p->codec_id = AV_CODEC_ID_RAWVIDEO;
-  p->format = AV_PIX_FMT_RGB48LE;
-  p->codec_tag = avcodec_pix_fmt_to_codec_tag(AV_PIX_FMT_RGB48LE);
-  need(p->codec_tag != 0, "explicit RGB48 NUT tag");
+  enum AVPixelFormat format = EXPORT_YUV10 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_RGB48LE;
+  p->format = format;
+  p->codec_tag = avcodec_pix_fmt_to_codec_tag(format);
+  need(p->codec_tag != 0, "explicit raw NUT pixel tag");
   p->width = EXPORT_WIDTH;
   p->height = EXPORT_HEIGHT;
-  p->bits_per_coded_sample = 48;
+  p->bits_per_coded_sample = EXPORT_YUV10 ? 15 : 48;
   p->color_primaries = AVCOL_PRI_BT2020;
   p->color_trc = AVCOL_TRC_SMPTE2084;
-  p->color_space = AVCOL_SPC_RGB;
-  p->color_range = AVCOL_RANGE_JPEG;
+  p->color_space = EXPORT_YUV10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_RGB;
+  p->color_range = EXPORT_YUV10 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
+  if (EXPORT_YUV10)
+    p->chroma_location = AVCHROMA_LOC_LEFT;
   need(avio_open(&nut_output->pb, path, AVIO_FLAG_WRITE) >= 0,
        "NUT output open");
   need(avformat_write_header(nut_output, NULL) >= 0, "NUT output header");
@@ -250,10 +264,35 @@ static enum pl_chroma_location chroma(enum AVChromaLocation value) {
   }
 }
 static uint16_t *pack(const AVFrame *frame) {
+  if (frame->format == AV_PIX_FMT_VAAPI) {
+    AVFrame *host = av_frame_alloc();
+    need(host && av_hwframe_transfer_data(host, frame, 0) >= 0 &&
+             host->format == AV_PIX_FMT_P010LE,
+         "diagnostic decoded surface download");
+    uint16_t *out = pack(host);
+    av_frame_free(&host);
+    return out;
+  }
   size_t count = (size_t)frame->width * frame->height * 3 / 2;
   uint16_t *out = malloc(count * 2);
   need(out != NULL, "native pair allocation");
   size_t at = 0;
+  if (frame->format == AV_PIX_FMT_P010LE) {
+    // Same planar ten-bit codes the software decoder produces.
+    for (int y = 0; y < frame->height; y++) {
+      const uint16_t *row = (const uint16_t *)(frame->data[0] + (size_t)y * frame->linesize[0]);
+      for (int x = 0; x < frame->width; x++) out[at++] = row[x] >> 6;
+    }
+    size_t u = at, v = at + count / 6;
+    for (int y = 0; y < frame->height / 2; y++) {
+      const uint16_t *row = (const uint16_t *)(frame->data[1] + (size_t)y * frame->linesize[1]);
+      for (int x = 0; x < frame->width / 2; x++) {
+        out[u++] = row[2 * x] >> 6;
+        out[v++] = row[2 * x + 1] >> 6;
+      }
+    }
+    return out;
+  }
   for (int c = 0; c < 3; c++) {
     int w = c ? frame->width / 2 : frame->width,
         h = c ? frame->height / 2 : frame->height;
@@ -392,8 +431,16 @@ static void render_pairs(void) {
     }
     need(emitted < frame_cap, "emitted window frame cap exhausted");
     bool diagnostic_hashes = debug_frames || dv_frame_hashes();
-    uint16_t *native[2] = {base_only && !diagnostic_hashes ? NULL : pack(bl),
-                           base_only ? NULL : pack(el)};
+    bool surfaces = bl->format == AV_PIX_FMT_VAAPI;
+    need(base_only || surfaces == (el->format == AV_PIX_FMT_VAAPI),
+         "both layers decoded the same way");
+    // Mapped surfaces need no host copy; after an import failure the
+    // renderer takes host copies for the rest of the window.
+    bool mapped = surfaces && !dv_hw_host_copy;
+    uint16_t *native[2] = {
+        (base_only || mapped) && !diagnostic_hashes ? NULL : pack(bl),
+        base_only || (mapped && !diagnostic_hashes) ? NULL : pack(el)};
+    const AVFrame *hardware[2] = {bl, el};
     if (!initialized) {
       if (base_only)
         base_gpu_init(expected_w[0], expected_h[0]);
@@ -447,7 +494,7 @@ static void render_pairs(void) {
     if (base_only)
       base_gpu_render(bl, &base_mapped, emitted, pts, duration, write_rgb, diagnostic_hashes);
     else
-      gpu_render(native, nalu, raw->size + 2, emitted, pts, duration,
+      gpu_render(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
                  chroma(bl->chroma_location), chroma(el->chroma_location),
                  write_rgb, NULL, debug_frames);
     char rpu_path[64];
@@ -489,7 +536,10 @@ static void receive(struct layer *layer) {
       expected_w[1] = frame->width;
       expected_h[1] = frame->height;
     }
-    need(frame->format == AV_PIX_FMT_YUV420P10LE &&
+    bool surface = frame->format == AV_PIX_FMT_VAAPI && frame->hw_frames_ctx &&
+                   ((AVHWFramesContext *)frame->hw_frames_ctx->data)->sw_format ==
+                       AV_PIX_FMT_P010LE;
+    need((frame->format == AV_PIX_FMT_YUV420P10LE || surface) &&
              frame->width == expected_w[layer->index] &&
              frame->height == expected_h[layer->index] &&
              frame->pts != AV_NOPTS_VALUE &&
@@ -508,6 +558,43 @@ static void receive(struct layer *layer) {
   need(window_done || result == AVERROR(EAGAIN) || result == AVERROR_EOF,
        "decoder receive");
   av_frame_free(&frame);
+}
+// The device must decode HEVC Main10 itself; otherwise every window would be
+// a single-threaded software decode behind a GPU device that does nothing.
+static bool decodes_hevc_main10(AVBufferRef *device) {
+  VADisplay display =
+      ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)device->data)->hwctx)->display;
+  int profiles = vaMaxNumProfiles(display), entrypoints = vaMaxNumEntrypoints(display);
+  if (profiles <= 0 || entrypoints <= 0)
+    return false;
+  VAProfile *profile = calloc((size_t)profiles, sizeof(*profile));
+  VAEntrypoint *entrypoint = calloc((size_t)entrypoints, sizeof(*entrypoint));
+  bool main10 = false, decode = false;
+  if (profile && vaQueryConfigProfiles(display, profile, &profiles) == VA_STATUS_SUCCESS)
+    for (int i = 0; i < profiles; i++)
+      main10 |= profile[i] == VAProfileHEVCMain10;
+  if (main10 && entrypoint &&
+      vaQueryConfigEntrypoints(display, VAProfileHEVCMain10, entrypoint,
+                               &entrypoints) == VA_STATUS_SUCCESS)
+    for (int i = 0; i < entrypoints; i++)
+      decode |= entrypoint[i] == VAEntrypointVLD;
+  free(profile);
+  free(entrypoint);
+  return main10 && decode;
+}
+static enum AVPixelFormat hardware_format(AVCodecContext *context,
+                                          const enum AVPixelFormat *offered) {
+  (void)context;
+  for (const enum AVPixelFormat *p = offered; *p != AV_PIX_FMT_NONE; p++)
+    if (*p == AV_PIX_FMT_VAAPI)
+      return *p;
+  // The decoder offers no GPU surface for this stream; decode it in software
+  // and say so in the trace.
+  hw_fell_back = true;
+  for (const enum AVPixelFormat *p = offered; *p != AV_PIX_FMT_NONE; p++)
+    if (*p == AV_PIX_FMT_YUV420P10LE)
+      return *p;
+  return AV_PIX_FMT_NONE;
 }
 static struct layer open_layer(AVStream *stream, int index) {
   struct layer out = {.index = index};
@@ -531,16 +618,25 @@ static struct layer open_layer(AVStream *stream, int index) {
   out.decoder->height = expected_h[index];
   // Window admission reserves four frame workers per layer, plus the helper
   // caller and the one software-Vulkan worker. Disable nested slice threading.
-  out.decoder->thread_count = window_mode ? 4 : 1;
+  out.decoder->thread_count = window_mode && !hw_device ? 4 : 1;
   out.decoder->thread_type = FF_THREAD_FRAME;
+  if (hw_device) {
+    out.decoder->hw_device_ctx = av_buffer_ref(hw_device);
+    need(out.decoder->hw_device_ctx != NULL, "GPU decoder device reference");
+    out.decoder->get_format = hardware_format;
+    // Each layer queues up to PAIR_WINDOW decoded pictures while it waits
+    // for its partner; the surface pool must hold them plus references.
+    out.decoder->extra_hw_frames = PAIR_WINDOW + 4;
+  }
   out.decoder->max_pixels = discover_el && index == 1
                                 ? (int64_t)expected_w[0] * expected_h[0]
                                 : (int64_t)expected_w[index] * expected_h[index];
   out.decoder->err_recognition = AV_EF_CAREFUL | AV_EF_EXPLODE;
   need(avcodec_open2(out.decoder, codec, NULL) >= 0,
        "independent decoder open");
-  need(!window_mode || (out.decoder->thread_count == 4 &&
-                           out.decoder->active_thread_type == FF_THREAD_FRAME),
+  need(!window_mode || hw_device ||
+           (out.decoder->thread_count == 4 &&
+            out.decoder->active_thread_type == FF_THREAD_FRAME),
        "bounded frame-only decoder workers");
   return out;
 }
@@ -590,16 +686,17 @@ int main(int argc, char **argv) {
   }
   int stream_index = number(argv[3], 0, 255);
   frame_cap = number(argv[4], 1, 64);
-  expected_w[0] = number(argv[5], 64, 3840);
+  expected_w[0] = number(argv[5], 64, 4096);
   expected_h[0] = number(argv[6], 64, 2160);
-  expected_w[1] = number(argv[7], 0, 3840);
+  expected_w[1] = number(argv[7], 0, 4096);
   expected_h[1] = number(argv[8], 0, 2160);
   EXPORT_WIDTH = expected_w[0];
   EXPORT_HEIGHT = expected_h[0];
   if (argc == 19) {
-    EXPORT_WIDTH = number(argv[16], 32, 3840);
+    EXPORT_WIDTH = number(argv[16], 32, 4096);
     EXPORT_HEIGHT = number(argv[17], 32, 2160);
-    need(!strcmp(argv[18], "pq-bilinear-rgb48-v1") &&
+    EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1");
+    need((EXPORT_YUV10 || !strcmp(argv[18], "pq-bilinear-rgb48-v1")) &&
              EXPORT_WIDTH <= expected_w[0] && EXPORT_HEIGHT <= expected_h[0] &&
              EXPORT_WIDTH % 2 == 0 && EXPORT_HEIGHT % 2 == 0,
          "unsupported export geometry or policy");
@@ -728,6 +825,18 @@ int main(int argc, char **argv) {
   }
   if (streaming)
     open_nut(argv[11]);
+  dv_host_pack = pack;
+  const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
+  if (decode_device && *decode_device) {
+    if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
+                               decode_device, NULL, 0) < 0) {
+      hw_device = NULL;
+      software_reason = "decode-device-unavailable";
+    } else if (!decodes_hevc_main10(hw_device)) {
+      av_buffer_unref(&hw_device);
+      software_reason = "no-hevc-main10-decode";
+    }
+  }
   layers[0] = open_layer(stream, 0);
   if (!base_only)
     layers[1] = open_layer(stream, 1);
@@ -824,6 +933,15 @@ int main(int argc, char **argv) {
     av_bsf_free(&layers[k].split);
     avcodec_free_context(&layers[k].decoder);
   }
+  const char *decoder_mode = !hw_device       ? "software"
+                             : hw_fell_back     ? "vaapi-software-fallback"
+                             : dv_hw_host_copy  ? "vaapi-host-copy"
+                                                : "vaapi";
+  const char *decoder_reason = !hw_device       ? software_reason
+                               : hw_fell_back    ? "no-gpu-surface-offered"
+                               : dv_hw_host_copy ? "surface-import-failed"
+                                                 : "";
+  av_buffer_unref(&hw_device);
   av_packet_free(&packet);
   avformat_close_input(&input);
   if (movie_avio) {
@@ -849,6 +967,8 @@ int main(int argc, char **argv) {
            (long long)last_emitted_end, source_time_base.num,
            source_time_base.den, (unsigned long long)movie_io.bytes);
   }
+  printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
+         decoder_mode, decoder_reason);
   printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
          "16,\"gpu_contexts\":1,\"output_policy\":\"bt2020-pq-master-clip\","
          "\"production_qualified\":false}\n",

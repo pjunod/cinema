@@ -207,6 +207,7 @@ function rollbackPreparedReplacement(p,state,successor){
   p.qualityCandidateId=predecessor.qualityCandidateId;
   clearEffectiveProcessing(p);
   p.deliveredRange=predecessor.deliveredRange;
+  p.enhancement=predecessor.enhancement||null;
   // Transport intent belongs to the viewer, including commands made while
   // the successor was awaiting its first frame. Rollback restores media only.
   p.health=predecessor.health;

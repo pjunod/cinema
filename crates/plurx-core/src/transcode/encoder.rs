@@ -139,7 +139,7 @@ pub struct CompletedReconstructedOutputContract {
 }
 impl CompletedReconstructedOutputContract {
     pub(super) fn resolve(encoder: Encoder) -> Option<Self> {
-        let input = super::pipeline::ReconstructedPqInput::Rgb48Bt2020Pq;
+        let input = super::pipeline::ReconstructedPqInput::Yuv420p10Bt2020NclPq;
         input.pairs_with(encoder).then_some(Self { encoder, input })
     }
     pub fn encoder(self) -> Encoder {
@@ -253,7 +253,7 @@ mod output_codec_contract_tests {
         .is_none());
         let contract = CompletedReconstructedOutputContract::resolve(Encoder::Nvenc)
             .expect("reconstructed NVENC");
-        assert_eq!(contract.input_contract().pixel_format(), "rgb48le");
+        assert_eq!(contract.input_contract().pixel_format(), "yuv420p10le");
         let args = contract.encode_args(4000, true, Some(1));
         for pair in [
             ["-c:v", "hevc_nvenc"],
@@ -1063,6 +1063,32 @@ impl Encoder {
 }
 
 /// The DRI render node for VAAPI, overridable via `PLURX_VAAPI_DEVICE`.
+/// The lowest HEVC level (ITU-T H.265 Table A.8) whose picture size and
+/// luma sample rate admit `width`x`height` at `fps_num/fps_den`. Hardware
+/// encoders write the level they are given, so it must describe the raster.
+pub fn hevc_level_for(width: u32, height: u32, fps_num: u32, fps_den: u32) -> Option<&'static str> {
+    const LEVELS: [(&str, u64, u64); 7] = [
+        ("4", 2_228_224, 66_846_720),
+        ("4.1", 2_228_224, 133_693_440),
+        ("5", 8_912_896, 267_386_880),
+        ("5.1", 8_912_896, 534_773_760),
+        ("5.2", 8_912_896, 1_069_547_520),
+        ("6", 35_651_584, 1_069_547_520),
+        ("6.1", 35_651_584, 2_139_095_040),
+    ];
+    if fps_den == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let picture = u64::from(width) * u64::from(height);
+    // Ceiling of the per-second sample rate so a fractional cadence never
+    // rounds below its true rate.
+    let rate = (picture * u64::from(fps_num)).div_ceil(u64::from(fps_den));
+    LEVELS
+        .iter()
+        .find(|(_, size, samples)| picture <= *size && rate <= *samples)
+        .map(|(level, _, _)| *level)
+}
+
 pub fn vaapi_device() -> String {
     std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
@@ -2803,6 +2829,19 @@ mod tests {
             frames >= 10,
             "{frames} frames is not enough for a lookahead"
         );
+    }
+
+    #[test]
+    fn hevc_level_follows_raster_and_cadence() {
+        use super::hevc_level_for;
+        assert_eq!(hevc_level_for(1280, 720, 24000, 1001), Some("4"));
+        assert_eq!(hevc_level_for(1920, 1080, 30, 1), Some("4"));
+        assert_eq!(hevc_level_for(1920, 1080, 60, 1), Some("4.1"));
+        assert_eq!(hevc_level_for(3840, 2160, 24000, 1001), Some("5"));
+        assert_eq!(hevc_level_for(3840, 2160, 30, 1), Some("5"));
+        assert_eq!(hevc_level_for(3840, 2160, 60, 1), Some("5.1"));
+        assert_eq!(hevc_level_for(4096, 2160, 24, 1), Some("5"));
+        assert_eq!(hevc_level_for(3840, 2160, 0, 0), None);
     }
 
     #[test]

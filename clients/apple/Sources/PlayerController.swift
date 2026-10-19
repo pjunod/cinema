@@ -531,6 +531,13 @@ final class PlayerController: ObservableObject {
     /// on it (MEDIA-BADGES-PLAN.md §9).
     @Published private(set) var effectiveProcessing: EffectiveProcessingReport?
     @Published private(set) var effectiveProcessingGeneration: String?
+    /// The server's Dolby Vision enhancement answer for the current HLS
+    /// session (FEL / RPU / DYN). Held for the session and cleared wherever
+    /// the session's delivery answer is — but not on a seek: a seek clears
+    /// `effectiveProcessing`, and `PlaybackEnhancement.presented` hides a
+    /// report-gated answer until the next generation's report returns, while
+    /// a native Dolby Vision answer stays true across the seek.
+    @Published private(set) var playbackEnhancement: PlaybackEnhancement?
     @Published private(set) var deliveredRange: String?
     /// Take a delivery answer, both halves at once.
     ///
@@ -553,6 +560,7 @@ final class PlayerController: ObservableObject {
         } else {
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
+            playbackEnhancement = nil
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
         }
@@ -1825,6 +1833,7 @@ final class PlayerController: ObservableObject {
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         deliveredRange = "sdr"
         encoder = "offline"
         isVOD = true
@@ -2677,6 +2686,8 @@ final class PlayerController: ObservableObject {
         viewerBoundary: Bool = false
     ) {
         // Relative jumps and manual/automatic markers all enter here too.
+        // `playbackEnhancement` is deliberately kept: clearing the report is
+        // what hides its report-gated pills (see its declaration).
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
         let actionEpoch = owningActionEpoch ?? beginViewerAction()
@@ -3465,6 +3476,7 @@ final class PlayerController: ObservableObject {
         lastPreparedAccessLogSequence = nil
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         retireAutoTransferMetrics()
         abandonSeekMeasurement()
         requestedSeekGeneration = nil
@@ -4005,6 +4017,7 @@ final class PlayerController: ObservableObject {
             // it, for the reason `adoptSessionDelivery` gives.
             effectiveProcessing = nil
             effectiveProcessingGeneration = nil
+            playbackEnhancement = nil
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
             let deliveryPath = try contextForFile(fileId).translatedDeliveryPath(decision.delivery?.url ?? decision.playUrl)
@@ -5571,6 +5584,7 @@ final class PlayerController: ObservableObject {
     private func fail(_ error: Error) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         isChangingStream = false
         ttffMeasurement.reset()
         // M5: the create-retry owner has already stopped the player and raised
@@ -5652,6 +5666,7 @@ final class PlayerController: ObservableObject {
     private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        playbackEnhancement = nil
         abandonSeekMeasurement()
         player.pause()
         isPlaying = false
@@ -9006,6 +9021,9 @@ extension PlayerController {
     func adoptEffectiveProcessing(_ hls: HlsStart) {
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        // The enhancement answer belongs to this response, controllable or
+        // not; a report-gated one stays hidden without a matching report.
+        playbackEnhancement = hls.enhancement
         guard let bootstrap = hls.control, bootstrap.isValid else { return }
         effectiveProcessingGeneration = bootstrap.generation
         if let report = hls.effectiveProcessing,
@@ -10582,6 +10600,10 @@ extension PlayerController: PreparedSuccessorHost {
         unprovenPreparedItem = item
         effectiveProcessing = nil
         effectiveProcessingGeneration = nil
+        // The successor's own answer, as its prepare action carries it (nil
+        // when the server sent none). A report-gated one still stays hidden
+        // until a current effective-processing report is held.
+        playbackEnhancement = action.enhancement
         adoptWarmPlayer(successor)
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted

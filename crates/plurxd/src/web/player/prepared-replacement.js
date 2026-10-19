@@ -344,6 +344,9 @@ function beginPreparedReplacement(p,action,sharedContext=null){
     fileId:p.fileId,
     candidateRecipeDigest:(p.qualityCandidates||[]).find(row=>row.id===action.effective_selection?.candidate_id)?.recipe_digest?.slice(),
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
+    // The successor's own enhancement claim, parsed as on a create response;
+    // absent (an older server) stays null.
+    enhancement:typeof playbackEnhancementFromWire==="function"?playbackEnhancementFromWire(action.enhancement):null,
     sharedContext,
     mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
@@ -1070,13 +1073,17 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
     method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
     qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
-    health:p.health,healthObservedAt:p.healthObservedAt,
+    enhancement:p.enhancement||null,health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
     defaultPlaybackRate:intent.defaultPlaybackRate};
   // Authoritative before visible, so anything that reads PLAYER.hls during the
   // swap reads the instance that owns the picture.
   clearEffectiveProcessing(p);
+  // The successor's own enhancement, as its StartResponse reported it (null
+  // when the server sent none); the predecessor's is kept for a rollback. The
+  // report cleared above still gates any `requires_effective_processing` claim.
+  p.enhancement=state.enhancement||null;
   p.hls=state.hls;
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;

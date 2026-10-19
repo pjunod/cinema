@@ -1386,8 +1386,6 @@ pub fn vod_completed_reconstructed_pipe_args(
         || plan.options().subtitle_burn.is_some()
         || plan.options().video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50
         || grid.frames_per_segment > 64
-        || output.encoder() == super::Encoder::Vaapi
-            && u64::from(grid.numerator) > 30 * u64::from(grid.denominator)
     {
         return Err("unsupported reconstructed VOD recipe");
     }
@@ -1424,6 +1422,13 @@ pub fn vod_completed_reconstructed_pipe_args(
             "1".into(),
             "-threads".into(),
             "1".into(),
+            // Raw NUT has no per-packet duration, so the last picture of
+            // every window would reach the muxer one tick long and fail the
+            // window's own grid check. The input rate is exactly the grid's;
+            // every picture keeps one frame of duration (setpts below still
+            // restamps the presentation clock).
+            "-r".into(),
+            format!("{}/{}", grid.numerator, grid.denominator),
             "-i".into(),
             source_fd.into(),
         ],
@@ -1509,8 +1514,14 @@ pub fn vod_completed_reconstructed_pipe_args(
     } else {
         "yuv420p10le"
     };
+    // The helper already delivers BT.2020 NCL limited 4:2:0 10-bit PQ at
+    // the output raster: colour conversion and resampling happened on the
+    // GPU. The encoder only repacks for its upload format and restamps.
+    // Raw NUT carries no colour description, so the frames are tagged here
+    // with what the helper produced; the encoder writes its VUI and the
+    // sample entry's colr from these frame properties.
     let mut filter = format!(
-        "zscale=matrixin=gbr:rangein=full:primariesin=bt2020:transferin=smpte2084:matrix=bt2020nc:range=limited:primaries=bt2020:transfer=smpte2084:w={width}:h={height}:dither=none,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
+        "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
         grid.numerator, grid.denominator,
     );
     if output.encoder() == super::Encoder::Vaapi {
@@ -1560,10 +1571,25 @@ pub fn vod_completed_reconstructed_pipe_args(
             }
         }
         let at = args.len().saturating_sub(1);
-        args.splice(
-            at..at,
-            output.encode_args(plan.options().video_bitrate_kbps, true),
-        );
+        let mut encode = output.encode_args(plan.options().video_bitrate_kbps, true);
+        if output.encoder() == super::Encoder::Vaapi {
+            // The shared VAAPI HDR10 recipe names level 4 (the ordinary
+            // ladder's 1080p30 envelope). A reconstructed window carries the
+            // level of its own raster and cadence, up to 4K60 and beyond.
+            let level = super::hevc_level_for(
+                u32::try_from(width).map_err(|_| "reconstructed raster overflow")?,
+                u32::try_from(height).map_err(|_| "reconstructed raster overflow")?,
+                grid.numerator,
+                grid.denominator,
+            )
+            .ok_or("no HEVC level admits the reconstructed raster")?;
+            let index = encode
+                .iter()
+                .position(|arg| arg == "-level:v")
+                .ok_or("reconstructed VAAPI recipe has no level")?;
+            encode[index + 1] = level.to_owned();
+        }
+        args.splice(at..at, encode);
     } else if let Some(index) = args.iter().position(|arg| arg == "-x265-params") {
         let mut parameters: Vec<_> = args[index + 1]
             .split(':')
@@ -1966,6 +1992,13 @@ mod tests {
             ["/dev/fd/3", "/dev/fd/4"]
         );
         assert!(args.windows(2).any(|p| p == ["-map", "0:v:0"]));
+        // The reconstructed input carries the grid rate so the last picture
+        // has its full frame duration.
+        let input = args
+            .iter()
+            .position(|a| a == "/dev/fd/3")
+            .expect("video input");
+        assert_eq!(args[input - 3..input - 1], ["-r", "24/1"]);
         assert!(args.windows(2).any(|p| p == ["-c:v", "libx265"]));
         assert!(args.windows(2).any(|p| p == ["-threads:a", "1"]));
         let filter = &args[args
@@ -1974,7 +2007,15 @@ mod tests {
             .expect("video filter")
             + 1];
         assert!(!filter.contains("fps=") && !filter.contains("tpad=") && !filter.contains("trim="));
-        assert!(filter.contains("matrixin=gbr") && filter.contains("format=yuv420p10le"));
+        // The helper delivers BT.2020 NCL 10-bit YCbCr at the output raster;
+        // the encoder converts nothing (no single-threaded zscale at 4K).
+        assert!(!filter.contains("zscale"), "{filter}");
+        assert!(
+            filter.starts_with(
+                "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=yuv420p10le,"
+            ),
+            "{filter}"
+        );
         assert!(args
             .windows(2)
             .any(|p| p[0] == "-af" && p[1].contains("atrim=start_sample=")));
@@ -2148,7 +2189,7 @@ mod tests {
     }
 
     #[test]
-    fn reconstructed_vaapi_keeps_p010_upload_clock_and_level4_cadence_bounds() {
+    fn reconstructed_vaapi_keeps_p010_upload_clock_and_levels_its_raster_and_cadence() {
         use crate::transcode::*;
         let (source, plan, execution, _, _) = encoded_recipe_fixture(true);
         let output = plan
@@ -2169,7 +2210,19 @@ mod tests {
         let args = recipe(VodFrameGrid::new(24, 1).expect("grid")).expect("VAAPI graph");
         assert!(args.windows(2).any(|pair| pair == ["-c:v", "hevc_vaapi"]));
         assert!(args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
-        assert!(args.windows(2).any(|pair| pair == ["-level:v", "4"]));
+        let (width, height) =
+            super::super::output_size(&source, plan.options().target_height).expect("raster");
+        let level = |rate, den| {
+            super::super::hevc_level_for(width as u32, height as u32, rate, den).expect("level")
+        };
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-level:v", level(24, 1)]));
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "-level:v").count(),
+            1,
+            "exactly one level"
+        );
         assert!(args.windows(2).any(|pair| pair == ["-async_depth", "1"]));
         assert!(args.windows(2).any(|pair| pair == ["-bf", "0"]));
         assert!(args.iter().any(|arg| arg == "-vaapi_device"));
@@ -2186,8 +2239,12 @@ mod tests {
         );
         assert!(filter.contains("settb=expr=1/24") && filter.contains("setpts=N*1+"));
         assert!(!filter.contains("fps=") && !filter.contains("tpad="));
-        assert!(recipe(VodFrameGrid::new(60, 1).expect("high rate")).is_err());
-        assert!(recipe(VodFrameGrid::new(30000, 1001).expect("NTSC")).is_ok());
+        // No cadence ceiling of its own: the level follows the cadence. (A
+        // window is still bounded to 64 pictures by the helper.)
+        let ntsc = recipe(VodFrameGrid::new(30000, 1001).expect("NTSC")).expect("NTSC graph");
+        assert!(ntsc
+            .windows(2)
+            .any(|pair| pair == ["-level:v", level(30000, 1001)]));
     }
 
     #[test]

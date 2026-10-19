@@ -49,7 +49,7 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, vaapi_device,
+    benchmark_encoder, detect_encoders, detect_video_decoders, hevc_level_for, vaapi_device,
     validate_quality_rate_control, validate_quality_rate_control_yielding, vbv_maxrate_bps,
     vbv_maxrate_kbps, CompletedReconstructedOutputContract, EffectiveRateControl, Encoder,
     EncoderCaps, OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc,

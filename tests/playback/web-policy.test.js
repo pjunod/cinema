@@ -5934,6 +5934,7 @@ test("a session that lands on a different range repaints the badge", () => {
     [shippedSource("markPlaybackControlSeekExecuted"),
       shippedSource("samplePlaybackPresentationClock"),
       shippedSource("effectiveHdrProcessing"), shippedSource("clearEffectiveProcessing"),
+      shippedSource("playbackEnhancementFromWire"),
       shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };

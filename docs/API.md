@@ -1670,7 +1670,7 @@ and they are reported by `GET /api/v1/system`.
 The response carries `session_id`, `playlist_url`, `duration_ms`,
 `start_seconds`, `media_origin_ms`, `height`, `encoder`, `vod`, `ladder`,
 `prior_kbps`, `delivered_dynamic_range`, `delivered_dolby_vision_profile`,
-`control`, `plan_notes`.
+`control`, `plan_notes`, `enhancement`.
 
 - `media_origin_ms` is the source-timeline timestamp represented by
   player-local zero. A copy session can start on the keyframe *before*
@@ -1690,6 +1690,23 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 - `plan_notes` says why this session's plan is not the one the client asked
   for — a named override, or a `plan_mismatch:` line naming the field, the
   client's value and the server's. Empty and omitted on every agreeing create.
+- `enhancement` is the server-computed Dolby Vision enhancement the
+  delivered picture carries (`crates/plurx-core/src/playback/enhancement.rs`):
+  `{active: ["FEL","RPU","DYN"], details: [{badge, active, text}],
+  requires_effective_processing?: true}`. `active` lists the badges of the
+  active enhancements only, in display order; `details` has one plain sentence
+  per enhancement that applies to the source — what it is when active, why it
+  is unused when not. Clients render it rather than reconstructing the route:
+  one pill per `active` badge after the dynamic-range badge, and an
+  `Enhancement` info row listing each `details[].text` (neutral styling).
+  `requires_effective_processing` (omitted when false) marks a processed-HDR10
+  delivery whose pills and row are shown only while the client holds a
+  current, generation-matching `effective_processing` report; they clear with
+  it on seek, fallback or replacement. Omitted for non-Dolby-Vision sources and
+  SDR output. A replacement session never inherits its predecessor's; it
+  carries its own, in its create response and in the `prepare` control action
+  that announces it. The route comes from the selected processing plan, so a
+  processed-HDR10 play is described as one before its first window report.
 
 | Status | Code | When |
 |---|---|---|
@@ -1938,6 +1955,10 @@ the same completed-processing report as Start. Its `generation` is the current
 playback incarnation, and the report applies only to the delivered HDR10
 selection. Clients clear a previous report when an accepted response omits it;
 saved Developer preferences alone do not establish applied processing.
+`gpu_decoded: true` says the window's source pictures were decoded on the GPU
+(VA-API); it is omitted for a software decode, including the helper's own
+fallback when the node's device cannot decode HEVC Main10 or the renderer
+cannot import its surfaces.
 The owner relays this optional report in a bounded private response header
 (4096 bytes), keeping the internal control JSON body compatible with older
 peers. The ingress validates the incarnation and HDR10 selection before public
@@ -1990,7 +2011,7 @@ an `effective_selection`, and one `action`:
 | `hold` | Production is deliberately not advancing, and this is **not** a failure. `revisit_after_ms` is 5000 for every reason except `no_room`, which is 20 000, because nothing the client does clears node capacity. It is a revisit contract, not an expiry: a hold never escalates to a terminal |
 | `terminal` | Production stopped for a reason retrying cannot change. Ends the failed production attempt; a 404 or a 410 alone does not authorize discarding a usable buffered player |
 | `retry_resource` | Stopped for a reason that may not recur; retry on the server's cadence |
-| `prepare` | A successor session is staged, addressed exactly as its own create response would address it. The only action that is a transaction rather than a report, so it is recorded and replayed exactly rather than recomputed |
+| `prepare` | A successor session is staged, addressed exactly as its own create response would address it, including its `enhancement` (omitted when the staged successor has none) so a switch keeps the FEL / RPU / DYN indicator. The only action that is a transaction rather than a report, so it is recorded and replayed exactly rather than recomputed |
 
 Production holds do not veto bounded client presentation repair. An active
 client explicitly reporting `render_state: stalled` with substantial loaded

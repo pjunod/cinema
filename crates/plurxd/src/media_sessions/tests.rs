@@ -544,6 +544,7 @@ fn remote_prepare_names_only_an_exact_reserved_identity() {
 fn valid_start_response() -> RemoteStartResponse {
     let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
     RemoteStartResponse {
+        processed_fel: None,
         processed_dv_profile: None,
         retained_output: None,
         audio_delivery: None,

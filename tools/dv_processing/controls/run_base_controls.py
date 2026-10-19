@@ -106,6 +106,45 @@ def test_native_rgb_export_matches_independent_bilinear(root=Path('/work')):
 
 
 
+def test_yuv420p10_export_matches_cpu_bt2020_conversion(root=Path('/work')):
+    """The production export: GPU Y'CbCr 4:2:0 against the RGB48 export
+    converted on the CPU (runs after the RGB48 export test above)."""
+    import importlib.util
+    root = Path(root)
+    spec = importlib.util.spec_from_file_location(
+        'compare_yuv420p10_export', root / 'compare_yuv420p10_export.py')
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    arch = os.environ.get('DV_TEST_ARCH_LIB', 'aarch64-linux-gnu')
+    env = os.environ | {
+        'LD_LIBRARY_PATH': str(root / f'prefix/lib/{arch}'),
+        'VK_ICD_FILENAMES': os.environ.get('DV_TEST_VULKAN_ICD',
+                                          '/usr/share/vulkan/icd.d/lvp_icd.aarch64.json'),
+        'XDG_RUNTIME_DIR': str(root / 'runtime'),
+    }
+    results = []
+    for case, mode in [('p5-mmr3', 'base-rpu'), ('p8-piecewise', 'base-rpu'),
+                       ('p7-omit-fel', 'fel')]:
+        directory = root / f'{case}-export-yuv420p10'
+        directory.mkdir()
+        nut = directory / 'out.nut'
+        args = [str(root / 'bin/segment_decode_render'),
+                str(root / case / 'source.mkv'), str(directory), '0', '64',
+                '64', '64', '0', '0', '0', 'bt2020-pq-master-clip',
+                str(nut), '42/1000', '167/1000', '512', mode,
+                '64', '64', 'pq-bilinear-yuv420p10-v1']
+        process = subprocess.run(args, env=env, capture_output=True, timeout=30)
+        (directory / 'stdout').write_bytes(process.stdout)
+        (directory / 'stderr').write_bytes(process.stderr)
+        assert process.returncode == 0, (case, process.stderr)
+        events = [json.loads(line) for line in process.stdout.splitlines()]
+        assert [event['mode'] for event in events if event['kind'] == 'decoder'] == ['software']
+        results.append({'case': case, **checker.compare(
+            root / f'{case}-export-64-64' / 'out.nut', nut, 64, 64, 3)})
+    (root / 'yuv420p10-export-results.json').write_text(json.dumps(results, indent=2) + '\n')
+    return results
+
+
 def test_base_profile_nut_outputs(root=Path('/work')):
     """Validate actual decoded payload/timestamps, not only renderer stdout."""
     root = Path(root)
@@ -313,6 +352,7 @@ def test_base_profile_windows(root=Path('/work')):
     test_base_profile_nut_outputs(root)
     test_base_profile_nut_refusals(root)
     test_native_rgb_export_matches_independent_bilinear(root)
+    test_yuv420p10_export_matches_cpu_bt2020_conversion(root)
     (root / 'base-results.json').write_text(json.dumps(results, indent=2) + '\n')
     return results
 

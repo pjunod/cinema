@@ -12,6 +12,7 @@
 #include "nlq_clipping.h"
 #include "dv_trace.h"
 #include "rgb48.h"
+#include "yuv420p10.h"
 
 #include <libdovi/rpu_parser.h>
 #include <libplacebo/filters.h>
@@ -19,10 +20,13 @@
 #include <libplacebo/shaders/colorspace.h>
 #include <libplacebo/shaders/sampling.h>
 #include <libplacebo/utils/upload.h>
+#include <libplacebo/utils/libav.h>
 #include <libplacebo/vulkan.h>
 
 static int WIDTH, HEIGHT, ELWIDTH, ELHEIGHT;
 static int EXPORT_WIDTH, EXPORT_HEIGHT;
+// pq-bilinear-yuv420p10-v1: the export leaves the GPU as BT.2020 NCL limited 4:2:0 10-bit.
+static bool EXPORT_YUV10;
 #define FLOAT_COUNT ((size_t)WIDTH * (size_t)HEIGHT * 4)
 #define EXPORT_FLOAT_COUNT ((size_t)EXPORT_WIDTH * (size_t)EXPORT_HEIGHT * 4)
 
@@ -121,18 +125,9 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
   // This master-domain reconstruction does not target a display. L2/L8 display
   // trims remain unapplied and are exported in the original RPU for a later
   // P8.1 display mapper. HDR10 output explicitly reports that limitation.
-  require(dm->dm_data.level2.len <= 16 && dm->dm_data.level8.len <= 16,
-          "unsupported creative trims");
-  // L4 is retained as opaque per-frame display metadata. Its temporal
-  // display-mapping semantics are not implemented by this master renderer.
-  // L3 offsets describe display-mapping statistics, not master reconstruction.
-  // Their original values also travel in the exported, unapplied metadata.
-  for (size_t i = 0; i < dm->dm_data.level8.len; i++)
-    require(dm->dm_data.level8.list && dm->dm_data.level8.list[i] &&
-                dm->dm_data.level8.list[i]->length == 10,
-            "unsupported extended L8 trim format");
-  require(dm->dm_data.level10.len == 0 && !dm->dm_data.level255,
-          "unsupported metadata level");
+  // Display metadata (L2/L8 trims, L3/L4, L9 primaries, L10, L11, L254,
+  // L255) is carried unapplied by this master reconstruction and exported in
+  // the original RPU: any version is accepted.
   if (dm->dm_data.level5)
     require((unsigned)dm->dm_data.level5->active_area_left_offset +
                     dm->dm_data.level5->active_area_right_offset <
@@ -141,21 +136,6 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)picture_height,
             "invalid active area metadata");
-  if (dm->dm_data.level9)
-    require(dm->dm_data.level9->length == 1 &&
-                dm->dm_data.level9->source_primary_index == 0,
-            "unsupported explicit source primaries");
-  if (dm->dm_data.level11)
-    require(dm->dm_data.level11->content_type == 1 &&
-                dm->dm_data.level11->whitepoint == 0 &&
-                dm->dm_data.level11->reference_mode_flag &&
-                dm->dm_data.level11->reserved_byte2 == 0 &&
-                dm->dm_data.level11->reserved_byte3 == 0,
-            "unsupported content type/whitepoint policy");
-  if (dm->dm_data.level254)
-    require(dm->dm_data.level254->dm_mode == 0 &&
-                dm->dm_data.level254->dm_version_index == 2,
-            "unsupported CM mode/version");
   require(dm->signal_eotf_param0 == 0 && dm->signal_eotf_param1 == 0 &&
               dm->signal_eotf_param2 == 0,
           "unsupported EOTF parameters");
@@ -291,11 +271,12 @@ struct segment_gpu {
   pl_fmt format, plane_format;
   pl_renderer renderer;
   pl_tex textures[2][3], output_texture, native_texture;
+  pl_tex mapped[2][4];
   float *output, *staging;
 };
 static struct segment_gpu context;
 static void gpu_init(int width, int height, int el_width, int el_height) {
-  require(width >= 64 && height >= 64 && width <= 3840 && height <= 2160 &&
+  require(width >= 64 && height >= 64 && width <= 4096 && height <= 2160 &&
               width % 2 == 0 && height % 2 == 0,
           "supported even raster bound");
   require(el_width >= 32 && el_height >= 32 && el_width % 2 == 0 &&
@@ -369,8 +350,11 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   }
   context.output_texture = pl_tex_create(gpu,
       pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
-                    .renderable = true, .host_readable = true));
+                    .renderable = true, .host_readable = true,
+                    .sampleable = EXPORT_YUV10));
   require(context.output_texture != NULL, "persistent export float texture");
+  require(!EXPORT_YUV10 || dv_yuv10_init(gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
+          "GPU yuv420p10 export planes");
   if (EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
     context.native_texture = pl_tex_create(gpu,
         pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
@@ -380,7 +364,18 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   printf("{\"kind\":\"gpu_context_created\",\"width\":%d,\"height\":%d}\n",
          WIDTH, HEIGHT);
 }
-static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
+static struct pl_frame fel_mapped[2];
+static int fel_mapped_live;
+// Release mapped decoder surfaces once the frame's GPU work is complete.
+static void fel_unmap(pl_gpu gpu) {
+  for (int layer = 0; layer < fel_mapped_live; layer++)
+    pl_unmap_avframe(gpu, &fel_mapped[layer]);
+  fel_mapped_live = 0;
+}
+// `hardware` holds the two decoder surfaces when the layers were decoded on
+// the GPU; they are mapped in place (no host round trip) instead of uploaded.
+static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
+                       const uint8_t *rpu,
                        size_t rpu_size, int frame_index, const char *pts,
                        const char *duration, enum pl_chroma_location bl_chroma,
                        enum pl_chroma_location el_chroma,
@@ -407,6 +402,43 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
                .bits = {.sample_depth = 10, .color_depth = 10}},
       .color = pl_color_space_hdr10,
       .enhancement_layer = &enhancement_frame};
+  if (hardware) {
+    // Map each decoded surface, then restate the representation the native
+    // path uses: DV-coded full-range BL with the parsed metadata, and raw EL
+    // residual components. The mapped sample/colour depth (10 in 16) keeps
+    // the same code/1023 normalization as the host upload.
+    bool mapped = true;
+    for (int layer = 0; layer < 2 && mapped; layer++) {
+      struct pl_frame *live = &fel_mapped[layer];
+      if (!pl_map_avframe_ex(gpu, live, pl_avframe_params(
+              .frame = hardware[layer], .tex = context.mapped[layer]))) {
+        mapped = false;
+        break;
+      }
+      fel_mapped_live = layer + 1;
+      struct pl_frame *frame = layer ? &enhancement_frame : &source;
+      frame->num_planes = live->num_planes;
+      for (int p = 0; p < live->num_planes; p++)
+        frame->planes[p] = live->planes[p];
+      frame->repr.bits = live->repr.bits;
+    }
+    if (!mapped) {
+      // This Vulkan device cannot import the decoder's surfaces: copy them
+      // to host memory and take the ordinary upload path from now on.
+      fel_unmap(gpu);
+      dv_hw_host_copy = true;
+      source.num_planes = enhancement_frame.num_planes = 3;
+      source.repr.bits = (struct pl_bit_encoding){.sample_depth = 10, .color_depth = 10};
+      enhancement_frame.repr.bits = (struct pl_bit_encoding){0};
+      require(dv_host_pack != NULL, "decoded surface host copy");
+      // The caller owns and frees decoded[].
+      for (int layer = 0; layer < 2; layer++)
+        if (!decoded[layer])
+          decoded[layer] = dv_host_pack(hardware[layer]);
+      hardware = NULL;
+    }
+  }
+  if (!hardware)
   for (int layer = 0; layer < 2; layer++) {
     int width = layer ? ELWIDTH : WIDTH, height = layer ? ELHEIGHT : HEIGHT;
     size_t offset = 0;
@@ -436,9 +468,11 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
   // bias. Our admitted ratios are 1, 1/2 and 1/4; every non-tie sample is at
   // least 1/8 texel from an edge, so this does not change its nearest texel.
   // This explicit point policy is backend mechanics, not a Dolby filter claim.
-  for (int c = 0; c < 3; c++) {
+  for (int c = 0; c < source.num_planes; c++) {
     source.planes[c].shift_x -= 1.0f / 64;
     source.planes[c].shift_y -= 1.0f / 64;
+  }
+  for (int c = 0; c < enhancement_frame.num_planes; c++) {
     enhancement_frame.planes[c].shift_x -= 1.0f / 64;
     enhancement_frame.planes[c].shift_y -= 1.0f / 64;
   }
@@ -475,9 +509,35 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
   struct pl_render_errors errors = pl_renderer_get_errors(renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "renderer error-free export");
+  if (EXPORT_YUV10) {
+    require(!debug, "debug evidence is RGB48 only");
+    require(dv_yuv10_export(renderer, gpu, output_texture), "GPU yuv420p10 export");
+    fel_unmap(gpu);
+    write_rgb(dv_yuv10_context.frame, dv_yuv10_frame_bytes(), rgb_output);
+    char yuv10_field[86] = "";
+    if (dv_frame_hashes()) {
+      struct AVSHA *sha = av_sha_alloc();
+      uint8_t digest[32];
+      char hash[65];
+      require(sha && av_sha_init(sha, 256) == 0, "exported yuv420p10 SHA256");
+      av_sha_update(sha, dv_yuv10_context.frame, dv_yuv10_frame_bytes());
+      av_sha_final(sha, digest);
+      av_free(sha);
+      for (int i = 0; i < 32; i++)
+        snprintf(hash + 2 * i, 3, "%02x", digest[i]);
+      snprintf(yuv10_field, sizeof(yuv10_field), ",\"yuv10_sha256\":\"%s\"", hash);
+    }
+    printf("{\"kind\":\"rendered_frame\",\"frame\":%d,\"width\":%d,\"height\":%d,"
+           "\"pts\":\"%s\",\"duration\":\"%s\",\"el_bound\":true,\"nlq_active\":"
+           "true%s,\"render_errors\":%u,\"production_qualified\":false}\n",
+           frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, yuv10_field,
+           errors.errors);
+    return;
+  }
   require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = output_texture,
                                                       .ptr = output, )),
           "full renderer frame download");
+  fel_unmap(gpu);
   if (debug) {
     require(WIDTH == 64 && HEIGHT == 64 && EXPORT_WIDTH == WIDTH &&
                 EXPORT_HEIGHT == HEIGHT, "debug evidence restricted to64x64");
@@ -509,11 +569,15 @@ static void gpu_render(uint16_t *decoded[2], const uint8_t *rpu,
          frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, rgb_field, errors.errors);
 }
 static void gpu_close(void) {
-  for (int layer = 0; layer < 2; layer++)
+  for (int layer = 0; layer < 2; layer++) {
     for (int c = 0; c < 3; c++)
       pl_tex_destroy(context.gpu, &context.textures[layer][c]);
+    for (int c = 0; c < 4; c++)
+      pl_tex_destroy(context.gpu, &context.mapped[layer][c]);
+  }
   pl_tex_destroy(context.gpu, &context.output_texture);
   pl_tex_destroy(context.gpu, &context.native_texture);
+  if (EXPORT_YUV10) dv_yuv10_close(context.gpu);
   pl_renderer_destroy(&context.renderer);
   pl_vulkan_destroy(&context.vk);
   pl_log_destroy(&context.log);

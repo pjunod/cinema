@@ -1262,6 +1262,10 @@ pub struct StartInfo {
     /// Profile of an admitted, prepared processed presentation. Independent
     /// of the physical transcode kind and its PQ base grade; never source tags.
     pub(crate) processed_dv_profile: Option<u8>,
+    /// The admitted processing plan reconstructs the full enhancement layer
+    /// (`Some(true)`) or only the base reshaping (`Some(false)`); `None` when
+    /// no processing plan was selected or this node does not hold it.
+    pub(crate) processed_fel: Option<bool>,
     /// The request was dispatched with a processed Auto candidate that could
     /// not be consumed, and this session serves the ordinary request it
     /// enhanced instead; the reason, for the create's plan notes.
