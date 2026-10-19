@@ -81,7 +81,7 @@ test("actual logout and route entry retire artwork before current authority chan
  assert.equal(vm.runInContext("clearLocalSession(3)",auth),false);assert.equal(retired,0);
  assert.throws(()=>vm.runInContext("clearLocalSession(4)",auth),e=>e===sentinel);assert.equal(retired,1);
  const routeOrder=[];
- const router=vm.createContext({CinemaRemote:{clear(){routeOrder.push("clear");}},cinemaRemoteRouteChanged(){routeOrder.push("route");},window:{addEventListener(){}},NATIVE_READER_BOOT:false,boot(){},TOKEN:null,ME:null,WATCH:null,PLAYER:null,PAGE_RENDER_GENERATION:0,sharedArtworkRetire(){retired++;routeOrder.push("artwork");}});
+ const router=vm.createContext({CinemaRemote:{clear(){routeOrder.push("clear");}},cinemaRemoteRouteChanged(){routeOrder.push("route");},window:{addEventListener(){}},NATIVE_READER_BOOT:false,boot(){},TOKEN:null,ME:null,WATCH:null,PLAYER:null,PAGE_RENDER_GENERATION:0,LAYOUT_PRESENTATION:null,sharedArtworkRetire(){retired++;routeOrder.push("artwork");}});
  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/player/autoplay-next.js","utf8"),router);
  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/router.js","utf8"),router);await vm.runInContext("render()",router);assert.equal(retired,2);assert.deepEqual(routeOrder,["clear","route","artwork"]);
 });

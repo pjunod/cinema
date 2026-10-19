@@ -2029,7 +2029,7 @@ pub(crate) enum ControlAction {
         /// The successor's FEL / RPU / DYN indicator, as its create response
         /// carries it, so a switch does not drop the indicator.
         #[serde(skip_serializing_if = "Option::is_none")]
-        enhancement: Option<plurx_core::playback::enhancement::PlaybackEnhancement>,
+        enhancement: Option<Box<plurx_core::playback::enhancement::PlaybackEnhancement>>,
     },
 }
 
@@ -2066,7 +2066,7 @@ impl PreparedSuccessorAction {
             control: self.control,
             media_origin_ms: self.media_origin_ms,
             effective_selection: self.effective_selection,
-            enhancement: self.enhancement,
+            enhancement: self.enhancement.map(Box::new),
         }
     }
 }

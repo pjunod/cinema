@@ -1325,6 +1325,10 @@ fn session_delivered_processing_shape(
 /// an HDR10-E play described as the plain base. The FEL/RPU badges of a
 /// processed HDR10 delivery still wait for a current report on the client
 /// (`requires_effective_processing`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is an independent fact of the session being described"
+)]
 pub(super) fn session_enhancement(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
