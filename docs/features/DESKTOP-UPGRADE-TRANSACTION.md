@@ -1,7 +1,7 @@
 # Desktop upgrade transactions — shutdown, installation and recovery
 
-**Status:** open · **Updated:** 2026-10-19 · Astra-approved design; implementation
-and native qualification remain outstanding.
+**Status:** open · **Updated:** 2026-10-19 · Astra-approved design; implementation in progress
+on `effort/desktop-tray`; native qualification remains outstanding.
 
 Section 6 of [the desktop tray implementation plan](DESKTOP-TRAY-IMPLEMENTATION.md),
 extracted into its own file to meet the repository's 40 KB document budget.

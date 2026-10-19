@@ -1,8 +1,8 @@
 # Desktop tray — native server controls and GitHub release upgrades
 
-**Status:** open · **Updated:** 2026-10-19 · implementation has not started;
+**Status:** open · **Updated:** 2026-10-19 · implementation in progress;
 Astra approved revision 2 on 2026-10-19 after R1–R8 were resolved.
-Implementation and native/release qualification remain outstanding. This is the canonical implementation and
+Draft PR #1213 tracks integration; native/release qualification remains outstanding. This is the canonical implementation and
 acceptance ledger for project P31.
 [The Astra review record](DESKTOP-TRAY-REVIEW.md) tracks R1–R8 and their disposition.
 

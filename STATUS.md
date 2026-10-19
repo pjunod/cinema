@@ -1,10 +1,14 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-17 · Kept current by the working agent in the same
+**Updated:** 2026-10-19 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
 <!-- status: insert new efforts below this line -->
+
+## Native server tray, startup policy and release upgrades
+
+**Building on `effort/desktop-tray`, draft [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213); not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra approved the plan; the complete implementation review follows the PR. Controller, daemon, native UI and packaging work is in progress. Integration, native acceptance and the main promotion gate remain outstanding.
 
 ## Agent efficiency: smaller searches, a docs router, paperwork first
 
@@ -84,31 +88,14 @@ addressed (scheme respelled for Coil, Android failure backoff, Apple lock
 kept off suspension points, grid headers keep their width without artwork,
 wiring pinned by source tests). Not yet on hardware.
 
-## A leader restart no longer ends progressive or Live TV playback
-
-**[PR #807](http://forge.lan:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**
-Paul's standing rule is that a quorum leader restart must not interrupt
-playback. #798 gave the rolling registry a 5 s serving-fence grace; two more
-owners of running playback still treated any fence generation bump as final,
-even after authority came back. The progressive `stream.mp4` remux owner
-killed ffmpeg and ended the response, with no respawn, on every node. On the
-Live TV owner, the session observer, tuner fan-out, lease loop and request
-fence ended every session, shared transport and recording, and requests
-during the blip answered 410. Both now use #798's policy, moved beside the
-fence as `serving_fence::SessionGrace`. Brief losses keep the work, and
-nothing is published while authority is lost. Live TV requests answer a
-retryable 503. Sustained losses end the work within one grace, as before.
-RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
-Still owed: the GPT leader-restart check under live progressive, rolling and
-Live TV playback, before and after deploy.
-
 ## Older efforts — where each one now lives
 
 Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28,
-2026-10-04 and 2026-10-17 into the status history of their subject folder. One row per section, newest first.
+2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-10-04 | A leader restart no longer ends progressive or Live TV playback | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-05 | Main-merge defects D1–D7 and the red gates: one batched PR | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-10-04 | The architecture effort is on `main`; the close-out is a draft PR | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-10-04 | Jellyfin facade: both pinned clients can now finish a play (J5) | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
