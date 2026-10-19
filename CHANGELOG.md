@@ -10,6 +10,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Native macOS menu-bar and optional Linux desktop controls show local server status, open the web interface and logs, start/stop/restart the server, and manage separate server and tray startup preferences. Named upgrades use authenticated GitHub release artifacts; production release trust and macOS signing must be provisioned before distribution.
 - Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
