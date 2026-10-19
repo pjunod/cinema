@@ -1177,7 +1177,7 @@ impl TranscodeManager {
     }
 
     /// The title scanner has one software decoder thread and never uses a GPU.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub(crate) async fn admit_dv_title(&self) -> Option<FragmentAdmission> {
         self.admit_source_work(1).await
     }

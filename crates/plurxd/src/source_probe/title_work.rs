@@ -176,7 +176,7 @@ impl TitleTask {
 
     /// Scheduler checks only locally readable, compatible, live ordinary work.
     /// Durable SQL excludes stale coordinators and other resource blockers.
-    pub(super) async fn should_yield(&self, state: &AppState) -> Result<bool, StoreError> {
+    pub(super) async fn should_yield(&mut self, state: &AppState) -> Result<bool, StoreError> {
         if !state
             .jobs
             .execution_authority()

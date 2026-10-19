@@ -1,7 +1,7 @@
 //! Admitted leaf workers never mutate catalogue identity or scan completion.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod dv_title;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod title_work;
 
 use crate::state::AppState;
@@ -42,22 +42,22 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
     let boot = uuid::Uuid::new_v4().to_string();
     let mut cursor = None;
     let mut idle = crate::background_jobs::IdlePoll::new();
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let mut title: Option<title_work::TitleTask> = None;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let mut title_after = 0;
     loop {
         if shutdown.is_cancelled() {
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             if let Some(work) = title.take() {
                 work.stop().await;
             }
             return;
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let mut yielded = false;
-        #[cfg(unix)]
-        if let Some(work) = title.as_ref() {
+        #[cfg(target_os = "linux")]
+        if let Some(work) = title.as_mut() {
             match work.should_yield(&state).await {
                 Ok(true) => {
                     if let Some(work) = title.take() {
@@ -69,9 +69,9 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 Err(error) => tracing::warn!(%error,"title priority observation unavailable"),
             }
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let ordinary_idle = title.is_none();
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         let ordinary_idle = true;
         let published = if ordinary_idle {
             let published = match pass(&state, &boot, &mut cursor, &shutdown).await {
@@ -85,14 +85,14 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
         } else {
             false
         };
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         if title.is_none() && !yielded && !published && !shutdown.is_cancelled() {
             match title_work::TitleTask::start(&state, &boot, &mut title_after).await {
                 Ok(work) => title = work,
                 Err(error) => tracing::warn!(%error,"title demand unavailable"),
             }
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             let title_poll = async {
                 match title.as_mut() {
@@ -106,7 +106,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                 () = tokio::time::sleep(idle.after_completion(published)) => {},
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(idle.after_completion(published)) => {}
@@ -653,7 +653,9 @@ mod tests {
                     )
                     .await
                     .map_err(|error| plurx_core::error::ProbeError::Spawn(error.to_string()))?;
-                    Ok(Default::default())
+                    Ok::<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError>(
+                        Default::default(),
+                    )
                 };
                 run_admitted_probe(
                     &manager,
