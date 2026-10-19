@@ -321,7 +321,7 @@ RUN ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg \
     && apt-get -o Acquire::Retries=3 update \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         build-essential clang cmake curl git jq libssl-dev lld llvm make nasm ninja-build \
-        pkg-config python3 python3-venv \
+        libgtk-4-dev libdbus-1-dev pkg-config python3 python3-venv \
     && python3 -m venv /opt/playwright-venv \
     && /opt/playwright-venv/bin/pip install --no-cache-dir 'playwright==1.62.0' \
     && /opt/playwright-venv/bin/python3 -m playwright install --with-deps chromium \

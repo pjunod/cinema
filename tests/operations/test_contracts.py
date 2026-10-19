@@ -2255,11 +2255,13 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             list(effort_rust_steps),
             [
+                "Install Rust gate prerequisites",
                 "Check out the candidate",
                 "Install the pinned Rust toolchain",
                 "Restore the effort Rust cache",
                 "Compile every Rust target without executing tests",
                 "Enforce persistent Cargo bounds",
+                "Restore persistent runner workspace ownership",
             ],
         )
         rust_toolchain = effort_rust_steps["Install the pinned Rust toolchain"]
@@ -4454,6 +4456,34 @@ assert.equal(context.ACT_TIMER, null);
             "the ffmpeg majors CI covers changed; update docs/VALIDATION.md's "
             "'Which ffmpeg the profiles assume' in the same commit",
         )
+
+    def test_desktop_libraries_are_build_dependencies_not_server_runtime(self):
+        for path in (".github/workflows/ci.yml", ".github/workflows/effort-ci.yml",
+                     ".github/workflows/main-fast-lane.yml"):
+            with self.subTest(workflow=path):
+                job = workflow_job_blocks(path)["rust_compile"]
+                self.assertIn("container: ubuntu:24.04", job)
+                steps = workflow_step_blocks(job)
+                setup = steps["Install Rust gate prerequisites"]
+                self.assertIn("libgtk-4-dev libdbus-1-dev", setup)
+                self.assertLess(job.index(setup), job.index("make effort-rust-check"))
+                restore = steps["Restore persistent runner workspace ownership"]
+                self.assertIn("if: always()", restore)
+                self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', restore)
+        dockerfile = read("Dockerfile")
+        ci_stage = dockerfile.split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1)[0]
+        self.assertIn("libgtk-4-dev libdbus-1-dev", ci_stage)
+        self.assertNotIn("libgtk-4-dev", dockerfile.split("FROM runtime-assets AS ci", 1)[0])
+        self.assertNotIn("libgtk-4-dev", dockerfile.split("FROM runtime-assets AS runtime", 1)[1])
+        self.assertIn("cargo build --locked --release -p plurxd", dockerfile)
+        unit = workflow_job_blocks(".github/workflows/ci.yml")["check"]
+        self.assertIn('desktop: "true"', unit)
+        self.assertLess(unit.index("uses: ./.github/actions/rust-native-deps"),
+                        unit.index("run: make ci-rust-gate"))
+        adapter = read(".github/actions/rust-native-deps/action.yml")
+        self.assertIn("if: inputs.desktop == 'true'", adapter)
+        self.assertIn("pkg-config --exists 'gtk4 >= 4.0' dbus-1", adapter)
 
     def test_container_rust_jobs_supply_openssl_before_compilation(self):
         ci_stage = read("Dockerfile").split("FROM runtime-assets AS ci", 1)[1].split(
