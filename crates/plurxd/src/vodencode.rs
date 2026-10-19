@@ -1626,11 +1626,21 @@ impl Encoding {
         planning: &crate::media_pool::PlanningBinding,
     ) -> Result<[u8; 32], String> {
         use plurx_core::transcode::dv_processing::{DvDestination, DvSelection};
-        if !matches!(&self.dv_processing, DvSelection::Selected(plan) if plan.destination() == DvDestination::Hdr10)
-            || self.options.pipeline.output_grade() != plurx_core::transcode::OutputGrade::Hdr10
+        // HDR10-E and the reconstructed Profile 8.1 are both processed
+        // candidates; the destination is part of their identity.
+        let tag = match &self.dv_processing {
+            DvSelection::Selected(plan) if plan.destination() == DvDestination::Hdr10 => {
+                "plurx:processed-hdr10-candidate:v1"
+            }
+            DvSelection::Selected(plan) if plan.destination() == DvDestination::Profile81 => {
+                "plurx:processed-profile81-candidate:v1"
+            }
+            _ => return Err("candidate is not a completed processed recipe".into()),
+        };
+        if self.options.pipeline.output_grade() != plurx_core::transcode::OutputGrade::Hdr10
             || self.shared_audio.is_some()
         {
-            return Err("candidate is not a completed processed HDR10 recipe".into());
+            return Err("candidate is not a completed processed recipe".into());
         }
         let duration = file
             .duration_ms
@@ -1638,7 +1648,7 @@ impl Encoding {
             .ok_or("processed candidate requires the full source duration")?;
         let identity = self.identity(file, duration as f64 / 1000.0);
         let bytes = serde_json::to_vec(&(
-            "plurx:processed-hdr10-candidate:v1",
+            tag,
             planning,
             identity.size,
             identity.mtime_ms,

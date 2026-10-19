@@ -1,0 +1,15 @@
+[package]
+name = "plurx-gemm-arm-portability"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+gemm = "=0.19.0"
+gemm-common = "=0.19.0"
+half = "2.3"
+
+[patch.crates-io]
+gemm-common = { path = ".." }

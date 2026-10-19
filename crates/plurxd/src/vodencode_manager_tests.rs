@@ -171,7 +171,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .await
         .expect("actual graph resources");
         let started = Instant::now();
-        let (verified, plan) = runtime
+        let (verified, plan) = match runtime
             .execute(
                 &file,
                 &encoding.plan,
@@ -185,7 +185,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 None,
             )
             .await
-            .expect("actual verified window");
+            .expect("actual verified window")
+        {
+            crate::vodencode::dv_runtime::WindowOutcome::Completed(window) => window,
+            crate::vodencode::dv_runtime::WindowOutcome::Cancelled => {
+                panic!("actual graph was cancelled instead of verifying its window")
+            }
+        };
         assert_eq!(
             plan.semantic_digest(),
             selected.semantic_digest(),
@@ -224,6 +230,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
 /// Decode a processed window and check its luma is a limited-range picture:
 /// legal codes only, nominally 64..=940, and, where the film has picture, not
 /// flat. A wrong range or bit shift in the export fails these.
+#[cfg(target_os = "linux")]
 fn processed_window_luma(
     window: &[u8],
     (width, height): (u32, u32),
@@ -323,6 +330,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -340,6 +348,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         ..reopen_request(file_id, "encoded-manager", "unused", "unused")
     };
     let missing = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -546,7 +555,8 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             Pipeline::Cpu,
         );
         let request = SessionRequest {
-            sdr_master_codecs: None,
+            dv_processing_destination: None,
+        sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -688,6 +698,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -786,6 +797,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -834,7 +846,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let plain = manager
         .prepare_vod_encoding(
             &SessionRequest {
-                sdr_master_codecs: None,
+                dv_processing_destination: None,
+        sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -874,7 +887,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let burned = manager
         .prepare_vod_encoding(
             &SessionRequest {
-                sdr_master_codecs: None,
+                dv_processing_destination: None,
+        sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -983,6 +997,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1073,6 +1088,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     )
     .with_dovi_reshape(true);
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1170,6 +1186,7 @@ async fn encoding_shipped_shape() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1256,6 +1273,7 @@ async fn an_encode_the_software_budget_can_never_admit_is_refused_at_create() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -1384,6 +1402,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     )
     .with_decode_probe(Some(decode_probe));
     let mut request = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: Some(Box::new(ContinuousMediaRequest {
             controlled: false,
@@ -2122,6 +2141,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         height: i64::from(raster.1),
     };
     processed.hdr10 = true;
+    processed.dv_processing_destination = Some(plurx_core::transcode::dv_processing::DvDestination::Profile81);
     processed.candidate_context = Some(Box::new(processed_context.clone()));
 
     // The rolling engine never serves a processed candidate, whoever hands

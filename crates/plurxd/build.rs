@@ -21,9 +21,9 @@
 //! The stamp is the build's *source date* (`build_support/source_date.rs`):
 //! `SOURCE_DATE_EPOCH` when set, else the `HEAD` commit time, else the clock.
 //! It used to be the clock always, which made every build of one commit a
-//! different binary and an image impossible to reproduce. A malformed
-//! `SOURCE_DATE_EPOCH` is the one thing here that fails the build, because a
-//! fallback would silently undo what setting it asked for.
+//! different binary and an image impossible to reproduce. Malformed explicit
+//! source-date or full-commit inputs fail the build rather than silently
+//! undoing their reproducibility or authenticated identity contract.
 
 // A build script, never a daemon child: the launcher rule in clippy.toml is for
 // production code.
@@ -35,12 +35,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "build_support/source_date.rs"]
 mod source_date;
+#[path = "build_support/source_identity.rs"]
+mod source_identity;
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(plurx_dv_segment_probe)");
     println!("cargo:rerun-if-env-changed=PLURX_BUILD_REF");
+    println!("cargo:rerun-if-env-changed=PLURX_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-changed=build_support/source_date.rs");
+    println!("cargo:rerun-if-changed=build_support/source_identity.rs");
     watch_git_head();
 
     let build = std::env::var("PLURX_BUILD_REF")
@@ -50,6 +54,14 @@ fn main() {
         .or_else(git_describe)
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=PLURX_BUILD={build}");
+    let explicit_commit = std::env::var("PLURX_BUILD_SHA").ok();
+    let source_commit = source_identity::resolve_source_commit(
+        explicit_commit.as_deref(),
+        &build,
+        git_source_commit,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    println!("cargo:rustc-env=PLURX_SOURCE_COMMIT={source_commit}");
     println!(
         "cargo:rustc-env=PLURX_BUILT_AT={}",
         built_at(build.ends_with("-dirty"))
@@ -90,6 +102,21 @@ fn built_at(dirty: bool) -> String {
     })
     .unwrap_or_else(|err| panic!("{err}"));
     source_date::format_utc(secs)
+}
+
+/// Exact source identity; a display tag or short git description is insufficient.
+fn git_source_commit() -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(std::env::var("CARGO_MANIFEST_DIR").ok()?)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
 }
 
 /// Committer time of `HEAD`, in Unix seconds, when built from a checkout.

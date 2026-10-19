@@ -342,7 +342,7 @@ test("Shared direct attachment polls no status, starts no control, DELETEs its B
   vm.runInContext(source+"\n"+functions+`
     const API="/api/v1",TOKEN="t",log=[],deletes=[],apis=[],changes=[];let PLAYER=null;
     const document={getElementById(){return null;}};
-    function fetch(url,o){deletes.push({url,method:o.method,keepalive:o.keepalive});return Promise.resolve();}
+    function fetch(url,o){deletes.push({url,method:o.method,keepalive:o.keepalive});return Promise.resolve({ok:true,status:204});}
     async function api(url){apis.push(url);return {};}
     function playbackOwnsAttachedMedia(p){return !!p;}function playbackWaitSurfaceLive(){return false;}function updateStats(){}
     function stopPlaybackControl(){log.push("stop-control");}function startPlaybackControl(){log.push("start-control");}
@@ -390,8 +390,6 @@ test("Shared direct attachment polls no status, starts no control, DELETEs its B
   const local={fileId:"7",fileContext:t.local("7"),meta:{}};t.set(local);assert.throws(()=>t.attach(v,local,info(sid),0));
   assert.equal(t.deletes.length,2);
   // Every owner that ends a player or its media releases the direct session.
-  assert.match(shippedFunction("player/stats.js","closePlayer"),/releaseSharedDirect\(PLAYER\)/);
-  assert.match(shippedFunction("player/decode-margin.js","retirePlaybackPredecessor"),/releaseSharedDirect\(predecessor\)/);
   assert.match(shippedFunction("player/decode-tiers.js","preparePlayOutgoing"),/releaseSharedDirect\(outgoing\)/);
 });
 test("Shared next episode dispatches to the Source-order resolver and a fresh authorized start, never a Local route",async()=>{

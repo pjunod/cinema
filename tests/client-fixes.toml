@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1220 remediation keeps the upgrade confirmation consistent with recovery.
+[[fixes]]
+id = "desktop.native-upgrade-recovery-clarity"
+commits = ["0d128961b46659388dc488439775741125aabe29"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "If installation or readiness checks fail, plurx reports Recovery required"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testUpgradePreparesConfirmsNamedVersionThenApplies"
+
+# Native desktop companion: failed observations retain Unknown, never a second-server Start.
+[[fixes]]
+id = "desktop.native-tray-observed-state"
+commits = ["49eb0d3c5820123e48df6a2b56a78e4d81ca9029"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/MenuModel.swift"
+source_anchor = "guard statusFailure == nil, let status else { return .unknown }"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testFailedStatusIsUnknownNeverStopped"
+
 # Resume repair: current source/test anchors; execution evidence is in PR #1182.
 [[fixes]]
 id = "apple.resume-preserves-native-seek-completion"

@@ -138,7 +138,8 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             details.push(detail(
                 Rpu,
                 false,
-                "RPU: converted to Profile 8.1 and carried to the display",
+                "RPU: converted to Profile 8.1 — without the enhancement layer its \
+                 reshaping is a pass-through; its dynamic metadata is DYN",
             ));
             details.push(detail(
                 Dyn,
@@ -158,8 +159,9 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             ));
             details.push(detail(
                 Rpu,
-                false,
-                "RPU: rewritten for the reconstructed picture and carried to the display",
+                true,
+                "RPU: reshaping applied by the server; a rewritten 8.1 RPU carries \
+                 its dynamic metadata (DYN)",
             ));
             details.push(detail(
                 Dyn,
@@ -276,7 +278,9 @@ mod tests {
             fel_contributed: true,
         }))
         .expect("DV source");
-        assert_eq!(shown.active, [Fel, Dyn]);
+        // The server applied the RPU's reshaping with the FEL; the display
+        // applies the rewritten RPU's dynamic metadata.
+        assert_eq!(shown.active, [Fel, Rpu, Dyn]);
         assert!(!shown.requires_effective_processing);
     }
 

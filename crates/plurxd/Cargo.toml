@@ -82,6 +82,9 @@ quick-xml = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+plurx-desktop-control = { path = "../plurx-desktop-control" }
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = [

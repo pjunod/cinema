@@ -3860,6 +3860,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
     // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
     let source = staging_source(&fixture).await;
     let mut recipe = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -5537,6 +5538,268 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
     );
     assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+}
+
+/// Exercise the very helpers resolve_plan uses, then the real qualification
+/// input seam. No fixture installs a copy_contract or processed destination.
+#[tokio::test]
+async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection() {
+    use crate::transcode::{SessionKind, TranscodeManager};
+    use plurx_core::playback::audio::AudioAction;
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::store::keys;
+    use plurx_core::transcode::dv_processing::{DvDestination, DvFallbackReason, DvSelection};
+    let state = resolver_state();
+    let mut file = dolby_vision_p7_file();
+    file.dolby_vision.el_present = Some(true);
+    file.dolby_vision.rpu_present = Some(true);
+    file.audio_streams = vec![plurx_core::domain::AudioStream {
+        index: 2, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+        channel_layout: Some("5.1".into()), language: None, title: None, default: true,
+    }];
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["sdr","pq"],"max_height":2160}],
+        "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls","hls_hevc_sample_entries":["hvc1"],"audio":["aac","eac3"],
+        "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+            {"codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}]}"#);
+    let candidate = QualityCandidate {
+        id: CandidateId::for_recipe_digest([0x81; 32]), recipe_digest: [0x81; 32],
+        route: CandidateRoute::Encode, planned_codec: Some("hevc".into()),
+        processed_hdr10: false, normalized_geometry: true, width: 320, height: 180,
+        target_height: 180, average_bps: Some(1_000_000), peak_bps: Some(2_000_000),
+        grade: plurx_core::transcode::OutputGrade::Hdr10, decoder_compatible: true,
+        complete_cache: false, sustainable: true,
+    };
+    let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+        file: file.clone(), probe_json: None, settings: Default::default(),
+        generation: 1, item_title: None,
+    };
+    for hdr in [false, true] {
+        snapshot.settings.insert(keys::DV_HDR_PROCESSING.into(), u8::from(hdr).to_string());
+        snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+        snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
+        let body = || CreateSession {
+            playback_id: "real-ingress-p81".into(), copy: Some(true),
+            preserve_dolby_vision: Some(true), audio: Some(2), audio_offset_ms: Some(175),
+            caps: Some(caps.clone()), ..bare_create()
+        };
+        let review = || review_client_plan(&caps, None, &file, &capable_node(), true, false, NOW_MS);
+        assert!(review().convert_dolby_vision, "actual service conversion verdict");
+        // Same producer as resolve_plan, before geometry/Encode normalization.
+        let query = body().selection_catalog_request(&file, &caps, body().reviewed_copy_scope(Some(&review())));
+        assert_eq!(query.copy_contract, Some((true, true, true)), "nonzero offset requires audio encoding");
+        let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+        let mut request = body().into_request(file.id, 180);
+        let unselected_fingerprint = request.durable_intent_fingerprint(&principal);
+        request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(&candidate)));
+        let fingerprint = request.durable_intent_fingerprint(&principal);
+        assert_ne!(fingerprint, unselected_fingerprint, "selected candidate binds intent");
+        let context = request.candidate_context.as_mut().expect("selected candidate");
+        context.catalog_query = Some(query.clone());
+        context.canonical_caps = Some(caps.clone());
+        context.planning_snapshot = Some(Arc::new(snapshot.clone()));
+        assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint,
+            "catalog provenance does not change original client intent bytes");
+        apply_plan_review(&mut request, review());
+        // Both the original converted Copy and selected Encode must qualify.
+        for encode in [false, true] {
+            let mut selected = request.clone();
+            normalize_catalog_selection(&mut selected, 180, !encode).expect("real normalization");
+            assert!(selected.dv_processing_destination.is_none(), "ordinary fallback stays ordinary");
+            let (trial, projected) = TranscodeManager::processed_qualification_input(&snapshot, &selected, 180)
+                .expect("converted catalog input reaches P81 qualification");
+            assert_eq!(trial.kind, SessionKind::Transcode { height: 180 });
+            assert_eq!(trial.dv_processing_destination, Some(DvDestination::Profile81));
+            assert_eq!(projected.copy_contract, query.copy_contract);
+            assert_eq!(trial.audio_index, Some(2));
+            assert_eq!(trial.audio_offset_ms, 175);
+            assert!(matches!(projected.audio_delivery.as_ref().expect("audio").action,
+                AudioAction::Encode { ref codec, channels: 2, sample_rate: 48_000, .. } if codec == "aac"));
+            assert!(matches!(TranscodeManager::vod_dv_processing_from_snapshot(&snapshot, &trial).expect("preflight"),
+                DvSelection::KeepExisting(DvFallbackReason::AwaitingFirstWindow)));
+        }
+        normalize_catalog_selection(&mut request, 180, false).expect("Encode selection");
+        let mut described = candidate.clone();
+        described.processed_hdr10 = true;
+        let mut remembered = request.clone();
+        let context = remembered.candidate_context.as_mut().expect("context");
+        context.selected_candidate = described.clone();
+        state.transcode.remember_processed_candidate(&remembered);
+        let lookup = body().selection_catalog_request(&file, &caps, body().reviewed_copy_scope(Some(&review())));
+        let descriptions = state.transcode.processed_quality_descriptions(&snapshot, &lookup);
+        let reselected = descriptions.iter().find(|row| row.id == described.id).expect("same P81 description rediscovered");
+        let mut context = TranscodeManager::candidate_context(reselected);
+        context.catalog_query = Some(lookup);
+        context.canonical_caps = Some(caps.clone());
+        request.candidate_context = Some(Box::new(context));
+        normalize_catalog_selection(&mut request, 180, false).expect("reselected Encode");
+        assert_eq!(TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
+            .expect("description re-enters fresh qualification").0.dv_processing_destination,
+            Some(DvDestination::Profile81));
+        assert!(request.candidate_context.as_ref().expect("description only").prepared_processing.is_none());
+
+        for (copy, native, conversion, fel) in [(true, true, true, true), (false, false, true, true),
+            (true, false, false, true), (true, false, true, false)] {
+            let mut current = snapshot.clone();
+            current.settings.insert(keys::DV_CONVERT.into(), u8::from(conversion).to_string());
+            current.settings.insert(keys::DV_FEL_REENCODE.into(), u8::from(fel).to_string());
+            let mut current_caps = caps.clone();
+            if native { current_caps.video[0].dv_profiles.push(7); }
+            let mut node = capable_node();
+            node.dolby_vision_convert = conversion;
+            let body = CreateSession { copy: Some(copy), caps: Some(current_caps.clone()), ..body() };
+            let review = review_client_plan(&current_caps, None, &file, &node, true, hdr, NOW_MS);
+            let query = body.selection_catalog_request(&file, &current_caps, body.reviewed_copy_scope(Some(&review)));
+            let mut ordinary = body.into_request(file.id, 180);
+            let mut context = TranscodeManager::candidate_context(&candidate);
+            context.catalog_query = Some(query);
+            context.canonical_caps = Some(current_caps);
+            ordinary.candidate_context = Some(Box::new(context));
+            apply_plan_review(&mut ordinary, review);
+            normalize_catalog_selection(&mut ordinary, 180, false).expect("ordinary Encode");
+            let outcome = TranscodeManager::processed_qualification_input(&current, &ordinary, 180);
+            assert!(!outcome.as_ref().is_ok_and(|(trial, _)| trial.dv_processing_destination == Some(DvDestination::Profile81)),
+                "native/numeric/disabled conversion or FEL must not acquire P81");
+            if !copy && hdr {
+                assert_eq!(outcome.expect("ordinary HDR10 remains eligible").0.dv_processing_destination,
+                    Some(DvDestination::Hdr10));
+            }
+        }
+    }
+}
+
+/// Compare the ordinary catalog recipe with execution BEFORE admission. Both
+/// inputs come from production ingress; no fixture installs Copy tuple bits.
+#[tokio::test]
+async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
+    use crate::transcode::{copy_candidate_recipe_digest, SessionKind, TranscodeManager};
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::store::keys;
+    #[cfg(target_os = "linux")]
+    let state = resolver_state();
+    let mut file = dolby_vision_p7_file();
+    file.dolby_vision.el_present = Some(true);
+    file.audio_streams = vec![
+        plurx_core::domain::AudioStream {
+            index: 1, codec: "aac".into(), channels: Some(2), sample_rate: Some(48_000),
+            channel_layout: Some("stereo".into()), language: None, title: None, default: true,
+        },
+        plurx_core::domain::AudioStream {
+            index: 7, codec: "eac3".into(), channels: Some(6), sample_rate: Some(48_000),
+            channel_layout: Some("5.1".into()), language: None, title: None, default: false,
+        },
+    ];
+    // Missing/false stale AAC -> encode, true stale AAC -> passthrough,
+    // and nonzero offset -> encode even with a compatible EAC3 sink.
+    for (raw_aac, passthrough, offset, expected_aac) in [
+        (None, false, 0, true), (Some(false), false, 0, true),
+        (Some(true), true, 0, false), (Some(false), true, 175, true),
+    ] {
+        for route in ["native", "dv-declined", "converted-fallback"] {
+            let mut caps_json = serde_json::json!({"v":2,
+                "video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],
+                    "present":["sdr","pq"],"max_height":2160}],
+                "containers":["mkv","mp4"],"transports":["hls"],"dv_transport":"hls",
+                "hls_hevc_sample_entries":["hvc1"],"audio":["aac"],
+                "audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]});
+            if passthrough {
+                caps_json["audio"].as_array_mut().expect("codecs").push("eac3".into());
+                caps_json["audio_sinks"].as_array_mut().expect("sinks").push(serde_json::json!({
+                    "codec":"eac3","max_channels":6,"sample_rates_hz":[48000],"passthrough":true}));
+            }
+            if route == "native" {
+                caps_json["video"][0]["dv_profiles"].as_array_mut().expect("DV").push(7.into());
+            }
+            let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(caps_json).expect("caps");
+            let review = || review_client_plan(&caps, None, &file, &capable_node(), route != "dv-declined", false, NOW_MS);
+            let mut body = CreateSession { playback_id: "ordinary-copy-audio".into(),
+                copy: Some(true), aac: raw_aac, audio: Some(7), audio_offset_ms: Some(offset),
+                preserve_dolby_vision: Some(route != "dv-declined"), caps: Some(caps.clone()), ..bare_create() };
+            let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+                file: file.clone(), probe_json: None, settings: Default::default(), generation: 1, item_title: None,
+            };
+            snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
+            snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());
+            // Same ordering as resolve_plan: original video scope, then actual
+            // canonical track selection, then query (not a preselection AAC bit).
+            let scope = body.reviewed_copy_scope(Some(&review()));
+            body.audio = TranscodeManager::candidate_audio_from_snapshot(&snapshot, body.audio);
+            assert_eq!(body.audio, Some(7), "selected nondefault stream index, not vector position");
+            let query = body.selection_catalog_request(&file, &caps, scope);
+            let digest = |audio, offset, subtitle, tuple| copy_candidate_recipe_digest(
+                &file, audio, offset, subtitle, tuple, Some("source-version"),
+                Some("executable"), Some("engine"), (3840, 2160));
+            let catalog_digest = digest(query.audio_index, query.audio_offset_ms, query.subtitle_burn,
+                query.copy_contract.expect("original Copy"));
+            let candidate = QualityCandidate {
+                id: CandidateId::for_recipe_digest(catalog_digest), recipe_digest: catalog_digest,
+                route: CandidateRoute::Remux, planned_codec: None, processed_hdr10: false,
+                normalized_geometry: true, width: 3840, height: 2160, target_height: 2160,
+                average_bps: None, peak_bps: None, grade: plurx_core::transcode::OutputGrade::Hdr10,
+                decoder_compatible: true, complete_cache: false, sustainable: true,
+            };
+            let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+            let mut request = body.into_request(file.id, 2160);
+            request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps).expect("claim");
+            let unselected_fingerprint = request.durable_intent_fingerprint(&principal);
+            request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(&candidate)));
+            let fingerprint = request.durable_intent_fingerprint(&principal);
+            assert_ne!(fingerprint, unselected_fingerprint, "selected candidate binds intent");
+            let context = request.candidate_context.as_mut().expect("selected candidate");
+            context.catalog_query = Some(query.clone());
+            context.canonical_caps = Some(caps.clone());
+            context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+            assert_eq!(request.durable_intent_fingerprint(&principal), fingerprint);
+            apply_plan_review(&mut request, review());
+            normalize_catalog_selection(&mut request, 2160, true).expect("ordinary Remux");
+            reconcile_request_audio(Some(&file), &mut request);
+            let SessionKind::Copy { aac, preserve_dolby_vision, convert_dolby_vision } = request.kind else {
+                panic!("ordinary fallback must remain Copy");
+            };
+            assert_eq!(aac, expected_aac, "selected EAC3/offset determines execution, not raw AAC");
+            assert_eq!((preserve_dolby_vision, convert_dolby_vision), match route {
+                "native" => (true, false), "dv-declined" => (false, false), _ => (true, true),
+            });
+            let actual_tuple = (aac, preserve_dolby_vision, convert_dolby_vision);
+            // The selected old418 sensitivity must fail HERE, after compiling
+            // and executing real canonical reconciliation, not on helper absence.
+            assert_eq!(query.copy_contract, Some(actual_tuple), "catalog Copy audio differs from canonical execution");
+            assert_eq!(catalog_digest, digest(request.audio_index, request.audio_offset_ms, request.subtitle_burn, actual_tuple));
+            assert_eq!(CandidateId::for_recipe_digest(catalog_digest), candidate.id);
+            let before = serde_json::to_value(&request).expect("ordinary snapshot");
+            if route == "converted-fallback" {
+                let (trial, projected) = TranscodeManager::processed_qualification_input(&snapshot, &request, 180)
+                    .expect("converted input still qualifies");
+                assert_eq!(trial.kind, SessionKind::Transcode { height: 180 });
+                assert!(projected.audio_delivery.expect("encoded audio").is_encoded_vod_compatible());
+                // A real preparation error before any producer: binding names
+                // a source not present in this fixture's store. No device work.
+                #[cfg(target_os = "linux")]
+                {
+                    let recovery = crate::transcode::SessionRecoveryIdentity {
+                        principal: principal.clone(), incarnation_id: "copy-audio-failure".into(), recovery_epoch: String::new(),
+                    };
+                    let failure = state.transcode.prepare_processed_hdr10(&request, &recovery, false).await
+                        .expect_err("missing bound source must refuse preparation");
+                    assert!(failure.contains("candidate source missing"), "actual failure: {failure}");
+                }
+            }
+            assert_eq!(serde_json::to_value(&request).expect("fallback"), before,
+                "declined/failed optional processing cannot mutate the ordinary Copy recipe");
+            assert!(request.dv_processing_destination.is_none());
+        }
+    }
+    // No canonical audio claim preserves the old raw Copy contract.
+    let caps = caps_v2(r#"{"v":2,"video":[{"codec":"hevc","present":["hdr10"]}],"audio":["aac"],"transports":["hls"]}"#);
+    for aac in [None, Some(false), Some(true)] {
+        let body = CreateSession { copy: Some(true), aac, ..bare_create() };
+        let query = body.selection_catalog_request(&file, &caps, body.reviewed_copy_scope(None));
+        assert!(query.audio_claim.is_none());
+        let mut request = body.into_request(file.id, 2160);
+        let before = request.kind;
+        reconcile_request_audio(Some(&file), &mut request);
+        assert_eq!(request.kind, before);
+        assert_eq!(query.copy_contract.expect("legacy Copy").0, aac == Some(true));
+    }
 }
 
 #[tokio::test]

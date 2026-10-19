@@ -715,7 +715,10 @@ fn validated_annotations_rewind(connection: &rusqlite::Connection) -> String {
                 row.get(0)
             })
             .expect("annotations fixture data");
-        assert_eq!(rows, 0, "populated annotations table {table} cannot be rewound");
+        assert_eq!(
+            rows, 0,
+            "populated annotations table {table} cannot be rewound"
+        );
     }
     format!(
         "{};",

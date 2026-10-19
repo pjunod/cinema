@@ -21,6 +21,11 @@ pub const SEMVER: &str = env!("CARGO_PKG_VERSION");
 /// that have no `.git`.
 pub const BUILD: &str = env!("PLURX_BUILD");
 
+/// Full source commit used by authenticated native upgrade readiness. Human
+/// release/build labels remain in BUILD; unknown/dirty source fails exact checks.
+#[cfg(unix)]
+pub const SOURCE_COMMIT: &str = env!("PLURX_SOURCE_COMMIT");
+
 /// The build's source date, `YYYY-MM-DDTHH:MM:SSZ`. Always present, even when
 /// [`BUILD`] is `unknown`.
 ///
@@ -42,6 +47,10 @@ pub const LONG: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("PLURX_BUIL
 #[cfg(test)]
 #[path = "../build_support/source_date.rs"]
 mod source_date;
+
+#[cfg(test)]
+#[path = "../build_support/source_identity.rs"]
+mod source_identity;
 
 #[cfg(test)]
 mod tests {
