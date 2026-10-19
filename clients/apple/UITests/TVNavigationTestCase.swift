@@ -230,6 +230,7 @@ class TVNavigationTestCase: XCTestCase {
 
     func assertFocus(_ target: XCUIElement, in app: XCUIApplication, context: String,
                              timeout: TimeInterval = 5,
+                             captureOnSuccess: Bool = true,
                              file: StaticString = #filePath, line: UInt = #line) {
         // Observe completed native moves immediately. XCTest's first polling
         // interval otherwise spends a second of the player's four-second
@@ -244,17 +245,19 @@ class TVNavigationTestCase: XCTestCase {
         }
         let focusDebug = app.staticTexts["choice-focus-debug"]
         if focusDebug.exists { print("NATIVE_CHOICE_FOCUS_DEBUG=\(focusDebug.label)") }
-        let screenshot = app.screenshot()
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("PlurxNavigationCaptures")
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let safeName = context.replacingOccurrences(of: "/", with: "-")
-        let nativePath = directory.appendingPathComponent(safeName + ".png")
-        try? screenshot.pngRepresentation.write(to: nativePath)
-        print("NAVIGATION_SCREENSHOT_PATH=\(nativePath.path)")
-        let capture = XCTAttachment(screenshot: screenshot)
-        capture.name = context
-        capture.lifetime = .keepAlways
-        add(capture)
+        if result != .completed || captureOnSuccess {
+            let screenshot = app.screenshot()
+            let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("PlurxNavigationCaptures")
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let safeName = context.replacingOccurrences(of: "/", with: "-")
+            let nativePath = directory.appendingPathComponent(safeName + ".png")
+            try? screenshot.pngRepresentation.write(to: nativePath)
+            print("NAVIGATION_SCREENSHOT_PATH=\(nativePath.path)")
+            let capture = XCTAttachment(screenshot: screenshot)
+            capture.name = context
+            capture.lifetime = .keepAlways
+            add(capture)
+        }
         XCTAssertEqual(result, .completed, "\(context): \(app.debugDescription)", file: file, line: line)
     }
 }
