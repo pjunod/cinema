@@ -677,6 +677,30 @@ pub(crate) fn hevc_copy_requires_hls(
     ))
 }
 
+/// Dolby Vision–enhanced HDR10 is produced only for a segmented session:
+/// the HLS create is where the processed rendition replaces the copy. A DV
+/// source that a non-DV client would receive as its HDR10 base therefore has
+/// to come over HLS while the Developer setting is on. A direct file or a
+/// progressive copy never reaches the helper, so the client would get plain
+/// HDR10 with nothing said about it.
+fn routes_through_processed_hdr10(
+    file: &MediaFile,
+    decision: &Decision,
+    caps: Option<&playback::DeviceCaps>,
+    processing_enabled: bool,
+) -> bool {
+    processing_enabled
+        && matches!(
+            decision.method,
+            playback::PlaybackMethod::DirectPlay | playback::PlaybackMethod::Remux
+        )
+        && !decision.preserve_dolby_vision
+        && !decision.convert_dolby_vision
+        && decision.delivered_dynamic_range == "hdr10"
+        && matches!(file.dolby_vision.profile, Some(5 | 7 | 8))
+        && caps.is_some_and(|caps| caps.transports.iter().any(|transport| transport == "hls"))
+}
+
 fn remux_requires_hls(
     file: &MediaFile,
     decision: &Decision,
@@ -2446,6 +2470,27 @@ async fn decision_for_file(
         requested_audio,
         container_default_audio,
     );
+    let processed_hdr10 = routes_through_processed_hdr10(
+        &file,
+        &decision,
+        q.caps_v2.as_ref(),
+        plurx_core::store::stored_switch(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::DV_HDR_PROCESSING)
+                .await?
+                .as_deref(),
+            false,
+        ),
+    );
+    if processed_hdr10 {
+        // The same source bytes, copied into HLS instead of served as a file.
+        decision.method = playback::PlaybackMethod::Remux;
+        decision.reasons.push(
+            "served over HLS so the server can apply Dolby Vision-enhanced HDR10 (Developer setting)"
+                .into(),
+        );
+    }
     // Subtitle burn and an explicit non-default track can change the method
     // after the pure decision ran. Resolve audio again against that final
     // method. The legacy bool intentionally keeps its old compatibility
@@ -2472,12 +2517,13 @@ async fn decision_for_file(
         .fragment_index(id, &vod_identity)
         .await?
         .is_some();
-    let requires_hls = remux_requires_hls(
-        &file,
-        &decision,
-        q.caps_v2.as_ref(),
-        vod_video.promotes_parameter_sets(),
-    )?;
+    let requires_hls = processed_hdr10
+        || remux_requires_hls(
+            &file,
+            &decision,
+            q.caps_v2.as_ref(),
+            vod_video.promotes_parameter_sets(),
+        )?;
 
     let caps_v2_version = q.caps_v2.as_ref().map(|caps| caps.v);
     let caps_v2_transports = q.caps_v2.as_ref().map(|caps| caps.transports.as_slice());

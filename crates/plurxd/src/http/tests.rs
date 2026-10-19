@@ -14732,6 +14732,151 @@ async fn the_decision_carries_an_executable_delivery_plan() {
     assert_eq!(body["delivered_dynamic_range"], "sdr", "{body}");
 }
 
+/// Avatar on a Pixel 11 (no Dolby Vision decoder) came back as a progressive
+/// remux of its HDR10 base: HDR10-E is applied only on an HLS session, so
+/// the Developer setting had no effect there. With the setting on, a DV
+/// source a non-DV client would receive as HDR10 comes over HLS; with it off
+/// the decision is unchanged.
+#[tokio::test]
+async fn processed_hdr10_setting_routes_a_non_dv_client_over_hls() {
+    use plurx_core::domain::{AudioStream, DolbyVisionFacts, ProbeResult};
+
+    crate::transcode::require_ffmpeg();
+    let system = crate::state::SystemInfo {
+        dovi_rpu: true,
+        dolby_vision_convert: true,
+        ..Default::default()
+    };
+    let (app, state) = test_state_with_system(system);
+    let admin = setup_admin(&app).await;
+    let seeded = seed_content(&state).await;
+    let seed = |profile: i64, container: &str, audio: &str| ProbeResult {
+        duration_ms: Some(12_000),
+        container: Some(container.into()),
+        video_codec: Some("hevc".into()),
+        video_profile: Some("Main 10".into()),
+        width: Some(640),
+        height: Some(360),
+        bit_depth: Some(10),
+        hdr: Some("dolby_vision".into()),
+        hdr_format: Some(format!(
+            "Dolby Vision · Profile {profile} (HDR10-compatible)"
+        )),
+        dolby_vision: DolbyVisionFacts {
+            profile: Some(profile),
+            level: Some(6),
+            bl_compat_id: Some(1),
+            el_present: Some(profile == 7),
+            rpu_present: Some(true),
+        },
+        bitrate: Some(2_000_000),
+        audio_streams: vec![AudioStream {
+            index: 0,
+            codec: audio.into(),
+            channels: Some(2),
+            language: Some("eng".into()),
+            default: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut files = Vec::new();
+    for (kind, probe) in [
+        ("closed-gop", seed(7, "mkv", "truehd")),
+        ("open-gop", seed(8, "mp4", "aac")),
+    ] {
+        let source = plurx_core::testfixtures::source(kind);
+        let metadata = std::fs::metadata(&source).expect("DV fixture metadata");
+        files.push(
+            state
+                .store
+                .upsert_file(
+                    seeded.movie,
+                    &source.to_string_lossy(),
+                    metadata.len() as i64,
+                    1,
+                    &probe,
+                )
+                .await
+                .expect("seed DV source"),
+        );
+    }
+    let caps = |transports: Value| {
+        json!({
+            "v": 2,
+            "client": {"kind": "android", "build": "175"},
+            "video": [{
+                "codec": "hevc",
+                "profiles": ["main10"],
+                "max_height": 2160,
+                "present": ["sdr", "pq"],
+                "dv_profiles": []
+            }],
+            "audio": ["aac"],
+            "containers": ["mp4", "mkv"],
+            "transports": transports,
+            "display": {"hdr": true, "dolby_vision": false}
+        })
+    };
+    let decide = |file: i64, transports: Value| {
+        let app = app.clone();
+        let caps = caps(transports);
+        let admin = admin.clone();
+        async move {
+            let (status, body) = call(
+                &app,
+                post(
+                    &format!("/api/v1/files/{file}/decision"),
+                    Some(&admin),
+                    json!({"caps": caps}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+    };
+    let both = || json!(["progressive", "hls"]);
+    // Setting off: the ordinary progressive delivery of the HDR10 base.
+    for file in &files {
+        let body = decide(*file, both()).await;
+        assert_eq!(body["delivered_dynamic_range"], "hdr10", "{body}");
+        assert_ne!(body["method"], "transcode", "{body}");
+        assert!(body["delivery"].get("requires_hls").is_none(), "{body}");
+    }
+
+    let (status, saved) = call(
+        &app,
+        put(
+            "/api/v1/settings",
+            Some(&admin),
+            json!({"dolby_vision_hdr_processing": true}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    for file in &files {
+        let body = decide(*file, both()).await;
+        assert_eq!(body["method"], "remux", "{body}");
+        assert_eq!(body["delivery"]["requires_hls"], true, "{body}");
+        assert_eq!(body["delivered_dynamic_range"], "hdr10", "{body}");
+        assert!(
+            body["reasons"]
+                .as_array()
+                .expect("reasons")
+                .iter()
+                .any(|reason| reason.as_str().is_some_and(|text| text.contains("HDR10"))),
+            "{body}"
+        );
+        // A client that cannot take HLS keeps its ordinary delivery.
+        let progressive = decide(*file, json!(["progressive"])).await;
+        assert!(
+            progressive["delivery"].get("requires_hls").is_none(),
+            "{progressive}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_progressive() {
     use plurx_core::domain::{AudioStream, DolbyVisionFacts, ProbeResult};

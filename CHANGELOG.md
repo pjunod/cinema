@@ -22,6 +22,9 @@ bump may break compatibility and a **patch** bump never does.
 - Apple Resume retries interrupted native seeks once and retains the saved position when preparation fails or the player closes.
 - Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout; framework-owned tabs preserve fullscreen playback after switching destinations.
 
+- Non-Dolby-Vision clients that support HLS are offered a segmented HDR10-base copy when Developer → DV processing is enabled, so the HLS processing path can apply HDR10-E instead of silently bypassing it with a progressive remux. Setting-off and progressive-only delivery remain unchanged; actual processing and any decline are reported by the HLS session.
+- Continuous AVC fallback catalogs exclude rows outside H.264 High@5.0 at the source's measured cadence, including 2160p, instead of offering a family that fails at session creation. An unknown or nominal-only cadence offers no continuous family.
+
 ### Added
 
 - Web player shows the Dolby Vision enhancement the server reports: FEL / RPU / DYN pills after the dynamic-range badge for what is active, and an Enhancement row in Playback info with one neutral line per enhancement explaining it or why it is unused. Processed-HDR10 pills appear only while a current HDR10-E report is held.

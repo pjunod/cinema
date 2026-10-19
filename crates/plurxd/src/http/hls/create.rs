@@ -431,17 +431,43 @@ pub async fn continuous_candidates(
             },
         )
         .await;
-    Ok(Json(continuous_candidates_from_workers(&workers)))
+    // The same facts the plan checks: a nominal-only rate is not measured.
+    let rate = state
+        .transcode
+        .quality_source_facts(&source)
+        .await
+        .and_then(|facts| {
+            (facts.frame_rate().provenance() != plurx_core::transcode::FrameRateProvenance::Nominal)
+                .then(|| facts.frame_rate().value())
+                .flatten()
+        });
+    Ok(Json(continuous_candidates_from_workers(&workers, rate)))
 }
 
+/// `rate` is the source's measured cadence, the one the continuous AVC plan
+/// encodes at. A family member must fit H.264 High@5.0 at that cadence
+/// (`continuous_avc_envelope_accepts`), or its plan is refused at session
+/// creation. A 2160p row is never in the envelope, and an unmeasured rate
+/// offers no family at all.
 pub(super) fn continuous_candidates_from_workers(
     workers: &[crate::media_pool::WorkerQualityCandidate],
+    rate: Option<plurx_core::transcode::Rational>,
 ) -> ContinuousCandidatesResponse {
     let compatible: Vec<_> = workers
         .iter()
         .filter(|entry| {
             use plurx_core::playback::candidate::CandidateRoute;
-            entry.dispatch_supported
+            rate.is_some_and(|rate| {
+                plurx_core::transcode::continuous_avc_envelope_accepts(
+                    entry.candidate.width,
+                    entry.candidate.height,
+                    rate.numerator(),
+                    rate.denominator(),
+                    entry.candidate.average_bps.map_or(1, |bps| {
+                        u32::try_from(bps.div_ceil(1000)).unwrap_or(u32::MAX)
+                    }),
+                )
+            }) && entry.dispatch_supported
                 && !entry.partial
                 && entry.candidate.route == CandidateRoute::Encode
                 && entry.candidate.decoder_compatible
