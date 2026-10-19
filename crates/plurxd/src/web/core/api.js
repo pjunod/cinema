@@ -199,7 +199,18 @@ function refreshClientErrorReporterAuth(){
 function clientLog(ev){
   try{
     const state=ev?.event==="stall"?"stalled":ev?.event==="stall_end"||ev?.event==="stall_recovery"?"recovered":ev?.level==="error"?"failed":"unknown";
-    if(TOKEN&&ME&&window.CinemaDiagnostics?.owns(PLAYER?.mediaAttachment,AUTH_GENERATION))observeDiagnosticRequest("playback",ev?.level==="error"?"error":"state",{state,mode:PLAYER?.method||"unknown",...(state==="failed"?{failure:"delivery"}:{})});
+    const hasSessionId=ev!=null&&Object.prototype.hasOwnProperty.call(ev,"session_id");
+    const reportedSession=hasSessionId?ev.session_id:ev?.session;
+    const hasReportedSession=hasSessionId||(ev!=null&&Object.prototype.hasOwnProperty.call(ev,"session"));
+    const ownsReportedAttempt=ev?.attempt!=null&&ev.attempt===PLAYER?.attemptId
+      &&(ev.file_id==null||String(ev.file_id)===String(PLAYER?.fileId))
+      &&(ev.attachment_id==null||ev.attachment_id===PLAYER?.mediaAttachment?.id);
+    const ownsReportedSession=!hasReportedSession||(reportedSession!=null
+      ?reportedSession===PLAYER?.sessionId||reportedSession===PLAYER?.sharedDirect?.session_id
+      :PLAYER?.sessionId==null&&PLAYER?.sharedDirect==null&&ownsReportedAttempt);
+    // A late failure still reaches the server under its original session,
+    // but must not mark the replacement's local diagnostic attachment failed.
+    if(TOKEN&&ME&&ownsReportedSession&&window.CinemaDiagnostics?.owns(PLAYER?.mediaAttachment,AUTH_GENERATION))observeDiagnosticRequest("playback",ev?.level==="error"?"error":"state",{state,mode:PLAYER?.method||"unknown",...(state==="failed"?{failure:"delivery"}:{})});
     const p=/** @type {Player} */(PLAYER||{}), s=p.source||{};
     const body=Object.assign({
       ua:browserLabel(),

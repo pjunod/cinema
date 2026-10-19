@@ -604,6 +604,10 @@ async function refreshQualityCandidates(p){
   if(p.abr.catalogRefreshing||p.directedChange&&!p.directedChange.settled) return false;
   p.abr.catalogRefreshing=true;
   const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
+  const retainedProcessed=qualityCatalogSelectionCurrent(p)
+    &&p.abr.requestedCandidateId===p.qualityCandidateId
+    ?(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId
+      &&candidate.processed_hdr10===true):null;
   try{
     const decision=await askDecision(playbackFileContextForPlayer(p),qualityForce(),
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
@@ -615,7 +619,17 @@ async function refreshQualityCandidates(p){
     p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
-    p.abr.requestedCandidateId=null;
+    // Dropping this exact running recipe changes named Auto into unnamed
+    // Auto on the next control exchange. Its ordinary replan can replace
+    // HDR10-E with the source's HDR10 base despite no viewer selection change.
+    // Retain it only while the refreshed destination still admits its bytes.
+    p.abr.requestedCandidateId=retainedProcessed
+      &&Array.isArray(retainedProcessed.recipe_digest)&&retainedProcessed.recipe_digest.length===32
+      &&(p.qualityCandidates||[]).some(candidate=>candidate.id===retainedProcessed.id
+        &&candidate.processed_hdr10===true&&candidate.decoder_compatible===true
+        &&Array.isArray(candidate.recipe_digest)&&candidate.recipe_digest.length===32
+        &&candidate.recipe_digest.every((byte,index)=>byte===retainedProcessed.recipe_digest[index]))
+      ?retainedProcessed.id:null;
     if(p.abr.candidateState) p.abr.candidateState.upgradeSinceMs=null;
     return Array.isArray(p.qualityCandidates);
   }catch(e){ return false; }

@@ -209,6 +209,85 @@ impl SegmentEvidence {
     }
 }
 
+/// Causal helper result, retained separately from the encoder's retirement.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+pub(crate) enum HelperOutcome {
+    Completed,
+    Cancelled,
+    Failed(String),
+}
+
+/// One authoritative result, published before the supervisor's cleanup.
+/// Clones observe the same retained value, including after child retirement.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct HelperCompletion(tokio::sync::watch::Receiver<Option<HelperOutcome>>);
+#[cfg(target_os = "linux")]
+impl HelperCompletion {
+    pub(crate) fn outcome(&self) -> Option<HelperOutcome> {
+        self.0.borrow().clone()
+    }
+    pub(crate) async fn wait(mut self) -> HelperOutcome {
+        loop {
+            if let Some(outcome) = self.outcome() {
+                return outcome;
+            }
+            if self.0.changed().await.is_err() {
+                return HelperOutcome::Failed("DV helper completion owner lost".into());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn supervise_streaming_helper(
+    helper: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+    helper_cancel: CancellationToken,
+    cancel: CancellationToken,
+    slot: std::sync::Weak<ProducerSlot>,
+    registration: ProducerRegistration,
+) -> HelperCompletion {
+    let (completed, completion) = tokio::sync::watch::channel(None);
+    tokio::spawn(async move {
+        tokio::pin!(helper);
+        let retirement = registration.retirement();
+        let result = tokio::select! {
+            result = &mut helper => result,
+            _ = cancel.cancelled() => {
+                helper_cancel.cancel();
+                // Retire the encoder before joining a helper that may be
+                // blocked writing into it. The original slot still owns reap.
+                if let Some(slot) = slot.upgrade() {
+                    let _ = slot.request_registered_retirement(&registration).await;
+                }
+                helper.await
+            },
+            _ = retirement.cancelled() => { helper_cancel.cancel(); helper.await },
+        };
+        let outcome = if cancel.is_cancelled() || retirement.is_cancelled() {
+            HelperOutcome::Cancelled
+        } else {
+            match result {
+                Ok(()) => HelperOutcome::Completed,
+                Err(cause) => HelperOutcome::Failed(cause),
+            }
+        };
+        let finished = matches!(outcome, HelperOutcome::Completed);
+        let _ = completed.send_replace(Some(outcome));
+        if finished {
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = retirement.cancelled() => {},
+            }
+        }
+        if let Some(slot) = slot.upgrade() {
+            let _ = slot.request_registered_retirement(&registration).await;
+        }
+    });
+    HelperCompletion(completion)
+}
+
 /// Same registered pipes/writer barrier the existing producer consumes. On
 /// unsuccessful handoff the detached owner retires this exact generation.
 pub(crate) struct SegmentProducer {
@@ -217,7 +296,8 @@ pub(crate) struct SegmentProducer {
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     unaccepted_cancel: Option<CancellationToken>,
-    helper_completion: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    #[cfg(target_os = "linux")]
+    helper_completion: Option<HelperCompletion>,
     #[cfg(target_os = "linux")]
     evidence: Option<SegmentEvidence>,
 }
@@ -230,9 +310,8 @@ impl SegmentProducer {
     /// Reports actual helper exit, source fencing and bounded observation capture.
     /// The consumer must validate those observations and final encoder bytes
     /// before publishing an interval or effective-processing report.
-    pub(crate) fn take_helper_completion(
-        &mut self,
-    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_helper_completion(&mut self) -> Option<HelperCompletion> {
         self.helper_completion.take()
     }
 
@@ -769,6 +848,7 @@ async fn run(
         stdout: Some(encoded.stdout),
         stderr: Some(encoded.stderr),
         unaccepted_cancel: Some(handoff_cancel),
+        #[cfg(target_os = "linux")]
         helper_completion: None,
         #[cfg(target_os = "linux")]
         evidence: None,
@@ -1055,18 +1135,12 @@ async fn run_streaming(
         request.at,
         Box::new(resources),
     );
-    let watched = registration.clone();
-    let slot = Arc::downgrade(&request.producer);
     let handoff_cancel = cancel.clone();
-    let (completed, completion) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let mut helper = helper;
-        let helper_result = tokio::select! {
-            result = &mut helper => result.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))),
-            _ = cancel.cancelled() => { helper_cancel.cancel(); if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
-            _ = watched.wait_confirmed_reap() => { helper_cancel.cancel(); helper.await.unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}"))) },
-        };
-        let helper_result = helper_result.and_then(|observations| {
+    let completed_helper = async move {
+        let helper_result = helper
+            .await
+            .unwrap_or_else(|e| Err(format!("streaming renderer owner failed: {e}")));
+        helper_result.and_then(|observations| {
             check_source(&watched_source)?;
             use std::io::Write;
             let _lease = (&evidence_lease, &evidence_hold);
@@ -1076,20 +1150,15 @@ async fn run_streaming(
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             )?;
             file.write_all(&observations).map_err(|e| e.to_string())
-        });
-        let failed = helper_result.is_err();
-        let _ = completed.send(helper_result);
-        if failed || cancel.is_cancelled() {
-            if let Some(slot) = slot.upgrade() {
-                let _ = slot.request_registered_retirement(&watched).await;
-            }
-        } else {
-            tokio::select! {
-                _ = cancel.cancelled() => { if let Some(slot) = slot.upgrade() { let _ = slot.request_registered_retirement(&watched).await; } },
-                _ = watched.wait_confirmed_reap() => {},
-            }
-        }
-    });
+        })
+    };
+    let completion = supervise_streaming_helper(
+        completed_helper,
+        helper_cancel,
+        cancel,
+        Arc::downgrade(&request.producer),
+        registration.clone(),
+    );
     Ok(SegmentProducer {
         registration,
         writers: Some(writers),
@@ -1466,7 +1535,7 @@ pub(crate) async fn physical_probe() {
     })
     .await
     .expect("predecessor slot fully settled");
-    let mut producer = probe_spawn(
+    let producer = probe_spawn(
         SegmentRequest {
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
@@ -1497,7 +1566,10 @@ pub(crate) async fn physical_probe() {
     .await
     .expect("physical graph handoff");
     #[cfg(target_os = "linux")]
+    let mut producer = producer;
+    #[cfg(target_os = "linux")]
     let evidence = producer.take_evidence();
+    #[cfg(target_os = "linux")]
     let completion = producer.take_helper_completion();
     let (registration, writers, stdout, stderr) = producer.into_parts();
     assert_eq!(
@@ -1529,11 +1601,12 @@ pub(crate) async fn physical_probe() {
         "encoder: {}",
         String::from_utf8_lossy(&diagnostic)
     );
+    #[cfg(target_os = "linux")]
     if let Some(completion) = completion {
-        completion
-            .await
-            .expect("streaming renderer completion")
-            .expect("streaming renderer success");
+        assert!(
+            matches!(completion.wait().await, HelperOutcome::Completed),
+            "streaming renderer success"
+        );
     }
     assert!(encoded.len() > 100, "actual encoded Matroska output");
     assert!(source.unchanged(), "same source revision retained");
@@ -1592,7 +1665,7 @@ pub(crate) async fn physical_probe() {
         );
     }
     let slot = Arc::new(ProducerSlot::new());
-    let mut unaccepted = probe_spawn(
+    let unaccepted = probe_spawn(
         SegmentRequest {
             renderer: std::env::var("PLURX_DV_SEGMENT_RENDERER")
                 .expect("renderer")
@@ -1626,6 +1699,9 @@ pub(crate) async fn physical_probe() {
     )
     .await
     .expect("actual unaccepted encoder handoff");
+    #[cfg(target_os = "linux")]
+    let mut unaccepted = unaccepted;
+    #[cfg(target_os = "linux")]
     let completion = unaccepted.take_helper_completion();
     let abandoned = unaccepted.registration.clone();
     assert_eq!(offsets.available_permits(), 0);
@@ -1634,8 +1710,9 @@ pub(crate) async fn physical_probe() {
         .await
         .expect("dropped actual handoff retires encoder");
     assert!(receipt.matches(&abandoned));
+    #[cfg(target_os = "linux")]
     if let Some(completion) = completion {
-        let _ = completion.await.expect("cancelled helper owned completion");
+        assert!(matches!(completion.wait().await, HelperOutcome::Cancelled));
     }
     assert_eq!(
         receipt.writers(),
@@ -1646,6 +1723,7 @@ pub(crate) async fn physical_probe() {
         .try_admit_bundle(1, cpu_threads, &estimate, Priority::Live)
         .is_some());
     assert!(source.unchanged());
+    #[cfg(target_os = "linux")]
     if streaming {
         let slot = Arc::new(ProducerSlot::new());
         let mut refused = probe_spawn(
@@ -1685,11 +1763,12 @@ pub(crate) async fn physical_probe() {
         let completion = refused
             .take_helper_completion()
             .expect("actual streaming completion");
-        assert!(tokio::time::timeout(Duration::from_secs(5), completion)
-            .await
-            .expect("refusal completion bounded")
-            .expect("refusal owner completes")
-            .is_err());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), completion.wait())
+                .await
+                .expect("refusal completion bounded"),
+            HelperOutcome::Failed(_)
+        ));
         let registration = refused.registration.clone();
         drop(refused);
         tokio::time::timeout(Duration::from_secs(5), registration.wait_confirmed_reap())

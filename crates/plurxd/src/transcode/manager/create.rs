@@ -2443,9 +2443,16 @@ impl TranscodeManager {
                         let worker = credit.clone().try_claim_worker().ok_or("DV preparation credit already claimed")?;
                         (Some(credit), crate::dv_segment::SegmentAdmission::Retained(worker))
                     } else { (None, crate::dv_segment::SegmentAdmission::Owned(bundle)) };
-                    let (verified, selected) = runtime.execute_until(file, &processed_plan, &processed_options, grid,
+                    let (verified, selected) = match runtime.execute_until(file, &processed_plan, &processed_options, grid,
                         entry, &executable.path, admission,
-                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None, processing_deadline).await?;
+                        Arc::new(crate::prodrun::ProducerSlot::new()), tokio_util::sync::CancellationToken::new(), None, processing_deadline).await {
+                            // This awaited owner still holds the frozen graph's
+                            // admission. Dropping it never reaches this branch;
+                            // normal cancellation makes no backend claim.
+                            Err(cause) => { runtime.refuse_episode(); return Err(cause); },
+                            Ok(crate::vodencode::dv_runtime::WindowOutcome::Completed(window)) => window,
+                            Ok(crate::vodencode::dv_runtime::WindowOutcome::Cancelled) => return Err("processed preparation cancelled".into()),
+                        };
                     runtime.prepared.lock().map_err(|_| "DV prepared window lock poisoned")?
                         .replace((entry.index, verified));
                     Ok::<_, String>(((processed_plan, processed_options, processed_resources,
