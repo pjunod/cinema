@@ -16,6 +16,7 @@
 #include <libavutil/sha.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <va/va.h>
 
@@ -166,6 +167,21 @@ static void open_movie_io(AVFormatContext *input, const char *source) {
   input->pb = movie_avio;
   input->flags |= AVFMT_FLAG_CUSTOM_IO;
 }
+// A queued export may still be sampling the decoded surfaces of the frame
+// just rendered; references held here keep the decoder from reusing them
+// until that frame has been written.
+static AVFrame *held[2];
+static void release_held(void) {
+  for (int k = 0; k < 2; k++)
+    av_frame_free(&held[k]);
+}
+static void hold_rendered_pair(void) {
+  release_held();
+  for (int k = 0; k < (base_only ? 1 : 2); k++) {
+    held[k] = av_frame_clone(layers[k].queue[0]);
+    need(held[k] != NULL, "rendered surface hold");
+  }
+}
 static void drop_pair(void) {
   for (int k = 0; k < (base_only ? 1 : 2); k++) {
     av_frame_free(&layers[k].queue[0]);
@@ -174,23 +190,99 @@ static void drop_pair(void) {
             (size_t)layers[k].count * sizeof(AVFrame *));
   }
 }
-// The packed buffer remains owned by gpu_render for the duration of this
-// synchronous write. A blocked pipe provides backpressure without a frame
-// queue.
+// A blocked pipe provides backpressure without a frame queue: at most one
+// frame is being written while the next is rendered.
+static void write_frame(const uint8_t *rgb, size_t bytes, int64_t pts,
+                        int64_t duration);
+// Exported frames are written to the encoder pipe on a writer thread, so a
+// frame's 25 MB pipe write overlaps the next frame's decode and GPU work. The
+// yuv420p10 export downloads into alternating buffers, and a frame is queued
+// only once the writer has finished the frame before it, so the buffer being
+// written is never the one being downloaded into. Any other export frees its
+// buffer when the sink returns, so it waits for its own write.
+static pthread_t writer_thread;
+static pthread_mutex_t writer_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t writer_cond = PTHREAD_COND_INITIALIZER;
+static struct {
+  const uint8_t *data;
+  pl_buf buf;
+  size_t bytes;
+  int64_t pts, duration;
+  bool pending, busy, stop;
+} writer;
+static void *writer_main(void *unused) {
+  (void)unused;
+  pthread_mutex_lock(&writer_lock);
+  for (;;) {
+    while (!writer.pending && !writer.stop)
+      pthread_cond_wait(&writer_cond, &writer_lock);
+    if (!writer.pending)
+      break;
+    const uint8_t *data = writer.data;
+    pl_buf buf = writer.buf;
+    size_t bytes = writer.bytes;
+    int64_t pts = writer.pts, duration = writer.duration;
+    writer.pending = false;
+    writer.busy = true;
+    pthread_mutex_unlock(&writer_lock);
+    dv_yuv10_wait_buffer(buf);
+    write_frame(data, bytes, pts, duration);
+    pthread_mutex_lock(&writer_lock);
+    writer.busy = false;
+    pthread_cond_broadcast(&writer_cond);
+  }
+  pthread_mutex_unlock(&writer_lock);
+  return NULL;
+}
+static void writer_wait_idle(void) {
+  pthread_mutex_lock(&writer_lock);
+  while (writer.pending || writer.busy)
+    pthread_cond_wait(&writer_cond, &writer_lock);
+  pthread_mutex_unlock(&writer_lock);
+}
 static void write_rgb(const uint8_t *rgb, size_t bytes, void *unused) {
   (void)unused;
+  writer_wait_idle();
+  // The previous frame is written, so the GPU has finished reading its
+  // decoded surfaces.
+  release_held();
+  pthread_mutex_lock(&writer_lock);
+  writer.data = rgb;
+  writer.buf = EXPORT_YUV10 ? dv_yuv10_context.frame_buf : NULL;
+  writer.bytes = bytes;
+  writer.pts = output_pts;
+  writer.duration = output_duration;
+  writer.pending = true;
+  pthread_cond_broadcast(&writer_cond);
+  pthread_mutex_unlock(&writer_lock);
+  if (!EXPORT_YUV10)
+    writer_wait_idle();
+}
+static void writer_start(void) {
+  need(pthread_create(&writer_thread, NULL, writer_main, NULL) == 0,
+       "export writer thread");
+}
+static void writer_finish(void) {
+  pthread_mutex_lock(&writer_lock);
+  writer.stop = true;
+  pthread_cond_broadcast(&writer_cond);
+  pthread_mutex_unlock(&writer_lock);
+  need(pthread_join(writer_thread, NULL) == 0, "export writer join");
+}
+static void write_frame(const uint8_t *rgb, size_t bytes, int64_t pts,
+                        int64_t duration) {
   if (!nut_output) {
     need(fwrite(rgb, 1, bytes, rgb_output) == bytes, "RGB frame write");
     return;
   }
-  need(bytes <= INT_MAX && output_pts >= 0 && output_duration > 0,
+  need(bytes <= INT_MAX && pts >= 0 && duration > 0,
        "bounded nonnegative NUT presentation interval");
   AVPacket *packet = av_packet_alloc();
   need(packet != NULL, "NUT packet allocation");
   packet->data = (uint8_t *)rgb;
   packet->size = (int)bytes;
   packet->stream_index = nut_stream->index;
-  need(nut_scale_interval(output_pts, output_duration, nut_tick_scale,
+  need(nut_scale_interval(pts, duration, nut_tick_scale,
                           &packet->pts, &packet->duration),
        "NUT timestamp interval overflow");
   packet->dts = packet->pts;
@@ -497,6 +589,8 @@ static void render_pairs(void) {
       gpu_render(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
                  chroma(bl->chroma_location), chroma(el->chroma_location),
                  write_rgb, NULL, debug_frames);
+    if (EXPORT_YUV10 && dv_yuv10_context.frame_buf)
+      hold_rendered_pair();
     char rpu_path[64];
     int rpu_length =
         snprintf(rpu_path, sizeof(rpu_path), "rpus/frame-%03d.nal", emitted);
@@ -826,6 +920,7 @@ int main(int argc, char **argv) {
   if (streaming)
     open_nut(argv[11]);
   dv_host_pack = pack;
+  writer_start();
   const char *decode_device = getenv("PLURX_DV_DECODE_DEVICE");
   if (decode_device && *decode_device) {
     if (av_hwdevice_ctx_create(&hw_device, AV_HWDEVICE_TYPE_VAAPI,
@@ -915,6 +1010,8 @@ int main(int argc, char **argv) {
            "source EOF extent unavailable or inconsistent");
     }
   }
+  writer_finish();
+  release_held();
   if (streaming) {
     need(av_write_trailer(nut_output) >= 0, "NUT trailer");
     need(avio_closep(&nut_output->pb) >= 0, "NUT output close");

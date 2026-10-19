@@ -348,12 +348,14 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
       require(context.textures[layer][c] != NULL, "persistent native plane texture");
     }
   }
-  context.output_texture = pl_tex_create(gpu,
-      pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
-                    .renderable = true, .host_readable = true,
-                    .sampleable = EXPORT_YUV10));
+  context.output_texture = EXPORT_YUV10 ? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT) : NULL;
+  if (!context.output_texture)
+    context.output_texture = pl_tex_create(gpu,
+        pl_tex_params(.w = EXPORT_WIDTH, .h = EXPORT_HEIGHT, .format = format,
+                      .renderable = true, .host_readable = true,
+                      .sampleable = EXPORT_YUV10));
   require(context.output_texture != NULL, "persistent export float texture");
-  require(!EXPORT_YUV10 || dv_yuv10_init(gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
+  require(!EXPORT_YUV10 || dv_yuv10_init(log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");
   if (EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
     context.native_texture = pl_tex_create(gpu,
@@ -516,6 +518,7 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
     write_rgb(dv_yuv10_context.frame, dv_yuv10_frame_bytes(), rgb_output);
     char yuv10_field[86] = "";
     if (dv_frame_hashes()) {
+      dv_yuv10_wait();
       struct AVSHA *sha = av_sha_alloc();
       uint8_t digest[32];
       char hash[65];

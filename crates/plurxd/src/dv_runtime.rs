@@ -1717,3 +1717,58 @@ mod processed_selection_has_no_software_gates {
         assert!(!admit.contains("production_evidence"), "{admit}");
     }
 }
+
+#[cfg(test)]
+mod hdr10e_export_throughput {
+    /// One body from a C source: from `start` to the first top-level `}`.
+    fn c_body<'a>(source: &'a str, start: &str) -> &'a str {
+        source
+            .split_once(start)
+            .expect("C function")
+            .1
+            .split_once("\n}\n")
+            .expect("C function end")
+            .0
+    }
+
+    /// 4K HDR10-E fell behind real time on the GPU export, not the decode:
+    /// the reconstruction wrote 32-bit float, three passes read it back, and
+    /// every frame waited for its own download. The export now renders into
+    /// 16 bits, queues the download, and only the writer waits for it — so
+    /// a decoded surface stays held until its frame has been written.
+    #[test]
+    fn the_4k_export_renders_in_16_bits_and_queues_its_download() {
+        let export = include_str!("../../../tools/dv_processing/yuv420p10.h");
+        let main = include_str!("../../../tools/dv_processing/segment_decode_render.c");
+        for renderer in [
+            include_str!("../../../tools/dv_processing/fel_renderer.h"),
+            include_str!("../../../tools/dv_processing/base_dv_renderer.h"),
+        ] {
+            assert!(
+                renderer.contains("? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT)")
+            );
+        }
+        let source = c_body(export, "static pl_tex dv_yuv10_source_texture(");
+        assert!(source.contains("PL_FMT_UNORM, 4, 16, 16"), "{source}");
+        let queued = c_body(export, "static bool dv_yuv10_export(");
+        assert!(queued.contains(".buf = buf"), "{queued}");
+        for wait in ["pl_buf_poll", "pl_gpu_finish", "dv_yuv10_wait"] {
+            assert!(!queued.contains(wait), "the export waits: {wait}");
+        }
+        let writer = c_body(main, "static void *writer_main(");
+        let waited = writer
+            .find("dv_yuv10_wait_buffer(buf)")
+            .expect("writer waits");
+        assert!(waited < writer.find("write_frame(").expect("writer writes"));
+        let rendering = c_body(main, "static void render_pairs(");
+        let held = rendering
+            .find("hold_rendered_pair()")
+            .expect("surfaces held");
+        assert!(held < rendering.rfind("drop_pair()").expect("pair dropped"));
+        let handoff = c_body(main, "static void write_rgb(");
+        let idle = handoff
+            .find("writer_wait_idle()")
+            .expect("previous frame written");
+        assert!(idle < handoff.find("release_held()").expect("surfaces released"));
+    }
+}
