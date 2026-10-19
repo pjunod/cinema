@@ -89,6 +89,53 @@ class QualificationCase(unittest.TestCase):
             self.assertEqual(value["failure"], "no real seat")
             self.assertFalse(path.with_suffix(".json.partial").exists())
 
+    def test_cold_fixture_cache_fetches_both_committed_locks_before_overlay_resolution(self):
+        spec = importlib.util.spec_from_file_location("qualification_fixture_builder", HERE / "build-local-fixtures.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        directory = HERE.parents[1] / "target/desktop-qualification-tests"
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=directory) as fixture:
+            root = Path(fixture)
+            source = root / "source"
+            manifests = [source / "Cargo.toml", source / "tests/desktop/stage-driver/Cargo.toml"]
+            for manifest in manifests:
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                manifest.write_text('version = "1.2.3"\n')
+                manifest.with_name("Cargo.lock").write_text("committed lock\n")
+            original = {p: p.read_bytes() for manifest in manifests for p in (manifest, manifest.with_name("Cargo.lock"))}
+            arguments = ["build-local-fixtures.py", "--candidate", "a" * 40, "--source", str(source),
+                         "--artifacts", str(root / "artifacts"), "--work", str(root / "work"),
+                         "--output", str(root / "receipts")]
+            warmed = set()
+
+            def fetch(command, **_kwargs):
+                # Model a fresh runner: each independent locked graph must be
+                # fetched before offline overlay resolution may be reached.
+                self.assertEqual(command[:4], ["cargo", "fetch", "--locked", "--manifest-path"])
+                warmed.add(Path(command[4]))
+
+            def offline_overlay(*_args):
+                self.assertEqual(warmed, set(manifests))
+                self.assertEqual({p: p.read_bytes() for p in original}, original)
+                raise RuntimeError("offline overlay reached with both dependency graphs ready")
+
+            with patch.object(sys, "argv", arguments), patch.object(module, "hosted_guard"), \
+                    patch.object(module, "run", side_effect=fetch), patch.object(module, "load", side_effect=offline_overlay):
+                with self.assertRaisesRegex(RuntimeError, "both dependency graphs ready"):
+                    module.main()
+            self.assertEqual(warmed, set(manifests))
+            self.assertFalse((root / "work").exists())
+            # A fetch failure must stop before creating an overlay or private key.
+            with patch.object(sys, "argv", arguments), patch.object(module, "hosted_guard"), \
+                    patch.object(module, "run", side_effect=RuntimeError("registry unavailable")), \
+                    patch.object(module, "load") as overlay:
+                with self.assertRaisesRegex(RuntimeError, "registry unavailable"):
+                    module.main()
+            overlay.assert_not_called()
+            self.assertFalse((root / "work").exists())
+            self.assertEqual(json.loads((root / "receipts/build-and-update.json").read_bytes())["status"], "failed")
+
     @unittest.skipUnless(shutil.which("dpkg-deb"), "real deb archive qualification requires native Linux dpkg-deb")
     def test_real_deb_fixture_repackage_updates_exact_cohort_identity_and_checksums(self):
         spec = importlib.util.spec_from_file_location("qualification_fixture_builder", HERE / "build-local-fixtures.py")

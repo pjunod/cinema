@@ -112,6 +112,12 @@ def main():
         hosted_guard(a.candidate, mutate=True)
         if a.work.exists() or a.work.resolve().is_relative_to(a.output.resolve()):
             raise RuntimeError("fixture work must be fresh and outside uploaded receipt output")
+        # A new hosted VM has none of the artifact builders' Cargo cache.
+        # Fetch the unchanged committed locks before overlay version resolution,
+        # which deliberately remains offline for both manifests.
+        for manifest in (a.source / "Cargo.toml", a.source / "tests/desktop/stage-driver/Cargo.toml"):
+            run(["cargo", "fetch", "--locked", "--manifest-path", manifest], timeout=600)
+        module = load("qualification_overlay", HERE / "create-overlay.py")
         a.work.mkdir(parents=True)
         private = a.work / "private"
         private.mkdir(mode=0o700)
@@ -124,7 +130,6 @@ def main():
         base_version = re.search(r'\[workspace\.package\]\n[^\[]*?version = "([0-9]+\.[0-9]+\.[0-9]+)"', text)[1]
         major, minor, patch = map(int, base_version.split("."))
         versions = [base_version, f"{major}.{minor}.{patch + 1}"]
-        module = load("qualification_overlay", HERE / "create-overlay.py")
         os.environ["CARGO_TARGET_DIR"] = str(a.work / "cargo-target")
         os.environ["CARGO_BUILD_JOBS"] = "2"
         overlays = []
