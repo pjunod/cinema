@@ -121,7 +121,31 @@ class KnownRedContractTest(unittest.TestCase):
         validate_listed_tests(subtitle_fixtures, (subtitle_fixture.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(subtitle_fixtures, ())
-        admitted_identities = {capture_identity, public_wire_identity} | fixture_ids
+        # Native desktop harnesses are exact opt-in fixtures, not known-red
+        # product tests. The child entry is invoked by its parent regression;
+        # privileged fixtures are executed only in a disposable installation.
+        desktop_harness_reasons = {
+            "crates/plurx-desktop-control/tests/linux_launch_lock.rs::"
+            "linux_launch_lock_allows_only_the_service_group_and_root":
+                "requires disposable Linux root and explicit service UID/GID and unrelated UID fixtures",
+            "crates/plurx-tray/src/tests.rs::tests::process::"
+            "real_controller_runner_writes_effective_xdg_and_refuses_invalid_values":
+                "requires an explicitly supplied real controller and root-owned disposable installation record",
+            "crates/plurx-tray/src/tests.rs::tests::process::xdg_runner_child":
+                "subprocess entry used by the XDG runner regressions",
+        }
+        desktop_harnesses = tuple(
+            item for item in ignored if item.identity in desktop_harness_reasons
+        )
+        self.assertEqual(
+            {item.identity: item.reason for item in desktop_harnesses},
+            desktop_harness_reasons,
+        )
+        admitted_identities = (
+            {capture_identity, public_wire_identity}
+            | fixture_ids
+            | desktop_harness_reasons.keys()
+        )
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.
         # #811 adds three operator-run ffmpeg 8 fixture checks (captured
