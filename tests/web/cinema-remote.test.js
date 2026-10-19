@@ -155,6 +155,102 @@ test("actual VOD close pauses and removes local source before pending progress o
   vm.runInContext(shipped("closePlayer","player/stats.js"),h.context);
   h.context.closePlayer();assert.equal(video.paused,true);assert.equal(video.sourceRemoved,true);assert.equal(h.modal.classList.contains("open"),false);
 });
+function vodPageHideHarness(){
+  const h=harness(),events=new Map(),video=h.node("video","VIDEO"),calls=[];
+  video.paused=false;video.pause=()=>{video.paused=true;};
+  video.removeAttribute=()=>{video.sourceRemoved=true;};video.load=()=>{};
+  h.modal.classList.add("open");
+  const noop=()=>{},play=()=>{};
+  Object.assign(h.context,{WATCH_CLOSE_PROMISE:null,WATCH_GENERATION:0,WATCH:null,
+    watchDetach:()=>null,PLAY_OPEN_GATE:{invalidate:()=>calls.push("invalidate")},play,
+    reportProgress:()=>new Promise(()=>{}),beginPlaybackPreparation:{},
+    exitPresentationModes:noop,clearPlayerMediaSession:noop,supersedePlaybackControlIntent:noop,
+    finishPlaybackSeekTelemetry:noop,stopPlayerTimers:noop,clearInterval:noop,
+    STATS_TIMER:null,resetPlaybackSurface:noop,cancelPendingSeek:noop,
+    PLAYER_WIRED:false,hasPendingPlaybackOpen:()=>false,pbWireSeek:noop,wirePlayerMedia:noop,notifyPlaybackControl:noop,
+    cancelHlsStartup:noop,playbackTransportMarker:()=>({}),
+    playbackSurfaceStep:noop,playbackSurfaceGeneration:()=>({}),
+    supersedeDirectedChange:noop,cancelPreparedFirstFrame:noop,
+    abandonPreparedReplacement:p=>{
+      if(p?.prepared){calls.push("destroy:"+p.prepared.sessionId);p.prepared=null;}
+    },
+    API:"/api/v1",fetch:(url,options)=>{
+      calls.push("release:"+url.split("/").pop());
+      assert.equal(options.method,"DELETE");assert.equal(options.keepalive,true);
+      assert.equal(options.headers.authorization,"Bearer token");
+      return new Promise(()=>{});
+    }});
+  h.context.window.addEventListener=(event,fn)=>events.set(event,fn);
+  for(const name of ["playbackTransportEvents","pausePlaybackInternally","rememberPlaybackTransportIntent",
+    "resetPlaybackTransportEvents","resetMediaSource","destroyHlsInstance","teardownHls","retirePlaybackPredecessor"])
+    vm.runInContext(shipped(name,"player/decode-margin.js"),h.context);
+  vm.runInContext(shipped("releaseSession","player/directed-change.js"),h.context);
+  vm.runInContext(shipped("closePlayer","player/stats.js"),h.context);
+  vm.runInContext(shipped("closeVodForPageHide","player/transport.js"),h.context);
+  vm.runInContext(shipped("wirePlayer","player/transport.js"),h.context);
+  h.context.wirePlayer();
+  function session(id){return {fileId:1,sessionId:id,hls:{destroy:()=>calls.push("destroy:"+id)}};}
+  return {...h,video,calls,session,hide:persisted=>events.get("pagehide")({persisted})};
+}
+test("VOD pagehide destroys and releases current outgoing and staged sessions without awaiting progress",()=>{
+  const h=vodPageHideHarness(),p=h.session("current");
+  p.mediaPredecessor=h.session("outgoing");
+  p.prepared={sessionId:"staged"};
+  h.context.PLAYER=p;
+  h.hide(false);
+  for(const id of ["current","outgoing","staged"]){
+    assert.equal(h.calls.filter(call=>call==="release:"+id).length,1);
+    assert.ok(h.calls.indexOf("destroy:"+id)<h.calls.indexOf("release:"+id));
+  }
+  assert.equal(p.sessionId,null);assert.equal(p.mediaPredecessor,null);
+  assert.equal(h.video.sourceRemoved,true);assert.equal(h.modal.classList.contains("open"),false);
+  const count=h.calls.length;h.hide(false);assert.equal(h.calls.length,count);
+});
+test("a bfcache VOD pagehide restores a closed player instead of a retired session",()=>{
+  const h=vodPageHideHarness(),p=h.session("cached");h.context.PLAYER=p;
+  h.hide(true);
+  assert.equal(p.sessionId,null);assert.equal(p.hls,null);assert.equal(p.wantsPlayback,false);
+  assert.equal(h.video.sourceRemoved,true);assert.equal(h.modal.classList.contains("open"),false);
+  assert.ok(h.calls.includes("release:cached"));
+});
+test("VOD pagehide releases both committing sessions when cancellation rolls back before Close captures its handle",()=>{
+  const h=vodPageHideHarness(),p=h.session("successor"),predecessor=h.session("predecessor");
+  const retired=h.node("video-retired","VIDEO");
+  retired.pause=()=>{};retired.play=()=>Promise.resolve();retired.removeAttribute=()=>{};retired.load=()=>{};
+  p.preparedCommitting={sessionId:"successor",hls:p.hls,
+    predecessor:{sessionId:"predecessor",hls:predecessor.hls,element:retired}};
+  h.context.PLAYER=p;
+  const noop=()=>{},getElement=h.context.document.getElementById;
+  Object.assign(h.context,{clearEffectiveProcessing:noop,resumePreparedIncumbentLoad:noop,
+    restorePreparedOverlap:noop,queuePlaybackControlAcknowledgement:noop,
+    disposeRetiredMediaElement:noop,renderPlayerInfo:noop,
+    adoptPlaybackMediaElement:()=>{
+      h.context.document.getElementById=id=>id==="video"?retired:getElement(id);
+    }});
+  for(const name of ["rollbackPreparedReplacement","cancelPreparedFirstFrame"])
+    vm.runInContext(shipped(name,"player/prepared-switch-measurement.js"),h.context);
+  // A preparation's synchronous cancellation may restore the predecessor
+  // before Close snapshots sessionId. Exercise the shipped rollback, not a
+  // stub that assumes which of the two handles Close will release.
+  h.context.beginPlaybackPreparation.active={cancel:()=>h.context.cancelPreparedFirstFrame(p),finish:noop};
+  h.hide(false);
+  for(const id of ["successor","predecessor"]){
+    assert.ok(h.calls.includes("release:"+id));
+    assert.ok(h.calls.indexOf("destroy:"+id)<h.calls.indexOf("release:"+id));
+  }
+  // The captured preparation is bounded to two handles; its predecessor can
+  // already have been released by Close, so a second idempotent DELETE is OK.
+  assert.equal(h.calls.filter(call=>call==="release:predecessor").length,2);
+  assert.equal(p.sessionId,null);assert.equal(p.hls,null);assert.equal(p.preparedCommitting,null);
+});
+test("VOD pagehide cancels an initial open before its session returns",()=>{
+  const h=vodPageHideHarness();h.context.PLAYER=null;h.modal.classList.remove("open");
+  let cancelled=0,finished=0;
+  h.context.beginPlaybackPreparation.active={cancel:()=>cancelled++,finish:()=>finished++};
+  h.context.play.pendingIntent={};h.hide(false);
+  assert.equal(cancelled,1);assert.equal(finished,1);
+  assert.ok(h.calls.includes("invalidate"));assert.equal(h.context.play.pendingIntent,null);
+});
 test("network pause cannot acquire a physical pending scrub",()=>{
   const h=harness();h.modal.classList.add("open");h.modal.style.display="block";h.context.PLAYER._seekPending=20;
   h.dispatch({type:"set_playing",playing:false},{source:"network"});h.remote.physicalInput();assert.equal(h.context.PLAYER._seekPending,20);

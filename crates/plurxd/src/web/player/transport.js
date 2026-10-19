@@ -782,11 +782,42 @@ function handlePlaybackPlaying(v,p){
   playerActivity(); settlePlaybackControlSeek(v,p); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl();
   if(first&&!hlsStartupIncomplete(p)) reportTtff();
 }
+// A reload or tab close does not pass through the player's Close button.
+// End even a page entering bfcache: restoring it restores the closed modal,
+// rather than a decoder whose server session was retired while it was frozen.
+function closeVodForPageHide(){
+  const p=PLAYER;
+  const preparation=/** @type {typeof beginPlaybackPreparation & {active?:unknown}} */ (beginPlaybackPreparation);
+  if(!(document.getElementById("modal")?.classList.contains("open")
+    ||p?.sessionId||p?.sharedDirect||p?.mediaPredecessor
+    ||hasPendingPlaybackOpen(p)||preparation.active)) return;
+  const preparedSessions=new Set();
+  // A full open owns at most one outgoing player; each player owns at most
+  // one preparation in each phase. Capture before close drains those owners.
+  for(const owner of [p,p?.mediaPredecessor]){
+    if(!owner) continue;
+    for(const state of [owner.prepared,owner.preparedCommitting,
+      owner.preparedRetiring,owner.preparedControlPending]){
+      if(state?.sessionId) preparedSessions.add(state.sessionId);
+      if(state?.predecessor?.sessionId) preparedSessions.add(state.predecessor.sessionId);
+    }
+  }
+  // Close tears down every decoder synchronously, before its keepalive
+  // DELETEs. Its progress/detail refresh must not delay unload cleanup.
+  closePlayer({routeLeave:true}).catch(()=>{});
+  // Prepared settlements normally travel on the reporter. A document that
+  // is going away cannot depend on that exchange surviving, so retire any
+  // staged/hidden handle through the same keepalive release path. A first-frame
+  // rollback can change which handle Close releases; repeating an idempotent
+  // DELETE is safer than assuming the pre-close session is the one it ended.
+  for(const id of preparedSessions) releaseSession(id);
+}
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){
   if(PLAYER_WIRED) return; PLAYER_WIRED=true;
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
+  window.addEventListener("pagehide",closeVodForPageHide);
   // Deliberately no "keydown": a second listener that reveals the chrome is a
   // second answer to what a key does, and it made every `ignore` row in the
   // routing table have an effect anyway. The adapter reveals where the

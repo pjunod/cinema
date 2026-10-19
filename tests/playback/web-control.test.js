@@ -8039,6 +8039,66 @@ test("cached captions follow the attached local or shared owner namespace and fe
 });
 
 
+function processedCatalogRefreshFixture(){
+  const processed={id:"a".repeat(32),recipe_digest:Array(32).fill(10),route:"encode",
+    processed_hdr10:true,planned_codec:"hevc",grade:"hdr10",decoder_compatible:true,
+    sustainable:true,complete_cache:false,width:3840,height:2160,target_height:2160,peak_bps:30000000};
+  const player={mediaAttachment:{},controlIntentGeneration:1,sessionId:"processed-session",
+    qualityProtocol:"route-v1",qualityCandidateId:processed.id,qualityCandidates:[processed],
+    curSub:-1,burnedSub:null,aoffset:0,audio:0,
+    abr:{requestedCandidateId:processed.id,catalogSelectionKey:JSON.stringify([0,-1,null,0])}};
+  const h=new Function("PLAYER",[
+    "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
+    "let answer={quality_candidates:PLAYER.qualityCandidates.map(row=>({...row,recipe_digest:[...row.recipe_digest]}))},quality='auto';",
+    "function currentCapsDocument(){return {video:[],display:{}};}function selectedAudioIndex(p){return p.audio;}",
+    "function playQuality(){return quality;}function qualityForce(){return quality;}function playbackFileContextForPlayer(){return {};}",
+    "async function askDecision(){return answer;}function continuousQualityBoundCatalog(rows){return rows;}",
+    ...["qualityCatalogSelectionKey","qualityCatalogSelectionCurrent","playbackControlSelection",
+      "candidateQualityContext","refreshQualityCandidates"].map(shippedSource),
+    "return {player:PLAYER,answer,refresh:()=>refreshQualityCandidates(PLAYER),selection:()=>playbackControlSelection(PLAYER,true),setQuality:value=>quality=value};",
+  ].join("\n"))(player);
+  return {...h,processed};
+}
+
+test("processed Auto catalog refresh retains exact running recipe in the next control selection",async()=>{
+  const h=processedCatalogRefreshFixture();
+  const before=h.selection();
+  assert.equal(await h.refresh(),true);
+  assert.deepEqual(h.selection(),before,"a capability catalog refresh must not ask the owner to replace HDR10-E with unnamed Auto");
+  assert.deepEqual(h.selection().quality,{mode:"auto",candidate_id:h.processed.id,height:2160});
+});
+
+test("processed Auto catalog refresh clears a missing, changed or incompatible recipe and a changed track selection",async()=>{
+  for(const change of [h=>{h.answer.quality_candidates=[];},
+    h=>{h.answer.quality_candidates[0].recipe_digest[31]++;},
+    h=>{h.answer.quality_candidates[0].decoder_compatible=false;},
+    h=>{h.player.audio=1;}]){
+    const h=processedCatalogRefreshFixture();change(h);
+    assert.equal(await h.refresh(),true);
+    assert.deepEqual(h.selection().quality,{mode:"auto"});
+  }
+});
+
+test("processed Auto catalog refresh still permits pressure downshift and preserves manual quality",async()=>{
+  const h=processedCatalogRefreshFixture();
+  const lower={...h.processed,id:"b".repeat(32),recipe_digest:Array(32).fill(11),
+    processed_hdr10:false,width:1920,height:1080,target_height:1080,peak_bps:10000000};
+  h.answer.quality_candidates.push(lower);
+  await h.refresh();
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const decision=policy.decideCandidateTransition({state:{},candidates:h.player.qualityCandidates,
+    currentId:h.selection().quality.candidate_id,sample:{now_ms:1000,automatic:true,presenting:true,
+      cause:"link",cause_age_ms:0,stalled:true,runway_ms:1000,
+      transfer:{completed:true,from_cache:false,producer_paced:false,bytes:1500000,elapsed_ms:1000,age_ms:0}}});
+  assert.equal(decision.candidate.id,lower.id,"retaining the request identity must not lock Auto at its current rung");
+  h.setQuality("720");
+  assert.deepEqual(h.selection().quality,{mode:"manual",height:720});
+  const ordinary=processedCatalogRefreshFixture();
+  ordinary.player.qualityCandidates[0].processed_hdr10=false;
+  await ordinary.refresh();
+  assert.deepEqual(ordinary.selection().quality,{mode:"auto"},"ordinary Auto keeps its existing refresh behavior");
+});
+
 test("paused subtitle selection projects ordinal zero and Off immediately", async () => {
   const policy=require("../../crates/plurxd/src/web/playback-policy.js");
   const h=new Function("PlaybackPolicy",[
