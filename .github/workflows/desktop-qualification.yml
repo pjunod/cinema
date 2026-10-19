@@ -1,0 +1,158 @@
+name: desktop native qualification
+run-name: desktop qualification ${{ inputs.candidate_sha }} from artifact run ${{ inputs.candidate_run_id }}
+
+# Every job is GitHub-only; these disposable hosted VMs never reach the fleet.
+# This consumes already-built candidate assets and never publishes anything.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful dry-run github-release.yml artifact run ID for this exact commit
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact forty-character SHA of the dispatched workflow and candidate run
+        required: true
+        type: string
+      run_local_fixture_updates:
+        description: Also rebuild isolated ephemeral-root fixtures and run real worker apply/recovery in all four initial states
+        required: true
+        default: true
+        type: boolean
+
+  workflow_call:
+    inputs:
+      candidate_run_id:
+        description: Completed dry-run artifact build for the exact dispatched candidate
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact candidate commit
+        required: true
+        type: string
+      run_local_fixture_updates:
+        description: Rebuild isolated fixtures and qualify actual worker apply/recovery
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-qualification-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: native desktop (${{ matrix.runner }})
+    if: github.server_url == 'https://github.com'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            runner: macos-15
+          - platform: macos
+            runner: macos-15-intel
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: linux
+            runner: ubuntu-24.04-arm
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      PLURX_QUALIFICATION_MUTATE: disposable-hosted-vm
+    steps:
+      - name: Fetch the exact qualification source without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] && [ "$CANDIDATE_SHA" = "$GITHUB_SHA" ]
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          git init -q source
+          git -C source fetch -q --depth 1 "https://github.com/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git -C source checkout -q --detach FETCH_HEAD
+          mkdir -p qualification
+      - name: Bind artifacts to the exact successful candidate build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 source/tests/desktop/verify-run.py --run-id "$CANDIDATE_RUN_ID" \
+            --candidate "$CANDIDATE_SHA" --output qualification/candidate-run.json
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          merge-multiple: true
+          path: artifacts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-update-candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: build-metadata
+      - name: Verify the dry-run cohort provenance and every native asset digest
+        run: |
+          python3 source/tests/desktop/verify-build.py --candidate "$CANDIDATE_SHA" \
+            --source "$PWD/source" --artifacts "$PWD/artifacts" --metadata "$PWD/build-metadata" \
+            --output "$PWD/qualification/build-provenance.json"
+      - name: Qualify native macOS Aqua bootstrap and lifecycle
+        if: matrix.platform == 'macos'
+        run: |
+          python3 source/tests/desktop/macos-host.py --candidate "$CANDIDATE_SHA" \
+            --artifacts "$PWD/artifacts" --output "$PWD/qualification/macos"
+      - name: Qualify native Linux packages and real PAM graphical sessions
+        if: matrix.platform == 'linux'
+        run: |
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_SERVER_URL,GITHUB_SHA,PLURX_QUALIFICATION_MUTATE \
+            python3 source/tests/desktop/linux-host.py --candidate "$CANDIDATE_SHA" \
+            --artifacts "$PWD/artifacts" --output "$PWD/qualification/linux"
+      - name: Provision the pinned native fixture compiler
+        if: inputs.run_local_fixture_updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+          test "$(rustc +1.97.1 --version | awk '{print $2}')" = 1.97.1
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get -qq update
+            sudo apt-get -qq install -y --no-install-recommends build-essential clang cmake pkg-config libgtk-4-dev >/dev/null
+          else
+            rustup target add --toolchain 1.97.1 aarch64-apple-darwin x86_64-apple-darwin
+          fi
+      - name: Rebuild isolated native cohorts and qualify real local apply/recovery
+        if: inputs.run_local_fixture_updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl_binary=$(command -v openssl)
+          if [ "$RUNNER_OS" = macOS ]; then
+            openssl_binary="$(brew --prefix openssl@3)/bin/openssl"
+            test -x "$openssl_binary"
+          fi
+          python3 source/tests/desktop/build-local-fixtures.py --candidate "$CANDIDATE_SHA" \
+            --source "$PWD/source" --artifacts "$PWD/artifacts" \
+            --work "$PWD/source/target/native-fixtures" --output "$PWD/qualification/fixtures" \
+            --openssl "$openssl_binary"
+      - name: Retain Linux supervisor and session failures
+        if: always() && matrix.platform == 'linux'
+        run: |
+          sudo journalctl --no-pager -u plurxd -u plurx-recovery -u lightdm > qualification/supervisor-journal.log || true
+          sudo loginctl list-sessions --no-pager > qualification/logind-sessions.log || true
+          sudo cp -R /var/log/lightdm qualification/lightdm-logs 2>/dev/null || true
+          sudo cp -R /var/lib/plurx-qualification qualification/linux-session-work 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" qualification
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: desktop-qualification-${{ matrix.runner }}
+          path: qualification
+          if-no-files-found: error
+          retention-days: 14

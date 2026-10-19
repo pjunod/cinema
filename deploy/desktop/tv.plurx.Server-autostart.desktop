@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=plurx Server
+Comment=Show local server controls in an eligible graphical session
+Exec=/usr/bin/plurx-tray --autostart
+TryExec=/usr/bin/plurx-tray
+Icon=tv.plurx.Server
+Terminal=false
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

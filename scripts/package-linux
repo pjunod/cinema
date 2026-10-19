@@ -2,23 +2,26 @@
 # Package a built Linux plurxd as a .deb and an .rpm with nfpm.
 #
 #   scripts/package-linux --arch amd64|arm64 --version X.Y.Z \
-#     --binary target/release/plurxd --out DIR
+#     --binary target/release/plurxd --control-dir target/release --out DIR
+#     [--desktop-binary target-desktop/release/plurx-tray]
 #
 # The paired split-debug file is read from beside the binary (BINARY.dwp, which
-# the release profile's packed split-debuginfo produces). The two packages come from one description,
-# deploy/packaging/nfpm.yaml; this script stages what it names, derives the
-# packaged unit from deploy/plurxd.service, and prints the two paths it wrote.
+# the release profile's packed split-debuginfo produces). The headless server
+# and optional GUI have separate nFPM descriptions. This stages their complete
+# controller/desktop companions and derives a guarded unit from deploy/plurxd.service.
 # nfpm must be on PATH (the GitHub release workflow installs a pinned build).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-arch= version= binary= out=
+arch= version= binary= out= control_dir= desktop_binary=
 while [ $# -gt 0 ]; do
   case $1 in
     --arch) arch=${2:?}; shift ;;
     --version) version=${2:?}; shift ;;
     --binary) binary=${2:?}; shift ;;
     --out) out=${2:?}; shift ;;
+    --control-dir) control_dir=${2:?}; shift ;;
+    --desktop-binary) desktop_binary=${2:?}; shift ;;
     *) echo "package-linux: unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -30,33 +33,72 @@ case $arch in amd64|arm64) ;; *) echo "package-linux: --arch must be amd64 or ar
 [ -n "$out" ] || { echo "package-linux: --out is required" >&2; exit 2; }
 command -v nfpm >/dev/null || { echo "package-linux: nfpm is not on PATH" >&2; exit 1; }
 
-stage=$(mktemp -d "${TMPDIR:-/tmp}/plurx-package-linux.XXXXXX")
+verify_linux_binary() {
+  local file=$1 magic machine expected
+  magic=$(LC_ALL=C od -An -tx1 -N6 "$file" | tr -d '[:space:]')
+  machine=$(LC_ALL=C od -An -tx1 -j18 -N2 "$file" | tr -d '[:space:]')
+  case $arch in amd64) expected=3e00 ;; arm64) expected=b700 ;; esac
+  [ "$magic" = 7f454c460201 ] && [ "$machine" = "$expected" ] || {
+    echo "package-linux: $file is not an ELF64 little-endian $arch executable" >&2; exit 1;
+  }
+}
+[ -n "$control_dir" ] || { echo "package-linux: --control-dir is required" >&2; exit 2; }
+verify_linux_binary "$binary"
+for name in plurx-control plurx-install-helper plurx-update-worker plurx-service-launch plurx-recovery; do
+  [ -x "$control_dir/$name" ] || { echo "package-linux: missing controller executable $name" >&2; exit 1; }
+  verify_linux_binary "$control_dir/$name"
+done
+if [ -n "$desktop_binary" ]; then
+  [ -x "$desktop_binary" ] || { echo "package-linux: missing desktop executable" >&2; exit 1; }
+  verify_linux_binary "$desktop_binary"
+fi
+
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+stage=$(mktemp -d "$out/.plurx-package-linux.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 install -m 0755 "$binary" "$stage/plurxd"
 install -m 0644 "$binary.dwp" "$stage/plurxd.dwp"
 # The example configuration ships from the tree the binary was built from;
 # PLURX_PKG_SOURCE_ROOT names it when that is not this checkout.
 install -m 0644 "${PLURX_PKG_SOURCE_ROOT:-$root}/plurx.example.toml" "$stage/plurx.example.toml"
-for script in postinstall preremove postremove; do
-  install -m 0755 "$root/deploy/packaging/$script" "$stage/$script"
+[ -n "$control_dir" ] || { echo "package-linux: --control-dir is required" >&2; exit 2; }
+for name in plurx-control plurx-install-helper plurx-update-worker plurx-service-launch plurx-recovery; do
+  [ -x "$control_dir/$name" ] || { echo "package-linux: missing controller executable $name" >&2; exit 1; }
+  install -m 0755 "$control_dir/$name" "$stage/$name"
 done
-# The package installs the executable under /usr, not /usr/local; everything
-# else in the unit is the documented one.
+install -m 0644 "$root/deploy/packaging/plurx-recovery.service" "$stage/"
+install -m 0644 "$root/deploy/desktop/tv.plurx.install.policy" "$stage/"
+for script in preinstall postinstall preremove postremove; do
+  install -m 0755 "$root/deploy/packaging/$script" "$stage/$script"
+  install -m 0755 "$root/deploy/packaging/desktop-$script" "$stage/desktop-$script"
+done
+# The source unit stays suitable for source installs. Packages use the native
+# launcher and a mandatory root guard before every activation.
 grep -q '^ExecStart=/usr/local/bin/plurxd run$' "$root/deploy/plurxd.service" || {
   echo "package-linux: deploy/plurxd.service no longer has the ExecStart this script repoints" >&2
   exit 1
 }
-sed 's|^ExecStart=/usr/local/bin/plurxd run$|ExecStart=/usr/bin/plurxd run|' \
+sed -e 's|^ExecStart=/usr/local/bin/plurxd run$|ExecStart=/usr/lib/plurx-control/plurx-service-launch|' \
+    -e 's|^After=network-online.target$|After=network-online.target plurx-recovery.service|' \
+    -e '/^Wants=network-online.target$/a\
+Requires=plurx-recovery.service' \
+    -e '/^Type=simple$/a\
+ExecStartPre=+/usr/lib/plurx-control/plurx-recovery --guard\
+RuntimeDirectory=plurx\
+RuntimeDirectoryMode=0755' \
+    -e 's|^ReadWritePaths=/var/lib/plurx$|ReadWritePaths=/var/lib/plurx /run/plurx /var/lib/plurx-control/shutdown-receipts|' \
   "$root/deploy/plurxd.service" > "$stage/plurxd.service"
 
 repository=${PLURX_PKG_REPOSITORY:-https://github.com/pjunod/cinema}
 owner=${repository%/*}; owner=${owner##*/}
+source_commit=${PLURX_BUILD_SHA:-$(git -C "${PLURX_PKG_SOURCE_ROOT:-$root}" rev-parse HEAD)}
+[[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "package-linux: invalid source commit" >&2; exit 2; }
+printf '{"schema_version":1,"repository":"pjunod/cinema","version":"%s","source_commit":"%s","architecture":"%s"}\n' "$version" "$source_commit" "$arch" > "$stage/release.json"
 export PLURX_PKG_ARCH=$arch PLURX_PKG_VERSION=$version
 export PLURX_PKG_HOMEPAGE=$repository
 export PLURX_PKG_MAINTAINER="noirr cinema <$owner@users.noreply.github.com>"
 
-mkdir -p "$out"
-out=$(cd "$out" && pwd)
 for packager in deb rpm; do
   # nfpm resolves the config's ./ sources against its working directory.
   (cd "$stage" && nfpm package --config "$root/deploy/packaging/nfpm.yaml" \
@@ -69,3 +111,22 @@ for package in "$deb" "$rpm"; do
   [ -f "$package" ] || { echo "package-linux: nfpm did not write $package" >&2; ls -l "$out" >&2; exit 1; }
   printf '%s\n' "$package"
 done
+
+if [ -n "$desktop_binary" ]; then
+  [ -x "$desktop_binary" ] || { echo "package-linux: missing desktop executable" >&2; exit 1; }
+  install -m 0755 "$desktop_binary" "$stage/plurx-tray"
+  for asset in tv.plurx.Server.desktop tv.plurx.Server-autostart.desktop tv.plurx.Server.svg; do
+    install -m 0644 "$root/deploy/desktop/$asset" "$stage/"
+  done
+  for state in running starting stopped unhealthy unknown; do
+    install -m 0644 "$root/deploy/desktop/icons/tv.plurx.Server-$state-symbolic.svg" "$stage/"
+  done
+  for packager in deb rpm; do
+    (cd "$stage" && nfpm package --config "$root/deploy/packaging/desktop-nfpm.yaml" \
+      --packager "$packager" --target "$out/" >&2)
+  done
+  for package in "$out/plurx-desktop_${version}-1_${arch}.deb" "$out/plurx-desktop-${version}-1.${rpm_arch}.rpm"; do
+    [ -f "$package" ] || { echo "package-linux: nfpm did not write $package" >&2; exit 1; }
+    printf '%s\n' "$package"
+  done
+fi

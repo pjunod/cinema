@@ -70,6 +70,7 @@ jobs:
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       apple: ${{ steps.scope.outputs.apple }}
+      desktop_macos: ${{ steps.scope.outputs.desktop_macos }}
       android_jvm: ${{ steps.scope.outputs.android_jvm }}
       android_device: ${{ steps.scope.outputs.android_device }}
       web_layout: ${{ steps.scope.outputs.web_layout }}
@@ -298,10 +299,19 @@ jobs:
     # General executors also reclaim above 4 GiB during the large Rust check.
     # Share the existing larger-memory topology queue; keep its host bounds.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
+    container: ubuntu:24.04
     timeout-minutes: 20
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
+      - name: Install Rust gate prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git libssl-dev lld llvm \
+            libgtk-4-dev libdbus-1-dev make nasm ninja-build nodejs pkg-config python3
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -327,6 +337,11 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   check:
     name: Rust unit and SQLite contracts
@@ -409,6 +424,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
       - uses: ./.github/actions/ffmpeg
         with:
           major: "8"
@@ -1445,7 +1462,7 @@ jobs:
   apple:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+    if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
     concurrency:
       group: plurx-apple-silicon-heavy
@@ -1466,6 +1483,26 @@ jobs:
           xcode_version="$(xcodebuild -version)"
           grep -Fxq "Xcode 27.0" <<< "$xcode_version"
           grep -Fxq "Build version 27A266a" <<< "$xcode_version"
+          xcrun --find swift
+      - name: Build and test native macOS server tray
+        if: needs.scope.outputs.desktop_macos == 'true'
+        # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
+        # The complete native output is preserved independently, including failures.
+        run: |
+          mkdir -p target/validation
+          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+          echo "Native macOS server tray build and unit checks passed."
+      - name: Preserve native macOS server tray check output
+        if: always() && needs.scope.outputs.desktop_macos == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: desktop-macos-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation/desktop-macos-check.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify the pinned mobile Apple toolchain
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
+        run: |
           test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"
           test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"
           test "$(xcodegen --version)" = "Version: 2.46.0"
@@ -1478,6 +1515,7 @@ jobs:
       # incremental rebuild from a near miss still beats a cold compile, and a
       # poisoned cache only ever costs the rebuild we paid before caching.
       - name: Cache DerivedData
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
@@ -1486,6 +1524,7 @@ jobs:
             apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
             apple-dd-
       - name: Create isolated iPhone, iPad, and Apple TV simulators
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
           # A job-level timeout cancels its `always()` cleanup along with the
           # test step. Remove only simulators owned by this workflow before
@@ -1522,13 +1561,15 @@ jobs:
             xcrun simctl bootstatus "$simulator_id" -b
           done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: make apple-test
       - name: Require native TV navigation journeys
+        if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
       - name: Preserve TV navigation evidence including failures
-        if: always()
+        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1536,7 +1577,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Delete the run's simulators
-        if: always()
+        if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
           for destination in "${APPLE_IOS_SIM:-}" "${APPLE_IPAD_SIM:-}" "${APPLE_TVOS_SIM:-}"; do
             udid="${destination##*,id=}"

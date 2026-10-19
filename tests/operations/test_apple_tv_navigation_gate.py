@@ -25,7 +25,16 @@ class AppleTVNavigationGateTests(unittest.TestCase):
                 step = apple_job.split("- name: Require native TV navigation journeys", 1)[1].split("- name:", 1)[0]
                 self.assertIn("run: make apple-tv-navigation-test", step)
                 self.assertNotIn("continue-on-error", apple_job)
-                self.assertNotIn("if:", step)
+                # This job also serves the native macOS tray. Mobile TV
+                # journeys remain mandatory whenever the mobile Apple lane
+                # executes; retained mobile evidence is handled separately.
+                expected_guard = "needs.scope.outputs.apple == 'true'"
+                if path == ".github/workflows/ci.yml":
+                    expected_guard += " && needs.scope.outputs.retain_apple != 'true'"
+                self.assertEqual(
+                    re.findall(r"^        if: (.+)$", step, re.MULTILINE),
+                    [expected_guard],
+                )
                 self.assertIn("PLURX_TV_NAVIGATION_OUTPUT:", step)
                 self.assertIn("- " + apple, job(path, gate))
                 self.assertIn("needs." + apple + ".result", workflow)

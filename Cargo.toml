@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/plurx-desktop-control",
+    "crates/plurx-tray",
     "crates/plurx-core",
     "crates/plurx-cluster-check",
     "crates/plurx-compat-plex",
@@ -13,6 +15,7 @@ members = [
 exclude = [
     "vendor/bitvec_helpers",
     "vendor/dolby_vision",
+    "vendor/gemm-common",
     "vendor/hiqlite",
     "vendor/hiqlite-wal",
     "vendor/rust_decimal",
@@ -178,6 +181,9 @@ split-debuginfo = "packed"
 # 0.39.1; `deny.toml`'s ban on that aws-lc-sys version is the tripwire, and
 # this row has to come back with it.
 [patch.crates-io]
+# Declare FP16 only on its runtime-dispatched helpers; retain generic ARM.
+# See vendor/gemm-common/PLURX-PATCH.md.
+gemm-common = { path = "vendor/gemm-common" }
 # dolby_vision 3.4.0 sizes allocations from unbounded ue(v) counts in the
 # RPU it is parsing; a corrupted or hostile RPU could abort plurxd. The
 # vendored copy refuses counts that cannot fit in the bits left. See

@@ -12,6 +12,7 @@ from pathlib import Path
 VENDORED = (
     ("bitvec_helpers", "4.0.2"),
     ("dolby_vision", "3.4.0"),
+    ("gemm-common", "0.19.0"),
     ("hiqlite", "0.14.0"),
     ("hiqlite-wal", "0.14.0"),
     ("rust_decimal", "1.42.1"),
@@ -156,9 +157,18 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    output = synthesize(
-        args.root.read_text(encoding="utf-8"),
+    # GEMM is not part of the Hiqlite spike. Its pinned registry package
+    # identity remains advisory evidence after the root graph patches it in.
+    gemm_evidence = (
+        Path(__file__).resolve().parents[1]
+        / "vendor/gemm-common/registry-provenance.lock"
+    )
+    registry_evidence = merge_package_inventories(
         args.registry_evidence.read_text(encoding="utf-8"),
+        [gemm_evidence.read_text(encoding="utf-8")],
+    )
+    output = synthesize(
+        args.root.read_text(encoding="utf-8"), registry_evidence
     )
     output = merge_package_inventories(
         output,
