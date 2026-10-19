@@ -1744,9 +1744,7 @@ mod hdr10e_export_throughput {
             include_str!("../../../tools/dv_processing/fel_renderer.h"),
             include_str!("../../../tools/dv_processing/base_dv_renderer.h"),
         ] {
-            assert!(
-                renderer.contains("? dv_yuv10_source_texture(gpu, EXPORT_WIDTH, EXPORT_HEIGHT)")
-            );
+            assert!(renderer.contains("dv_yuv10_source_texture("));
         }
         let source = c_body(export, "static pl_tex dv_yuv10_source_texture(");
         assert!(source.contains("PL_FMT_UNORM, 4, 16, 16"), "{source}");

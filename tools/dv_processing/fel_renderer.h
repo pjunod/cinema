@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "nlq_clipping.h"
 #include "dv_trace.h"
@@ -30,10 +31,22 @@ static bool EXPORT_YUV10;
 #define FLOAT_COUNT ((size_t)WIDTH * (size_t)HEIGHT * 4)
 #define EXPORT_FLOAT_COUNT ((size_t)EXPORT_WIDTH * (size_t)EXPORT_HEIGHT * 4)
 
+// Once the export writer thread runs, a refusal on either thread leaves
+// without exit-time teardown: the other thread may be inside Vulkan or
+// mid-write, and loader and driver destructors racing it can hang or crash
+// instead of reporting the refusal.
+static bool dv_threads_live;
+static void dv_exit(int code) {
+  if (!dv_threads_live)
+    exit(code);
+  fflush(stdout);
+  fflush(stderr);
+  _exit(code);
+}
 static void require(bool condition, const char *message) {
   if (!condition) {
     fprintf(stderr, "Probe failed: %s\n", message);
-    exit(EXIT_FAILURE);
+    dv_exit(EXIT_FAILURE);
   }
 }
 
@@ -82,7 +95,7 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
   if (error) {
     fprintf(stderr, "RPU parser rejected input: %s\n", error);
     dovi_rpu_free(rpu);
-    exit(EXIT_FAILURE);
+    dv_exit(EXIT_FAILURE);
   }
   const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
   require(header != NULL, "parsed RPU header");

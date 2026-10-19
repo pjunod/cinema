@@ -48,8 +48,9 @@ static bool dv_yuv10_init(pl_log log, pl_gpu gpu, int width, int height) {
     return false;
   pl_fmt r16 = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16,
                            PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
-  dv_yuv10_fused = r16 &&
-                   (r16->caps & PL_FMT_CAP_STORABLE) && r16->glsl_format;
+  // The fused pass runs 16x16 invocations per group; Vulkan guarantees 128.
+  dv_yuv10_fused = r16 && (r16->caps & PL_FMT_CAP_STORABLE) && r16->glsl_format &&
+                   gpu->glsl.compute && gpu->glsl.max_group_threads >= 256;
   if (!r16 || r16->texel_size != 2)
     return false;
   dv_yuv10_context = (struct dv_yuv10){.width = width, .height = height, .gpu = gpu};
@@ -65,7 +66,12 @@ static bool dv_yuv10_init(pl_log log, pl_gpu gpu, int width, int height) {
       return false;
   }
   size_t bytes = (size_t)width * height * 3;
-  bool mapped = gpu->limits.thread_safe && gpu->limits.max_mapped_size >= bytes;
+  // Each plane lands at its offset in one buffer. The Cr plane starts at
+  // 5/2 W H bytes, which a transfer queue may refuse when (W/2)(H/2) is odd.
+  size_t cr = (size_t)width * height * 5 / 2;
+  size_t align = gpu->limits.align_tex_xfer_offset > 4 ? gpu->limits.align_tex_xfer_offset : 4;
+  bool mapped = gpu->limits.thread_safe && gpu->limits.max_mapped_size >= bytes &&
+                ((size_t)width * height * 2) % align == 0 && cr % align == 0;
   for (int b = 0; b < 2 && mapped; b++) {
     dv_yuv10_context.mapped[b] = pl_buf_create(gpu, pl_buf_params(
         .size = bytes, .host_mapped = true, .host_readable = true));
@@ -171,7 +177,7 @@ static bool dv_yuv10_dispatch_fused(pl_tex rgb) {
   };
   int gx = 16, gy = 16;
   int bw = dv_yuv10_context.width / 2, bh = dv_yuv10_context.height / 2;
-  return pl_shader_custom(sh, &(struct pl_custom_shader){
+  if (!pl_shader_custom(sh, &(struct pl_custom_shader){
              .description = "plurx yuv420p10 fused export",
              .header = dv_yuv10_header,
              .body = dv_yuv10_fused_body,
@@ -181,10 +187,13 @@ static bool dv_yuv10_dispatch_fused(pl_tex rgb) {
              .num_descriptors = 4,
              .compute = true,
              .compute_group_size = {gx, gy},
-         }) &&
-         pl_dispatch_compute(dv_yuv10_context.dispatch, pl_dispatch_compute_params(
-             .shader = &sh,
-             .dispatch_size = {(bw + gx - 1) / gx, (bh + gy - 1) / gy, 1}));
+         })) {
+    pl_dispatch_abort(dv_yuv10_context.dispatch, &sh);
+    return false;
+  }
+  return pl_dispatch_compute(dv_yuv10_context.dispatch, pl_dispatch_compute_params(
+      .shader = &sh,
+      .dispatch_size = {(bw + gx - 1) / gx, (bh + gy - 1) / gy, 1}));
 }
 
 static bool dv_yuv10_export(pl_renderer renderer, pl_gpu gpu, pl_tex rgb) {
@@ -209,8 +218,11 @@ static bool dv_yuv10_export(pl_renderer renderer, pl_gpu gpu, pl_tex rgb) {
             .output = PL_SHADER_SIG_COLOR,
             .descriptors = &source,
             .num_descriptors = 1,
-        }) ||
-        !pl_dispatch_finish(dv_yuv10_context.dispatch,
+        })) {
+      pl_dispatch_abort(dv_yuv10_context.dispatch, &sh);
+      return false;
+    }
+    if (!pl_dispatch_finish(dv_yuv10_context.dispatch,
                             pl_dispatch_params(.shader = &sh,
                                                .target = dv_yuv10_context.planes[c])))
       return false;

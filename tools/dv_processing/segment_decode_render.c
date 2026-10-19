@@ -105,7 +105,7 @@ static int video_duration_ns(const char *text, int64_t *duration) {
 static void need(int ok, const char *reason) {
   if (!ok) {
     fprintf(stderr, "Segment refused: %s\n", reason);
-    exit(1);
+    dv_exit(1);
   }
 }
 static struct rational rational(const char *text) {
@@ -261,6 +261,7 @@ static void write_rgb(const uint8_t *rgb, size_t bytes, void *unused) {
 static void writer_start(void) {
   need(pthread_create(&writer_thread, NULL, writer_main, NULL) == 0,
        "export writer thread");
+  dv_threads_live = true;
 }
 static void writer_finish(void) {
   pthread_mutex_lock(&writer_lock);
@@ -268,6 +269,7 @@ static void writer_finish(void) {
   pthread_cond_broadcast(&writer_cond);
   pthread_mutex_unlock(&writer_lock);
   need(pthread_join(writer_thread, NULL) == 0, "export writer join");
+  dv_threads_live = false;
 }
 static void write_frame(const uint8_t *rgb, size_t bytes, int64_t pts,
                         int64_t duration) {
@@ -963,6 +965,9 @@ int main(int argc, char **argv) {
     need(avcodec_send_packet(layers[k].decoder, NULL) >= 0, "decoder drain");
     receive(&layers[k]);
   }
+  // Every frame is rendered: finish its writes before the window checks.
+  writer_finish();
+  release_held();
   need(emitted > 0 &&
            (window_done || (layers[0].count == 0 && layers[1].count == 0)),
        "nonempty complete pair coverage");
@@ -1010,8 +1015,6 @@ int main(int argc, char **argv) {
            "source EOF extent unavailable or inconsistent");
     }
   }
-  writer_finish();
-  release_held();
   if (streaming) {
     need(av_write_trailer(nut_output) >= 0, "NUT trailer");
     need(avio_closep(&nut_output->pb) >= 0, "NUT output close");
