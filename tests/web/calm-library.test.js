@@ -124,6 +124,8 @@ function libraryHarness(pages, state) {
       // The three filter globals and the page size are the state a case sets.
       "let LIB_SCOPE=state.scope||'',LIB_FIND=state.find||'',LIB_FILTER=state.filter||'all',LIB_PER=state.per||'all';",
       "function layoutChrome(){} function setOrigin(){} function restoreScroll(){}",
+      // Layout recomposition after a layout switch is not this test's subject.
+      "function registerLayoutPresentation(){}",
       "function libraryBrowseTools(){return '';}",
       "async function libsCached(){return [{id:1}];}",
       // Only "unwatched" is modelled: enough to hide some cards and show them again.
