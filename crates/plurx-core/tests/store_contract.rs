@@ -18318,6 +18318,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // wire identities, compatibility logins and bounded negotiations
     // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
     // v102–v103).
+    // Plus the item ratings and per-person lists (SQLite v113).
     let mut imported_tables = report
         .tables
         .iter()
@@ -18369,6 +18370,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
             "jellyfin_plays",
             "job_leases",
             "libraries",
+            "library_annotations_lists",
+            "library_annotations_rating_fetches",
+            "library_annotations_ratings",
             "library_channel_entries",
             "library_channel_favourites",
             "library_channel_generations",
