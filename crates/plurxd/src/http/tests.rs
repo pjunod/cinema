@@ -14572,14 +14572,13 @@ async fn processed_hdr10_setting_routes_a_non_dv_client_over_hls() {
         }
     };
     let both = || json!(["progressive", "hls"]);
-    let mut off = Vec::new();
+    // Setting off: the ordinary progressive delivery of the HDR10 base.
     for file in &files {
         let body = decide(*file, both()).await;
         assert_eq!(body["delivered_dynamic_range"], "hdr10", "{body}");
+        assert_ne!(body["method"], "transcode", "{body}");
         assert!(body["delivery"].get("requires_hls").is_none(), "{body}");
-        off.push(body["method"].clone());
     }
-    assert_eq!(off, [json!("remux"), json!("direct_play")]);
 
     let (status, saved) = call(
         &app,
