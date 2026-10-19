@@ -42,10 +42,14 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 10] = [
+    let inputs: [(&str, &[u8]); 11] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
+        ),
+        (
+            "display_target.h",
+            include_bytes!("../../../tools/dv_processing/display_target.h"),
         ),
         (
             "dv_trace.h",
@@ -205,7 +209,7 @@ impl ToolSet {
             let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             if manifest.schema != 1
                 || manifest.source_sha256 != renderer_source_identity()
-                || manifest.graph != "p7-fel-linear-dz-bt2020-pq-master-clip-v1"
+                || manifest.graph != "dv-native-master-or-annex-b2-rgb-v1"
                 || manifest.abi.get("libplacebo") != Some(&374)
                 || !["avcodec", "avformat", "avutil"]
                     .iter()

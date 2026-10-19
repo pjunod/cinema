@@ -4,9 +4,9 @@ import hashlib
 import json
 from pathlib import Path
 
-INPUTS = ("base_dv_renderer.h", "dv_trace.h", "fel_renderer.h", "hevc-rasl-frame-thread.patch", "nlq_clipping.h",
+INPUTS = ("base_dv_renderer.h", "display_target.h", "dv_trace.h", "fel_renderer.h", "hevc-rasl-frame-thread.patch", "nlq_clipping.h",
           "nut_timing.h", "rgb48.h", "scan_title.c", "segment_decode_render.c", "yuv420p10.h")
-GRAPH = "p7-fel-linear-dz-bt2020-pq-master-clip-v1"
+GRAPH = "dv-native-master-or-annex-b2-rgb-v1"
 
 
 def sha(path):

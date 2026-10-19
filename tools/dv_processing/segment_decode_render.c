@@ -759,11 +759,11 @@ static void send_layer(struct layer *layer, AVPacket *packet) {
 int main(int argc, char **argv) {
   need(argc == 11 || argc == 12 || argc == 15 ||
            (argc == 16 && !strcmp(argv[15], "base-rpu")) ||
-           (argc == 19 && (!strcmp(argv[15], "base-rpu") ||
+           ((argc == 19 || argc == 21) && (!strcmp(argv[15], "base-rpu") ||
                            !strcmp(argv[15], "fel"))),
        "usage: segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX "
        "MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START "
-       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY]]]]");
+       "END MAX_PREROLL [base-rpu|fel [EXPORT_W EXPORT_H EXPORT_POLICY [TITLE_MIN_1E4 TITLE_PEAK]]]]]");
   bool streaming = argc >= 12;
   base_only = argc >= 16 && !strcmp(argv[15], "base-rpu");
   window_mode = argc >= 15;
@@ -788,7 +788,7 @@ int main(int argc, char **argv) {
   expected_h[1] = number(argv[8], 0, 2160);
   EXPORT_WIDTH = expected_w[0];
   EXPORT_HEIGHT = expected_h[0];
-  if (argc == 19) {
+  if (argc >= 19) {
     EXPORT_WIDTH = number(argv[16], 32, 4096);
     EXPORT_HEIGHT = number(argv[17], 32, 2160);
     EXPORT_YUV10 = !strcmp(argv[18], "pq-bilinear-yuv420p10-v1");
@@ -808,10 +808,10 @@ int main(int argc, char **argv) {
   need(!base_only || (expected_w[1] == 0 && expected_h[1] == 0),
        "base-only mode has no declared EL");
   debug_frames = number(argv[9], 0, 1) != 0;
-  // argv[10] reserves an explicit output policy; never interpreted as a display
-  // target.
-  need(strcmp(argv[10], "bt2020-pq-master-clip") == 0,
-       "unsupported output policy");
+  // Explicit control API only. Session/caps selection is a later PR.
+  need(argc == 21 ? dv_target_policy(argv[10], argv[19], argv[20]) :
+                       strcmp(argv[10], "bt2020-pq-master-clip") == 0,
+        "unsupported output policy");
   need(
       expected_w[0] % 2 == 0 && expected_h[0] % 2 == 0 &&
           expected_w[1] % 2 == 0 && expected_h[1] % 2 == 0 &&
@@ -1070,9 +1070,9 @@ int main(int argc, char **argv) {
   printf("{\"kind\":\"decoder\",\"mode\":\"%s\",\"reason\":\"%s\"}\n",
          decoder_mode, decoder_reason);
   printf("{\"kind\":\"segment_complete\",\"frames\":%d,\"pair_window_bound\":"
-         "16,\"gpu_contexts\":1,\"output_policy\":\"bt2020-pq-master-clip\","
+         "16,\"gpu_contexts\":1,\"output_policy\":\"%s\","
          "\"production_qualified\":false}\n",
-         emitted);
+         emitted, dv_target_policy_name());
   if (base_only)
     printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
            "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"

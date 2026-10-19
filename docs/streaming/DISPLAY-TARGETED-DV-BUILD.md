@@ -13,17 +13,23 @@
   existing source/publication fence. Unknown versions, partial scans and old
   documents cannot establish eligibility. L6/L9 are constant, unknown or
   inconsistent; a missing observation is not silently replaced by the last one.
+- Scanner checkpoint `6b060987` compiled all four helpers successfully; the
+  original three retained their baseline hashes. Its Rust check failed E0433
+  (wrong runtime module path), fixed in `01d21106`; corrected checking is pending.
+  This is compilation evidence, not numerical or title-scan qualification.
 - Unit cases are authored but intentionally not executed before the complete
-  candidate's independent adversarial review. Scanner integration, renderer and
-  policy identity, controls, candidate compilation and draft paperwork remain.
+  candidate's independent adversarial review. Targeted shader/independent oracle
+  implementation is underway. Policy identity, reports, controls, candidate
+  compilation, exact B landing and draft paperwork remain.
 - Actual upstream API 374 inspection found a design conflict with the helper
   recipe below. `hybrid_mix` is removed, and its ST 2094-10 function uses a modified
   PQ-space knee selector. The shader also applies an adaptive virtual target and
   LMS/film response independently of peak detection. Setting contrast recovery
   and hybrid mix to zero therefore does not establish Annex B.2 equivalence.
-  The required independent two-code bound is retained. A supported explicit
-  post-reconstruction shader is under coordinator consideration; no numerical
-  implementation change or equivalence claim has been approved at this checkpoint.
+  The required independent two-code bound is retained. The coordinator accepted
+  the explicit post-reconstruction shader as a documented implementation-plan
+  deviation, with separately named engineering extensions for degenerate anchors.
+  It has not yet been numerically qualified. See the actual method below.
 - The numerical reference is the published
   [SMPTE ST 2094-10:2021 Annex B.2](https://pub.smpte.org/latest/st2094-10/st2094-10-2021.pdf),
   not a translation of libplacebo's implementation. No private LUT research or
@@ -130,31 +136,39 @@ fixed rule. One title therefore never mixes master and targeted windows.
 - **New argument.** A new output policy value `bt2020-pq-target-<nits>`
   sits alongside `bt2020-pq-master-clip`. `<nits>` is one of the bucket
   values. Any other value is refused.
-- **Per frame:**
-  - Set `source.color.hdr.max_pq_y` from L1 `max_pq / 4095` and
-    `avg_pq_y` from L1 `avg_pq / 4095`. L1 values are 12-bit PQ codes, and
-    libplacebo's own AVDOVI mapping divides the same way. `repr.dovi` does
-    not carry L1, so `color.hdr` is the only path in.
-  - Set `source.color.hdr.max_luma` to the title's mastering peak (L6,
-    else 4000), **not** 10,000. That way a frame whose L1 max is 0
-    (libplacebo reads that as "no metadata") falls back to a sane input
-    peak.
-  - The black level is constant for the title: source `min_luma` =
-    mastering minimum (L6, else 0.005), and target `min_luma` = the same
-    value. Using per-shot L1 min would pump the black floor shot to shot
-    and lift OLED black.
-  - Use `cmap.metadata = PL_HDR_METADATA_CIE_Y` and
-    `cmap.tone_mapping_function = &pl_tone_map_st2094_10`.
-  - Set `target.color.hdr.max_luma = <nits>`.
-  - Set `cmap.contrast_recovery = 0` and `cmap.hybrid_mix = 0` explicitly.
-    The defaults (about 0.3 and 0.2 in this libplacebo) do nothing under
-    clip, but sharpen and blend per channel once the curve compresses, so
-    the output would no longer be ST 2094-10. A test asserts both are 0.
-  - Gamut: start with `pl_gamut_map_clip`. Compressing intensity with a
-    hard clip can shift hue in bright saturated highlights, which are
-    exactly the shots being mapped. The control compares clip against
-    `pl_gamut_map_perceptual` on a fire/neon fixture and keeps the one with
-    the smaller hue error against the master.
+- **Actual method (accepted deviation, 2026-10-19):** preserve the existing
+  native master reconstruction, including its 10,000-nit PQ container and all
+  original DV operations. An explicit stateless custom shader then reads that
+  native BT.2020/PQ RGB float texture, decodes PQ to linear RGB nits, applies the
+  published B.2 rational curve per RGB component as in B.3 equation (7), clips
+  to the target range, and encodes PQ. Existing bilinear/YUV export follows.
+  There is no built-in `pl_tone_map_st2094_10`, CIE_Y renderer metadata execution,
+  adaptive exposure, film/LMS blend, library patch or private LUT in this pass.
+  Method identity: `annex-b2-rgb-fixed-floor-no-expansion-linear-edge-v1`.
+  - Source peak and average are PQ EOTFs of L1 max/avg divided by 4095. A valid
+    max0 uses the fixed title mastering peak (consistent L6, otherwise 4000).
+  - Source and target floors are the same fixed title minimum (consistent L6,
+    otherwise 0.005); actual samples at/below that floor are preserved, including
+    exact zero black. Per-shot L1 min is not used as a rendering endpoint.
+  - B.2 target average is `sqrt(source_average * sqrt(floor * target_peak))`,
+    capped at `0.8 * target_peak` as suggested by the public standard.
+  - Fit the three anchors using an affine normalization: `t=(x-floor)/(peak-floor)`,
+    `u=(y-floor)/(target-floor)`, `u=t/(k*(1-t)+t)` and
+    `k=t_avg*(1-u_avg)/(u_avg*(1-t_avg))`. Finite positive `k`, including its
+    float uniform representation, proves no pole and nonnegative derivative on
+    the actual interval. Dynamic public shader uniforms avoid per-frame pipelines.
+  - **Versioned engineering extensions, not exact B.2 claims:** no inverse
+    expansion when frame peak already fits; a degenerate average/adaptation or
+    nonfinite/nonmonotone fit uses deterministic endpoint-linear compression.
+    Each frame reports its actual curve/fallback reason and max0 provenance.
+    Missing/invalid L1 is never an engineering-curve fallback.
+  - Independent Python controls solve the defining unnormalized anchor equations
+    by Gaussian elimination, not this coefficient expression or libplacebo code.
+    Nondegenerate controls retain the two-code bound; edge controls separately
+    disclose the extension, zero-black, peak and monotonicity requirements.
+  - RGB-component mapping can change saturated-highlight hue. Fire/neon hue
+    comparison and the gamut-policy disposition remain acceptance work; there is
+    no claim of a measured perceptual improvement or calibrated display accuracy.
 - **Invalid L1 on a frame of an eligible title** cannot happen (the scan
   excluded such titles). If it does anyway, the window refuses and the
   daemon falls back to the master recipe for the **whole session**, with

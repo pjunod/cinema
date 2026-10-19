@@ -1,6 +1,6 @@
 #ifndef PLURX_BASE_DV_RENDERER_H
 #define PLURX_BASE_DV_RENDERER_H
-// Decode and GPU mapping are public FFmpeg/libplacebo APIs. No color-math fork.
+// Public FFmpeg/libplacebo reconstruction; optional separate public-spec export.
 #include <libplacebo/utils/libav.h>
 #include "dv_trace.h"
 struct base_gpu {
@@ -122,6 +122,7 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
   // do not widen them to an identity curve or substitute a fixed matrix.
   pl_map_dovi_metadata(&out->dovi, data);
   out->dovi.nlq_active = false; // Explicitly omitted EL: never compose residuals.
+  dv_target_metadata(dm);
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_data_mapping(mapping);
   dovi_rpu_free_header(h);
@@ -148,7 +149,7 @@ static void base_gpu_init(int width, int height) {
   base_context.renderer = pl_renderer_create(base_context.log, gpu);
   pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
                            PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE |
-                           ((EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
+                           ((dv_target.nits || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) ?
                             PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR : 0) |
                            (EXPORT_YUV10 ? PL_FMT_CAP_SAMPLEABLE : 0));
   require(base_context.renderer && fmt && fmt->texel_size == 16,
@@ -163,7 +164,7 @@ static void base_gpu_init(int width, int height) {
           "GPU yuv420p10 export planes");
   base_context.rgba = malloc(EXPORT_FLOAT_COUNT * sizeof(float));
   require(base_context.output_texture && base_context.rgba, "base output buffer");
-  if (EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
+  if (dv_target.nits || EXPORT_WIDTH != width || EXPORT_HEIGHT != height) {
     base_context.native_texture = pl_tex_create(gpu,
         pl_tex_params(.w = width, .h = height, .format = fmt,
                       .renderable = true, .sampleable = true));
@@ -226,6 +227,9 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   pl_renderer_reset_errors(base_context.renderer, NULL);
   require(pl_render_image(base_context.renderer, &source, &destination, &params),
           "base DV render");
+  if (dv_target.nits)
+    destination.planes[0].texture = dv_target_render(base_context.log, gpu,
+                                                    destination.planes[0].texture, index);
   if (base_context.native_texture)
     export_native_rgb(base_context.renderer, destination, base_context.output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(base_context.renderer);
@@ -277,7 +281,10 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   printf(",\"applied_operations\":[\"RepresentationNormalization\"");
   if (mapping->polynomial_segments) printf(",\"PolynomialReshape\"");
   if (mapping->mmr_segments) printf(",\"MmrReshape\"");
-  printf(",\"RpuColorConversion\",\"TargetMapping\"]");
+  printf(",\"RpuColorConversion\",\"TargetMapping\"");
+  if (dv_target.nits)
+    printf(",{\"DisplayTargetMapping\":{\"nits\":%u}}", dv_target.nits);
+  printf("]");
   if (diagnostic_hashes)
     printf(EXPORT_YUV10 ? ",\"yuv10_sha256\":\"%s\"" : ",\"rgb_sha256\":\"%s\"", rgb_hash);
   printf(",\"creative_trims_applied\":false,\"render_errors\":%u,"
@@ -285,6 +292,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
 }
 static void base_gpu_close(void) {
   pl_gpu gpu = base_context.vk->gpu;
+  dv_target_destroy(gpu);
   for (int i = 0; i < 4; i++) pl_tex_destroy(gpu, &base_context.textures[i]);
   pl_tex_destroy(gpu, &base_context.output_texture);
   pl_tex_destroy(gpu, &base_context.native_texture);

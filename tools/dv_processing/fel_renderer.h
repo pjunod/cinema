@@ -50,6 +50,8 @@ static void require(bool condition, const char *message) {
   }
 }
 
+#include "display_target.h"
+
 // Resample only the already reconstructed and master-clipped native RGB/PQ
 // texture. This separate pass cannot resize BL/EL before their DV operations.
 static void export_native_rgb(pl_renderer renderer, struct pl_frame native,
@@ -135,6 +137,7 @@ static void map_parsed_rpu(const uint8_t *bytes, size_t size,
           "LINEAR_DZ mapping and DM metadata");
   require(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
           "PQ full-range reconstructed control representation");
+  dv_target_metadata(dm);
   // This master-domain reconstruction does not target a display. L2/L8 display
   // trims remain unapplied and are exported in the original RPU for a later
   // P8.1 display mapper. HDR10 output explicitly reports that limitation.
@@ -370,7 +373,7 @@ static void gpu_init(int width, int height, int el_width, int el_height) {
   require(context.output_texture != NULL, "persistent export float texture");
   require(!EXPORT_YUV10 || dv_yuv10_init(log, gpu, EXPORT_WIDTH, EXPORT_HEIGHT),
           "GPU yuv420p10 export planes");
-  if (EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
+  if (dv_target.nits || EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT) {
     context.native_texture = pl_tex_create(gpu,
         pl_tex_params(.w = WIDTH, .h = HEIGHT, .format = format,
                       .renderable = true, .sampleable = true));
@@ -494,7 +497,7 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
 
   pl_tex output_texture = context.output_texture;
   bool resized = EXPORT_WIDTH != WIDTH || EXPORT_HEIGHT != HEIGHT;
-  pl_tex native_texture = resized ? context.native_texture : output_texture;
+  pl_tex native_texture = (resized || dv_target.nits) ? context.native_texture : output_texture;
   struct pl_frame destination = {.num_planes = 1,
                                  .planes = {{.texture = native_texture,
                                              .components = 3,
@@ -520,7 +523,9 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
   pl_renderer_reset_errors(renderer, NULL);
   require(pl_render_image(renderer, &source, &destination, &parameters),
           "full renderer export");
-  if (resized) export_native_rgb(renderer, destination, output_texture);
+  if (dv_target.nits)
+    destination.planes[0].texture = dv_target_render(context.log, gpu, native_texture, frame_index);
+  if (resized || dv_target.nits) export_native_rgb(renderer, destination, output_texture);
   struct pl_render_errors errors = pl_renderer_get_errors(renderer);
   require(errors.errors == 0 && errors.num_disabled_hooks == 0,
           "renderer error-free export");
@@ -585,6 +590,7 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
          frame_index, EXPORT_WIDTH, EXPORT_HEIGHT, pts, duration, rgb_field, errors.errors);
 }
 static void gpu_close(void) {
+  dv_target_destroy(context.gpu);
   for (int layer = 0; layer < 2; layer++) {
     for (int c = 0; c < 3; c++)
       pl_tex_destroy(context.gpu, &context.textures[layer][c]);
