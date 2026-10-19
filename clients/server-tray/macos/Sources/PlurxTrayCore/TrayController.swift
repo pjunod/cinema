@@ -29,6 +29,9 @@ public final class TrayController {
     private let control: ControlInvoking
     private weak var environment: TrayEnvironment?
     private var polling = false
+    /// Read-only observation for qualification: wait out a coalesced menu read
+    /// before requesting status after the lifecycle operation has completed.
+    public var isRefreshing: Bool { polling }
     private var pollTask: Task<Void, Never>?
     public var menuVisible = false {
         didSet { if menuVisible && !oldValue { refreshSoon() } }

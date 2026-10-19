@@ -6,11 +6,21 @@ import AppKit
 import PlurxTrayCore
 import PlurxTrayUI
 
+let smoke: SmokeOptions?
+do { smoke = try SmokeOptions.parse(Array(CommandLine.arguments.dropFirst())) } catch {
+    fputs("invalid smoke arguments: \(error)\n", stderr)
+    exit(2)
+}
+
 let bundleIdentifier = Bundle.main.bundleIdentifier ?? "tv.plurx.Server"
 let me = ProcessInfo.processInfo.processIdentifier
 let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
     .filter { $0.processIdentifier != me }
 if !others.isEmpty {
+    if smoke != nil {
+        fputs("smoke requires its own application instance\n", stderr)
+        exit(1)
+    }
     FileHandle.standardError.write(Data("Plurx Server is already running (pid \(others[0].processIdentifier)).\n".utf8))
     exit(0)
 }
@@ -18,7 +28,19 @@ if !others.isEmpty {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = MainActor.assumeIsolated {
-    TrayApp(control: ControlRunner.bundled(), info: AppInfo.from(.main))
+    let bundled = ControlRunner.bundled()
+    let runner = ControlRunner(executable: bundled.executable, installationRecord: smoke?.installation)
+    let info = AppInfo.from(.main)
+    if let smoke {
+        let recorded = SmokeControl(runner)
+        let delegate = TrayApp(control: recorded, info: info)
+        delegate.smokeDriver = SmokeDriver(options: smoke, control: recorded,
+                                           controllerPath: runner.executable.path, info: info)
+        return delegate
+    }
+    return TrayApp(control: runner, info: info)
 }
 app.delegate = delegate
 app.run()
+
+if smoke != nil { exit(MainActor.assumeIsolated { delegate.smokeDriver?.exitCode ?? 1 }) }

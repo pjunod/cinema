@@ -8,6 +8,7 @@ import PlurxTrayCore
 public final class TrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, TrayEnvironment {
     public private(set) var statusItem: NSStatusItem?
     public let menu = NSMenu()
+    public var smokeDriver: SmokeDriver?
     public private(set) var controller: TrayController!
     private let control: ControlInvoking
     private let info: AppInfo
@@ -37,7 +38,7 @@ public final class TrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, Tra
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         install()
-        controller.startPolling()
+        if let smokeDriver { smokeDriver.start(on: self) } else { controller.startPolling() }
     }
 
     /// Creates the status item and first menu. Separate from launch so tests
@@ -56,14 +57,29 @@ public final class TrayApp: NSObject, NSApplicationDelegate, NSMenuDelegate, Tra
     public func applicationWillTerminate(_ notification: Notification) {
         // Leaves the server and any upgrade worker running by design.
         controller.stopPolling()
+        if let smokeDriver {
+            smokeDriver.applicationWillTerminate(self)
+            // NSApplication.terminate otherwise exits with zero regardless of
+            // qualification failure. Preserve the normal Quit delegate path.
+            exit(smokeDriver.exitCode)
+        }
     }
 
     // MARK: NSMenuDelegate
 
-    public func menuWillOpen(_ menu: NSMenu) { controller.menuVisible = true }
-    public func menuDidClose(_ menu: NSMenu) { controller.menuVisible = false }
+    public func menuWillOpen(_ menu: NSMenu) {
+        smokeDriver?.menuOpened()
+        controller.menuVisible = true
+    }
+    public func menuDidClose(_ menu: NSMenu) {
+        smokeDriver?.menuClosed()
+        controller.menuVisible = false
+    }
 
     @objc public func menuAction(_ sender: NSMenuItem) {
+        // Qualification opens the real menu for observation only. The explicit
+        // driver action is the sole authority; clicks cannot change startup.
+        guard smokeDriver == nil else { return }
         guard let box = sender.representedObject as? ActionBox else { return }
         dispatch(box.action)
     }
