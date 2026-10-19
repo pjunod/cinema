@@ -7387,3 +7387,20 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "enhancement = tv.plurx.app.data.PlaybackEnhancement.fromJson(action.enhancement)"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
 test_anchor = "aPreparedSuccessorCarriesItsOwnEnhancementParsedLikeTheCreateResponse"
+
+# Settings names the server by the node hostname (PR #1207).
+[[fixes]]
+id = "apple.settings-server-label-names-the-node"
+commits = ["0d5af614d", "10cc3b92e"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = "serverName = node.displayName ?? info.name"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAChosenNameKeepsTheAnsweringNodeVisible"
+
+[[fixes]]
+id = "android.settings-server-label-names-the-node"
+commits = ["0d5af614d", "10cc3b92e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
+source_anchor = "serverName = node?.display_name ?: info.name"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/ServerLabelTest.kt"
+test_anchor = "aChosenNameKeepsTheAnsweringNodeVisible"
