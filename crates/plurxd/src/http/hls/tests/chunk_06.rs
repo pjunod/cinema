@@ -3860,6 +3860,7 @@ async fn shipped_shape_primes_an_admitted_candidate() {
     // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
     let source = staging_source(&fixture).await;
     let mut recipe = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,

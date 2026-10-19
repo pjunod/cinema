@@ -2140,7 +2140,8 @@
         // explicit clear the successor would stage claiming to be a reopen of
         // a session that is still playing.
         let candidate = crate::transcode::SessionRequest {
-            sdr_master_codecs: None,
+            dv_processing_destination: None,
+        sdr_master_codecs: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,

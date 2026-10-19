@@ -42,6 +42,7 @@ async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         MediaSessionRequestClaim::Acquired { .. }
     ));
     let request = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -206,6 +207,7 @@ async fn started_session_cleanup_shipped_shape() {
     let dir = crate::test_tempdir().expect("state dir");
     let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
     let request = crate::transcode::SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,
@@ -3407,10 +3409,8 @@ async fn negotiated_relay_uses_owner_local_acquisition_and_preserves_cached_mani
 /// whether the first window's report has arrived: a create that beats its
 /// report must still describe HDR10-E, and a staged copy successor keeps the
 /// native DYN pill.
-/// The reconstructed 8.1 for a Dolby Vision display keeps the converted
-/// copy's `Copy` kind (that kind is what selects the 8.1 destination). It
-/// was described as the plain conversion — FEL "not used for this play" on
-/// a Studio Display — because only a `Transcode` kind counted as processed.
+/// A completed reconstructed 8.1 uses the truthful encoded carrier; its plan
+/// projection, not the PQ base label, supplies FEL+RPU+DYN.
 #[test]
 fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
     use plurx_core::playback::enhancement::EnhancementBadge;
@@ -3421,13 +3421,20 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
         aac: false,
         preserve_dolby_vision: true,
     };
+    let reconstructed = crate::transcode::SessionKind::Transcode { height: 1080 };
+    // Retain the original owner-projection regression as well as the new
+    // encoded carrier: the completed plan must not be relabelled by a kind.
     assert_eq!(
         session_delivered_processing_shape(Some(&file), &converted, OutputGrade::Hdr10, Some(8)),
         (Some("dolby_vision"), Some(8))
     );
+    assert_eq!(
+        session_delivered_processing_shape(Some(&file), &reconstructed, OutputGrade::Hdr10, Some(8)),
+        (Some("dolby_vision"), Some(8))
+    );
     let shown = session_enhancement(
         Some(&file),
-        &converted,
+        &reconstructed,
         OutputGrade::Hdr10,
         Some(8),
         Some(true),
@@ -3440,6 +3447,9 @@ fn a_reconstructed_profile81_copy_is_described_as_reconstructed() {
         shown.active,
         [EnhancementBadge::Fel, EnhancementBadge::Rpu, EnhancementBadge::Dyn]
     );
+    let projected_legacy = session_enhancement(Some(&file), &converted, OutputGrade::Hdr10,
+        Some(8), Some(true), None, None, None).expect("owner-projected completed legacy carrier");
+    assert_eq!(projected_legacy.active, shown.active);
     // The plain conversion still says why the FEL is unused.
     let plain = session_enhancement(
         Some(&file),

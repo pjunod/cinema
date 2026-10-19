@@ -2398,6 +2398,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
+        dv_processing_destination: candidate.dv_processing_destination,
         sdr_master_codecs: None,
         continuous_media: None,
         candidate_context: candidate.candidate_context.clone(),

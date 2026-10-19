@@ -266,6 +266,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
         sustainable: true,
     };
     let mut request = SessionRequest {
+        dv_processing_destination: None,
         sdr_master_codecs: None,
         continuous_media: None,
         quality_catalog: None,

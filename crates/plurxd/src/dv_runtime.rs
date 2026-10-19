@@ -1704,8 +1704,8 @@ mod processed_selection_has_no_software_gates {
             .split_once("let Some(original) = request.candidate_context")
             .expect("candidate context read")
             .0;
-        assert!(silent.contains("convert_dolby_vision: true"), "{silent}");
-        assert!(silent.contains("!profile81"), "{silent}");
+        assert!(silent.contains("convert_dolby_vision: false"), "{silent}");
+        assert!(silent.contains("dv_processing_route()?"), "{silent}");
         assert!(body.contains("preferences.fel_reencode"), "{body}");
     }
 

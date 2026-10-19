@@ -623,6 +623,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -1326,14 +1327,14 @@ pub(super) fn session_delivered_dolby_vision_profile(
 /// The prepared processing result may author P81 while still physically
 /// re-encoding a PQ base. Only the owner-projected marker overrides the ordinary
 /// route; requests, source tags and saved processing preferences do not.
-fn session_delivered_processing_shape(
+pub(super) fn session_delivered_processing_shape(
     source: Option<&MediaFile>,
     kind: &crate::transcode::SessionKind,
     grade: plurx_core::transcode::OutputGrade,
     processed_dv_profile: Option<u8>,
 ) -> (Option<&'static str>, Option<u8>) {
-    // A reconstructed 8.1 is processed whatever kind carried it: the
-    // converted copy it replaces keeps its `Copy` kind.
+    // The completed processing plan, not source tags or a request flag,
+    // authors the reconstructed Profile 8.1 output.
     if processed_dv_profile == Some(8) && grade == plurx_core::transcode::OutputGrade::Hdr10 {
         return (Some("dolby_vision"), Some(8));
     }

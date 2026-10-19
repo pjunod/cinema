@@ -790,6 +790,11 @@ pub struct SessionRequest {
     /// because the passthrough filter on a non-DV input emits a broken
     /// picture at exit 0 rather than failing (measured).
     pub hdr10: bool,
+    /// Service-selected processed output. Describes semantics, never executable
+    /// authority; a remote/restarted owner still needs fresh qualification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dv_processing_destination:
+        Option<plurx_core::transcode::dv_processing::DvDestination>,
     /// Which presentation this durable request names. `Live` remains the
     /// serde default solely so recipes written by an older binary retain
     /// their identity and can be refused rather than misread as VOD. Public
@@ -1074,6 +1079,59 @@ impl SessionKind {
 }
 
 impl SessionRequest {
+    /// Resolve legacy routes and explicit encoded destinations in one place so
+    /// preflight and the completed-window runtime cannot disagree.
+    pub(crate) fn dv_processing_route(
+        &self,
+    ) -> Result<
+        (
+            plurx_core::transcode::dv_processing::DvExistingRoute,
+            plurx_core::transcode::dv_processing::DvDestination,
+            bool,
+        ),
+        String,
+    > {
+        use plurx_core::transcode::dv_processing::{DvDestination, DvExistingRoute};
+        if let Some(destination) = self.dv_processing_destination {
+            if self.presentation != Presentation::Vod
+                || !matches!(self.kind, SessionKind::Transcode { height } if height >= 32 && height <= super::MAX_HEIGHT && height % 2 == 0)
+                || !self.hdr10
+                || self.subtitle_burn.is_some()
+                || self.continuous_media.is_some()
+            {
+                return Err("invalid processed destination contract: finite PQ transcode at an even height without burn or continuous media required".into());
+            }
+            return Ok((DvExistingRoute::Other, destination, true));
+        }
+        Ok(match self.kind {
+            SessionKind::Copy {
+                preserve_dolby_vision: true,
+                convert_dolby_vision: false,
+                ..
+            } => (
+                DvExistingRoute::NativeDvCopy,
+                DvDestination::Profile81,
+                true,
+            ),
+            SessionKind::Copy {
+                convert_dolby_vision: true,
+                ..
+            } => (
+                DvExistingRoute::P7BaseConversion,
+                DvDestination::Profile81,
+                true,
+            ),
+            SessionKind::Copy { .. } => (
+                DvExistingRoute::CompatibleBaseHdr10,
+                DvDestination::Hdr10,
+                true,
+            ),
+            SessionKind::Transcode { .. } => {
+                (DvExistingRoute::Other, DvDestination::Hdr10, self.hdr10)
+            }
+        })
+    }
+
     /// The client's request intent before server-owned Auto normalization.
     /// This is the only idempotency identity: it is what `claim_request`
     /// compares when a `request_id` is replayed, so every field that changes
@@ -1141,6 +1199,15 @@ impl SessionRequest {
         };
         let kind = if let Some(limit) = self.finite_bitrate_limit_bps {
             format!("{kind}+finite-bitrate-v1:{limit}")
+        } else {
+            kind
+        };
+        let kind = if let Some(destination) = self.dv_processing_destination {
+            let tag = match destination {
+                plurx_core::transcode::dv_processing::DvDestination::Hdr10 => "hdr10",
+                plurx_core::transcode::dv_processing::DvDestination::Profile81 => "profile81",
+            };
+            format!("{kind}+dv-processing-v1:{tag}")
         } else {
             kind
         };
@@ -1339,6 +1406,175 @@ pub(crate) fn continuous_test_candidate_context(
 mod prepared_candidate_tests {
     use super::*;
 
+    fn destination_request() -> SessionRequest {
+        serde_json::from_value(serde_json::json!({
+            "file_id":1,"playback_id":"destination","automatic":true,
+            "kind":{"kind":"transcode","height":720},"start_seconds":0.0,
+            "audio_offset_ms":0,"hdr10":true,"presentation":"vod"
+        }))
+        .expect("legacy encoded request")
+    }
+
+    #[test]
+    fn processed_destination_wire_and_identity_are_explicit_and_legacy_stable() {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        // Frozen legacy wire field set, not the new SessionRequest decoder.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyRequest {
+            file_id: serde_json::Value,
+            playback_id: serde_json::Value,
+            request_id: serde_json::Value,
+            control_sequence: serde_json::Value,
+            automatic: serde_json::Value,
+            previous_session_id: serde_json::Value,
+            reopen_reason: serde_json::Value,
+            kind: serde_json::Value,
+            start_seconds: serde_json::Value,
+            audio_index: serde_json::Value,
+            subtitle_burn: serde_json::Value,
+            audio_offset_ms: serde_json::Value,
+            hdr10: serde_json::Value,
+            presentation: serde_json::Value,
+        }
+        let ordinary = destination_request();
+        let wire = serde_json::to_value(&ordinary).expect("wire");
+        assert!(wire.get("dv_processing_destination").is_none());
+        assert!(serde_json::from_value::<LegacyRequest>(wire.clone()).is_ok());
+        let mut null = wire.clone();
+        null["dv_processing_destination"] = serde_json::Value::Null;
+        let null: SessionRequest = serde_json::from_value(null).expect("null default");
+        assert_eq!(serde_json::to_value(&null).expect("null wire"), wire);
+        assert_eq!(
+            ordinary.intent_fingerprint("viewer"),
+            null.intent_fingerprint("viewer")
+        );
+        assert_eq!(
+            ordinary.intent_fingerprint("viewer"),
+            serde_json::json!([
+                "viewer",
+                1,
+                "destination",
+                1,
+                "ta+hdr10+vod",
+                "0.000",
+                null,
+                null,
+                0,
+                null,
+                null
+            ])
+            .to_string()
+        );
+        let principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+        let mut identities = std::collections::HashSet::new();
+        identities.insert(ordinary.durable_intent_fingerprint(&principal));
+        for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+            let mut request = ordinary.clone();
+            request.dv_processing_destination = Some(destination);
+            let encoded = serde_json::to_value(&request).expect("explicit wire");
+            let restored: SessionRequest =
+                serde_json::from_value(encoded.clone()).expect("round trip");
+            assert_eq!(restored.dv_processing_destination, Some(destination));
+            assert!(restored.candidate_context.is_none());
+            assert!(identities.insert(restored.durable_intent_fingerprint(&principal)));
+            // A strict old receiver knows precisely the old field set. Reject
+            // either explicit value rather than silently decoding wrong bytes.
+            assert!(serde_json::from_value::<LegacyRequest>(encoded).is_err());
+        }
+        for value in [
+            serde_json::json!("unknown"),
+            serde_json::json!(true),
+            serde_json::json!(81),
+        ] {
+            let mut bad = wire.clone();
+            bad["dv_processing_destination"] = value;
+            assert!(serde_json::from_value::<SessionRequest>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn processed_destination_requires_finite_even_pq_transcode_and_routes_profile81() {
+        use plurx_core::transcode::dv_processing::{DvDestination, DvExistingRoute};
+        let mut request = destination_request();
+        request.dv_processing_destination = Some(DvDestination::Profile81);
+        assert_eq!(
+            request.dv_processing_route().expect("explicit"),
+            (DvExistingRoute::Other, DvDestination::Profile81, true)
+        );
+        for height in [0, 31, 33, 719, MAX_HEIGHT + 2] {
+            let mut invalid = request.clone();
+            invalid.kind = SessionKind::Transcode { height };
+            assert!(invalid.dv_processing_route().is_err(), "{height}");
+        }
+        for native in [false, true] {
+            let mut invalid = request.clone();
+            invalid.kind = SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: native,
+                convert_dolby_vision: !native,
+            };
+            assert!(invalid.dv_processing_route().is_err());
+            invalid.dv_processing_destination = None;
+            assert_eq!(
+                invalid.dv_processing_route().expect("legacy").0,
+                if native {
+                    DvExistingRoute::NativeDvCopy
+                } else {
+                    DvExistingRoute::P7BaseConversion
+                }
+            );
+        }
+        let mut invalid = request.clone();
+        invalid.hdr10 = false;
+        assert!(invalid.dv_processing_route().is_err());
+        invalid = request.clone();
+        invalid.presentation = Presentation::Live;
+        assert!(invalid.dv_processing_route().is_err());
+        invalid = request.clone();
+        invalid.subtitle_burn = Some(0);
+        assert!(invalid.dv_processing_route().is_err());
+        let mut continuous: SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id":1,"playback_id":"destination","automatic":true,
+            "kind":{"kind":"transcode","height":720},"start_seconds":0.0,
+            "audio_offset_ms":0,"hdr10":true,"presentation":"vod",
+            "continuous_media":{"version":1,"family_generation":"generation","role":"video"}
+        }))
+        .expect("continuous descriptor");
+        continuous.dv_processing_destination = Some(DvDestination::Profile81);
+        assert!(continuous.dv_processing_route().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn serialized_processed_destination_cannot_enter_an_ordinary_producer() {
+        let root = crate::test_tempdir().expect("source-free refusal");
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut request = destination_request();
+        request.dv_processing_destination =
+            Some(plurx_core::transcode::dv_processing::DvDestination::Profile81);
+        let request: SessionRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).expect("wire")).expect("restore");
+        let error = manager
+            .create_session(&request, "viewer")
+            .await
+            .err()
+            .expect("no authority");
+        assert!(
+            error.contains("fresh admitted owner qualification"),
+            "{error}"
+        );
+        assert!(manager.active_session_ids().await.is_empty());
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn prepared_candidate_timer_releases_unconsumed_credit_without_replay() {
@@ -1438,6 +1674,19 @@ mod prepared_candidate_tests {
         let baseline = request
             .processed_preparation_binding(&recovery)
             .expect("complete binding");
+        for destination in [
+            plurx_core::transcode::dv_processing::DvDestination::Hdr10,
+            plurx_core::transcode::dv_processing::DvDestination::Profile81,
+        ] {
+            let mut changed = request.clone();
+            changed.dv_processing_destination = Some(destination);
+            assert_ne!(
+                changed
+                    .processed_preparation_binding(&recovery)
+                    .expect("destination"),
+                baseline
+            );
+        }
         let mut changed = request.clone();
         changed.start_seconds = 360.0;
         assert_ne!(

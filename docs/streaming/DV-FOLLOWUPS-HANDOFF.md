@@ -40,8 +40,10 @@ Original authored head `1eeb0542d` is preserved on preparation branch
 `codex/cinema-fel-p81-catalog`. The intended Pixel candidate `08b51db215`
 and its documentation base are integrated for preparation only. B's final
 independent review and merge still wait for actual Pixel landing and any
-necessary base reconciliation. This candidate has no valid compiler or unit
-receipt yet; the earlier stale-binary output is not evidence.
+necessary base reconciliation. The source-bound baseline formatter passed;
+all-target compilation found an inaccessible regression helper (repaired in
+the implementation). The completed candidate still needs compilation and
+independent review. There is no affected-unit receipt; stale output is not evidence.
 
 **Symptom:** Safari on a Studio Display, Avatar (P7 FEL), FEL re-encode on, gets the plain P7→8.1 conversion with "FEL: not used for this play" and no reason. The reconstructed 8.1 (FEL rebuilt, re-encoded, new RPU) is never reached, although #1199's physical test proves that path.
 
@@ -50,7 +52,9 @@ receipt yet; the earlier stale-binary output is not evidence.
 - The DV backend is captured only when there is no `candidate_context` or this is a processed trial. Catalog starts always carry a context.
 
 **Branch changes:**
-- A converted copy (`Copy { convert_dolby_vision: true }`) is offered the reconstructed 8.1 under `fel_reencode`, and declines are named. The trial keeps the Copy kind, which is what selects `DvDestination::Profile81`.
+- A converted copy (`Copy { convert_dolby_vision: true }`) is offered reconstructed 8.1 under `fel_reencode` plus conversion policy, independently of `hdr_processing`, and declines are named. Both processed trials use a finite even-height `Transcode` with an explicit service-owned optional `dv_processing_destination`; preflight and runtime use one resolver. Native DV remains untouched.
+- The original catalog query survives normalization. Its v2 description/reuse scope binds destination, full preferences and current encoded audio. Copy-route audio is discarded and re-resolved through the canonical EncodedVod AAC claim; actual geometry/Main10/P8 support must come from the same video entry.
+- Ordinary payloads omit the optional destination and keep their intent bytes. Explicit new payloads fail closed on old strict workers; remote/durable serialization keeps semantics but loses local prepared authority. Neither restoration nor strict kind/audio equality is weakened.
 - `processed_candidate_digest` (`crates/plurxd/src/vodencode.rs`) accepts both destinations with distinct tags.
 - `session_delivered_processing_shape` and `session_enhancement` no longer require a Transcode kind.
 - Enhancement text: the reconstructed 8.1 lights FEL+RPU+DYN, and the plain 8.1 explains its RPU.
@@ -62,17 +66,15 @@ receipt yet; the earlier stale-binary output is not evidence.
 
 **Main risk:** an Encode-route candidate on a Copy-kind request. Check every place that assumes Encode ⇒ Transcode: `candidates.rs` restore (~1399, ~1447), successor predicates at the top of `manager/create.rs`, link receipts. Alternative if fragile: an explicit destination field on `SessionRequest` (note `deny_unknown_fields`), with a Transcode-kind trial. Also check `trial.audio_delivery = None` for copies and that `encoded_client_compatible` accepts the 8.1 output for Safari's caps.
 
-**Preparation findings, not final review:** the retained binding normalizes an
-encoded delivery to Transcode, while retained acquisition requires its kind
-to equal the request kind and resolves audio according to that request kind.
-The processed reuse scope also currently excludes preserving-DV copies and
-requires the HDR-processing preference, so a FEL-only Profile 8.1 start cannot
-reuse its predecessor through that scope. A frontier thinker must settle an
-explicit destination/Transcode-carrier design before implementation proceeds;
-do not relax retained equality or processed restoration refusals to hide the
-mismatch. Copy preparation also swallows detailed processing errors, and the
-unsupported-profile early return precedes the promised named Profile 8.1
-decline. These source contracts remain unfinished.
+**Preparation, not final review:** canonical Astra decision accepted the explicit
+destination and truthful encoded carrier. Source repairs the retained-kind/audio
+mismatch, FEL-only reuse scope and swallowed processing errors, and checks plan
+destination/height again at prepared admission and retained binding. Source tests
+cover wire/intent/binding and ordinary-producer refusal, preference/source/encoded
+audio scope, same-entry completed client contract and original daemon indicators.
+Compilation, full independent review and post-review execution still determine
+whether this complete implementation is ready. The separate reservation-slot
+incident and general remote processed requalification remain out of B scope.
 
 **Finish:**
 1. Resolve the destination, reuse, audio and mixed-version contracts; complete
