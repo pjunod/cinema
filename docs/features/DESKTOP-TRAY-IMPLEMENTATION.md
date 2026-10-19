@@ -2,8 +2,10 @@
 
 **Status:** open · **Updated:** 2026-10-19 · implementation in progress;
 Astra approved revision 2 on 2026-10-19 after R1–R8 were resolved.
-Draft PR #1213 tracks integration; native/release qualification remains outstanding. This is the canonical implementation and
-acceptance ledger for project P31.
+Draft PR #1213 tracks promotion; the complete cohort receives one task PR
+and post-PR Astra review. Native/release qualification remains outstanding.
+[The qualification ledger](DESKTOP-TRAY-QUALIFICATION.md) records evidence and gaps.
+This is the canonical implementation and acceptance ledger for project P31.
 [The Astra review record](DESKTOP-TRAY-REVIEW.md) tracks R1–R8 and their disposition.
 
 Companion to [the release contract](../RELEASING.md),
@@ -433,6 +435,10 @@ returns to it. Files overlap, so the independent-main exception does not
 apply. Table ownership identifies the writer for each task; integration owns
 shared manifests, release workflow, documentation and acceptance ledger when
 parallel branches would otherwise conflict. Task gates do not qualify a release.
+
+M1–M5 integrate as one cohort task PR into the effort, preserving their owned
+commits and focused regressions. This supersedes partial component PRs; complete
+review, the native transaction batch and the effort gate still precede its merge.
 
 | Task | Owns / delivers | Depends on | Acceptance before task merge |
 |---|---|---|---|

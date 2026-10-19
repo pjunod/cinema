@@ -8,7 +8,7 @@ first.
 
 ## Native server tray, startup policy and release upgrades
 
-**Building on `effort/desktop-tray`, draft [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213); not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra approved the plan; the complete implementation review follows the PR. Controller, daemon, native UI and packaging work is in progress. Integration, native acceptance and the main promotion gate remain outstanding.
+**Building on `effort/desktop-tray`, draft [PR #1213](http://forge.lan:3000/noirr/plurx/pulls/1213); not deployed.** The [implementation ledger](docs/features/DESKTOP-TRAY-IMPLEMENTATION.md) tracks macOS and Linux desktop controls, separate server/tray startup choices, and signed GitHub artifact upgrades. Astra approved the plan; the complete implementation review follows the PR. Controller, daemon, native UI and packaging source is assembled in one cohort task PR. The [qualification ledger](docs/features/DESKTOP-TRAY-QUALIFICATION.md) distinguishes focused compiler/regression evidence from outstanding native acceptance, implementation review and main promotion.
 
 ## Agent efficiency: smaller searches, a docs router, paperwork first
 
