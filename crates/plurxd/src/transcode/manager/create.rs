@@ -705,6 +705,20 @@ impl TranscodeManager {
         serving_admission: Option<ClusterServingAdmission>,
         priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<SessionCreation, String> {
+        req.dv_processing_route()
+            .map_err(|error| vod_refusal_error("vod_processed_contract_invalid", error))?;
+        // A durable/remote destination is descriptive, not a local lease.
+        if req.dv_processing_destination.is_some()
+            && !req
+                .candidate_context
+                .as_ref()
+                .is_some_and(|context| context.selected_candidate.processed_hdr10)
+        {
+            return Err(vod_refusal_error(
+                "candidate_recipe_unavailable",
+                "processed destination requires fresh admitted owner qualification",
+            ));
+        }
         let (priority, retained_capture) = priority;
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -1203,35 +1217,9 @@ impl TranscodeManager {
         request: &SessionRequest,
     ) -> Result<plurx_core::transcode::dv_processing::DvSelection, String> {
         use plurx_core::transcode::dv_processing::{
-            dv_processing_preflight, DvDestination, DvExistingRoute, DvFallbackReason, DvSelection,
+            dv_processing_preflight, DvFallbackReason, DvSelection,
         };
-        let (existing, destination, allowed) = match request.kind {
-            SessionKind::Copy {
-                preserve_dolby_vision: true,
-                convert_dolby_vision: false,
-                ..
-            } => (
-                DvExistingRoute::NativeDvCopy,
-                DvDestination::Profile81,
-                true,
-            ),
-            SessionKind::Copy {
-                convert_dolby_vision: true,
-                ..
-            } => (
-                DvExistingRoute::P7BaseConversion,
-                DvDestination::Profile81,
-                true,
-            ),
-            SessionKind::Copy { .. } => (
-                DvExistingRoute::CompatibleBaseHdr10,
-                DvDestination::Hdr10,
-                true,
-            ),
-            SessionKind::Transcode { .. } => {
-                (DvExistingRoute::Other, DvDestination::Hdr10, request.hdr10)
-            }
-        };
+        let (existing, destination, allowed) = request.dv_processing_route()?;
         let reason = dv_processing_preflight(
             existing,
             allowed && request.subtitle_burn.is_none() && request.continuous_media.is_none(),
@@ -1280,26 +1268,48 @@ impl TranscodeManager {
         #[cfg(target_os = "linux")]
         {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
-            // Silent only where HDR10-E is not what this play is: a native
-            // Dolby Vision display (the DV route serves it), an SDR output,
-            // or the Developer-tab setting off. Everything after the setting
-            // check names its reason in the plan notes.
-            if matches!(
-                request.kind,
-                SessionKind::Copy {
-                    preserve_dolby_vision: true,
-                    ..
-                }
-            ) {
+            // Two processed destinations. A Profile 7 copy converted to 8.1
+            // for a Dolby Vision display becomes the reconstructed 8.1 (the
+            // FEL rebuilt into the picture, a new RPU) under FEL re-encode.
+            // Any other HDR10 delivery becomes HDR10-E under Dolby Vision
+            // processing.
+            use plurx_core::transcode::dv_processing::DvDestination;
+            let Some(destination) = Self::processed_qualification_destination(request)? else {
+                return Ok(None);
+            };
+            let profile81 = destination == DvDestination::Profile81;
+            // Silent only where no processed destination is what this play
+            // is: a native Dolby Vision copy (the display applies the RPU),
+            // an SDR output, or the Developer-tab setting off. Everything
+            // after the setting check names its reason in the plan notes.
+            if request.dv_processing_destination.is_none()
+                && matches!(
+                    request.kind,
+                    SessionKind::Copy {
+                        preserve_dolby_vision: true,
+                        convert_dolby_vision: false,
+                        ..
+                    }
+                )
+            {
                 return Ok(None);
             }
             let Some(original) = request.candidate_context.as_ref() else {
+                if request.dv_processing_destination.is_some() {
+                    return Err(
+                        "processed destination requires fresh admitted owner qualification".into(),
+                    );
+                }
                 return Ok(None);
             };
             // Compatible HDR10 copy does not set the legacy re-encode flag.
             // Its accepted destination still permits preference-driven DV
             // processing, subject to the actual completed decoder contract.
-            if !hdr10_intent && original.selected_candidate.grade != OutputGrade::Hdr10 {
+            if request.dv_processing_destination.is_none()
+                && !profile81
+                && !hdr10_intent
+                && original.selected_candidate.grade != OutputGrade::Hdr10
+            {
                 return Ok(None);
             }
             let Some(planning) = self
@@ -1308,10 +1318,39 @@ impl TranscodeManager {
             else {
                 return Ok(None);
             };
-            if !Self::vod_dv_preferences_from_snapshot(&planning).hdr_processing
-                || !matches!(planning.file.dolby_vision.profile, Some(5 | 7 | 8))
+            let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
+            let enabled = if profile81 {
+                preferences.fel_reencode
+            } else {
+                preferences.hdr_processing
+            };
+            if !enabled {
+                return if request.dv_processing_destination.is_some() {
+                    Err("the selected processed destination is no longer enabled".into())
+                } else {
+                    Ok(None)
+                };
+            }
+            if profile81 && !preferences.conversion_permitted {
+                return Err("Dolby Vision conversion is not permitted".into());
+            }
+            if profile81
+                && (planning.file.dolby_vision.profile != Some(7)
+                    || planning.file.dolby_vision.el_present == Some(false))
             {
-                return Ok(None);
+                return Err(
+                    "FEL re-encode needs a Profile 7 source with its enhancement layer".into(),
+                );
+            }
+            if !profile81 && !matches!(planning.file.dolby_vision.profile, Some(5 | 7 | 8)) {
+                return if request.dv_processing_destination.is_some() {
+                    Err(
+                        "the processed destination needs supported Dolby Vision source metadata"
+                            .into(),
+                    )
+                } else {
+                    Ok(None)
+                };
             }
             // The setting is on for a DV source: from here every decline is
             // reported with the ordinary start it falls back to.
@@ -1324,10 +1363,13 @@ impl TranscodeManager {
             let Some(caps) = original.canonical_caps.as_ref() else {
                 return Err("the client did not report its playback capabilities".into());
             };
-            if !caps
-                .hls_hevc_sample_entries
-                .as_ref()
-                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
+            // The converted 8.1 copy this replaces already established the
+            // client's Dolby Vision HLS signalling; HDR10-E is new HEVC.
+            if !profile81
+                && !caps
+                    .hls_hevc_sample_entries
+                    .as_ref()
+                    .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1"))
                 || !caps.containers.iter().any(|container| container == "mp4")
                 || !caps.transports.iter().any(|transport| transport == "hls")
             {
@@ -1357,24 +1399,18 @@ impl TranscodeManager {
             };
             // The processed rendition is the selected rendition: same height,
             // at any resolution the source has.
-            let height = file
+            let source_height = file
                 .height
-                .unwrap_or(0)
-                .min(i64::from(original.selected_candidate.target_height))
-                & !1;
+                .filter(|height| u32::try_from(*height).is_ok_and(|value| value > 0))
+                .ok_or("the source has no valid picture height to process")?;
+            let height =
+                source_height.min(i64::from(original.selected_candidate.target_height)) & !1;
             if height < 32 {
                 return Err("the source has no picture height to process".into());
             }
-            let mut trial = request.clone();
+            let (mut trial, projected) =
+                Self::processed_qualification_input(&planning, request, height)?;
             trial.request_id = Some(recovery.incarnation_id.clone());
-            trial.kind = SessionKind::Transcode { height };
-            trial.hdr10 = true;
-            if matches!(request.kind, SessionKind::Copy { .. }) {
-                // The copy route's retained passthrough/E-AC-3 answer cannot
-                // describe a new reconstructed AAC producer. Resolve the
-                // encoded destination from the same canonical sink claim.
-                trial.audio_delivery = None;
-            }
             let context = trial
                 .candidate_context
                 .as_mut()
@@ -1397,7 +1433,9 @@ impl TranscodeManager {
                         deadline.into_std(),
                     )
                     .await
-                    .filter(|root| root.encoding.options.target_height == height)
+                    .filter(|root| root.encoding.options.target_height == height
+                        && matches!(&root.encoding.dv_processing,
+                            plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination))
             } else {
                 None
             };
@@ -1452,6 +1490,14 @@ impl TranscodeManager {
                 return Err("the processed trial has no processing runtime".into());
             };
             let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+            if !matches!(&encoding.dv_processing,
+                plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination)
+                || encoding.options.target_height != height
+            {
+                return Err(
+                    "the processed plan disagrees with its requested destination or height".into(),
+                );
+            }
             let digest = encoding.processed_candidate_digest(&file, &binding)?;
             if original.selected_candidate.processed_hdr10 && digest != original.recipe_digest {
                 return Err(vod_refusal_error(
@@ -1511,9 +1557,27 @@ impl TranscodeManager {
             else {
                 return Err("the processed recipe has no effective geometry".into());
             };
-            if !super::manager_candidates::encoded_client_compatible(caps, &encoding.plan, &facts) {
+            if !super::manager_candidates::processed_client_compatible(
+                caps,
+                &encoding.plan,
+                &facts,
+                destination,
+            ) {
                 return Err("the processed recipe is not one this client can decode".into());
             }
+            let actual_audio = encoding
+                .options
+                .audio
+                .as_ref()
+                .ok_or("the processed recipe has no resolved audio answer")?;
+            if projected
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|expected| expected.byte_identity() != actual_audio.byte_identity())
+            {
+                return Err("the processed audio differs from its canonical encoded claim".into());
+            }
+            trial.audio_delivery = Some(actual_audio.clone());
             let audio = if encoding.plan.options().input_has_audio {
                 u64::from(encoding.options.audio_bitrate_kbps) * 1000
             } else {
@@ -1651,6 +1715,13 @@ impl TranscodeManager {
         )>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         let processed_trial = prepared_admission.is_some();
+        req.dv_processing_route()?;
+        if req.dv_processing_destination.is_some() && !processed_trial {
+            return Err(vod_refusal_error(
+                "candidate_recipe_unavailable",
+                "processed destination requires fresh admitted owner qualification",
+            ));
+        }
         #[cfg(target_os = "linux")]
         let processing_deadline = prepared_admission.as_ref().map(|(_, deadline)| *deadline);
         if req
@@ -1673,6 +1744,17 @@ impl TranscodeManager {
         }
         let planning = self.vod_preparation_snapshot(req, file).await?;
         let dv_processing = Self::vod_dv_processing_from_snapshot(&planning, req)?;
+        if processed_trial {
+            if let plurx_core::transcode::dv_processing::DvSelection::KeepExisting(reason) =
+                &dv_processing
+            {
+                if *reason
+                    != plurx_core::transcode::dv_processing::DvFallbackReason::AwaitingFirstWindow
+                {
+                    return Err(format!("processed preflight refused: {reason:?}"));
+                }
+            }
+        }
         #[cfg(target_os = "linux")]
         let dv_tools = if matches!(
             &dv_processing,
@@ -2368,10 +2450,8 @@ impl TranscodeManager {
             if let Some(tools) = dv_tools {
                 let attempt = async {
                     use crate::vodencode::dv_runtime::{RuntimeRecipe, failure_episode_key, episode_failed};
-                    use plurx_core::transcode::dv_processing::{DvDestination, DvSelection};
-                    let destination = if matches!(req.kind, SessionKind::Copy { convert_dolby_vision: true, .. }) {
-                        DvDestination::Profile81
-                    } else { DvDestination::Hdr10 };
+                    use plurx_core::transcode::dv_processing::DvSelection;
+                    let (_, destination, _) = req.dv_processing_route()?;
                     let preferences = Self::vod_dv_preferences_from_snapshot(&planning);
                     let failure_episode = failure_episode_key(&req.playback_id, &source_object_version,
                         &tools, preferences, destination)?;
@@ -2455,6 +2535,9 @@ impl TranscodeManager {
                         };
                     runtime.prepared.lock().map_err(|_| "DV prepared window lock poisoned")?
                         .replace((entry.index, verified));
+                    if selected.destination() != destination {
+                        return Err("completed processing plan destination changed".into());
+                    }
                     Ok::<_, String>(((processed_plan, processed_options, processed_resources,
                         DvSelection::Selected(Box::new(selected)), Some(Arc::new(runtime))), credit))
                 }.await;
@@ -2524,7 +2607,7 @@ impl TranscodeManager {
         if let Some((sink, _)) = prepared_admission.as_mut() { **sink = prepared_credit; }
         Ok(Some(encoding))
         }.await;
-        if copy_attempt {
+        if copy_attempt && !processed_trial {
             match result {
                 Err(reason) => {
                     tracing::warn!(target: "plurxd::transcode", %reason, "DV copy processing refused; retaining source fallback");
@@ -2678,6 +2761,16 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         encoding: &Option<Arc<crate::vodencode::Encoding>>,
     ) -> Result<Option<crate::vodserve::RetainedCandidateBinding>, String> {
+        if let Some(destination) = req.dv_processing_destination {
+            req.dv_processing_route()?;
+            if encoding.as_ref().is_none_or(|encoding|
+                !matches!(req.kind, SessionKind::Transcode { height } if height == encoding.options.target_height)
+                    || !matches!(&encoding.dv_processing,
+                        plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination))
+            {
+                return Err(vod_refusal_error("candidate_recipe_changed", "retained processed destination or height changed"));
+            }
+        }
         let kind = encoding
             .as_ref()
             .map_or(req.kind, |encoding| SessionKind::Transcode {
@@ -2799,6 +2892,7 @@ impl TranscodeManager {
         recovery: Option<&SessionRecoveryIdentity>,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
+        let (_, destination, _) = req.dv_processing_route()?;
         let recovery = recovery.ok_or("processed candidate requires typed recovery identity")?;
         let prepared = context
             .prepared_processing
@@ -2822,7 +2916,56 @@ impl TranscodeManager {
             .encoding
             .processed_candidate_digest(file, binding)
             .map_err(|error| vod_refusal_error("candidate_recipe_changed", error))?;
+        #[cfg(target_os = "linux")]
+        {
+            let snapshot = context
+                .planning_snapshot
+                .as_ref()
+                .ok_or("processed planning snapshot missing")?;
+            let query = context
+                .catalog_query
+                .as_ref()
+                .ok_or("processed original query missing")?;
+            let projected = Self::processed_catalog_query(snapshot, query)
+                .ok_or("processed audio claim changed")?;
+            let facts = Self::quality_facts_from_snapshot(snapshot)
+                .ok_or("processed client facts unavailable")?;
+            let caps = context
+                .canonical_caps
+                .as_ref()
+                .ok_or("processed client caps missing")?;
+            if Self::processed_catalog_destination(snapshot, query) != Some(destination)
+                || !super::manager_candidates::processed_client_compatible(
+                    caps,
+                    &prepared.encoding.plan,
+                    &facts,
+                    destination,
+                )
+                || projected
+                    .audio_delivery
+                    .as_ref()
+                    .zip(prepared.encoding.options.audio.as_ref())
+                    .is_none_or(|(expected, actual)| {
+                        expected.byte_identity() != actual.byte_identity()
+                    })
+                || req
+                    .audio_delivery
+                    .as_ref()
+                    .zip(prepared.encoding.options.audio.as_ref())
+                    .is_none_or(|(expected, actual)| {
+                        expected.byte_identity() != actual.byte_identity()
+                    })
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "processed decoder or encoded audio contract changed",
+                ));
+            }
+        }
         if actual != context.recipe_digest
+            || !matches!(&prepared.encoding.dv_processing,
+                plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination)
+            || !matches!(req.kind, SessionKind::Transcode { height } if height == prepared.encoding.options.target_height)
             || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
                 != context.candidate_id
             || context.owner_node_id.as_deref() != self.cache_location().map(|(_, node)| node)
