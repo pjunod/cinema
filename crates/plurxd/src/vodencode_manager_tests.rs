@@ -71,17 +71,29 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         manager.hdr10_passthrough_vaapi,
         "actual P010/Main10 upload proof"
     );
+    // PLURX_DV_WINDOW_DESTINATION=profile81 takes the Dolby Vision client's
+    // route instead: the P7 conversion copy, which FEL re-encode turns into a
+    // reconstructed Profile 8.1 rendition at the source raster.
+    let profile81 = std::env::var("PLURX_DV_WINDOW_DESTINATION").as_deref() == Ok("profile81");
     let request = SessionRequest {
         request_id: Some("actual-processed-hdr-window".into()),
         automatic: false,
         // Any resolution: PLURX_DV_WINDOW_HEIGHT selects the rung (720 by default).
-        kind: SessionKind::Transcode {
-            height: std::env::var("PLURX_DV_WINDOW_HEIGHT")
-                .ok()
-                .and_then(|height| height.parse().ok())
-                .unwrap_or(720),
+        kind: if profile81 {
+            SessionKind::Copy {
+                convert_dolby_vision: true,
+                aac: true,
+                preserve_dolby_vision: false,
+            }
+        } else {
+            SessionKind::Transcode {
+                height: std::env::var("PLURX_DV_WINDOW_HEIGHT")
+                    .ok()
+                    .and_then(|height| height.parse().ok())
+                    .unwrap_or(720),
+            }
         },
-        hdr10: true,
+        hdr10: !profile81,
         audio_index: Some(0),
         start_seconds: 0.0,
         presentation: Presentation::Vod,
@@ -100,6 +112,15 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             encoding.dv_processing
         );
     };
+    assert_eq!(
+        selected.destination(),
+        if profile81 {
+            plurx_core::transcode::dv_processing::DvDestination::Profile81
+        } else {
+            plurx_core::transcode::dv_processing::DvDestination::Hdr10
+        }
+    );
+    assert_eq!(encoding.preserves_processed_dv(), profile81);
     let runtime = encoding
         .dv_runtime
         .as_ref()
