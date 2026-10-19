@@ -768,6 +768,14 @@ pub struct AppState {
     pub(crate) live_tv_peers: Arc<crate::http::live_tv::LiveTvPeers>,
     pub(crate) subtitle_models: Arc<crate::subtitle_models::Runtime>,
     pub server_name: String,
+    /// Items whose review-site scores this node is fetching right now.
+    pub(crate) rating_fetches: crate::http::annotations::RatingFetches,
+    /// Where review-site score providers are reached (overridden in tests).
+    pub(crate) provider_endpoints: crate::http::annotations::ProviderEndpoints,
+    /// This node's short hostname, resolved once from membership at
+    /// construction (the name the roster shows for it); `None` when the
+    /// machine has no usable name.
+    pub node_hostname: Option<String>,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
     /// Whether LAN discovery must distinguish this node from cluster peers.
@@ -1274,6 +1282,7 @@ impl AppState {
             membership_status_cache: Default::default(),
             serving,
             clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
+            node_hostname: membership.local_hostname(),
             membership,
             media_pool,
             media_sessions,
@@ -1282,6 +1291,8 @@ impl AppState {
             live_tv_peers,
             subtitle_models,
             server_name,
+            rating_fetches: Default::default(),
+            provider_endpoints: Default::default(),
             node_id,
             cluster_advertisement,
             snapshot_recovery_budgets,

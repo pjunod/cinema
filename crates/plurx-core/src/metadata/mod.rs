@@ -11,6 +11,8 @@ pub mod budget;
 pub mod classification;
 pub mod genres;
 pub mod local;
+pub mod omdb;
+pub mod ratings;
 pub mod tmdb;
 
 use std::collections::{BTreeMap, HashSet};
@@ -32,6 +34,7 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 
 pub use anilist::AniListClient;
+pub use omdb::OmdbClient;
 pub use tmdb::TmdbClient;
 
 use crate::domain::{ArtworkAttempt, ItemKind, MetadataPatch};

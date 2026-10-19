@@ -7,6 +7,7 @@
 
 mod analysis;
 mod analysis_reconcile;
+pub(crate) mod annotations;
 mod auth;
 mod background_jobs;
 mod preparation;
@@ -329,6 +330,10 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/reanalyze"
         | "/api/v1/items/{id}/refresh-artwork"
         | "/api/v1/items/{id}/reading-state"
+        | "/api/v1/items/{id}/annotations"
+        | "/api/v1/items/{id}/watchlist"
+        | "/api/v1/items/{id}/favorite"
+        | "/api/v1/lists/{list}"
         | "/api/v1/files/{id}/preparation"
         | "/api/v1/files/{id}/analysis"
         | "/api/v1/files/{id}/dv-conversion"
@@ -495,6 +500,7 @@ fn http_route_group(path: &str) -> usize {
         // Configuration, diagnostics, scans, public shell and maintenance.
         "/"
         | "/api/v1/server"
+        | "/api/v1/server/node"
         | "/api/v1/settings"
         | "/api/v1/subtitle-transcription"
         | "/api/v1/subtitle-translation"
@@ -1510,6 +1516,7 @@ pub fn router(state: AppState) -> Router {
         .merge(shared_library::viewer_router(state.clone()))
         .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
+        .route("/server/node", get(system::server_node))
         .route("/me", get(auth::me))
         .route("/features", get(system::features))
         .route("/settings", get(system::get_settings))
@@ -1632,6 +1639,20 @@ pub fn router(state: AppState) -> Router {
             get(crate::library_search::get_classification)
                 .put(crate::library_search::correct_classification),
         )
+        // Annotations: scores and a person's watchlist and favorites.
+        .route(
+            "/items/{id}/annotations",
+            get(annotations::item_annotations),
+        )
+        .route(
+            "/items/{id}/watchlist",
+            put(annotations::add_to_watchlist).delete(annotations::remove_from_watchlist),
+        )
+        .route(
+            "/items/{id}/favorite",
+            put(annotations::add_to_favorites).delete(annotations::remove_from_favorites),
+        )
+        .route("/lists/{list}", get(annotations::list_items))
         // Watch
         .route("/items/{id}/progress", post(watch::progress))
         .route("/items/{id}/scrobble", post(watch::scrobble))
@@ -2406,6 +2427,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             || matches!(
                 path,
                 "/api/v1/me"
+                    | "/api/v1/server/node"
                     | "/api/v1/features"
                     | "/api/v1/auth/login"
                     | "/api/v1/auth/logout"

@@ -3820,3 +3820,21 @@
 [data-layout=meridian] .rowscroll[data-shelf-kind=watch] .artbox .art{width:100%;height:100%;object-fit:cover;aspect-ratio:auto}
 
 [data-layout=meridian] .md-shell button.btnplay{background:var(--action-bg);color:var(--action-ink);border-color:var(--action-bg)}
+
+/* ---- item annotations: scores, watchlist and favorites ---- */
+.ratingrow{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:4px 0}
+.ratingrow:empty{display:none}
+.rating{display:inline-flex;align-items:center;gap:8px;padding:5px 12px 5px 7px;border-radius:10px;background:var(--panel);border:1px solid var(--line);line-height:1.1}
+.rating .rmark{width:22px;height:22px;flex:0 0 22px}
+.rating .rtext{display:flex;flex-direction:column}
+.rating .rscore{font-weight:800;font-size:15px;color:var(--text)}
+.rating .rsuffix{font-weight:500;font-size:11px;color:var(--muted)}
+.rating .rsrc{font-size:11px;color:var(--muted)}
+.listtoggles{display:inline-flex;gap:10px;align-items:center}
+.listtoggles:empty{display:none}
+button.listtoggle{display:inline-flex;align-items:center;gap:6px}
+button.listtoggle svg{width:16px;height:16px}
+button.listtoggle.on{border-color:var(--accent);color:var(--accent)}
+button.listtoggle.fav.on{border-color:var(--bad);color:var(--bad)}
+.rowscroll .seeall{flex:0 0 auto;align-self:center;display:flex;align-items:center;justify-content:center;width:120px;height:180px;border-radius:8px;border:1px dashed var(--line);color:var(--muted);text-decoration:none;font-weight:600}
+.rowscroll .seeall:hover{color:var(--text);border-color:var(--muted)}

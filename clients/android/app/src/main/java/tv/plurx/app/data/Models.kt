@@ -24,6 +24,25 @@ data class Server(
     val display_aware_auto_protocol: String? = null,
 )
 
+/** `GET /api/v1/server/node` (signed in): which machine this client is talking to. */
+@Serializable
+data class ServerNode(
+    val hostname: String? = null,
+    /** The server's own label: a chosen name, else the hostname. */
+    val display_name: String? = null,
+)
+
+/**
+ * The Settings "Server" value: the server's label, with the answering node's
+ * hostname added when the label is a name an operator chose — so every node of
+ * a custom-named cluster still says which machine this client is talking to.
+ */
+fun serverSettingsLabel(name: String?, hostname: String?): String? {
+    if (name.isNullOrEmpty()) return hostname
+    if (hostname.isNullOrEmpty() || hostname.equals(name, ignoreCase = true)) return name
+    return "$name · $hostname"
+}
+
 @Serializable
 data class ClusterIngress(
     val node_urls: List<String> = emptyList(),
@@ -128,6 +147,27 @@ data class Hubs(
     val next_up: List<Item> = emptyList(),
     val recently_added: List<Item> = emptyList(),
 )
+
+/** One review-site score: `imdb` out of 10, `rotten_tomatoes` / `metacritic` / `tmdb` out of 100. */
+@Serializable
+data class Rating(
+    val source: String,
+    val value: Double,
+    val scale: Int,
+    val votes: Long? = null,
+)
+
+/** `GET items/{id}/annotations`: scores and the reader's list flags. */
+@Serializable
+data class ItemAnnotations(
+    val ratings: List<Rating> = emptyList(),
+    val watchlist: Boolean = false,
+    val favorite: Boolean = false,
+)
+
+/** `GET lists/{list}`: the reader's watchlist or favorites, newest first. */
+@Serializable
+data class ItemList(val items: List<Item> = emptyList())
 
 @Serializable
 data class Page(

@@ -292,7 +292,7 @@ struct SettingsView: View {
 
             Section("Account") {
                 LabeledContent("Signed in as", value: model.username ?? "—")
-                LabeledContent("Server", value: model.serverName ?? model.origin)
+                LabeledContent("Server", value: serverSettingsLabel(name: model.serverName, hostname: model.serverHostname) ?? model.origin)
                 Button("Change server") { model.changeServer() }
                 Button("Sign out", role: .destructive) {
                     if DiagnosticReportModel.shared.hasPendingUnsubmitted { diagnosticSignOutConfirmation = true; return }

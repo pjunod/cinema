@@ -696,6 +696,7 @@ async function viewItem(id,isCurrent=()=>true){
   document.getElementById("main").innerHTML=layoutView("item",page);
   DV_FILE_PAGE_FILES=page.files||[];
   pollDvFileActions(DV_FILE_PAGE_FILES,generation,true);
+  paintItemAnnotations(id,generation);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -826,6 +827,7 @@ function classicItemBody(p){
       <div class="poster">${artHtml(it)}</div>
       <div class="dhead">${crumbs}<h1>${esc(it.title)}${editable?` <button class="ghost sm" title="Edit details" aria-label="Edit details" onclick='openEdit(${esc(JSON.stringify(it))})'>✎ Edit</button>`:''}${artBtn}</h1>${bookByline(it)}
         <div class="chips">${chips.join("")}</div>
+        ${ratingsSlot(it)}
         ${(it.tags&&it.tags.length)?`<div class="chips">${it.tags.map(t=>`<span>${esc(t)}</span>`).join("")}</div>`:''}
         ${heroBadges?`<div class="vbadges" style="margin-top:10px">${heroBadges}</div>`:''}
         ${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}

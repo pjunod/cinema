@@ -332,6 +332,7 @@ function catalogHomeBody(p){
   // something, so the card carries "23m left · ends ~10:45 PM".
   if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""),"watch");
   if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""),"watch");
+  hubs+=listRails(p);
   if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
   if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 
@@ -663,6 +664,7 @@ function catalogItemBody(p){
       <div class="dhead">${crumbs}${kick}
         <h1>${esc(it.title)}${editBtn}${artBtn}</h1>${bookByline(it)}
         ${chips.length?`<div class="chips">${chips.join("")}</div>`:''}
+        ${ratingsSlot(it)}
         ${(it.tags&&it.tags.length)?`<div class="chips px-tags">${it.tags.map(t=>`<span>${esc(t)}</span>`).join("")}</div>`:''}
         ${heroBadges?`<div class="vbadges" style="margin-top:10px">${heroBadges}</div>`:''}
         ${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}

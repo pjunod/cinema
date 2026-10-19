@@ -3074,7 +3074,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # - merge base. No new owner is introduced by the merge itself.
 # Progressive translation: +3 directly awaited spawn_blocking owners in
 # subtitle_translation/runtime.rs (held-source SHA, PCM inspection, fixture staging).
-expected_occurrences = 973
+# Item ratings (#1205): +1 in http/annotations.rs, the score fetch for one item.
+# It holds that item's single-flight claim (RAII) and ends when the bounded
+# provider requests finish; the reader awaits it for at most FETCH_WAIT and a
+# late result is stored for the next read. No producer, process or timer of its
+# own. +1 test-only mock TMDB/OMDb axum server in http/tests.rs, dropped with
+# the test runtime.
+expected_occurrences = 975
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4714,7 +4720,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Progressive translation: +17 bounded timers (installer phase, manager metadata
 # and demand bounds, module source/readiness bounds, runtime phase/source/fence
 # bounds including the 2 s preparation open, and finite regression waits).
-expected_occurrences = 1810
+# Item ratings (#1205): +1 tokio::time::timeout(FETCH_WAIT, task) bounding how
+# long an annotations read waits on the score fetch it started or joined.
+expected_occurrences = 1811
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

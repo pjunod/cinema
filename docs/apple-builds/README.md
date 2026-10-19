@@ -117,6 +117,8 @@ Previous: [Live TV playback method](245-live-tv-playback-method.md).
 
 | Note | Answers | |
 |---|---|---|
+| [Ratings, watchlist and favorites](1205-ratings-watchlist-favorites.md) | What do the ratings and list controls add to iOS and tvOS? | built |
+| [Server label names the machine](1204-server-hostname-label.md) | What does Settings call the server you are signed in to? | built |
 | [Remote diagnostics Apple wire](remote-diagnostics-wire.md) | What is added to the Apple report format contract? | built |
 | [Remote diagnostics Apple capture](remote-diagnostics-capture.md) | What changes in native private report capture, share, send and TV approval? | open |
 | [remote-diagnostics-qualification.md](remote-diagnostics-qualification.md) | Qualifies offline phone ZIP export, native TV local downloads and same-incident relaunch recovery. | built |

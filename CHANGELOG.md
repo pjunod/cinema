@@ -8,16 +8,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
+- A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
+
 ### Fixed
 
 - Converted Profile 7 catalog starts can qualify reconstructed Profile 8.1 under FEL re-encode independently of the HDR-processing switch. The service carries an explicit processed destination on a finite PQ transcode, resolves its own encoded AAC audio, and checks the completed stream against one matching Main10/Profile 8 client capability entry. Native Dolby Vision copying is unchanged; refusals retain their reason and only the saved ordinary request can be a fallback. Remote descriptors retain the destination but do not acquire local execution authority.
-- Non-Dolby-Vision clients that support HLS are offered a segmented HDR10-base copy when Developer → DV processing is enabled, so the HLS processing path can apply HDR10-E instead of silently bypassing it with a progressive remux. Setting-off and progressive-only delivery remain unchanged; actual processing and any decline are reported by the HLS session.
-- Continuous AVC fallback catalogs exclude rows outside H.264 High@5.0 at the source's measured cadence, including 2160p, instead of offering a family that fails at session creation. An unknown or nominal-only cadence offers no continuous family.
+- Settings names the server you are signed in to by its machine name. A server still on the default name `plurx` used to show `plurx` on every node. A new signed-in route, `GET /api/v1/server/node`, gives the answering node's `hostname` and a `display_name` (a chosen name, else the hostname, the same rule as the LAN picker, which now resolves the hostname the same way the roster does). iOS, tvOS and Android Settings show it, adding the hostname after a chosen name, and the web System tab heads with it and lists the Host.
 - HDR10-E at 4K is produced faster. The processing helper renders into 16-bit rather than 32-bit float textures, converts to 10-bit Y'CbCr in one compute pass, and queues each frame's download so the GPU finishes one frame while the next is decoded. On an Intel Alder Lake test node a 2-second 4K window takes 0.9–1.1 s in the helper instead of 1.7 s, and 1.75 s instead of 2.2 s with the hardware encoder (Profile 7 FEL); Profile 8 takes 2.1 s instead of 2.55 s, still short of real time there.
 - Dolby Vision HDR10-E (server-processed HDR10) plays at every resolution. The processing helper decodes on the GPU (VA-API, mapped zero-copy into the renderer, with a software or host-copy fallback it reports) and converts to 10-bit Y'CbCr on the GPU. Reconstructed frames carry their frame duration and BT.2020 PQ colour description, every display-metadata version is accepted, and the 720p cap, the speed qualification, the Auto-only rule and the other silent gates are gone. Every decline after the Developer setting is named in the plan notes, and an explicitly chosen rung is no longer filtered by Auto's link evidence. Receipts and the effective-processing report record whether the window was GPU-decoded.
 - Apple TV Meridian: choosing a different source from the navigation panel opens that source and focuses its library tools again.
 - Apple Resume retries interrupted native seeks once and retains the saved position when preparation fails or the player closes.
 - Restore Standard's native iPad/Apple TV tabs on iOS/tvOS 18 and later, full-screen TV details, and original TV Theater styling after Meridian changed the existing layouts. Theme choices and open navigation state remain independent of the layout; framework-owned tabs preserve fullscreen playback after switching destinations.
+
+- Non-Dolby-Vision clients that support HLS are offered a segmented HDR10-base copy when Developer → DV processing is enabled, so the HLS processing path can apply HDR10-E instead of silently bypassing it with a progressive remux. Setting-off and progressive-only delivery remain unchanged; actual processing and any decline are reported by the HLS session.
+- Continuous AVC fallback catalogs exclude rows outside H.264 High@5.0 at the source's measured cadence, including 2160p, instead of offering a family that fails at session creation. An unknown or nominal-only cadence offers no continuous family.
 
 ### Added
 

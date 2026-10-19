@@ -10,42 +10,52 @@ Repo: Forgejo `noirr/plurx`. Process:
 
 Already merged and deployed: #1197–#1203 (HDR10-E at all resolutions, 4K throughput, FEL/RPU/DYN indicator, Animals frame-rate fix) and #1208 (display-targeted plan). Chrome on a MacBook Pro shows FEL+RPU for HDR10-E.
 
-## A. Pixel fixes — draft PR #1210 (source owner: Sol; publication: coordinator)
+## A. Pixel fixes — merged PR #1210 (source owner: Sol; publication: coordinator)
 
 Original authored head `eed076a5e` on `claude/pixel-hdr10e-and-animals` is
 preserved in the preparation branch `codex/cinema-pixel-hdr10e`, with current
-main's documentation incorporated. PR #1210 remains the delivery vehicle.
+main incorporated. PR #1210 landed as `e940b75b455e` after independent Astra
+review, pinned compiler/static checks, five affected regressions and fast lane
+5546 passed on reconciled head `44d31080e7fa`.
 
 **What it fixes:**
 1. **Avatar on a Pixel 11 never got HDR10-E.** The Pixel has no DV decoder, and the decision gave it a progressive remux of the HDR10 base. HDR10-E is applied only on an HLS session. With Developer → DV processing (`playback.dolby_vision_hdr_processing`) on, `routes_through_processed_hdr10` (`crates/plurxd/src/http/stream.rs`) now makes such a delivery a copy over HLS (`requires_hls: true`, reason named).
 2. **Animals' fallback transcode answered 500.** Its 2160p continuous AVC primary is outside H.264 High@5.0 (`decoder plan refused: continuous_video_envelope is invalid`). `continuous_candidates_from_workers(workers, rate)` (`crates/plurxd/src/http/hls/create.rs`) now offers only rows inside `continuous_avc_envelope_accepts` (made `pub`) at the source's measured rate, and none when the rate is unmeasured.
 
-**Status:** source prepared, not deployed. The earlier clippy/catalog claims
-are inherited and do not establish this complete candidate's qualification;
-retained stale-binary runs are not valid evidence. Source-bound compiler/static
-receipts must cover the intended complete candidate. Regression tests are
-written but are not run during preparation.
+**Status:** merged; deployment is not verified here. The coordinator's merge
+receipt binds parents `f5323c20e359` and `44d31080e7fa` and both regression
+anchors. Retained stale-binary runs are not evidence; source-bound receipts
+and the passing reconciled-head lane are the qualification evidence.
 
 **Finish:**
-1. Compile and statically inspect the complete candidate with the pinned toolchain; retain exact source/archive identity and true exit statuses.
-2. Obtain one independent Fable adversarial review of the completed PR, fix findings, then run the affected filtered tests and fast lane once. Retry only failed or genuinely invalidated checks. Keep the draft PR's owner, status, evidence and next steps current.
-3. Merge with:
+1. Source/review/test/fast-lane/API merge steps are complete. Landing contains:
    - `Regression-Test: crates/plurxd/src/http/tests.rs::processed_hdr10_setting_routes_a_non_dv_client_over_hls`
    - `Regression-Test: crates/plurxd/src/http/hls/tests/chunk_06.rs::continuous_catalog_offers_only_rows_inside_the_avc_level_envelope`
-4. After deploy, device check: Avatar on the Pixel shows the HDR10-E badge and FEL/RPU; Animals' fallback starts.
+2. Paul deploys; after deployment, check Avatar on the Pixel shows the HDR10-E badge and FEL/RPU and Animals' fallback starts. No deployment or device result is claimed here.
 
 ## B. FEL→Profile 8.1 for DV displays — draft PR #1211 (source owner: Sol; publication: coordinator)
 
 Original authored head `1eeb0542d` is preserved on preparation branch
-`codex/cinema-fel-p81-catalog`. The intended Pixel candidate `08b51db215`
-and its documentation base are integrated for preparation only. B's final
-independent review and merge still wait for actual Pixel landing and any
-necessary base reconciliation. The source-bound baseline formatter passed;
-all-target compilation found an inaccessible regression helper (repaired in
-the implementation). Completed-source formatting and all-target compilation then
-passed; Clippy found one manual-range-style lint, now repaired with identical
-bounds and even-height semantics. The exact-source Clippy retry and independent
-review remain. There is no affected-unit receipt; stale output is not evidence.
+`codex/cinema-fel-p81-catalog`. Actual Pixel/main landing `e940b75b455e` is
+integrated, preserving unrelated main changes without changing B's implementation
+or regression bodies. The sole merge conflict was changelog prose, resolved by
+retaining both topics and removing duplicate Pixel bullets. Exact reconciled-source
+compiler/static qualification and publication are the next preparation steps;
+the existing independent complete-PR Astra review follows, not self-review.
+
+**Retained evidence:** exact pre-integration `f931f603` formatting and all-target
+Clippy passed after repairing the baseline helper visibility and one range-style
+lint. The three section-B regressions each passed with exact source/archive,
+Cargo JSON-selected binary, nonzero count and true-exit receipts. An initial
+wrong-namespace zero-match failure is retained; only its two unexecuted cases
+resumed. Test-only old-main sensitivity built successfully and each daemon case
+failed with exactly one match. The runtime source assertion detects unconditional
+Copy refusal; the HLS indicator assertion detects missing reconstructed RPU.
+The raw aggregate sensitivity receipt remains FAIL because the prepared
+first-HLS-shape-assertion expectation was wrong: early shape assertions passed,
+then the indicator failed. Corrected classification is separate from raw output.
+Unchanged positive and negative evidence is retained, not repeated or promoted
+to physical playback evidence. Final review can invalidate changed closures only.
 
 **Symptom:** Safari on a Studio Display, Avatar (P7 FEL), FEL re-encode on, gets the plain P7→8.1 conversion with "FEL: not used for this play" and no reason. The reconstructed 8.1 (FEL rebuilt, re-encoded, new RPU) is never reached, although #1199's physical test proves that path.
 
@@ -66,7 +76,13 @@ review remain. There is no affected-unit receipt; stale output is not evidence.
 - `dv_runtime.rs::a_converted_dv_copy_is_offered_the_reconstructed_profile81`
 - `enhancement.rs::reconstructed_p81_carries_fel_and_dyn`
 
-**Main risk:** an Encode-route candidate on a Copy-kind request. Check every place that assumes Encode ⇒ Transcode: `candidates.rs` restore (~1399, ~1447), successor predicates at the top of `manager/create.rs`, link receipts. Alternative if fragile: an explicit destination field on `SessionRequest` (note `deny_unknown_fields`), with a Transcode-kind trial. Also check `trial.audio_delivery = None` for copies and that `encoded_client_compatible` accepts the 8.1 output for Safari's caps.
+**Resolved design risk; still a review focus:** the original Encode-route/Copy-kind
+trial violated retained-kind/audio invariants. The accepted explicit optional
+`SessionRequest` destination uses a truthful Transcode trial instead. Review
+strict `deny_unknown_fields` mixed-version refusal, local-only prepared authority,
+restore/successor/recovery/link paths, canonical encoded AAC and same-entry Safari
+Main10/Profile 8 raster/cadence/bitrate support; do not relax equality to make reuse
+work. Ordinary producers refuse serialized explicit processed destinations.
 
 **Preparation, not final review:** canonical Astra decision accepted the explicit
 destination and truthful encoded carrier. Source repairs the retained-kind/audio
@@ -74,19 +90,21 @@ mismatch, FEL-only reuse scope and swallowed processing errors, and checks plan
 destination/height again at prepared admission and retained binding. Source tests
 cover wire/intent/binding and ordinary-producer refusal, preference/source/encoded
 audio scope, same-entry completed client contract and original daemon indicators.
-Compilation, full independent review and post-review execution still determine
+Final-base compilation, full independent review and remaining post-review execution determine
 whether this complete implementation is ready. The separate reservation-slot
 incident and general remote processed requalification remain out of B scope.
 
 **Finish:**
-1. Complete source-bound compiler/static preparation for the accepted explicit
-   destination contract. The latest direct owner sequence requests the three
-   section-B regressions above after a valid build/clippy and before review;
-   retain those passes if review leaves their source unchanged. The quick
-   draft-paperwork operations-test exception also remains in effect.
+1. Qualify and publish the complete actual-main-reconciled source with the
+   pinned compiler/static loop. The latest direct owner sequence's three
+   section-B regressions and old-main sensitivity already have independently
+   adopted receipts. Retain them where test/defect closures are unchanged;
+   no repeat merely for history or docs. The quick draft-paperwork
+   operations-test exception remains in effect.
 2. Obtain one independent frontier adversarial review of the complete PR,
-   fix findings, then run the affected tests, required old-code sensitivity
-   checks and fast lane once. Retry only failed or invalidated checks.
+   fix findings, then run the remaining affected tests and fast lane once.
+   Retry only failed or genuinely invalidated checks, including sensitivity
+   only if its test/defect closure changed.
 3. Merge with the two daemon `Regression-Test:` lines.
 4. Device check after deploy: Safari plus Studio Display, Avatar from 10 minutes in, expecting FEL+RPU+DYN and "FEL: full enhancement layer reconstructed". Also check there is no stutter.
 

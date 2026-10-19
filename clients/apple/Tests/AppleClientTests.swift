@@ -12599,3 +12599,47 @@ private struct PGSOverlayCasesFixture: Decodable {
     let tickCases: [TickCase]
     let manifestResponses: [ManifestResponse]
 }
+
+final class RatingFormatTests: XCTestCase {
+    func testAnnotationsDecodeAndEachSourceReadsOnItsOwnScale() throws {
+        let json = #"{"ratings":[{"source":"imdb","value":8.1,"scale":10,"votes":214000},{"source":"rotten_tomatoes","value":94,"scale":100},{"source":"metacritic","value":81,"scale":100},{"source":"tmdb","value":78,"scale":100,"votes":3900}],"watchlist":true,"favorite":false}"#
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let a = try decoder.decode(ItemAnnotations.self, from: Data(json.utf8))
+        XCTAssertEqual(a.watchlist, true)
+        XCTAssertEqual(a.favorite, false)
+        XCTAssertEqual((a.ratings ?? []).map(RatingFormat.text), ["8.1", "94%", "81", "78%"])
+        XCTAssertEqual(RatingFormat.accessibility(a.ratings![0]), "IMDb 8.1, from 214000 votes")
+    }
+
+    func testRottenTomatoesTurnsPositiveAtSixty() {
+        XCTAssertFalse(RatingFormat.rottenTomatoesPositive(59))
+        XCTAssertTrue(RatingFormat.rottenTomatoesPositive(60))
+    }
+}
+
+final class ServerLabelTests: XCTestCase {
+    private func decode(_ json: String) throws -> ServerNode {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ServerNode.self, from: Data(json.utf8))
+    }
+
+    func testTheServerNodeCarriesTheMachineNameAndTheServersLabel() throws {
+        let node = try decode(#"{"hostname":"lab6","display_name":"lab6"}"#)
+        XCTAssertEqual(node.displayName, "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "lab6")
+    }
+
+    func testANodeWithoutAMachineNameShowsTheLabelAlone() throws {
+        let node = try decode(#"{"display_name":"plurx"}"#)
+        XCTAssertNil(node.hostname)
+        XCTAssertEqual(serverSettingsLabel(name: node.displayName, hostname: node.hostname), "plurx")
+    }
+
+    func testAChosenNameKeepsTheAnsweringNodeVisible() {
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: "lab6"), "Living Room · lab6")
+        XCTAssertEqual(serverSettingsLabel(name: nil, hostname: "lab6"), "lab6")
+        XCTAssertEqual(serverSettingsLabel(name: "Living Room", hostname: nil), "Living Room")
+    }
+}
