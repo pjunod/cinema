@@ -26,7 +26,10 @@ FLEET_REGISTRY_EXPR = "${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid'
 # held to that boundary below; these are held to their own contract instead
 # (test_github_only_workflows_never_reach_the_fleet), which is what makes the
 # exemption safe rather than a hole.
-GITHUB_ONLY_WORKFLOWS = frozenset({".github/workflows/github-release.yml"})
+GITHUB_ONLY_WORKFLOWS = frozenset({
+    ".github/workflows/github-release.yml",
+    ".github/workflows/desktop-qualification.yml",
+})
 GITHUB_HOSTED_RUNNERS = frozenset(
     {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15", "macos-15-intel", "windows-2022"}
 )
@@ -4312,21 +4315,29 @@ assert.equal(context.ACT_TIMER, null);
                 on = re.search(r"(?m)^on:\n((?:(?:  .*)?\n)*)", code)
                 self.assertIsNotNone(on, path)
                 triggers = re.findall(r"(?m)^  ([a-z_]+):", on.group(1))
-                self.assertEqual(["push", "workflow_dispatch"], triggers, path)
-                push = on.group(1).split("  workflow_dispatch:", 1)[0]
-                self.assertEqual(["tags"], re.findall(r"(?m)^    ([a-z_]+):", push), path)
+                qualification = path == ".github/workflows/desktop-qualification.yml"
+                if qualification:
+                    self.assertEqual(["workflow_dispatch", "workflow_call"], triggers, path)
+                else:
+                    self.assertEqual(["push", "workflow_dispatch"], triggers, path)
+                    push = on.group(1).split("  workflow_dispatch:", 1)[0]
+                    self.assertEqual(["tags"], re.findall(r"(?m)^    ([a-z_]+):", push), path)
                 self.assertEqual(
-                    ["  contents: read\n"],
+                    ["  contents: read\n  actions: read\n"],
                     re.findall(r"(?m)^permissions:\n((?:  .*\n)*)", code),
                     path,
                 )
+                if qualification:
+                    self.assertNotRegex(code, r"(?m)^\s+(?:environment|secrets):")
+                    self.assertNotIn("secrets.", code)
                 for forbidden in ("self-hosted", "pull_request", "workflow_run"):
                     self.assertFalse(forbidden in code, f"{path} names {forbidden}")
                 self.assertIsNone(re.search(r"(?m)^\s+(?:container|services):", code), path)
                 for action in re.findall(r"(?m)^\s*(?:-\s+)?uses:\s+(\S+)", code):
                     self.assertTrue(
                         action.startswith("./.github/actions/")
-                        or artifact_action.fullmatch(action),
+                        or artifact_action.fullmatch(action)
+                        or (path == ".github/workflows/github-release.yml" and action == "./.github/workflows/desktop-qualification.yml"),
                         f"{path} uses {action}",
                     )
                 jobs = workflow_job_blocks(path)
@@ -4334,7 +4345,26 @@ assert.equal(context.ACT_TIMER, null);
                 writers = []
                 for name, block in jobs.items():
                     conditions = re.findall(r"(?m)^    if: (.+)$", block)
-                    self.assertEqual([gate], conditions, f"{path}:{name}")
+                    # Production metadata signing must be skipped entirely on
+                    # dry runs so fixture qualification never enters a protected
+                    # environment or requests owner signing credentials.
+                    expected_gate = gate
+                    if path == ".github/workflows/github-release.yml":
+                        if name in ("desktop_signing", "publish"):
+                            expected_gate += " && needs.resolve.outputs.mode == 'release'"
+                        elif name == "desktop_qualification":
+                            expected_gate += " && needs.resolve.outputs.mode == 'qualification'"
+                        elif name != "resolve":
+                            self.assertIn(name, {"linux", "macos_build", "macos", "windows", "windows_smoke", "desktop_metadata"})
+                            expected_gate += " && needs.resolve.outputs.mode != 'qualification'"
+                    self.assertEqual([expected_gate], conditions, f"{path}:{name}")
+                    if path == ".github/workflows/github-release.yml" and name == "desktop_qualification":
+                        self.assertIn("    needs: resolve\n", block)
+                        self.assertIn("    uses: ./.github/workflows/desktop-qualification.yml\n", block)
+                        self.assertIn("      candidate_sha: ${{ github.sha }}\n", block)
+                        self.assertIn("      run_local_fixture_updates: true\n", block)
+                        self.assertNotRegex(block, r"(?m)^    (?:permissions|runs-on|steps|environment|secrets):")
+                        continue
                     self.assertIn("\n    timeout-minutes:", block, f"{path}:{name}")
                     runs_on = re.search(r"(?m)^    runs-on: (.+)$", block).group(1)
                     if runs_on == "${{ matrix.runner }}":
@@ -4345,6 +4375,7 @@ assert.equal(context.ACT_TIMER, null);
                     self.assertLessEqual(runners, GITHUB_HOSTED_RUNNERS, f"{path}:{name}")
                     grants = re.findall(r"(?m)^    permissions:(.*)\n((?:      .*\n)*)", block)
                     if grants:
+                        self.assertFalse(qualification, f"{path}:{name} may not hold job permission overrides")
                         self.assertEqual([("", "      contents: write\n")], grants, f"{path}:{name}")
                         writers.append(name)
                         # The writer runs nothing it was handed: no build, and

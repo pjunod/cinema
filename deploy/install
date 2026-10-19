@@ -29,8 +29,8 @@
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
-# Every install ends by proving the server answers /readyz and printing the
-# version it reports, rather than by claiming success. Privileged steps run
+# A new/running install proves /readyz and reports the observed version. An
+# existing stopped install keeps its running and startup policy. Privileged steps run
 # through sudo only when they have to; the build never does.
 #
 # Stays within bash 3.2, which is what macOS ships.
@@ -38,6 +38,13 @@ set -euo pipefail
 
 here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
 root=$(cd -P -- "$here/.." && pwd -P)
+
+# A release archive contains a complete native runtime, app and controller.
+# Its shipped native bootstrap verifies the closure and uses fixed per-user
+# destinations; it needs no checkout, Python, Homebrew, Rust or downloads.
+if [ -f "$here/runtime-closure-v1.json" ] && [ -x "$here/control/plurx-control" ]; then
+  exec "$here/control/plurx-control" bootstrap macos --package "$here" "$@"
+fi
 
 mode=auto
 binary=
@@ -148,9 +155,9 @@ cleanup_temp_files() {
       run_for_dir "$parent" mv "$subtitle_engine_backup" "$subtitle_engine_destination"
       subtitle_engine_backup=
     fi
-    if [ -f "$HOME/Library/LaunchAgents/$macos_agent_label.plist" ]; then
+    if [ "${macos_was_running:-0}" = 1 ] && [ -f "$HOME/Library/LaunchAgents/$macos_agent_label.plist" ]; then
       run launchctl bootstrap "gui/$uid" "$HOME/Library/LaunchAgents/$macos_agent_label.plist"
-      run launchctl kickstart -k "gui/$uid/$macos_agent_label"
+      run launchctl kickstart "gui/$uid/$macos_agent_label"
     fi
     say 'subtitle engine update failed; prior engine package restored (model data kept)'
   fi
@@ -360,7 +367,8 @@ install_binary_to() {
 linux_install() {
   [ "$dry_run" = 1 ] || command -v systemctl >/dev/null 2>&1 \
     || die "no systemctl on this host; use 'make install-binary' and run plurxd under your own supervisor"
-  local dir unit_src unit_dst data was_active=0
+  local dir unit_src unit_dst data was_active=0 was_installed=0
+  [ ! -e "${DESTDIR:-}/etc/plurx/installation.json" ] || die "this installation is managed by the native controller; use plurx-control or the package manager instead of a source overwrite"
   dir=$(bin_dir)
   unit_src=$here/plurxd.service
   unit_dst=${DESTDIR:-}/etc/systemd/system/plurxd.service
@@ -370,6 +378,8 @@ linux_install() {
   case $dir in
     /home/*|/root/*) die "the unit sets ProtectHome=true, so a prefix under $dir can never start; choose --prefix /opt/plurx or /usr/local" ;;
   esac
+  [ ! -f "$unit_dst" ] || was_installed=1
+  if command -v systemctl >/dev/null 2>&1 && [ "$(systemctl show --property=LoadState --value plurxd.service 2>/dev/null || true)" = loaded ]; then was_installed=1; fi
   if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet plurxd 2>/dev/null; then
     was_active=1
     say "plurxd is running; stopping it for the upgrade"
@@ -404,10 +414,14 @@ linux_install() {
   run_root systemctl daemon-reload
   if [ "$was_active" = 1 ]; then
     run_root systemctl start plurxd
-  else
+  elif [ "$was_installed" = 0 ]; then
     run_root systemctl enable --now plurxd
+  else
+    say "existing service stays stopped; its automatic-start policy is unchanged"
   fi
-  wait_ready 32400 "journalctl -u plurxd"
+  if [ "$was_active" = 1 ] || [ "$was_installed" = 0 ]; then
+    wait_ready 32400 "journalctl -u plurxd"
+  fi
   [ "$dry_run" = 1 ] || systemctl status plurxd --no-pager --lines=0 || true
   say "logs: journalctl -u plurxd -f"
 }
@@ -784,6 +798,13 @@ macos_install() {
   data="$HOME/Library/Application Support/plurx"
   uid=$(id -u)
   macos_refuse_root
+  [ ! -e "$data/installation.json" ] || die "this installation is managed by the native controller; use the tray or plurx-control instead of a source overwrite"
+  macos_was_installed=0
+  macos_was_running=0
+  if [ -f "$plist" ]; then
+    macos_was_installed=1
+    if launchctl print "gui/$uid/$macos_agent_label" 2>/dev/null | grep -q '^[[:space:]]*pid = [0-9]'; then macos_was_running=1; fi
+  fi
   resolve_binary
   macos_claim_prefix "$dir"
   macos_ensure_jellyfin_ffmpeg "$dir"
@@ -814,10 +835,18 @@ macos_install() {
     macos_place_plist "$rendered" "$plist"
     say "rendered $plist"
   fi
-  run launchctl bootstrap "gui/$uid" "$plist"
-  run launchctl enable "gui/$uid/$macos_agent_label"
-  run launchctl kickstart -k "gui/$uid/$macos_agent_label"
-  wait_ready 32400 "$HOME/Library/Logs/plurxd.log"
+  if [ "$macos_was_installed" = 0 ]; then
+    run launchctl bootstrap "gui/$uid" "$plist"
+    run launchctl enable "gui/$uid/$macos_agent_label"
+    run launchctl kickstart "gui/$uid/$macos_agent_label"
+    wait_ready 32400 "$HOME/Library/Logs/plurxd.log"
+  elif [ "$macos_was_running" = 1 ]; then
+    run launchctl bootstrap "gui/$uid" "$plist"
+    run launchctl kickstart "gui/$uid/$macos_agent_label"
+    wait_ready 32400 "$HOME/Library/Logs/plurxd.log"
+  else
+    say "existing agent stays stopped; its login-start policy is unchanged"
+  fi
   macos_finish_subtitle_engine
   [ "$dry_run" = 1 ] || launchctl print "gui/$uid/$macos_agent_label" | grep -E 'state|pid' || true
   say "logs: tail -f ~/Library/Logs/plurxd.log"

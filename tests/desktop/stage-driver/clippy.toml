@@ -1,0 +1,3 @@
+# Independent test executable: do not inherit application-only Tokio method paths
+# that are absent from this workspace's enabled dependency graph.
+msrv = "1.97.1"

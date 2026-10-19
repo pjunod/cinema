@@ -1411,6 +1411,7 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/package-linux",
+  "scripts/create-desktop-update-manifest",
   "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/bench-macos-video",
   "scripts/qualify-tonemap-segments",
@@ -1427,6 +1428,7 @@ paths = [
   "scripts/release-cut",
   "scripts/sign-android-release",
   "tests/operations/**",
+  "tests/desktop/**",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
 depends_on = ["server.api"]

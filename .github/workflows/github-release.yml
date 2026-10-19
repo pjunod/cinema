@@ -12,10 +12,14 @@ run-name: github release ${{ inputs.release_tag || (github.event_name == 'push' 
 #   plurxd-X.Y.Z-1.{x86_64,aarch64}.rpm     Fedora, RHEL 9+ with RPM Fusion
 #   plurxd-X.Y.Z-macos-universal.tar.gz     Apple Silicon and Intel
 #   plurxd-X.Y.Z-windows-x86_64.zip         Windows 10 1809+ / Server 2019+
+#   plurx-desktop_X.Y.Z-1_{amd64,arm64}.deb optional local Linux GUI
+#   plurx-desktop-X.Y.Z-1.{x86_64,aarch64}.rpm
+#   plurx-update-v1.json + plurx-update-v1.json.sig (raw Ed25519)
 #   SHA256SUMS
 #
 # Forgejo reads this file as well, because its runners take .github/workflows.
-# Every job's whole condition is `github.server_url == 'https://github.com'`
+# Every job has the exact positive `github.server_url == 'https://github.com'`
+# guard plus explicit build/release/qualification mode routing where needed.
 # (GitHub adds the implicit success() of its needs); Forgejo
 # evaluates a job-level `if` on the server and records the run as skipped
 # without allocating a runner (probed on Forgejo 16.0.3 on 2026-10-10). So
@@ -31,7 +35,10 @@ run-name: github release ${{ inputs.release_tag || (github.event_name == 'push' 
 # the release source from the tag. On a tag push those are the same commit; a
 # manual dispatch with `release_tag` back-fills an older tag with current
 # packaging. A dispatch without one is a dry run of the dispatched ref: every
-# artifact is built and checked, and nothing is published.
+# artifact is built and checked, and nothing is published. A nonempty
+# desktop_qualification_build_run_id instead consumes an already completed
+# exact-candidate dry run through the local reusable native qualification workflow;
+# it never rebuilds or enters publication/signing jobs.
 on:
   push:
     tags: ["v*.*.*"]
@@ -42,9 +49,15 @@ on:
         required: false
         default: ""
         type: string
+      desktop_qualification_build_run_id:
+        description: Existing successful dry-run artifact build for this exact commit; empty builds normally
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # One run per release tag, whichever way it was started; dry runs never wait.
@@ -69,6 +82,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       commit: ${{ steps.release.outputs.commit }}
+      source_tree: ${{ steps.release.outputs.source_tree }}
       build_ref: ${{ steps.release.outputs.build_ref }}
       source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
       expect_version: ${{ steps.release.outputs.expect_version }}
@@ -78,6 +92,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_QUALIFICATION_RUN_ID: ${{ inputs.desktop_qualification_build_run_id }}
         run: |
           set -euo pipefail
           # A tag push publishes that tag. A dispatch publishes the tag it is
@@ -88,6 +103,18 @@ jobs:
             case $GITHUB_REF in refs/tags/*) tag=$GITHUB_REF_NAME ;; esac
           else
             tag=$INPUT_TAG
+          fi
+          if [ -n "$INPUT_QUALIFICATION_RUN_ID" ]; then
+            [ "$EVENT_NAME" = workflow_dispatch ] && [ -z "$tag" ] || {
+              echo "::error::qualification cannot be combined with release publication"
+              exit 1
+            }
+            [[ "$INPUT_QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::qualification build run ID must be a positive decimal integer"
+              exit 1
+            }
+            printf 'mode=qualification\ncommit=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           git init -q source
           cd source
@@ -132,6 +159,7 @@ jobs:
             echo "tag=$tag"
             echo "version=$version"
             echo "commit=$commit"
+            echo "source_tree=$(git rev-parse HEAD^{tree})"
             echo "build_ref=$build_ref"
             echo "source_date_epoch=$(git show -s --format=%ct "$commit")"
             echo "expect_version=plurxd $version ($build_ref)"
@@ -141,7 +169,7 @@ jobs:
   linux:
     name: Linux packages (${{ matrix.arch }})
     needs: resolve
-    if: github.server_url == 'https://github.com'
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -208,7 +236,7 @@ jobs:
               rustup toolchain install "$(sed -n "s/^channel = \"\(.*\)\"/\1/p" rust-toolchain.toml)" \
                 --profile minimal
               git config --global --add safe.directory /src
-              cargo build --locked --release -p plurxd
+              cargo build --locked --release -p plurxd -p plurx-desktop-control --bins
               chown -R "$HOST_UID:$HOST_GID" target
             '
       - name: Check the binary's identity and glibc floor
@@ -229,6 +257,35 @@ jobs:
             exit 1
           }
           echo "$reported; highest glibc symbol $max_glibc"
+      - name: Build the optional desktop against the GTK4 and glibc floors
+        env:
+          RUSTUP_TRIPLE: ${{ matrix.rustup_triple }}
+          RUSTUP_SHA256: ${{ matrix.rustup_sha256 }}
+        run: |
+          set -euo pipefail
+          # Server remains Alma8/glibc2.28; only the optional GUI uses Alma9.
+          # Official Alma9 AppStream carries gtk4-devel 4.12.3. The Rust GUI
+          # enables GTK4.0 APIs only, so Debian12 GTK4.8 remains supported.
+          docker run --rm \
+            --volume "$PWD/release-source:/src" --workdir /src \
+            --env CARGO_TERM_COLOR --env RUSTUP_VERSION --env RUSTUP_TRIPLE --env RUSTUP_SHA256 \
+            --env HOST_UID="$(id -u)" --env HOST_GID="$(id -g)" \
+            almalinux:9@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16 bash -euo pipefail -c '
+              dnf -y -q install gcc gcc-c++ make git gtk4-devel pkgconf-pkg-config >/dev/null
+              curl -fsSL -o /tmp/rustup-init \
+                "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$RUSTUP_TRIPLE/rustup-init"
+              echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -
+              chmod 0755 /tmp/rustup-init
+              /tmp/rustup-init -y -q --profile minimal --default-toolchain none
+              . "$HOME/.cargo/env"
+              rustup toolchain install "$(sed -n "s/^channel = \"\(.*\)\"/\1/p" rust-toolchain.toml)" --profile minimal
+              git config --global --add safe.directory /src
+              CARGO_TARGET_DIR=/src/target-desktop cargo build --locked --release -p plurx-tray
+              chown -R "$HOST_UID:$HOST_GID" target-desktop
+            '
+          binary=release-source/target-desktop/release/plurx-tray
+          max_glibc=$(readelf --version-info "$binary" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -1)
+          test "$(printf '%s\n' "$max_glibc" 2.34 | sort -V | tail -1)" = 2.34
       - name: Package the .deb and .rpm
         env:
           NFPM_ASSET: ${{ matrix.nfpm_asset }}
@@ -245,7 +302,9 @@ jobs:
           PLURX_PKG_REPOSITORY="$REPO_URL" \
           PLURX_PKG_SOURCE_ROOT="$PWD/release-source" \
             scripts/package-linux --arch "$ARCH" --version "$VERSION" \
-            --binary release-source/target/release/plurxd --out dist
+            --binary release-source/target/release/plurxd \
+            --control-dir release-source/target/release \
+            --desktop-binary release-source/target-desktop/release/plurx-tray --out dist
           ls -l dist
       - name: Install, start, reinstall and remove each package on its distributions
         env:
@@ -262,7 +321,10 @@ jobs:
             test "$(plurxd --version)" = "$EXPECT_VERSION"
             getent passwd plurx >/dev/null
             test "$(stat -c %U:%a /var/lib/plurx)" = plurx:750
-            grep -qx "ExecStart=/usr/bin/plurxd run" /usr/lib/systemd/system/plurxd.service
+            grep -qx "ExecStart=/usr/lib/plurx-control/plurx-service-launch" /usr/lib/systemd/system/plurxd.service
+            test -x /usr/bin/plurx-control
+            test -x /usr/lib/plurx-control/plurx-recovery
+            test -f /etc/plurx/installation.json
             su -s /bin/sh plurx -c "PLURX_DATA_DIR=/var/lib/plurx PLURX_BIND=127.0.0.1:32400 plurxd run" \
               > /tmp/plurxd.log 2>&1 &
             tries=0
@@ -337,7 +399,7 @@ jobs:
   macos_build:
     name: macOS plurxd (${{ matrix.arch }})
     needs: resolve
-    if: github.server_url == 'https://github.com'
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: ${{ matrix.runner }}
     # A slice takes about an hour on these runners (63 min arm64, 72 min
     # x86_64 on 2026-10-10).
@@ -377,12 +439,24 @@ jobs:
           set -euo pipefail
           toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
           rustup toolchain install "$toolchain" --profile minimal --target "$TARGET"
-          cargo build --locked --release -p plurxd --target "$TARGET"
+          cargo build --locked --release -p plurxd -p plurx-desktop-control --bins --target "$TARGET"
           binary="target/$TARGET/release/plurxd"
           test "$(lipo -archs "$binary")" = "$ARCH"
           test "$("$binary" --version)" = "$EXPECT_VERSION"
           mkdir -p ../slice
           cp "$binary" "../slice/plurxd-$ARCH"
+          dsymutil "$binary" -o "../slice/plurxd-$ARCH.dSYM"
+          for tool in plurx-control plurx-install-helper plurx-update-worker plurx-service-launch plurx-recovery; do
+            cp "target/$TARGET/release/$tool" "../slice/$tool-$ARCH"
+          done
+          clients/server-tray/macos/build --configuration release \
+            --version "$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)" \
+            --output "$RUNNER_TEMP/Plurx Server.app"
+          tar -C "$RUNNER_TEMP" -czf "../slice/desktop-$ARCH.tar.gz" 'Plurx Server.app'
+          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
+          python3 scripts/build-macos-video-ffmpeg --output "$RUNNER_TEMP/media-package" \
+            --source-parser-package "$RUNNER_TEMP/source-parser"
+          tar -C "$RUNNER_TEMP/media-package" -czf "../slice/media-$ARCH.tar.gz" .
           python3 scripts/build-subtitle-engine --output "$RUNNER_TEMP/subtitle-engine" --architecture "$ARCH" --jobs 3
           # Artifact upload normalizes permissions; tar preserves the signed
           # executable's mode and the complete per-slice package directory.
@@ -398,7 +472,7 @@ jobs:
   macos:
     name: macOS universal archive
     needs: [resolve, macos_build]
-    if: github.server_url == 'https://github.com'
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: macos-15
     timeout-minutes: 30
     env:
@@ -420,57 +494,63 @@ jobs:
         run: |
           set -euo pipefail
           name="plurxd-$VERSION-macos-universal"
-          mkdir -p "dist/$name"
-          lipo -create -output "dist/$name/plurxd" slice/plurxd-arm64 slice/plurxd-x86_64
-          chmod 0755 "dist/$name/plurxd"
-          codesign --force --sign - "dist/$name/plurxd"
-          codesign --verify --strict "dist/$name/plurxd"
-          test "$(lipo -archs "dist/$name/plurxd")" = "x86_64 arm64"
-          test "$("dist/$name/plurxd" --version)" = "$EXPECT_VERSION"
-          cp deploy/install deploy/com.plurx.plurxd.plist "dist/$name/"
-          cp deploy/verify-subtitle-engine "dist/$name/"
-          for arch in arm64 x86_64; do
-            mkdir "slice/subtitle-engine-$arch"
-            tar -C "slice/subtitle-engine-$arch" -xzf "slice/subtitle-engine-$arch.tar.gz"
+          mkdir -p "$RUNNER_TEMP/universal/bin" dist
+          for tool in plurxd plurx-control plurx-install-helper plurx-update-worker plurx-service-launch plurx-recovery; do
+            lipo -create -output "$RUNNER_TEMP/universal/bin/$tool" "slice/$tool-arm64" "slice/$tool-x86_64"
+            test "$(lipo -archs "$RUNNER_TEMP/universal/bin/$tool")" = "x86_64 arm64"
           done
-          python3 scripts/build-subtitle-engine --output "$PWD/dist/$name/subtitle-engine" \
+          cp -R slice/plurxd-arm64.dSYM "$RUNNER_TEMP/plurxd.dSYM"
+          lipo -create slice/plurxd-arm64.dSYM/Contents/Resources/DWARF/plurxd \
+            slice/plurxd-x86_64.dSYM/Contents/Resources/DWARF/plurxd \
+            -output "$RUNNER_TEMP/plurxd.dSYM/Contents/Resources/DWARF/plurxd"
+          for arch in arm64 x86_64; do
+            mkdir -p "slice/media-$arch" "slice/subtitle-engine-$arch" "slice/desktop-$arch"
+            tar -C "slice/media-$arch" -xzf "slice/media-$arch.tar.gz"
+            tar -C "slice/subtitle-engine-$arch" -xzf "slice/subtitle-engine-$arch.tar.gz"
+            tar -C "slice/desktop-$arch" -xzf "slice/desktop-$arch.tar.gz"
+          done
+          python3 scripts/package-macos --combine-ffmpeg "$PWD/slice/media-arm64" "$PWD/slice/media-x86_64" \
+            --output "$RUNNER_TEMP/universal-media"
+          python3 scripts/build-subtitle-engine --output "$RUNNER_TEMP/universal-engine" \
             --combine "$PWD/slice/subtitle-engine-arm64" "$PWD/slice/subtitle-engine-x86_64"
-          bash deploy/verify-subtitle-engine "$PWD/dist/$name/subtitle-engine"
-          # plurxd reads decoder facts on macOS only through this module; the
-          # installer puts it beside the pinned FFprobe.
-          python3 scripts/build-macos-source-parser --output "$RUNNER_TEMP/source-parser" --jobs 3
-          cp "$RUNNER_TEMP/source-parser/bin/plurx-source-parser.wasm" "dist/$name/"
-          cp deploy/macos/README.md "dist/$name/README.md"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cp -R 'slice/desktop-arm64/Plurx Server.app' "$RUNNER_TEMP/Plurx Server.app"
+          app_executable=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$RUNNER_TEMP/Plurx Server.app/Contents/Info.plist")
+          lipo -create "slice/desktop-arm64/Plurx Server.app/Contents/MacOS/$app_executable" \
+            "slice/desktop-x86_64/Plurx Server.app/Contents/MacOS/$app_executable" \
+            -output "$RUNNER_TEMP/Plurx Server.app/Contents/MacOS/$app_executable"
+          codesign --force --deep --sign - --options runtime "$RUNNER_TEMP/Plurx Server.app"
+          python3 scripts/package-macos --daemon "$RUNNER_TEMP/universal/bin/plurxd" \
+            --ffmpeg-package "$RUNNER_TEMP/universal-media" --subtitle-engine-package "$RUNNER_TEMP/universal-engine" \
+            --debug-symbols "$RUNNER_TEMP/plurxd.dSYM" --desktop-app "$RUNNER_TEMP/Plurx Server.app" \
+            --control-dir "$RUNNER_TEMP/universal/bin" --version "$VERSION" \
+            --source-commit "${{ needs.resolve.outputs.commit }}" --output "$PWD/dist/$name"
+          test "$("dist/$name/runtime/plurxd" --version)" = "$EXPECT_VERSION"
+          if [ "${{ needs.resolve.outputs.mode }}" = release ]; then
+            # Actual Apple evidence is mandatory. A candidate assembled with
+            # ad-hoc signing fails closed here; no env flag can bless it.
+            # Protected Developer ID/notary configuration must precede the
+            # first official desktop-cohort release; local dry runs remain usable.
+            python3 scripts/package-macos --verify-distribution "$PWD/dist/$name" \
+              --team-id "${{ vars.PLURX_MACOS_DEVELOPER_TEAM_ID }}"
+          fi
+          python3 scripts/package-macos --archive "$PWD/dist/$name" --output "$PWD/dist/$name.tar.gz"
           rm -rf "dist/$name"
           ls -l dist
-      - name: Install from the archive as a user would, then uninstall
-        env:
-          PLURX_INSTALL_READY_TIMEOUT: "180"
+      - name: Validate complete archive without modifying host startup policy
         run: |
           set -euo pipefail
           name="plurxd-$VERSION-macos-universal"
-          smoke="$RUNNER_TEMP/smoke"
-          mkdir -p "$smoke"
-          tar -C "$smoke" -xzf "dist/$name.tar.gz"
-          cd "$smoke/$name"
-          # The installer itself waits for /readyz and prints what the server
-          # reports; the version check below binds it to this build.
-          ./install --prefix "$RUNNER_TEMP/prefix"
-          reported=$(curl -fsS http://127.0.0.1:32400/api/v1/server)
-          echo "$reported"
-          printf '%s' "$reported" | grep -Fq "\"$VERSION\""
-          # The archive's source parser must be installed and actually bind:
-          # discovery runs before the tone-map probe, so once that probe has
-          # logged, a missing or unusable module has already said so.
-          test -f "$RUNNER_TEMP/prefix/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/plurx-source-parser.wasm"
-          bash ./verify-subtitle-engine "$RUNNER_TEMP/prefix/bin/subtitle-engine"
-          log="$HOME/Library/Logs/plurxd.log"
-          for _ in $(seq 1 120); do grep -q "plurxd::pipeprobe" "$log" && break; sleep 1; done
-          grep -q "plurxd::pipeprobe" "$log"
-          if grep -E "FFprobe identity is unavailable|source parser is unavailable" "$log"; then exit 1; fi
-          ./install --uninstall --prefix "$RUNNER_TEMP/prefix"
-          test ! -e "$RUNNER_TEMP/prefix/bin/plurxd"
+          mkdir -p "$RUNNER_TEMP/archive-check"
+          tar -C "$RUNNER_TEMP/archive-check" -xzf "dist/$name.tar.gz"
+          package="$RUNNER_TEMP/archive-check/$name"
+          test -f "$package/runtime/plurx-source-parser.wasm"
+          test -x "$package/runtime/ffmpeg"
+          test -x "$package/runtime/ffprobe"
+          test -x "$package/control/plurx-service-launch"
+          codesign --verify --strict "$package/runtime/plurxd"
+          codesign --verify --deep --strict "$package/Plurx Server.app"
+          # Actual login/stop/reboot and rollback are native qualification,
+          # separate from archive assembly; this job does not claim them.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos
@@ -483,7 +563,7 @@ jobs:
   windows:
     name: Windows x64 archive
     needs: resolve
-    if: github.server_url == 'https://github.com'
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -537,7 +617,7 @@ jobs:
   windows_smoke:
     name: Windows archive runs on Windows
     needs: [resolve, windows]
-    if: github.server_url == 'https://github.com'
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
     runs-on: windows-2022
     timeout-minutes: 15
     env:
@@ -558,10 +638,161 @@ jobs:
           if ($reported -ne $env:EXPECT_VERSION) { throw "plurxd.exe reports '$reported', expected '$env:EXPECT_VERSION'" }
           Write-Output $reported
 
+  desktop_metadata:
+    name: validate complete desktop cohort (fixture signatures on dry runs)
+    needs: [resolve, linux, macos, windows, windows_smoke]
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode != 'qualification'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # No environment or secrets: candidate qualification needs no owner approval.
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+      SOURCE_TREE: ${{ needs.resolve.outputs.source_tree }}
+      PACKAGING_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Fetch packaging tools without any release credentials
+        run: |
+          set -euo pipefail
+          git init -q trusted
+          git -C trusted fetch -q --depth 1 "$REPO_URL" "$PACKAGING_COMMIT"
+          git -C trusted checkout -q --detach FETCH_HEAD
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y --no-install-recommends rpm >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - name: Check every platform artifact and create candidate metadata
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' \
+            "plurxd_${VERSION}-1_amd64.deb" "plurxd_${VERSION}-1_arm64.deb" \
+            "plurxd-${VERSION}-1.x86_64.rpm" "plurxd-${VERSION}-1.aarch64.rpm" \
+            "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
+            "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
+            "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
+            | LC_ALL=C sort)
+          test "$(ls assets | LC_ALL=C sort)" = "$expected"
+          umask 077
+          key="$RUNNER_TEMP/desktop-fixture-key.pem"
+          trap 'rm -f "$key"' EXIT
+          mkdir candidate
+          signing=()
+          if [ "$MODE" = dry-run ]; then
+            # Isolated fixtures are never published or installed as production trust.
+            openssl genpkey -algorithm ED25519 -out "$key"
+            signing=(--signing-key "$key")
+          fi
+          created=$(date +%s)
+          python3 trusted/scripts/create-desktop-update-manifest \
+            --assets "$PWD/assets" --output "$PWD/candidate/plurx-update-v1.json" \
+            --version "$VERSION" --sequence "$GITHUB_RUN_NUMBER" \
+            --source-commit "$SOURCE_COMMIT" --source-tree "$SOURCE_TREE" --packaging-commit "$PACKAGING_COMMIT" \
+            --created-unix "$created" --expires-unix "$((created + 30 * 86400))" \
+            --upgrade-from ">=0.0.0, <$VERSION" --data-compatibility fixture-only \
+            --cluster-compatibility fixture-only --minimum-controller 0.0.0 \
+            --rollback manual_recovery --inspect-packages "${signing[@]}"
+          python3 trusted/scripts/create-desktop-update-manifest --validate candidate/plurx-update-v1.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-update-candidate
+          path: candidate/*
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop_signing:
+    name: validate and sign desktop release metadata
+    needs: [resolve, desktop_metadata]
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Configure required reviewers and trusted branch/tag restrictions here.
+    # This environment alone owns the release signing key; no build job does.
+    environment: desktop-release-signing
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+      SOURCE_TREE: ${{ needs.resolve.outputs.source_tree }}
+      PACKAGING_COMMIT: ${{ github.sha }}
+      TRUSTED_PACKAGING_COMMIT: ${{ vars.PLURX_TRUSTED_PACKAGING_COMMIT }}
+    steps:
+      - name: Fetch only the explicitly approved immutable packaging code
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = release ]; then
+            [[ "$TRUSTED_PACKAGING_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+            test "$PACKAGING_COMMIT" = "$TRUSTED_PACKAGING_COMMIT"
+          else
+            TRUSTED_PACKAGING_COMMIT=$PACKAGING_COMMIT
+          fi
+          git init -q trusted
+          git -C trusted fetch -q --depth 1 "$REPO_URL" "$TRUSTED_PACKAGING_COMMIT"
+          git -C trusted checkout -q --detach FETCH_HEAD
+          test "$(git -C trusted rev-parse HEAD)" = "$TRUSTED_PACKAGING_COMMIT"
+          # Read only the exact candidate's compiled-in public-root data; no
+          # candidate source or binary is executed in this key-bearing job.
+          git -C trusted fetch -q --depth 1 "$REPO_URL" "$SOURCE_COMMIT"
+          git -C trusted show FETCH_HEAD:crates/plurx-desktop-control/production-trust-roots.json > candidate-trust-roots.json
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y --no-install-recommends rpm >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - name: Validate complete cohort and sign exact manifest bytes
+        env:
+          # This secret is used in this protected job only, never in a build.
+          PRODUCTION_KEY: ${{ secrets.PLURX_UPDATE_ED25519_PRIVATE_KEY }}
+          UPGRADE_FROM: ${{ vars.PLURX_UPDATE_UPGRADE_FROM }}
+          DATA_COMPATIBILITY: ${{ vars.PLURX_UPDATE_DATA_COMPATIBILITY }}
+          CLUSTER_COMPATIBILITY: ${{ vars.PLURX_UPDATE_CLUSTER_COMPATIBILITY }}
+          MINIMUM_CONTROLLER: ${{ vars.PLURX_UPDATE_MINIMUM_CONTROLLER }}
+          ROLLBACK: ${{ vars.PLURX_UPDATE_ROLLBACK }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/desktop-release-key.pem"
+          trap 'rm -f "$key"' EXIT
+          mkdir -p signed
+          if [ "$MODE" = release ]; then
+            test -n "$PRODUCTION_KEY"
+            test -n "$UPGRADE_FROM"
+            test -n "$DATA_COMPATIBILITY"
+            test -n "$CLUSTER_COMPATIBILITY"
+            test -n "$MINIMUM_CONTROLLER"
+            test -n "$ROLLBACK"
+            printf '%s\n' "$PRODUCTION_KEY" > "$key"
+          fi
+          unset PRODUCTION_KEY
+          created=$(date +%s)
+          python3 trusted/scripts/create-desktop-update-manifest \
+            --assets "$PWD/assets" --output "$PWD/signed/plurx-update-v1.json" \
+            --version "$VERSION" --sequence "$GITHUB_RUN_NUMBER" \
+            --source-commit "$SOURCE_COMMIT" --source-tree "$SOURCE_TREE" --packaging-commit "$PACKAGING_COMMIT" \
+            --created-unix "$created" --expires-unix "$((created + 30 * 86400))" \
+            --upgrade-from "$UPGRADE_FROM" --data-compatibility "$DATA_COMPATIBILITY" \
+            --cluster-compatibility "$CLUSTER_COMPATIBILITY" --minimum-controller "$MINIMUM_CONTROLLER" \
+            --rollback "$ROLLBACK" --inspect-packages --signing-key "$key" --production \
+            --trusted-roots "$PWD/trusted/crates/plurx-desktop-control/production-trust-roots.json" \
+            --trusted-roots "$PWD/candidate-trust-roots.json"
+          test "$(stat -c %s signed/plurx-update-v1.json.sig)" = 64
+          python3 trusted/scripts/create-desktop-update-manifest --validate signed/plurx-update-v1.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-desktop-metadata
+          path: signed/*
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: publish the release (a dry run stops at the check)
-    needs: [resolve, linux, macos, windows, windows_smoke]
-    if: github.server_url == 'https://github.com'
+    needs: [resolve, linux, macos, windows, windows_smoke, desktop_signing]
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'release'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -583,6 +814,9 @@ jobs:
           expected=$(printf '%s\n' \
             "plurxd_${VERSION}-1_amd64.deb" "plurxd_${VERSION}-1_arm64.deb" \
             "plurxd-${VERSION}-1.x86_64.rpm" "plurxd-${VERSION}-1.aarch64.rpm" \
+            "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
+            "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
+            "plurx-update-v1.json" "plurx-update-v1.json.sig" \
             "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
             | LC_ALL=C sort)
           test "$(ls assets | LC_ALL=C sort)" = "$expected" || {
@@ -640,6 +874,9 @@ jobs:
           \`http://<host>:32400\` to create the first administrator. They need the
           distribution's ffmpeg 5.1 or newer (6.1 or newer for the paced-stream burst;
           RHEL and its rebuilds take it from RPM Fusion, which needs EPEL).
+          The optional \`plurx-desktop\` package adds the Linux tray/control window;
+          install it beside the same version of \`plurxd\` on a local GUI host.
+          \`plurx-update-v1.json\` and its raw Ed25519 \`.sig\` bind native update cohorts.
           \`SHA256SUMS\` lists the checksum of every file.
           NOTES
           # Only the highest release tag is "latest", so back-filling an older
@@ -653,3 +890,13 @@ jobs:
           gh release create "$TAG" assets/* SHA256SUMS --verify-tag \
             --title "noirr cinema $TAG" --notes-file notes.md --latest="$latest"
           echo "published $TAG (latest: $latest)"
+
+  desktop_qualification:
+    name: qualify existing exact-candidate native artifacts
+    needs: resolve
+    if: github.server_url == 'https://github.com' && needs.resolve.outputs.mode == 'qualification'
+    uses: ./.github/workflows/desktop-qualification.yml
+    with:
+      candidate_run_id: ${{ inputs.desktop_qualification_build_run_id }}
+      candidate_sha: ${{ github.sha }}
+      run_local_fixture_updates: true
