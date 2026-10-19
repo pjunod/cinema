@@ -1705,7 +1705,12 @@ mod processed_selection_has_no_software_gates {
             .expect("candidate context read")
             .0;
         assert!(silent.contains("convert_dolby_vision: false"), "{silent}");
-        assert!(silent.contains("dv_processing_route()?"), "{silent}");
+        assert!(
+            silent.contains("processed_qualification_destination(request)?"),
+            "{silent}"
+        );
+        assert!(include_str!("transcode/manager/candidates.rs")
+            .contains("request.dv_processing_route()?"));
         assert!(body.contains("preferences.fel_reencode"), "{body}");
     }
 

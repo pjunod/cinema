@@ -64,6 +64,104 @@ impl ProcessedCandidateHints {
 }
 
 impl TranscodeManager {
+    /// The physical carrier can be Encode after catalog selection. Only the
+    /// original service-reviewed conversion scope can restore its P81 intent;
+    /// source tags, client preferences and a serialized description cannot.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn processed_qualification_destination(
+        request: &SessionRequest,
+    ) -> Result<Option<plurx_core::transcode::dv_processing::DvDestination>, String> {
+        use plurx_core::transcode::dv_processing::DvDestination;
+        let (_, destination, _) = request.dv_processing_route()?;
+        if request.dv_processing_destination.is_none()
+            && matches!(request.kind, SessionKind::Transcode { .. })
+        {
+            match request
+                .candidate_context
+                .as_ref()
+                .and_then(|context| context.catalog_query.as_ref())
+                .and_then(|query| query.copy_contract)
+            {
+                Some((_, _, true)) => return Ok(Some(DvDestination::Profile81)),
+                Some((_, true, false)) => return Ok(None),
+                _ => {}
+            }
+        }
+        Ok(Some(destination))
+    }
+
+    /// Pure qualification-input seam shared with ingress regressions. Its
+    /// caller must still validate current planning authority and acquire the
+    /// admitted local producer; this grants no prepared lease or executable.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn processed_qualification_input(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        request: &SessionRequest,
+        height: i64,
+    ) -> Result<(SessionRequest, crate::media_pool::QualityCatalogRequest), String> {
+        let destination = Self::processed_qualification_destination(request)?
+            .ok_or("native Dolby Vision copy has no processed destination")?;
+        let original = request
+            .candidate_context
+            .as_ref()
+            .ok_or("processed trial context missing")?;
+        let query = original
+            .catalog_query
+            .as_ref()
+            .ok_or("processed qualification requires its original catalog query")?;
+        // Keep equality even for an explicit serialized destination. The
+        // original scope and current policy must independently authorize it.
+        if Self::processed_catalog_destination(snapshot, query) != Some(destination) {
+            return Err(
+                "the original catalog query disagrees with the processed destination".into(),
+            );
+        }
+        let projected = Self::processed_catalog_query(snapshot, query)
+            .ok_or("the client has no compatible canonical encoded audio claim")?;
+        let caps = original
+            .canonical_caps
+            .as_ref()
+            .ok_or("the client did not report its playback capabilities")?;
+        let offset = if snapshot.file.audio_streams.is_empty() {
+            0
+        } else {
+            request.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        if projected.audio_index
+            != Self::candidate_audio_from_snapshot(snapshot, request.audio_index)
+            || projected.audio_offset_ms != offset
+            || caps.legacy_blanket_dolby_vision != query.caps.legacy_blanket_dolby_vision
+            || serde_json::to_value(caps).map_err(|error| error.to_string())?
+                != serde_json::to_value(&query.caps).map_err(|error| error.to_string())?
+        {
+            return Err(
+                "the original processed query no longer matches the selected track, offset or caps"
+                    .into(),
+            );
+        }
+        let mut trial = request.clone();
+        trial.audio_index = projected.audio_index;
+        trial.audio_offset_ms = projected.audio_offset_ms;
+        trial.audio_claim = projected.audio_claim.clone();
+        trial.kind = SessionKind::Transcode { height };
+        trial.hdr10 = true;
+        trial.dv_processing_destination = Some(destination);
+        trial.dv_processing_route()?;
+        if matches!(request.kind, SessionKind::Copy { .. }) {
+            // Copy's passthrough answer cannot describe reconstructed AAC.
+            trial.audio_delivery = None;
+        }
+        if trial.audio_delivery.as_ref().is_some_and(|audio| {
+            projected
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|expected| expected.byte_identity() != audio.byte_identity())
+        }) {
+            return Err("the retained encoded audio differs from the current client claim".into());
+        }
+        Ok((trial, projected))
+    }
+
     #[cfg(any(target_os = "linux", test))]
     pub(super) fn processed_catalog_destination(
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,

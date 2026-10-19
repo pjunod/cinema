@@ -1274,7 +1274,9 @@ impl TranscodeManager {
             // Any other HDR10 delivery becomes HDR10-E under Dolby Vision
             // processing.
             use plurx_core::transcode::dv_processing::DvDestination;
-            let (_, destination, _) = request.dv_processing_route()?;
+            let Some(destination) = Self::processed_qualification_destination(request)? else {
+                return Ok(None);
+            };
             let profile81 = destination == DvDestination::Profile81;
             // Silent only where no processed destination is what this play
             // is: a native Dolby Vision copy (the display applies the RPU),
@@ -1406,51 +1408,9 @@ impl TranscodeManager {
             if height < 32 {
                 return Err("the source has no picture height to process".into());
             }
-            let mut trial = request.clone();
-            let query = original
-                .catalog_query
-                .as_ref()
-                .ok_or("processed qualification requires its original catalog query")?;
-            if Self::processed_catalog_destination(&planning, query) != Some(destination) {
-                return Err(
-                    "the original catalog query disagrees with the processed destination".into(),
-                );
-            }
-            let projected = Self::processed_catalog_query(&planning, query)
-                .ok_or("the client has no compatible canonical encoded audio claim")?;
-            if projected.audio_index
-                != Self::candidate_audio_from_snapshot(&planning, request.audio_index)
-                || projected.audio_offset_ms != file.audio_offset_ms
-                || caps.legacy_blanket_dolby_vision != query.caps.legacy_blanket_dolby_vision
-                || serde_json::to_value(caps).map_err(|error| error.to_string())?
-                    != serde_json::to_value(&query.caps).map_err(|error| error.to_string())?
-            {
-                return Err("the original processed query no longer matches the selected track, offset or caps".into());
-            }
-            trial.audio_index = projected.audio_index;
-            trial.audio_offset_ms = projected.audio_offset_ms;
-            trial.audio_claim = projected.audio_claim.clone();
+            let (mut trial, projected) =
+                Self::processed_qualification_input(&planning, request, height)?;
             trial.request_id = Some(recovery.incarnation_id.clone());
-            trial.kind = SessionKind::Transcode { height };
-            trial.hdr10 = true;
-            trial.dv_processing_destination = Some(destination);
-            trial.dv_processing_route()?;
-            if matches!(request.kind, SessionKind::Copy { .. }) {
-                // The copy route's retained passthrough/E-AC-3 answer cannot
-                // describe a new reconstructed AAC producer. Resolve the
-                // encoded destination from the same canonical sink claim.
-                trial.audio_delivery = None;
-            }
-            if trial.audio_delivery.as_ref().is_some_and(|audio| {
-                projected
-                    .audio_delivery
-                    .as_ref()
-                    .is_none_or(|expected| expected.byte_identity() != audio.byte_identity())
-            }) {
-                return Err(
-                    "the retained encoded audio differs from the current client claim".into(),
-                );
-            }
             let context = trial
                 .candidate_context
                 .as_mut()

@@ -39,9 +39,13 @@ Original authored head `1eeb0542d` is preserved on preparation branch
 `codex/cinema-fel-p81-catalog`. Actual Pixel/main landing `e940b75b455e` is
 integrated, preserving unrelated main changes without changing B's implementation
 or regression bodies. The sole merge conflict was changelog prose, resolved by
-retaining both topics and removing duplicate Pixel bullets. Exact reconciled-source
-compiler/static qualification and publication are the next preparation steps;
-the existing independent complete-PR Astra review follows, not self-review.
+retaining both topics and removing duplicate Pixel bullets. Draft publication
+`fdc6d3ed` passed pinned formatting/all-target Clippy, but the complete independent
+Astra review required F1: real ingress saved no conversion provenance, and Encode
+normalization lost P81 eligibility. Sol's isolated source repair now captures the
+service-reviewed original catalog scope before normalization and resolves the
+qualification trial from that scope. Corrected compilation/publication and the
+same independent reviewer's exact-head closure remain required; no approval yet.
 
 **Retained evidence:** exact pre-integration `f931f603` formatting and all-target
 Clippy passed after repairing the baseline helper visibility and one range-style
@@ -75,6 +79,10 @@ to physical playback evidence. Final review can invalidate changed closures only
 - `chunk_05.rs::a_reconstructed_profile81_copy_is_described_as_reconstructed`
 - `dv_runtime.rs::a_converted_dv_copy_is_offered_the_reconstructed_profile81`
 - `enhancement.rs::reconstructed_p81_carries_fel_and_dyn`
+- `chunk_06.rs::reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection`
+  drives the shared production ingress/normalization helpers into qualification
+  inputs and remembered-description lookup, including FEL-only, HDR, native,
+  numeric and disabled-policy cases. Written for F1; execution awaits review.
 
 **Resolved design risk; still a review focus:** the original Encode-route/Copy-kind
 trial violated retained-kind/audio invariants. The accepted explicit optional
@@ -90,19 +98,22 @@ mismatch, FEL-only reuse scope and swallowed processing errors, and checks plan
 destination/height again at prepared admission and retained binding. Source tests
 cover wire/intent/binding and ordinary-producer refusal, preference/source/encoded
 audio scope, same-entry completed client contract and original daemon indicators.
-Final-base compilation, full independent review and remaining post-review execution determine
-whether this complete implementation is ready. The separate reservation-slot
+The complete independent review found F1 in production ingress, not in the
+retained wire/lease safety contract. The repair retains original intent ordering,
+ordinary fallback, query/destination equality and strict kind/audio binding.
+Corrected compilation, same-reviewer closure and remaining post-review execution
+determine readiness. The separate reservation-slot
 incident and general remote processed requalification remain out of B scope.
 
 **Finish:**
-1. Qualify and publish the complete actual-main-reconciled source with the
-   pinned compiler/static loop. The latest direct owner sequence's three
+1. Compile and publish the corrected actual-main-reconciled source with pinned
+   formatting/all-target Clippy and a linked production daemon. The three
    section-B regressions and old-main sensitivity already have independently
    adopted receipts. Retain them where test/defect closures are unchanged;
    no repeat merely for history or docs. The quick draft-paperwork
    operations-test exception remains in effect.
-2. Obtain one independent frontier adversarial review of the complete PR,
-   fix findings, then run the remaining affected tests and fast lane once.
+2. Close F1 in the existing independent frontier review of the complete PR,
+   then run new/invalidated affected tests and the remaining fast lane once.
    Retry only failed or genuinely invalidated checks, including sensitivity
    only if its test/defect closure changed.
 3. Merge with the two daemon `Regression-Test:` lines.
