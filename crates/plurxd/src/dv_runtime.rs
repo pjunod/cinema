@@ -323,6 +323,7 @@ pub(crate) struct PrivateWindow {
     encoded: Vec<u8>,
     pub(crate) evidence: crate::dv_segment::SegmentEvidence,
     registration: crate::prodrun::ProducerRegistration,
+    display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
 }
 
 #[cfg(target_os = "linux")]
@@ -357,6 +358,9 @@ impl PrivateWindow {
         use plurx_core::transcode::dv_processing::{
             dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
         };
+        if self.display_target.is_some() && destination != DvDestination::Hdr10 {
+            return Err("display targeting is HDR10-only".into());
+        }
         let rpus: Vec<_> = observed
             .pictures
             .iter()
@@ -1021,6 +1025,7 @@ pub(crate) async fn run_private_window(
     let _cancel_on_drop = cancel.clone().drop_guard();
     request.request.cancel = cancel.clone();
     let deadline = request.renderer_deadline;
+    let display_target = request.display_target;
     let mut producer = crate::dv_segment::spawn_streaming(request).await?;
     let evidence = producer
         .take_evidence()
@@ -1098,6 +1103,7 @@ pub(crate) async fn run_private_window(
         encoded: result?,
         evidence,
         registration,
+        display_target,
     })
 }
 
@@ -1179,6 +1185,49 @@ struct RenderRow {
     polynomial_segments: Option<u32>,
     mmr_segments: Option<u32>,
     applied_operations: Option<Vec<plurx_core::transcode::dv_processing::DvOperation>>,
+}
+/// Exact requested policy and raw-RPU values, not membership in a supported set.
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+struct DisplayTargetRow {
+    frame: u8,
+    nits: u32,
+    method: String,
+    curve: String,
+    max_pq: u16,
+    avg_pq: u16,
+    max0_fallback: bool,
+    title_min_1e4: u32,
+    title_peak: u32,
+}
+#[cfg(target_os = "linux")]
+impl DisplayTargetRow {
+    fn validate(
+        &self,
+        target: plurx_core::transcode::dv_processing::DvDisplayTarget,
+        raw: &[u8],
+    ) -> Result<(), String> {
+        use plurx_core::transcode::dv_processing::DISPLAY_TARGET_METHOD;
+        let (max, avg) = target.validate_rpu(raw).map_err(|e| e.to_string())?;
+        if self.nits != target.nits()
+            || self.method != DISPLAY_TARGET_METHOD
+            || self.title_min_1e4 != target.mastering().min_1e4_nits
+            || self.title_peak != target.mastering().max_nits
+            || (self.max_pq, self.avg_pq) != (max, avg)
+            || self.max0_fallback != (max == 0)
+            || !matches!(
+                self.curve.as_str(),
+                "annex-b2-rgb"
+                    | "no-expansion"
+                    | "degenerate-average-linear"
+                    | "degenerate-adaptation-linear"
+                    | "nonfinite-or-nonmonotone-fit-linear"
+            )
+        {
+            return Err("display target trace differs from requested policy or raw L1".into());
+        }
+        Ok(())
+    }
 }
 #[cfg(target_os = "linux")]
 #[derive(Deserialize)]
@@ -1316,6 +1365,7 @@ impl PrivateWindow {
         let events = self.evidence.renderer_events()?;
         let mut pairs = BTreeMap::new();
         let mut renders = BTreeMap::new();
+        let mut targets = BTreeMap::new();
         let mut coded = BTreeMap::new();
         let mut complete = None;
         let mut segment = None;
@@ -1344,6 +1394,13 @@ impl PrivateWindow {
                     let row: PairRow = serde_json::from_value(value).map_err(|e| e.to_string())?;
                     if pairs.insert(row.frame, row).is_some() {
                         return Err("duplicate accepted source picture".into());
+                    }
+                }
+                Some("display_target_frame") => {
+                    let row: DisplayTargetRow =
+                        serde_json::from_value(value).map_err(|e| e.to_string())?;
+                    if self.display_target.is_none() || targets.insert(row.frame, row).is_some() {
+                        return Err("unexpected or duplicate display target trace".into());
                     }
                 }
                 Some("rendered_frame") => {
@@ -1428,11 +1485,21 @@ impl PrivateWindow {
             u32::try_from(tick_num).map_err(|_| "invalid source tick")?,
             tick_den,
         );
+        let requested_policy = self.display_target.map_or_else(
+            || "bt2020-pq-master-clip".to_owned(),
+            DvDisplayTarget::output_policy,
+        );
         if tick.0 == 0
             || complete.frames != frames
             || pairs.len() != frames
             || renders.len() != frames
             || coded.len() != frames
+            || targets.len()
+                != if self.display_target.is_some() {
+                    frames
+                } else {
+                    0
+                }
             || frames == 0
             || frames > 64
             || complete.preroll_pairs > usize::from(window.max_preroll)
@@ -1449,7 +1516,7 @@ impl PrivateWindow {
             || segment
                 .get("output_policy")
                 .and_then(serde_json::Value::as_str)
-                != Some("bt2020-pq-master-clip")
+                != Some(requested_policy.as_str())
         {
             return Err("source window completion differs from owned request".into());
         }
@@ -1514,6 +1581,12 @@ impl PrivateWindow {
             if hash(&rpu) != pair.rpu_sha256 {
                 return Err("raw RPU differs from source observation".into());
             }
+            if let Some(target) = self.display_target {
+                targets
+                    .remove(&index)
+                    .ok_or("display target frame missing")?
+                    .validate(target, &rpu)?;
+            }
             let (profile, source_el_kind) = if mode == DvProcessingMode::Fel {
                 let parsed = DvParsedMetadata::from_raw_rpu(&rpu).map_err(|e| e.to_string())?;
                 if !parsed.runtime_supported() {
@@ -1530,6 +1603,11 @@ impl PrivateWindow {
                         DvOperation::Bt2020NclConversion | DvOperation::Main10Encoding
                     )
                 });
+                if let Some(target) = self.display_target {
+                    actual.push(DvOperation::DisplayTargetMapping {
+                        nits: target.nits(),
+                    });
+                }
                 if pair.profile != Some(parsed.profile)
                     || rendered.profile != Some(parsed.profile)
                     || pair.fel_contributed != Some(false)
@@ -1607,6 +1685,52 @@ impl PrivateWindow {
 mod helper_decoder_tests {
     use super::helper_decoder;
     use plurx_core::transcode::DecodeBackend;
+
+    #[test]
+    fn display_target_trace_binds_exact_bucket_endpoints_and_raw_l1() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(1600, Some(stats)).unwrap()
+        else {
+            panic!("target");
+        };
+        let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
+        let (max, avg) = target.validate_rpu(raw).unwrap();
+        let valid = serde_json::json!({
+            "frame":0, "nits":1600, "method":DISPLAY_TARGET_METHOD,
+            "curve":"annex-b2-rgb", "max_pq":max, "avg_pq":avg,
+            "max0_fallback":max == 0, "title_min_1e4":50, "title_peak":4000,
+        });
+        let parse = |row| serde_json::from_value::<super::DisplayTargetRow>(row).unwrap();
+        assert!(parse(valid.clone()).validate(target, raw).is_ok());
+        // Both 600 and 1600 are allowed. Only the requested one is admissible.
+        for (field, value) in [
+            ("nits", serde_json::json!(600)),
+            ("title_min_1e4", serde_json::json!(51)),
+            ("title_peak", serde_json::json!(1000)),
+            ("max_pq", serde_json::json!(max ^ 1)),
+            ("avg_pq", serde_json::json!(avg ^ 1)),
+            ("max0_fallback", serde_json::json!(max != 0)),
+            ("method", serde_json::json!("libplacebo-st2094-10")),
+            ("curve", serde_json::json!("unknown")),
+        ] {
+            let mut forged = valid.clone();
+            forged[field] = value;
+            assert!(parse(forged).validate(target, raw).is_err(), "{field}");
+        }
+        assert!(parse(valid).validate(target, b"not an RPU").is_err());
+    }
 
     #[test]
     fn the_helper_decoder_report_names_the_backend() {
