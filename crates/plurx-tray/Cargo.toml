@@ -1,0 +1,35 @@
+[package]
+name = "plurx-tray"
+description = "Linux desktop companion for a native plurx server: StatusNotifierItem tray and GTK4 control window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# Everything the plurx-desktop package ships. The server package and the
+# controller never depend on this crate, so a headless install pulls in no GTK,
+# session bus or tray code (DESKTOP-TRAY-IMPLEMENTATION.md §4.2).
+#
+# The protocol, menu model, session-eligibility decision, autostart reading and
+# controller runner are portable and tested on every host; the GTK4 window,
+# StatusNotifierItem and D-Bus probes compile only on Linux. GTK API floor is
+# 4.0 (no v4_x features) so RHEL 9's and Debian 12's GTK both build it.
+
+[[bin]]
+name = "plurx-tray"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.11", default-features = false }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+async-channel = "2"
+
+[lints]
+workspace = true
