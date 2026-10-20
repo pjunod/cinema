@@ -14,8 +14,8 @@ Exact-root reuse drops throughput gating, not identity/reservation fences.
 Private staged provenance and admitted epochs reach common attachment with
 actual-owner cleanup armed before async sealing; JSON still grants no authority.
 Independent Astra review and bounded F1/F2/F3 closure approved `03cbfe62c`;
-pinned fmt/Clippy/link passed. First affected batch: six pass, nine fixture failures.
-Source-clock/incarnation fixture repairs need compile, bounded closure and nine retries.
+pinned fmt/Clippy/link passed. Six original passes remain; `7cd6b015` retry: 0/9.
+Clock/incarnation setup passed; fixing missing container PQ metadata and test producer custody.
 B #1211 merged (`9753284e`, green lane 5600); history-only integration is retained.
 Fast lane/merge remain; no live reproduction or accuracy claim; [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair-in-progress-owner-sol-nativepublication-coordinator).
 

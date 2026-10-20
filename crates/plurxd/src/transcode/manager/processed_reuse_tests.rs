@@ -845,6 +845,8 @@ async fn fixture_with_audio(
     );
     let actual: serde_json::Value =
         serde_json::from_slice(&source_probe.stdout).expect("source probe");
+    std::fs::write(root.path().join("source-probe.json"), &source_probe.stdout)
+        .expect("retain actual source clock and tracks");
     let video = actual["streams"]
         .as_array()
         .expect("streams")
@@ -1061,6 +1063,11 @@ async fn fixture_with_audio(
             "libx265",
             "-pix_fmt",
             "yuv420p10le",
+            // The synthetic source has unspecified frame color properties.
+            // Set them on frames too: encoder VUI flags alone leave the MP4
+            // nclx primaries/transfer unspecified on supported FFmpeg builds.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
             "-preset",
             "ultrafast",
             "-x265-params",
@@ -1074,13 +1081,23 @@ async fn fixture_with_audio(
             "-video_track_timescale",
             "24000",
             "-movflags",
-            "+frag_keyframe+empty_moov+default_base_moof",
+            // PQ tags in the SPS do not imply a container color record.
+            // The completed-window validator independently requires nclx.
+            "+frag_keyframe+empty_moov+default_base_moof+write_colr",
         ])
-        .arg(&output)
+        .arg(&output);
+    std::fs::write(
+        root.path().join("completed-command.txt"),
+        format!("{status:?}\n"),
+    )
+    .expect("retain exact control argv");
+    let status = status
         .kill_on_drop(true)
         .output()
         .await
         .expect("encode control window");
+    std::fs::write(root.path().join("completed-stderr.txt"), &status.stderr)
+        .expect("retain encoder diagnostics");
     assert!(
         status.status.success(),
         "{}",
@@ -1103,13 +1120,20 @@ async fn fixture_with_audio(
     raw.modified = true;
     let rpus = vec![raw.write_hevc_unspec62_nalu().expect("bounded control RPU"); 3];
 
-    let bytes = std::fs::read(output).expect("completed bytes");
+    let bytes = std::fs::read(&output).expect("completed bytes");
     let bytes = if destination == DvDestination::Profile81 {
-        dv_author_profile81_window(&bytes, raster, rate_num, 0, rate_den, &rpus, 6)
-            .expect("actual reconstructed P81 authoring")
+        match dv_author_profile81_window(&bytes, raster, rate_num, 0, rate_den, &rpus, 6) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let retained = root.keep();
+                panic!("actual reconstructed P81 authoring: {error:?}; retained {retained:?}");
+            }
+        }
     } else {
         bytes
     };
+    std::fs::write(root.path().join("completed-validated-input.mp4"), &bytes)
+        .expect("retain exact validation input");
     let source = Arc::new(
         crate::fragment_index_cluster::open_source_fence(file, None)
             .await
@@ -1142,7 +1166,7 @@ async fn fixture_with_audio(
     )
     .expect("source facts");
     let preferences = TranscodeManager::vod_dv_preferences_from_snapshot(&snapshot);
-    let selected_plan = dv_plan_completed_window(DvCompletedWindowInput {
+    let selected_plan = match dv_plan_completed_window(DvCompletedWindowInput {
         source: source_facts,
         preferences,
         backend: backend.clone(),
@@ -1160,8 +1184,13 @@ async fn fixture_with_audio(
         source_trace: digest(b"lifecycle trace"),
         observed_at: 1,
         decoder: plurx_core::transcode::DecodeBackend::Software,
-    })
-    .expect("real completed-window validation");
+    }) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let retained = root.keep();
+            panic!("real completed-window validation: {error:?}; retained {retained:?}");
+        }
+    };
     let receipt = dv_receipt_completed_window(
         &selected_plan,
         &keys,

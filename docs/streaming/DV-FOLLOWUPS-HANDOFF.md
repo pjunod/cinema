@@ -210,8 +210,16 @@ controls supplied an invalid coarse source tick; the other omitted its admitted
 incarnation. Repairs probe actual source packet timing, retain the 24000/1001
 cadence and 1/24000 source tick through the checked output, and supply real
 incumbent/successor request incarnations. No production validator is relaxed.
-The repaired fixtures need pinned compilation, bounded same-reviewer closure
-and retries of only those nine cases; the six unchanged passes remain valid.
+Candidate `7cd6b015` passed pinned compilation/linking and bounded same-reviewer
+closure, but its nine-case retry had no passes. Eight controls reached the next
+sample-entry guard: SPS PQ flags do not supply the required MP4 nclx record.
+Synthetic frame color properties plus explicit `write_colr` now generate that
+record locally; a native standalone production-validator diagnostic is pending,
+not a unit pass. Failure paths retain actual bytes, source probe and encoder argv.
+The ninth reaches final predecessor revalidation; its external worker claim
+conflicts with the automatic driver's empty slot. Controlled test producer custody
+is under investigation, without weakening the guard. The six original passes
+remain; corrected compilation, bounded closure and nine failed-only retries are owed.
 Actual B landing `9753284e` is incorporated. Required fast lane and API merge
 remain. The historical live request path remains unknown; this is no deployment
 or general Dolby rendering-accuracy claim.
