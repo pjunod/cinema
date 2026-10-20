@@ -1023,8 +1023,10 @@ async fn staged_processed_second_successor_survives_normal_commit_and_parent_ret
                 .await;
             if destination == DvDestination::Hdr10 {
                 let report = report.expect("actual-owner-bound control publication");
-                assert!(report.hdr10_enhanced && report.fel_contributed);
-                assert_eq!(report.generation, incarnation);
+                assert!(report.fel_contributed());
+                let wire = serde_json::to_value(&report).expect("public processing report");
+                assert_eq!(wire["hdr10_enhanced"], serde_json::json!(true));
+                assert_eq!(wire["generation"].as_str(), Some(incarnation.as_str()));
             } else {
                 assert!(
                     report.is_none(),
