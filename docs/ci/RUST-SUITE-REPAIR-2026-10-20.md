@@ -65,6 +65,9 @@ reside in the existing Linux-only processed-reuse module; a Mac result
 cannot qualify them. The full cell also declares 22 threads;
 the baseline resource receipt reported 22 logical and affinity CPUs.
 This is recorded execution context, not a reduction in the case universe.
+The qualification job declares one Cargo build job to avoid concurrent
+large compiler processes; native execution still uses 22 test threads.
+The pinned CI build profiles and debug-symbol settings remain unchanged.
 Every phase retains its original native return code and process cleanup
 receipt. An unsafe cleanup blocks later execution. A safe failed body may
 collect later diagnostic evidence, but the final result remains red.
@@ -96,6 +99,7 @@ not performance estimates or permission to drop cases.
 | Local Linux compiler setup | Pinned 1.97.1 verified. Generic image lacks unrelated tray GTK libraries. A baseline two-job affected-target check recorded an OOM kill in the shared 7.747-GiB Docker VM; lower build concurrency is required. The same baseline affected-target check then passed in 80 seconds with one build job. No candidate test outcome is inferred from that setup failure. |
 | Final local workspace check | All targets passed in 1 minute 56 seconds; two subsequent fixture-only diagnostic-hook installation calls are included in the Clippy compile below. |
 | Final workspace Clippy | All targets passed with `-D warnings` in 1 minute 33 seconds, including the final fixture hook calls and redundant-borrow cleanup. |
+| Linux affected-target Clippy | Committed `5a277dbdf` passed all Core/daemon production and test targets with `-D warnings` in 6m48s. The 7.747-GiB local VM required one job, no incremental cache and no debug symbols; its earlier two compiler OOM kills remain setup failures. Local FFmpeg is 7.1.5; final CI requires 8. |
 | Final daemon native regressions | 17 platform-applicable cases passed in 61.34 seconds on committed `5a277dbdf`, including all original 15 daemon failures. With Core, all 25 original identities pass locally. Three new Linux-only driver controls remain owed. |
 | Replicated annotations/import contracts | Both actual `dyn Store` annotation and populated v14 three-voter import/parity cases passed in 20.02 seconds, with `cluster-read-cost-validation,hiqlite-contract-tests`. |
 | Ten Linux cohort repetitions | Pending. |
