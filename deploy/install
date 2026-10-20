@@ -1067,13 +1067,13 @@ docker_install_host_tray() {
     return 0
   fi
   if [ "$(id -u)" = 0 ]; then
-    say "the container is ready; run as your graphical login user: python3 $root/scripts/install-compose-tray --checkout $root"
+    say "the container is ready; run as your graphical login user: python3 $root/scripts/install-compose-tray --checkout $root --update-mode source"
     return 0
   fi
   if linux_has_local_gui; then
-    python3 "$root/scripts/install-compose-tray" --checkout "$root"
+    python3 "$root/scripts/install-compose-tray" --checkout "$root" --update-mode source
   else
-    say "no eligible local graphical login; to add host controls later run: python3 $root/scripts/install-compose-tray --checkout $root"
+    say "no eligible local graphical login; to add host controls later run: python3 $root/scripts/install-compose-tray --checkout $root --update-mode source"
   fi
 }
 

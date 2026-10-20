@@ -289,6 +289,11 @@ pub fn build(s: &Snapshot) -> Vec<Entry> {
                 idle && managed && toggleable(st.server_startup.state),
                 check_for(st.server_startup.state),
             ));
+            if let Some(detail) = &st.server_startup.detail {
+                if !detail.is_empty() {
+                    out.push(Entry::info(detail.clone()));
+                }
+            }
             out.push(Entry::checked(
                 startup_title("Show tray app at login", st.tray_startup.state),
                 Action::ToggleTrayLogin,

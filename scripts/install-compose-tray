@@ -13,10 +13,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = "tv.plurx.Server-autostart.desktop"
@@ -41,6 +43,105 @@ def output(argv, **kwargs):
     if len(value) > 1024 * 1024:
         raise ValueError("Compose inspection exceeded its output bound")
     return value.strip()
+
+
+BUILD_TIMEOUT = 6 * 60 * 60
+MAX_BUILD_RECEIPT = 1024 * 1024
+
+
+class BuildCancelled(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__("native tray build was cancelled")
+
+
+def stop_build(process, grace=10):
+    # Only the separately created build group is signalled. These are host
+    # compiler/package-manager clients, never the Docker engine or containers.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+
+
+def build_stage(argv):
+    """Long native staging lifecycle; Docker inspections retain output()'s 30s bound."""
+    print("Building the native host tray; compiler and package-manager progress follows.", file=sys.stderr, flush=True)
+    previous = {}
+    process = None
+    with tempfile.TemporaryFile() as receipt:
+        try:
+            process = subprocess.Popen(list(map(str, argv)), stdout=receipt, stderr=None, start_new_session=True)
+            def cancelled(signum, _frame):
+                raise BuildCancelled(signum)
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                previous[signum] = signal.signal(signum, cancelled)
+            deadline = time.monotonic() + BUILD_TIMEOUT
+            while True:
+                if os.fstat(receipt.fileno()).st_size > MAX_BUILD_RECEIPT:
+                    raise ValueError("native staging receipt exceeded its output bound")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(list(map(str, argv)), BUILD_TIMEOUT)
+                try:
+                    status = process.wait(timeout=min(1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if status != 0:
+                raise subprocess.CalledProcessError(status, list(map(str, argv)))
+            receipt.seek(0)
+            raw = receipt.read(MAX_BUILD_RECEIPT + 1)
+            if len(raw) > MAX_BUILD_RECEIPT:
+                raise ValueError("native staging receipt exceeded its output bound")
+            facts = json.loads(raw)
+            if not isinstance(facts, dict):
+                raise ValueError("native staging returned an invalid receipt")
+            return facts
+        except BaseException:
+            if process is not None:
+                stop_build(process)
+            raise
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+
+def deployment_mode(args, record):
+    """Retain an explicit deployment choice; do not infer OCI trust or ownership."""
+    previous = {}
+    if record.exists():
+        meta = record.lstat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077 or meta.st_size > 1024 * 1024:
+            raise ValueError("existing companion registration must be a private owned regular file")
+        with record.open() as stream:
+            previous = json.load(stream)
+        if not isinstance(previous, dict):
+            raise ValueError("existing companion registration has invalid deployment metadata")
+    requested = getattr(args, "update_mode", None)
+    mode = requested or previous.get("update_mode")
+    if mode not in ("source", "published"):
+        raise ValueError("select deployment ownership with --update-mode source (make docker-up) or --update-mode published (make docker-image-up); the installer does not infer image provenance")
+    reference = getattr(args, "image_reference", None)
+    if reference is None and (requested is None or requested == previous.get("update_mode")):
+        reference = previous.get("image_reference")
+    if mode == "source" and reference is not None:
+        raise ValueError("--image-reference applies only to an explicitly published deployment")
+    return mode, reference
 
 
 def safe_path(path):
@@ -106,6 +207,7 @@ def loopback_origin(bindings):
     if not isinstance(bindings, list) or not bindings:
         raise ValueError("selected server needs a published HTTP port")
     ports = set()
+    ipv4 = False
     for binding in bindings:
         if binding.get("HostIp") not in ("", "0.0.0.0", "::", "127.0.0.1", "::1"):
             raise ValueError("selected server HTTP binding is not reachable through loopback")
@@ -113,9 +215,11 @@ def loopback_origin(bindings):
         if not isinstance(value, str) or not value.isdecimal() or not 1 <= int(value) <= 65535:
             raise ValueError("invalid published HTTP port")
         ports.add(int(value))
+        ipv4 = ipv4 or binding.get("HostIp") in ("", "0.0.0.0", "127.0.0.1")
     if len(ports) != 1:
         raise ValueError("selected server has ambiguous published HTTP ports")
-    return f"http://127.0.0.1:{ports.pop()}"
+    host = "127.0.0.1" if ipv4 else "[::1]"
+    return f"http://{host}:{ports.pop()}"
 
 
 def select_deployment(checkout):
@@ -167,6 +271,7 @@ def install(args):
     config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     record = state / "installation.json"
     was_registered = record.exists()
+    update_mode, image_reference = deployment_mode(args, record)
     tray, control = cohort / "plurx-tray", cohort / "plurx-compose-control"
     autostart = config / "autostart" / ENTRY
     for path in [state, cohort, config, autostart]:
@@ -180,14 +285,14 @@ def install(args):
             raise ValueError("a different installation owns this user's tray login entry")
     if args.dry_run:
         print(json.dumps({"project": identity["project"], "browser_origin": identity["browser_origin"],
-                          "tray": str(tray), "record": str(record), "build": "native GTK tray only; no host server packages"}))
+                          "tray": str(tray), "record": str(record), "build": "native GTK tray only; no host server packages", "update_mode": update_mode}))
         return
     private_dir(state.parent)
     private_dir(state)
     private_dir(cohort.parent)
     with tempfile.TemporaryDirectory(prefix=".compose-tray-build-", dir=cohort.parent) as work:
         staged = Path(work) / "tray"
-        facts = json.loads(output([sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged]))
+        facts = build_stage([sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged])
         built = Path(facts["tray"])
         if built != staged / "plurx-tray" or built.is_symlink() or not built.is_file():
             raise ValueError("native tray builder returned an unexpected staged executable")
@@ -213,7 +318,9 @@ def install(args):
         register = [control, "--installation", record, "register"]
         for name, value in identity.items():
             register.extend(["--" + name.replace("_", "-"), value])
-        register.extend(["--tray", tray, "--update-mode", "source"])
+        register.extend(["--tray", tray, "--update-mode", update_mode])
+        if image_reference is not None:
+            register.extend(["--image-reference", image_reference])
         if record.exists():
             register.append("--refresh")
         run(register)
@@ -239,11 +346,19 @@ def main(argv=None):
     parser.add_argument("--checkout", type=Path, default=ROOT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-autostart", action="store_true")
+    parser.add_argument("--update-mode", choices=("source", "published"), help="explicit deployment owner; retained on refresh")
+    parser.add_argument("--image-reference", help="operator-selected published image reference; no signature verification is inferred")
     args = parser.parse_args(argv)
     try:
         install(args)
         return 0
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    except BuildCancelled as error:
+        print(f"compose tray: {error}", file=sys.stderr)
+        return 128 + error.signum
+    except KeyboardInterrupt:
+        print("compose tray: native tray build interrupted; build descendants stopped", file=sys.stderr)
+        return 130
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"compose tray: {error}", file=sys.stderr)
         return 1
 

@@ -78,7 +78,7 @@ class ComposeControlTests(unittest.TestCase):
                 elif args[0] == "update":
                     states[kind]["restart"] = args[2]
                 return ""
-            with patch.object(backend, "docker", side_effect=docker), patch.object(backend, "entry", return_value=root / "autostart" / control.ENTRY):
+            with patch.object(backend, "docker", side_effect=docker), patch.object(control, "verify_effective_restart"), patch.object(backend, "entry", return_value=root / "autostart" / control.ENTRY):
                 yield backend, states, commands, root
 
     def journal(self, backend, operation="stop", state="shutdown_committed"):
@@ -368,3 +368,108 @@ class ComposeWireCompatibilityTests(unittest.TestCase):
     def test_actual_backend_responses_match_strict_ui_golden_contract(self):
         golden = ROOT / "crates/plurx-tray/tests/fixtures/compose-wire-v1.json"
         self.assertEqual(wire_examples(), json.loads(golden.read_text()))
+
+
+class ComposeRecoveryTests(unittest.TestCase):
+    backend = ComposeControlTests.backend
+    journal = ComposeControlTests.journal
+    # Inherit fixture helpers only; root selects these three new cases.
+    def test_explicit_resume_keeps_original_restart_policies_after_interruption(self):
+        with self.backend() as (backend, states, commands, root):
+            value = self.journal(backend, state="recovery_required")
+            value["restart_policies"] = {"server": "always", "discovery": "unless-stopped"}
+            backend.store_journal(value)
+            for item in states.values(): item["restart"] = "no"
+            with patch.object(control.subprocess, "Popen") as dispatch:
+                response = backend.resume(TRANSACTION, True)
+            self.assertEqual(response["operation"], "stop")
+            dispatch.assert_called_once()
+            backend.worker(TRANSACTION)
+            self.assertEqual(states["server"]["restart"], "always")
+            self.assertEqual(states["discovery"]["restart"], "unless-stopped")
+            self.assertEqual(backend.journal()["state"], "complete")
+
+    def test_resume_refuses_without_confirmation_or_for_another_transaction(self):
+        with self.backend() as (backend, states, commands, root):
+            self.journal(backend, state="recovery_required")
+            with patch.object(control.subprocess, "Popen") as dispatch:
+                with self.assertRaises(control.ControlError): backend.resume(TRANSACTION, False)
+                with self.assertRaises(control.ControlError): backend.resume(INSTALLATION, True)
+                dispatch.assert_not_called()
+            self.assertFalse(any(command[0] in ("kill", "start", "update") for command in commands))
+
+    def test_recovery_hold_blocks_new_lifecycle_and_startup_changes(self):
+        with self.backend() as (backend, states, commands, root):
+            self.journal(backend, state="recovery_required")
+            with self.assertRaises(control.ControlError): backend.lifecycle("start", False)
+            with self.assertRaises(control.ControlError): backend.set_startup("server", "off")
+            self.assertFalse(any(command[0] in ("kill", "start", "update") for command in commands))
+
+
+class ComposeIndependentTrayStartupTests(unittest.TestCase):
+    def test_tray_login_can_be_disabled_while_docker_is_offline(self):
+        with ComposeControlTests().backend() as (backend, states, commands, root):
+            with patch.object(backend, "observe", side_effect=control.ControlError("unavailable", "offline")):
+                response = backend.set_startup("tray", "off")
+            self.assertEqual(response["tray"]["state"], "disabled")
+            self.assertEqual(response["server"]["state"], "unknown")
+            self.assertIn("Hidden=true", backend.entry().read_text())
+            self.assertEqual(commands, [])
+
+
+class ComposeReviewRecoveryTests(unittest.TestCase):
+    def test_startup_partial_failure_holds_transaction_and_resume_converges(self):
+        with ComposeControlTests().backend() as (backend, states, commands, root):
+            original = backend.docker.side_effect
+            def fail_second(*args, **kwargs):
+                if args[:3] == ("update", "--restart", "no") and args[-1] == DISCOVERY:
+                    raise control.ControlError("unavailable", "injected Docker failure")
+                return original(*args, **kwargs)
+            with patch.object(backend, "docker", side_effect=fail_second):
+                with self.assertRaises(control.ControlError): backend.set_startup("server", "off")
+            pending = backend.journal()
+            self.assertEqual(pending["state"], "recovery_required")
+            self.assertEqual(backend.status()["transaction_id"], pending["transaction_id"])
+            self.assertEqual(states["server"]["restart"], "no")
+            self.assertEqual(states["discovery"]["restart"], "unless-stopped")
+            response = backend.resume(pending["transaction_id"], False)
+            self.assertEqual(response["server"]["state"], "disabled")
+            self.assertEqual(backend.journal()["state"], "complete")
+            self.assertIsNone(backend.status()["transaction_id"])
+
+    def test_startup_resume_reconciles_environment_replace_before_record_save(self):
+        with ComposeControlTests().backend() as (backend, states, commands, root):
+            original = control.save
+            def fail_record(path, value):
+                if path == backend.path: raise OSError("injected crash after environment replace")
+                return original(path, value)
+            with patch.object(control, "save", side_effect=fail_record):
+                with self.assertRaises(OSError): backend.set_startup("server", "off")
+            pending = backend.journal()
+            backend.record = control.private_file(backend.path)
+            self.assertNotEqual(backend.record["environment_sha256"], pending["environment_intent"]["after_sha256"])
+            response = backend.resume(pending["transaction_id"], False)
+            self.assertEqual(response["server"]["state"], "disabled")
+            self.assertEqual(backend.record["environment_sha256"], pending["environment_intent"]["after_sha256"])
+
+    def test_resume_waiting_for_health_never_repeats_shutdown(self):
+        case = ComposeControlTests()
+        with case.backend() as (backend, states, commands, root):
+            value = case.journal(backend, operation="restart", state="recovery_required")
+            value.update(phase="waiting_health", restart_policies={"server": "always", "discovery": "always"})
+            backend.store_journal(value)
+            states["discovery"].update(running=False, status="exited")
+            with patch.object(control.subprocess, "Popen"): backend.resume(TRANSACTION, True)
+            backend.worker(TRANSACTION)
+            self.assertFalse(any(command[0] in ("kill", "update") for command in commands))
+            self.assertEqual(backend.journal()["state"], "complete")
+
+    def test_tray_login_is_independent_of_an_active_server_worker_lock(self):
+        case = ComposeControlTests()
+        with case.backend() as (backend, states, commands, root):
+            case.journal(backend)
+            with backend.locked():
+                response = backend.set_startup("tray", "off")
+            self.assertEqual(response["tray"]["state"], "disabled")
+            self.assertEqual(backend.journal()["state"], "shutdown_committed")
+            self.assertEqual(commands, [])

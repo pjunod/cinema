@@ -74,6 +74,11 @@ def save(path, value):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -163,16 +168,38 @@ def read_environment(path):
     return content, meta
 
 
-def compose_environment(checkout, project):
+def compose_inputs(checkout):
     base = normalized(checkout) / "deploy"
-    compose = base / "docker-compose.yml"
-    fd = os.open(compose, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, "rb") as stream:
-        meta = os.fstat(stream.fileno())
-        if not stat.S_ISREG(meta.st_mode) or meta.st_size > LIMIT:
-            fail("invalid_installation", "Compose base file must be a bounded regular file")
-        content = stream.read(LIMIT + 1)
-    text = content.decode("utf-8")
+    files = [base / "docker-compose.yml"]
+    override = base / "docker-compose.override.yml"
+    if override.exists() or override.is_symlink():
+        files.append(override)
+    # The installer selects these exact inputs. An alternate default filename
+    # would make a subsequent ordinary Compose deployment select a different set.
+    for name in ("compose.yaml", "compose.yml", "docker-compose.yaml", "compose.override.yaml", "compose.override.yml", "docker-compose.override.yaml"):
+        if (base / name).exists() or (base / name).is_symlink():
+            fail("unsupported", "Alternate Compose filenames require explicit deployment reconciliation")
+    return base, files
+
+
+def compose_environment(checkout, project):
+    base, files = compose_inputs(checkout)
+    contents = []
+    for path in files:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            meta = os.fstat(stream.fileno())
+            if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or meta.st_mode & 0o022 or meta.st_size > LIMIT:
+                fail("invalid_installation", "Compose inputs must be bounded protected regular files")
+            content = stream.read(LIMIT + 1)
+        if len(content) > LIMIT:
+            fail("invalid_installation", "Compose input exceeds its bounded size limit")
+        text = content.decode("utf-8")
+        significant = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        if re.search(r"(?:^|[\s{,])[\"']?(?:include|extends)[\"']?\s*:", significant):
+            fail("unsupported", "Compose include/extends inputs require explicit deployment reconciliation")
+        contents.append(content)
+    text = contents[0].decode("utf-8")
     if not re.search(r"(?m)^name: " + re.escape(project) + r"\s*$", text):
         fail("unsupported", "Only the explicitly named standard Compose project is supported")
     for name in ("plurxd", "plurx-discovery"):
@@ -183,13 +210,64 @@ def compose_environment(checkout, project):
             fail("unsupported", "Compose must use the supported restart-policy variable for both selected services")
     environment = base / ".env"
     raw, _ = read_environment(environment)
-    return environment, hashlib.sha256(raw).hexdigest(), hashlib.sha256(content).hexdigest()
+    if re.search(rb"(?m)^[ \t]*(?:export[ \t]+)?COMPOSE_(?:FILE|ENV_FILES|PROJECT_NAME)[ \t]*=", raw):
+        fail("unsupported", "Compose input/project selectors in .env require explicit deployment reconciliation")
+    if "PLURX_CONTAINER_RESTART_POLICY" in os.environ:
+        fail("unsupported", "Unset the shell restart-policy override before managing persistent startup")
+    # Preserve the original base-only digest when no override exists. Adding,
+    # deleting or editing the selected override always changes the saved guard.
+    digest = hashlib.sha256(contents[0])
+    for path, content in zip(files[1:], contents[1:]):
+        digest.update(b"\x00" + path.name.encode("utf-8") + b"\x00")
+        digest.update(content)
+    return environment, hashlib.sha256(raw).hexdigest(), digest.hexdigest()
 
 
-def update_environment(backend, policy):
+def verify_effective_restart(docker, engine_endpoint, checkout, project):
+    """Probe only owned restart outcomes; never emit resolved config or secrets.
+
+    Compose does the YAML merge and interpolation. The bounded response stays in
+    this process, and only the project name and two restart fields are examined.
+    Testing both choices defeats literal/indirect restart overrides even when a
+    literal happens to match the current preference.
+    """
+    before = compose_environment(checkout, project)
+    base, files = compose_inputs(checkout)
+    for policy in ("no", "always"):
+        argv = ["/usr/bin/env", "PLURX_CONTAINER_RESTART_POLICY=" + policy,
+                str(docker), "--host", engine_endpoint, "compose",
+                "--project-directory", str(base), "--project-name", project,
+                "--env-file", str(before[0])]
+        for path in files:
+            argv.extend(["-f", str(path)])
+        argv.extend(["config", "--format", "json"])
+        try:
+            resolved = json.loads(run(argv))
+            services = resolved.get("services", {})
+            accepted = resolved.get("name") == project and all(
+                services.get(name, {}).get("restart") == policy for name in ("plurxd", "plurx-discovery"))
+        except (ValueError, TypeError, AttributeError):
+            fail("unsupported", "Could not establish effective Compose startup preferences")
+        if not accepted:
+            fail("unsupported", "A selected Compose override defeats the persistent server startup preference")
+    if compose_environment(checkout, project) != before:
+        fail("policy_conflict", "Compose inputs changed during startup-policy verification")
+
+
+def update_environment(backend, policy, intent=None, plan_only=False):
     path, digest, compose_digest = compose_environment(backend.record["checkout"], backend.record["project"])
-    if digest != backend.record["environment_sha256"] or compose_digest != backend.record["compose_sha256"]:
+    if compose_digest != backend.record["compose_sha256"]:
         fail("policy_conflict", "Compose configuration changed; refresh this deployment before changing startup")
+    verify_effective_restart(backend.record["docker"], backend.record["endpoint"], backend.record["checkout"], backend.record["project"])
+    if compose_environment(backend.record["checkout"], backend.record["project"]) != (path, digest, compose_digest):
+        fail("policy_conflict", "Compose inputs changed during effective restart-policy inspection")
+    if intent and digest == intent["after_sha256"]:
+        backend.record["environment_sha256"] = digest
+        save(backend.path, backend.record)
+        return
+    expected = intent["before_sha256"] if intent else backend.record["environment_sha256"]
+    if digest != expected:
+        fail("policy_conflict", "Compose environment changed outside the pending startup intent")
     raw, meta = read_environment(path)
     pattern = re.compile(rb"(?m)^[ \t]*(?:export[ \t]+)?PLURX_CONTAINER_RESTART_POLICY[ \t]*=([^\r\n]*)(\r?\n|$)")
     matches = list(pattern.finditer(raw))
@@ -204,6 +282,11 @@ def update_environment(backend, policy):
         updated = raw[:match.start()] + replacement + raw[match.end():]
     else:
         updated = raw + (b"" if not raw or raw.endswith(b"\n") else b"\n") + RESTART_KEY + b"=" + policy.encode("ascii") + b"\n"
+    after = hashlib.sha256(updated).hexdigest()
+    if plan_only:
+        return {"before_sha256": digest, "after_sha256": after}
+    if intent and after != intent["after_sha256"]:
+        fail("policy_conflict", "Pending startup policy bytes differ from the recorded intent")
     temporary = path.parent / (".plurx-startup-" + uuid.uuid4().hex)
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IMODE(meta.st_mode))
@@ -215,6 +298,11 @@ def update_environment(backend, policy):
         if check != raw or (current.st_dev, current.st_ino) != (meta.st_dev, meta.st_ino):
             fail("policy_conflict", "Compose environment changed during startup-policy update")
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
     backend.record["environment_sha256"] = hashlib.sha256(updated).hexdigest()
@@ -314,9 +402,9 @@ class Backend:
         save(self.state / "operation.json", value)
 
     @contextlib.contextmanager
-    def locked(self):
+    def locked(self, *, tray=False):
         private_directory(self.state, create=True)
-        fd = os.open(self.state / "lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fd = os.open(self.state / ("tray.lock" if tray else "lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "r+") as lock:
             if os.fstat(lock.fileno()).st_uid != os.getuid() or os.fstat(lock.fileno()).st_mode & 0o077:
                 fail("invalid_installation", "Invalid companion operation lock")
@@ -356,7 +444,7 @@ class Backend:
 
     def status(self):
         journal = self.journal()
-        transaction = journal["transaction_id"] if journal and journal["state"] not in FINAL else None
+        transaction = journal["transaction_id"] if journal and journal["state"] not in ("complete", "failed", "cancelled") else None
         try:
             observed = self.observe()
             startup = self.startup(observed)
@@ -376,33 +464,63 @@ class Backend:
         return {"kind": "logs", "lines": output.splitlines(), "truncated": False}
 
     def set_startup(self, target, choice):
+        if target == "tray":
+            # Login preferences do not share the long-running server lock.
+            with self.locked(tray=True):
+                return self.set_tray_startup(choice)
         with self.locked():
             journal = self.journal()
-            if journal and journal["state"] not in FINAL:
-                fail("busy", "Wait for the active container operation")
+            if journal and journal["state"] not in ("complete", "failed", "cancelled"):
+                fail("busy", "Reconcile the active container operation first")
             observed = self.observe()
-            if target == "tray":
-                entry = self.entry()
-                if entry.exists() and "X-Plurx-Installation=" + self.record["installation_id"] not in entry.read_text():
-                    fail("policy_conflict", "A different installation owns the tray login entry")
-                entry.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                if entry.parent.stat().st_uid != os.getuid() or entry.parent.is_symlink():
-                    fail("policy_conflict", "Tray login directory belongs to another owner")
-                def quote(value):
-                    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
-                command = " ".join(map(quote, [self.record["tray"], "--autostart", "--control", str(Path(__file__).resolve()), "--installation", str(self.path)]))
-                text = "[Desktop Entry]\nType=Application\nName=Plurx Server\nTerminal=false\nExec=" + command + "\nIcon=tv.plurx.Server\nX-Plurx-Installation=" + self.record["installation_id"] + "\nHidden=" + ("false" if choice == "on" else "true") + "\n"
-                # The entry belongs to the desktop user's configuration, not root.
-                fd = os.open(entry, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-                with os.fdopen(fd, "w") as stream:
-                    stream.write(text)
-            else:
-                policy = "always" if choice == "on" else "no"
-                update_environment(self, policy)
-                for kind in ("server", "discovery"):
-                    self.observe()
-                    self.docker("update", "--restart", policy, self.record[kind + "_id"])
-            return self.startup()
+            policy = "always" if choice == "on" else "no"
+            intent = update_environment(self, policy, plan_only=True)
+            value = {"installation_id": self.record["installation_id"], "transaction_id": str(uuid.uuid4()),
+                     "operation": "startup", "state": "installing", "version": None,
+                     "detail": "Applying the selected container startup preference", "phase": "environment",
+                     "target_policy": policy, "environment_intent": intent,
+                     "restart_policies": {kind: observed[index]["restart"] for index, kind in enumerate(("server", "discovery"))}}
+            self.store_journal(value)
+            return self.apply_startup(value)
+
+    def set_tray_startup(self, choice):
+        entry = self.entry()
+        if entry.exists() and "X-Plurx-Installation=" + self.record["installation_id"] not in entry.read_text():
+            fail("policy_conflict", "A different installation owns the tray login entry")
+        entry.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if entry.parent.stat().st_uid != os.getuid() or entry.parent.is_symlink():
+            fail("policy_conflict", "Tray login directory belongs to another owner")
+        def quote(value):
+            return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
+        command = " ".join(map(quote, [self.record["tray"], "--autostart", "--control", str(Path(__file__).resolve()), "--installation", str(self.path)]))
+        text = "[Desktop Entry]\nType=Application\nName=Plurx Server\nTerminal=false\nExec=" + command + "\nIcon=tv.plurx.Server\nX-Plurx-Installation=" + self.record["installation_id"] + "\nHidden=" + ("false" if choice == "on" else "true") + "\n"
+        fd = os.open(entry, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(text)
+        return {"kind": "startup", "server": state("unknown", "Refresh status to observe the selected container startup policy"), "tray": self.tray_startup()}
+
+    def apply_startup(self, value):
+        try:
+            policy = value["target_policy"]
+            if policy not in ("always", "no"):
+                fail("policy_conflict", "Unknown pending container startup policy")
+            self.observe()
+            update_environment(self, policy, value["environment_intent"])
+            value.update(phase="container_policies")
+            self.store_journal(value)
+            for kind in ("server", "discovery"):
+                self.observe()
+                self.docker("update", "--restart", policy, self.record[kind + "_id"])
+            result = self.startup()
+            if result["server"]["state"] != ("enabled" if policy == "always" else "disabled"):
+                fail("recovery_required", "Selected containers did not retain the requested startup policy")
+            value.update(state="complete", phase="complete", detail="Container startup preference applied")
+            self.store_journal(value)
+            return result
+        except (ControlError, OSError, ValueError) as error:
+            value.update(state="recovery_required", detail=error.message if isinstance(error, ControlError) else "Startup preference needs explicit resume")
+            self.store_journal(value)
+            raise
 
     def lifecycle(self, operation, confirmed):
         if operation in ("stop", "restart") and not confirmed:
@@ -410,66 +528,118 @@ class Backend:
         with self.locked():
             observed = self.observe()
             existing = self.journal()
-            if existing and existing["state"] not in FINAL:
+            if existing and existing["state"] not in ("complete", "failed", "cancelled"):
                 fail("busy", "A recorded container operation already owns this deployment", True)
             transaction = str(uuid.uuid4())
             value = {"installation_id": self.record["installation_id"], "transaction_id": transaction,
                      "operation": operation, "state": "shutdown_committed" if operation != "start" else "restarting",
-                     "detail": "Container operation accepted; waiting for Docker without forced termination", "version": None}
+                     "detail": "Container operation accepted; waiting for Docker without forced termination", "version": None, "phase": "accepted"}
             self.store_journal(value)
+        return self.dispatch_worker(value, self.service_state(observed[0]))
+
+    def resume(self, transaction, confirmed):
+        # An active worker holds this exact lock throughout its operation.
+        # A crashed worker releases it; explicit resume never guesses a PID.
+        with self.locked():
+            value = self.journal()
+            if not value or value["transaction_id"] != transaction or value["state"] in ("complete", "failed", "cancelled"):
+                fail("identity_mismatch", "No unfinished operation matches the selected transaction")
+            if value["operation"] in ("stop", "restart") and not confirmed:
+                fail("invalid_request", "Resuming interruption requires explicit confirmation")
+            observed = self.observe()
+            if value["operation"] == "startup":
+                return self.apply_startup(value)
+            value.update(state="restarting" if value["operation"] == "start" else "shutdown_committed",
+                         detail="Explicitly resuming the selected container operation")
+            self.store_journal(value)
+        return self.dispatch_worker(value, self.service_state(observed[0]))
+
+    def dispatch_worker(self, value, service_state):
         # Release the lock before dispatch: the child must be able to acquire it.
+        transaction = value["transaction_id"]
         try:
             subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--installation", str(self.path), "--worker", transaction],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              close_fds=True, start_new_session=True)
         except OSError:
             with self.locked():
-                value.update(state="failed", detail="Could not start the host operation worker")
+                value.update(state="recovery_required", detail="Could not start the host operation worker; resume the recorded transaction explicitly")
                 self.store_journal(value)
             raise
-        return {"kind": "operation", "operation": operation, "service_state": self.service_state(observed[0])}
+        return {"kind": "operation", "operation": value["operation"], "service_state": service_state}
 
     def worker(self, transaction):
         with self.locked():
             value = self.journal()
             if not value or value["transaction_id"] != transaction or value["state"] in FINAL:
-                fail("identity_mismatch", "Worker does not own the recorded operation")
+                fail("identity_mismatch", "Worker does not own the recorded operation; use explicit resume for recovery")
             try:
                 initial = self.observe()
-                if value["operation"] != "start":
-                    policies = {kind: initial[index]["restart"] for index, kind in enumerate(("server", "discovery"))}
-                    if any(policy not in ("no", "always", "unless-stopped") for policy in policies.values()):
-                        fail("policy_conflict", "Selected container has an unsupported restart policy")
-                    value["restart_policies"] = policies
+                phase = value.get("phase", "accepted")
+                if phase == "accepted":
+                    phase = "starting_server" if value["operation"] == "start" else "disabling_restart"
+                    value["phase"] = phase
+                    if value["operation"] != "start":
+                        value["restart_policies"] = value.get("restart_policies") or {kind: initial[index]["restart"] for index, kind in enumerate(("server", "discovery"))}
                     self.store_journal(value)
+                def advance(next_phase):
+                    value["phase"] = next_phase
+                    self.store_journal(value)
+                if phase == "disabling_restart":
+                    policies = value["restart_policies"]
+                    if set(policies) != {"server", "discovery"} or any(policy not in ("no", "always", "unless-stopped") for policy in policies.values()):
+                        fail("policy_conflict", "Selected container has an unsupported restart policy")
                     for kind in ("server", "discovery"):
                         self.observe()
                         self.docker("update", "--restart", "no", self.record[kind + "_id"])
-                    # TERM only. Never `docker stop`'s eventual SIGKILL or a generic kill.
+                    advance("signalling")
+                    phase = "signalling"
+                if phase == "signalling":
                     for kind in ("discovery", "server"):
                         observed = self.observe()[0 if kind == "server" else 1]
                         if observed["running"]:
                             self.docker("kill", "--signal", "TERM", self.record[kind + "_id"])
+                    advance("waiting_exit")
+                    phase = "waiting_exit"
+                if phase == "waiting_exit":
                     deadline = time.monotonic() + 14400
                     while any(item["running"] for item in self.observe()):
                         if time.monotonic() > deadline:
                             fail("recovery_required", "Container has not exited after four hours; it was not force-killed")
                         time.sleep(2)
+                    advance("restoring_restart")
+                    phase = "restoring_restart"
+                if phase == "restoring_restart":
                     for kind in ("server", "discovery"):
-                        self.observe()
-                        self.docker("update", "--restart", policies[kind], self.record[kind + "_id"])
-                if value["operation"] != "stop":
+                        if any(item["running"] for item in self.observe()):
+                            fail("recovery_required", "A container started externally during policy restoration")
+                        self.docker("update", "--restart", value["restart_policies"][kind], self.record[kind + "_id"])
+                    advance("complete" if value["operation"] == "stop" else "starting_server")
+                    phase = value["phase"]
+                if phase == "starting_server":
                     value.update(state="restarting", detail="Starting the selected server and waiting for health")
                     self.store_journal(value)
-                    self.observe()
-                    self.docker("start", self.record["server_id"])
+                    if not self.observe()[0]["running"]:
+                        self.docker("start", self.record["server_id"])
+                    advance("waiting_health")
+                    phase = "waiting_health"
+                if phase == "waiting_health":
                     deadline = time.monotonic() + 14400
                     while self.service_state(self.observe()[0]) != "running":
                         if time.monotonic() > deadline:
                             fail("recovery_required", "Selected server did not become healthy; discovery remains stopped")
                         time.sleep(2)
-                    self.observe()
-                    self.docker("start", self.record["discovery_id"])
+                    advance("starting_discovery")
+                    phase = "starting_discovery"
+                if phase == "starting_discovery":
+                    if not self.observe()[1]["running"]:
+                        self.docker("start", self.record["discovery_id"])
+                    if not self.observe()[1]["running"]:
+                        fail("recovery_required", "Discovery did not remain running")
+                    advance("complete")
+                    phase = "complete"
+                if phase != "complete":
+                    fail("recovery_required", "Unknown recorded operation phase; inspect locally")
                 value.update(state="complete", detail="Container " + value["operation"] + " completed")
             except (ControlError, OSError, ValueError) as error:
                 value.update(state="recovery_required", detail=error.message if isinstance(error, ControlError) else "Container operation needs local inspection")
@@ -536,6 +706,9 @@ def register_locked(args, previous=None):
         selected[kind + "_id"] = identity
         selected[kind + "_image"] = item["image"]
     _, environment_digest, compose_digest = compose_environment(args.checkout, args.project)
+    verify_effective_restart(args.docker, args.endpoint, args.checkout, args.project)
+    if compose_environment(args.checkout, args.project)[1:] != (environment_digest, compose_digest):
+        fail("policy_conflict", "Compose inputs changed during deployment registration")
     if args.server_service != "plurxd" or args.discovery_service != "plurx-discovery":
         fail("unsupported", "Only the standard selected server/discovery services are supported")
     record = {"environment_sha256": environment_digest, "compose_sha256": compose_digest, "schema_version": 1, "owner_uid": os.getuid(), "installation_id": str(uuid.uuid4()),
@@ -578,6 +751,9 @@ def parser():
         command = commands.add_parser(operation)
         if operation != "status":
             command.add_argument("--confirm-interruption", action="store_true")
+    resume = commands.add_parser("resume")
+    resume.add_argument("--transaction", required=True)
+    resume.add_argument("--confirm-interruption", action="store_true")
     logs = commands.add_parser("logs")
     logs.add_argument("--lines", type=int, default=100)
     startup = commands.add_parser("startup").add_subparsers(dest="startup_action", required=True)
@@ -606,6 +782,9 @@ def execute(args):
         return backend.status()
     if args.command in ("start", "stop", "restart"):
         return backend.lifecycle(args.command, args.confirm_interruption)
+    if args.command == "resume":
+        uuid.UUID(args.transaction)
+        return backend.resume(args.transaction, args.confirm_interruption)
     if args.command == "logs":
         if not 1 <= args.lines <= 1000:
             fail("invalid_request", "Log line count must be between 1 and 1000")

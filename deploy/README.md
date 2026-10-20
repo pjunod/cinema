@@ -86,12 +86,15 @@ prints a command to run later as the desktop user. To add the tray to an
 already-running checkout without recreating its containers, run:
 
 ```sh
-python3 scripts/install-compose-tray --checkout "$PWD"
+python3 scripts/install-compose-tray --checkout "$PWD" --update-mode source
+# For a deployment made with docker-image-up, select --update-mode published instead.
 ```
 
 The host needs the native Rust/GTK build prerequisites and access to the selected
 local Docker Unix socket. This supports the standard two-service project in
-`deploy/docker-compose.yml`, including its local override. The tray pins Docker
+`deploy/docker-compose.yml`, including local overrides that retain the owned restart-policy variable.
+Literal restart overrides are refused before promising persistent startup.
+Refresh preserves the explicit source/published deployment choice. The tray pins Docker
 engine, full container and image identities; after `make docker-up` recreates
 containers, rerun the command to refresh that same selection. It refuses a
 remote engine or ambiguous selection. **Start server automatically** persists

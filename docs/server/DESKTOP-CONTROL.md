@@ -40,13 +40,28 @@ needs only the server package.
 
 For a Linux GUI host running the standard local Compose deployment,
 `make install-docker` installs a separate host tray. An existing deployment can
-add it with `python3 scripts/install-compose-tray --checkout "$PWD"` from its
-checkout. It controls only the pinned local engine and two selected containers,
+add it with `python3 scripts/install-compose-tray --checkout "$PWD" --update-mode source` from its
+checkout; use `--update-mode published` for a qualified image deployment.
+Refresh retains that explicit choice. It controls only the pinned local engine and two selected containers,
 opens the observed published loopback port and reads bounded container logs.
 It never installs a native host daemon or GUI dependencies in the image.
 Root and headless installs print a later-install command. Containers recreated
 by `make docker-up` require an explicit same-deployment tray refresh. Custom Pi
 setup ownership and remote Docker engines are not supported by this adapter.
+
+If the host reboots or an operation worker dies before completion, the private
+operation journal holds the controls. Inspect the selected containers and run
+that companion's controller with its exact installation path:
+
+```sh
+/path/to/plurx-compose-control --installation /path/to/installation.json updates status
+/path/to/plurx-compose-control --installation /path/to/installation.json resume --transaction UUID --confirm-interruption
+```
+
+This command also reconciles interrupted startup-policy changes without
+interruption confirmation when no stop/restart is pending. Resume refuses an active worker or different transaction/deployment and retains
+the original restart policies from the interrupted operation. It never clears
+the journal merely to enable new controls.
 
 Container startup On selects `always`; Off selects `no`; the choice persists in
 `deploy/.env` for recreation. Existing `unless-stopped` remains until changed,

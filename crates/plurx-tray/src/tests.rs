@@ -1280,3 +1280,13 @@ fn actual_compose_backend_wire_examples_decode_strictly() {
         .collect();
     assert_eq!(kinds, ["status", "startup", "logs", "update", "update"]);
 }
+
+#[test]
+fn observed_container_startup_policy_detail_is_visible() {
+    let mut snapshot = snap(ServiceState::Running);
+    snapshot.status.as_mut().unwrap().server_startup.detail =
+        Some("Docker restart policy: unless-stopped; Docker itself must start at boot".into());
+    assert!(model::build(&snapshot)
+        .iter()
+        .any(|entry| entry.title.contains("unless-stopped")));
+}

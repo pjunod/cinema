@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import types
 import shutil
+import signal
 import subprocess
 import sys
 import unittest
@@ -101,7 +102,7 @@ class ComposeTrayDesktopTests(unittest.TestCase):
         self.assertIn('"--autostart"', text)
 
     def test_root_caller_gets_actionable_error_without_build_or_inspection(self):
-        args = argparse.Namespace(checkout=ROOT, dry_run=False, no_autostart=False)
+        args = argparse.Namespace(checkout=ROOT, dry_run=False, no_autostart=False, update_mode="source", image_reference=None)
         with mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=0), mock.patch.object(installer, "native_helper") as helper:
             with self.assertRaisesRegex(ValueError, "ordinary Linux graphical login user"):
                 installer.install(args)
@@ -111,7 +112,7 @@ class ComposeTrayDesktopTests(unittest.TestCase):
         identity = {"docker": "/usr/bin/docker", "endpoint": "unix:///tmp/docker.sock", "project": "selected",
                     "server_id": SERVER, "discovery_id": DISCOVERY, "browser_origin": "http://127.0.0.1:32400", "checkout": str(ROOT)}
         helper = types.SimpleNamespace(eligible_session=mock.Mock())
-        args = argparse.Namespace(checkout=ROOT, dry_run=True, no_autostart=False)
+        args = argparse.Namespace(checkout=ROOT, dry_run=True, no_autostart=False, update_mode="source", image_reference=None)
         with tempfile.TemporaryDirectory() as work, mock.patch.dict(os.environ, {"XDG_STATE_HOME": work + "/state", "XDG_DATA_HOME": work + "/data", "XDG_CONFIG_HOME": work + "/config"}), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=os.getuid() or 1000), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "safe_path", side_effect=lambda path: path), mock.patch.object(installer, "private_dir") as private, mock.patch.object(installer, "run") as run, mock.patch.object(installer.subprocess, "Popen") as launch:
             installer.install(args)
             helper.eligible_session.assert_called_once()
@@ -137,7 +138,7 @@ class ComposeTrayDesktopTests(unittest.TestCase):
                 (destination / "plurx-tray").chmod(0o755)
                 (destination / "icons").mkdir()
                 (destination / "icons/tv.plurx.Server.svg").write_text("<svg/>\n")
-                return json.dumps({"tray": str(destination / "plurx-tray"), "source_commit": "c" * 40, "version": "0.7.0", "architecture": "amd64"})
+                return {"tray": str(destination / "plurx-tray"), "source_commit": "c" * 40, "version": "0.7.0", "architecture": "amd64"}
             def register(argv, **kwargs):
                 values = list(map(str, argv))
                 calls.append(values)
@@ -158,10 +159,10 @@ class ComposeTrayDesktopTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)
                 path.chmod(mode)
-            args = argparse.Namespace(checkout=ROOT, dry_run=False, no_autostart=False)
+            args = argparse.Namespace(checkout=ROOT, dry_run=False, no_autostart=False, update_mode="source", image_reference=None)
             environment = {"XDG_STATE_HOME": str(home / "state"), "XDG_DATA_HOME": str(home / "data"), "XDG_CONFIG_HOME": str(home / "config")}
             helper = types.SimpleNamespace(eligible_session=mock.Mock())
-            with mock.patch.dict(os.environ, environment), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=uid), mock.patch.object(installer.Path, "home", return_value=home), mock.patch.object(installer, "safe_path", side_effect=lambda path: path), mock.patch.object(installer, "private_dir", side_effect=private), mock.patch.object(installer, "atomic_text", side_effect=write), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "output", side_effect=stage), mock.patch.object(installer, "run", side_effect=register), mock.patch.object(installer.subprocess, "Popen") as launch:
+            with mock.patch.dict(os.environ, environment), mock.patch.object(installer.sys, "platform", "linux"), mock.patch.object(installer.os, "getuid", return_value=uid), mock.patch.object(installer.Path, "home", return_value=home), mock.patch.object(installer, "safe_path", side_effect=lambda path: path), mock.patch.object(installer, "private_dir", side_effect=private), mock.patch.object(installer, "atomic_text", side_effect=write), mock.patch.object(installer, "native_helper", return_value=helper), mock.patch.object(installer, "select_deployment", return_value=identity), mock.patch.object(installer, "build_stage", side_effect=stage), mock.patch.object(installer, "deployment_mode", return_value=("source", None)), mock.patch.object(installer, "run", side_effect=register), mock.patch.object(installer.subprocess, "Popen") as launch:
                 installer.install(args)
                 autostart = home / "config/autostart" / installer.ENTRY
                 self.assertTrue(autostart.is_file())
@@ -182,6 +183,69 @@ class ComposeTrayDesktopTests(unittest.TestCase):
         text = (ROOT / "deploy/docker-compose.yml").read_text()
         self.assertEqual(text.count('restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"'), 2)
         self.assertNotIn("restart: unless-stopped", text)
+
+
+class ComposeTrayBuildAndOwnershipTests(unittest.TestCase):
+    def test_native_staging_waits_beyond_inspection_timeout_and_keeps_progress_visible(self):
+        process = mock.Mock(pid=4242)
+        process.wait.side_effect = [subprocess.TimeoutExpired(["fixture-build"], 1), 0]
+        def launch(argv, **kwargs):
+            kwargs["stdout"].write(b'{"tray":"/fixture/plurx-tray"}')
+            kwargs["stdout"].flush()
+            self.assertIsNone(kwargs["stderr"])
+            self.assertTrue(kwargs["start_new_session"])
+            return process
+        with mock.patch.object(installer.subprocess, "Popen", side_effect=launch), mock.patch.object(installer.time, "monotonic", side_effect=[0, 31, 32]), mock.patch.object(installer, "stop_build") as stop:
+            self.assertEqual(installer.build_stage(["fixture-build"]), {"tray": "/fixture/plurx-tray"})
+            self.assertEqual(process.wait.call_count, 2)
+            stop.assert_not_called()
+
+    def test_native_staging_cancellation_cleans_build_group_before_returning(self):
+        process = mock.Mock(pid=4242)
+        process.wait.side_effect = installer.BuildCancelled(signal.SIGTERM)
+        with mock.patch.object(installer.subprocess, "Popen", return_value=process), mock.patch.object(installer, "stop_build") as stop:
+            with self.assertRaises(installer.BuildCancelled):
+                installer.build_stage(["fixture-build"])
+            stop.assert_called_once_with(process)
+
+    def test_build_group_cleanup_only_targets_its_own_process_group(self):
+        process = mock.Mock(pid=4242)
+        with mock.patch.object(installer.os, "killpg") as kill:
+            installer.stop_build(process, grace=0)
+        self.assertEqual(kill.call_args_list, [mock.call(4242, signal.SIGTERM), mock.call(4242, signal.SIGKILL)])
+        process.wait.assert_called_once_with()
+
+    def test_docker_inspections_keep_short_timeout(self):
+        with mock.patch.object(installer, "run", return_value=types.SimpleNamespace(stdout="inspected")) as run:
+            self.assertEqual(installer.output(["fixture-docker", "inspect"]), "inspected")
+            self.assertEqual(run.call_args.kwargs["timeout"], 30)
+
+    def test_refresh_retains_explicit_published_owner_and_reference(self):
+        with tempfile.TemporaryDirectory() as work:
+            record = Path(work) / "installation.json"
+            record.write_text('{"update_mode":"published","image_reference":"registry.example/plurx:v0.7.0"}')
+            record.chmod(0o600)
+            args = argparse.Namespace(update_mode=None, image_reference=None)
+            self.assertEqual(installer.deployment_mode(args, record), ("published", "registry.example/plurx:v0.7.0"))
+            args.update_mode = "source"
+            self.assertEqual(installer.deployment_mode(args, record), ("source", None))
+
+    def test_unknown_deployment_requires_choice_before_any_build(self):
+        with tempfile.TemporaryDirectory() as work, mock.patch.object(installer, "build_stage") as build:
+            args = argparse.Namespace(update_mode=None, image_reference=None)
+            with self.assertRaisesRegex(ValueError, "--update-mode source.*--update-mode published"):
+                installer.deployment_mode(args, Path(work) / "absent.json")
+            build.assert_not_called()
+
+    def test_published_choice_accepts_operator_reference_without_claiming_trust(self):
+        with tempfile.TemporaryDirectory() as work:
+            args = argparse.Namespace(update_mode="published", image_reference="registry.example/plurx:v0.7.0")
+            self.assertEqual(installer.deployment_mode(args, Path(work) / "absent.json"), ("published", args.image_reference))
+
+    def test_ipv6_only_publication_uses_bracketed_loopback(self):
+        for binding in ["::1", "::"]:
+            self.assertEqual(installer.loopback_origin([{"HostIp": binding, "HostPort": "43210"}]), "http://[::1]:43210")
+        self.assertEqual(installer.loopback_origin([{"HostIp": "::1", "HostPort": "43210"}, {"HostIp": "127.0.0.1", "HostPort": "43210"}]), "http://127.0.0.1:43210")
 
 
 class ComposeTrayInstallerRoutingTests(unittest.TestCase):
