@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Install Linux user desktop controls for this checkout's selected Compose stack.
+
+The host receives only GTK tray code and an unprivileged Compose controller.
+The server image, host server packages and host service units are untouched.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+ENTRY = "tv.plurx.Server-autostart.desktop"
+INSPECT = '{"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"working_dir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"ports":{{json (index .NetworkSettings.Ports "32400/tcp")}}}'
+
+
+def native_helper():
+    loader = importlib.machinery.SourceFileLoader("compose_tray_native", str(ROOT / "scripts/install-linux-source-runtime"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+def run(argv, **kwargs):
+    return subprocess.run(list(map(str, argv)), check=True, **kwargs)
+
+
+def output(argv, **kwargs):
+    value = run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30, **kwargs).stdout
+    if len(value) > 1024 * 1024:
+        raise ValueError("Compose inspection exceeded its output bound")
+    return value.strip()
+
+
+BUILD_TIMEOUT = 6 * 60 * 60
+MAX_BUILD_RECEIPT = 1024 * 1024
+
+
+class BuildCancelled(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__("native tray build was cancelled")
+
+
+def stop_build(process, grace=10):
+    # Only the separately created build group is signalled. These are host
+    # compiler/package-manager clients, never the Docker engine or containers.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+
+
+def build_stage(argv):
+    """Long native staging lifecycle; Docker inspections retain output()'s 30s bound."""
+    print("Building the native host tray; compiler and package-manager progress follows.", file=sys.stderr, flush=True)
+    previous = {}
+    process = None
+    with tempfile.TemporaryFile() as receipt:
+        try:
+            process = subprocess.Popen(list(map(str, argv)), stdout=receipt, stderr=None, start_new_session=True)
+            def cancelled(signum, _frame):
+                raise BuildCancelled(signum)
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                previous[signum] = signal.signal(signum, cancelled)
+            deadline = time.monotonic() + BUILD_TIMEOUT
+            while True:
+                if os.fstat(receipt.fileno()).st_size > MAX_BUILD_RECEIPT:
+                    raise ValueError("native staging receipt exceeded its output bound")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(list(map(str, argv)), BUILD_TIMEOUT)
+                try:
+                    status = process.wait(timeout=min(1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if status != 0:
+                raise subprocess.CalledProcessError(status, list(map(str, argv)))
+            receipt.seek(0)
+            raw = receipt.read(MAX_BUILD_RECEIPT + 1)
+            if len(raw) > MAX_BUILD_RECEIPT:
+                raise ValueError("native staging receipt exceeded its output bound")
+            facts = json.loads(raw)
+            if not isinstance(facts, dict):
+                raise ValueError("native staging returned an invalid receipt")
+            return facts
+        except BaseException:
+            if process is not None:
+                stop_build(process)
+            raise
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+
+def deployment_mode(args, record):
+    """Retain an explicit deployment choice; do not infer OCI trust or ownership."""
+    previous = {}
+    if record.exists():
+        meta = record.lstat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077 or meta.st_size > 1024 * 1024:
+            raise ValueError("existing companion registration must be a private owned regular file")
+        with record.open() as stream:
+            previous = json.load(stream)
+        if not isinstance(previous, dict):
+            raise ValueError("existing companion registration has invalid deployment metadata")
+    requested = getattr(args, "update_mode", None)
+    mode = requested or previous.get("update_mode")
+    if mode not in ("source", "published"):
+        raise ValueError("select deployment ownership with --update-mode source (make docker-up) or --update-mode published (make docker-image-up); the installer does not infer image provenance")
+    reference = getattr(args, "image_reference", None)
+    if reference is None and (requested is None or requested == previous.get("update_mode")):
+        reference = previous.get("image_reference")
+    if mode == "source" and reference is not None:
+        raise ValueError("--image-reference applies only to an explicitly published deployment")
+    return mode, reference
+
+
+def safe_path(path):
+    if not path.is_absolute() or ".." in path.parts or any(character in str(path) for character in ["\n", "\r", "\x00"]):
+        raise ValueError("desktop paths must be normalized absolute paths")
+    for candidate in [path, *path.parents]:
+        if candidate.is_symlink():
+            raise ValueError("desktop paths must not contain symlinks")
+        if candidate.exists():
+            info = candidate.stat()
+            if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX)):
+                raise ValueError("desktop path is writable by another user")
+    return path
+
+
+def private_dir(path):
+    safe_path(path)
+    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("companion state must be a private user-owned directory")
+
+
+def atomic_text(path, value, mode=0o600):
+    safe_path(path)
+    if path.exists() and (not path.is_file() or path.stat().st_uid != os.getuid()):
+        raise ValueError("refusing to replace an unowned desktop file")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".plurx-desktop-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def quote(value):
+    value = str(value)
+    if any(character in value for character in ["\n", "\r", "\x00"]):
+        raise ValueError("desktop command contains an invalid character")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$").replace("%", "%%") + '"'
+
+
+def desktop(tray, control, record, *, autostart):
+    argv = [tray, "--autostart" if autostart else "--window", "--control", control, "--installation", record]
+    return "\n".join(["[Desktop Entry]", "Type=Application", "Name=plurx Server (Compose)",
+                       "Comment=Manage the selected local Compose server", "Exec=" + " ".join(map(quote, argv)),
+                       "Icon=tv.plurx.Server", "Terminal=false", "StartupNotify=false", ""])
+
+
+def selected_id(compose, service, project_dir):
+    identities = output([*compose, "ps", "--all", "--quiet", "--no-trunc", service], cwd=project_dir).splitlines()
+    if len(identities) != 1 or re.fullmatch(r"[0-9a-f]{64}", identities[0]) is None:
+        raise ValueError(f"expected exactly one full container identity for selected service {service}")
+    return identities[0]
+
+
+def loopback_origin(bindings):
+    if not isinstance(bindings, list) or not bindings:
+        raise ValueError("selected server needs a published HTTP port")
+    ports = set()
+    ipv4 = False
+    for binding in bindings:
+        if binding.get("HostIp") not in ("", "0.0.0.0", "::", "127.0.0.1", "::1"):
+            raise ValueError("selected server HTTP binding is not reachable through loopback")
+        value = binding.get("HostPort", "")
+        if not isinstance(value, str) or not value.isdecimal() or not 1 <= int(value) <= 65535:
+            raise ValueError("invalid published HTTP port")
+        ports.add(int(value))
+        ipv4 = ipv4 or binding.get("HostIp") in ("", "0.0.0.0", "127.0.0.1")
+    if len(ports) != 1:
+        raise ValueError("selected server has ambiguous published HTTP ports")
+    host = "127.0.0.1" if ipv4 else "[::1]"
+    return f"http://{host}:{ports.pop()}"
+
+
+def select_deployment(checkout):
+    project_dir = safe_path(checkout / "deploy")
+    base = project_dir / "docker-compose.yml"
+    if base.read_text().count("${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}") != 2:
+        raise ValueError("this Compose file does not support durable tray startup preferences; update the checkout")
+    docker = shutil.which("docker")
+    if not docker:
+        raise ValueError("Docker CLI is unavailable")
+    docker = Path(docker).resolve()
+    endpoint = os.environ.get("DOCKER_HOST") or output([docker, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"])
+    if not endpoint.startswith("unix:///"):
+        raise ValueError("host tray supports only an explicitly selected local Docker Unix socket")
+    engine = [docker, "--host", endpoint]
+    compose = [*engine, "compose", "--project-directory", project_dir, "-f", base]
+    override = project_dir / "docker-compose.override.yml"
+    if override.exists():
+        safe_path(override)
+        compose.extend(["-f", override])
+    server = selected_id(compose, "plurxd", project_dir)
+    discovery = selected_id(compose, "plurx-discovery", project_dir)
+    facts = []
+    for identity, service in [(server, "plurxd"), (discovery, "plurx-discovery")]:
+        fact = json.loads(output([*engine, "inspect", "--type", "container", "--format", INSPECT, identity]))
+        if fact.get("service") != service or fact.get("working_dir") != str(project_dir):
+            raise ValueError("selected container does not belong to this exact Compose directory/service")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", fact.get("project", "")) is None:
+            raise ValueError("selected container has no valid Compose project identity")
+        facts.append(fact)
+    if facts[0]["project"] != facts[1]["project"]:
+        raise ValueError("selected server and discovery containers belong to different projects")
+    return {"docker": str(docker), "endpoint": endpoint, "project": facts[0]["project"],
+            "server_id": server, "discovery_id": discovery, "browser_origin": loopback_origin(facts[0].get("ports")),
+            "checkout": str(checkout)}
+
+
+def install(args):
+    if sys.platform != "linux" or os.getuid() == 0:
+        raise ValueError("run scripts/install-compose-tray as the ordinary Linux graphical login user")
+    helper = native_helper()
+    helper.eligible_session()  # strict logind/socket/bus/container policy, before builds or writes
+    checkout = safe_path(args.checkout.absolute())
+    identity = select_deployment(checkout)
+    key = hashlib.sha256((identity["endpoint"] + "\n" + identity["project"] + "\n" + str(checkout)).encode()).hexdigest()[:20]
+    home = Path.home()
+    state = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state")) / "plurx-compose" / key
+    cohort = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share")) / "plurx-compose" / key
+    config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    record = state / "installation.json"
+    was_registered = record.exists()
+    update_mode, image_reference = deployment_mode(args, record)
+    tray, control = cohort / "plurx-tray", cohort / "plurx-compose-control"
+    autostart = config / "autostart" / ENTRY
+    for path in [state, cohort, config, autostart]:
+        safe_path(path)
+    if autostart.exists():
+        if not record.exists() or record.is_symlink() or record.stat().st_uid != os.getuid() or record.stat().st_mode & 0o077:
+            raise ValueError("this user already has a different server tray login entry; reconcile it before selecting this deployment")
+        previous = json.loads(record.read_text())
+        marker = "X-Plurx-Installation=" + str(previous.get("installation_id", ""))
+        if not previous.get("installation_id") or marker not in autostart.read_text().splitlines():
+            raise ValueError("a different installation owns this user's tray login entry")
+    if args.dry_run:
+        print(json.dumps({"project": identity["project"], "browser_origin": identity["browser_origin"],
+                          "tray": str(tray), "record": str(record), "build": "native GTK tray only; no host server packages", "update_mode": update_mode}))
+        return
+    private_dir(state.parent)
+    private_dir(state)
+    private_dir(cohort.parent)
+    with tempfile.TemporaryDirectory(prefix=".compose-tray-build-", dir=cohort.parent) as work:
+        staged = Path(work) / "tray"
+        facts = build_stage([sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged])
+        built = Path(facts["tray"])
+        if built != staged / "plurx-tray" or built.is_symlink() or not built.is_file():
+            raise ValueError("native tray builder returned an unexpected staged executable")
+        shutil.copyfile(ROOT / "scripts/plurx-compose-control", staged / "plurx-compose-control")
+        (staged / "plurx-compose-control").chmod(0o755)
+        atomic_text(staged / "source-install.json", json.dumps({"schema_version": 1, "owner_uid": os.getuid(), "project": identity["project"], "checkout": str(checkout), "source_commit": facts["source_commit"]}) + "\n")
+        if cohort.exists():
+            marker = cohort / "source-install.json"
+            if not marker.is_file() or marker.is_symlink():
+                raise ValueError("refusing to replace an unowned companion directory")
+            old = json.loads(marker.read_text())
+            if old.get("owner_uid") != os.getuid() or old.get("project") != identity["project"] or old.get("checkout") != str(checkout):
+                raise ValueError("existing companion belongs to a different deployment")
+            retired = Path(work) / "previous"
+            cohort.rename(retired)
+            try:
+                staged.rename(cohort)
+            except OSError:
+                retired.rename(cohort)
+                raise
+        else:
+            staged.rename(cohort)
+        register = [control, "--installation", record, "register"]
+        for name, value in identity.items():
+            register.extend(["--" + name.replace("_", "-"), value])
+        register.extend(["--tray", tray, "--update-mode", update_mode])
+        if image_reference is not None:
+            register.extend(["--image-reference", image_reference])
+        if record.exists():
+            register.append("--refresh")
+        run(register)
+    data = Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
+    launcher = data / "applications" / ("tv.plurx.Compose-" + key + ".desktop")
+    atomic_text(launcher, desktop(tray, control, record, autostart=False), mode=0o644)
+    for icon in (cohort / "icons").glob("*.svg"):
+        destination = data / "icons/hicolor" / ("symbolic/apps" if "symbolic" in icon.name else "scalable/apps") / icon.name
+        atomic_text(destination, icon.read_text(), mode=0o644)
+    # On a repeated install an absent entry may be the user's explicit Off.
+    # Only initial registration creates a new default login entry.
+    if not was_registered and not args.no_autostart:
+        # The controller writes its installation ownership marker and the same
+        # startup format it uses for subsequent explicit On/Off choices.
+        run([control, "--installation", record, "startup", "set", "tray", "on"])
+    subprocess.Popen([str(tray), "--window", "--control", str(control), "--installation", str(record)],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    print(f"Installed host tray for Compose project {identity['project']}; server stays in its container.")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkout", type=Path, default=ROOT)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-autostart", action="store_true")
+    parser.add_argument("--update-mode", choices=("source", "published"), help="explicit deployment owner; retained on refresh")
+    parser.add_argument("--image-reference", help="operator-selected published image reference; no signature verification is inferred")
+    args = parser.parse_args(argv)
+    try:
+        install(args)
+        return 0
+    except BuildCancelled as error:
+        print(f"compose tray: {error}", file=sys.stderr)
+        return 128 + error.signum
+    except KeyboardInterrupt:
+        print("compose tray: native tray build interrupted; build descendants stopped", file=sys.stderr)
+        return 130
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"compose tray: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -16,6 +16,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux GUI Compose installations can install a separate host tray for the
+  selected local deployment, including status, logs, graceful lifecycle controls
+  and separate container boot and tray login preferences. Headless hosts and
+  container images retain their GUI-free runtime.
+
 - Native GUI source and binary installation now installs and opens the complete
   tray companion and local controller instead of updating only the daemon.
   Existing server running and startup choices are preserved.

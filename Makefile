@@ -1850,7 +1850,7 @@ install-macos: ## Install the native macOS server and menu bar companion
 install-windows: ## Install plurxd as the native Windows service (runs deploy/install.ps1)
 	@deploy/install windows $(INSTALL_FLAGS)
 
-install-docker: ## First-run Compose install: .env, override file, data dir, then docker-up
+install-docker: ## Install Compose server and, in Linux GUI sessions, its host tray
 	@deploy/install docker $(INSTALL_FLAGS)
 
 install-binary: ## Install core binaries and, in GUI sessions, system tray binaries
