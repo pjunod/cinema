@@ -15,6 +15,7 @@ VENDORED = (
     ("gemm-common", "0.19.0"),
     ("hiqlite", "0.14.0"),
     ("hiqlite-wal", "0.14.0"),
+    ("ksni", "0.3.6"),
     ("rust_decimal", "1.42.1"),
 )
 PACKAGE_HEADER = re.compile(r"(?m)^\[\[package\]\]\n")
@@ -157,15 +158,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    # GEMM is not part of the Hiqlite spike. Its pinned registry package
-    # identity remains advisory evidence after the root graph patches it in.
-    gemm_evidence = (
-        Path(__file__).resolve().parents[1]
-        / "vendor/gemm-common/registry-provenance.lock"
-    )
+    # These packages are not part of the Hiqlite spike. Preserve their exact
+    # registry identities for advisory scanning after path patching.
+    root = Path(__file__).resolve().parents[1]
     registry_evidence = merge_package_inventories(
         args.registry_evidence.read_text(encoding="utf-8"),
-        [gemm_evidence.read_text(encoding="utf-8")],
+        [(root / f"vendor/{name}/registry-provenance.lock").read_text(encoding="utf-8")
+         for name in ("gemm-common", "ksni")],
     )
     output = synthesize(
         args.root.read_text(encoding="utf-8"), registry_evidence

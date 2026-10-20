@@ -13,7 +13,15 @@ pub struct SniTray {
 
 /// DBusMenu treats `_` as a mnemonic marker.
 fn label(text: &str) -> String {
-    text.replace('_', "__")
+    // Panel menus do not wrap. Keep controller errors and remote version text
+    // from dictating the width of the desktop; the window retains full text.
+    let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = single_line.chars();
+    let mut title: String = chars.by_ref().take(56).collect();
+    if chars.next().is_some() {
+        title.push('…');
+    }
+    title.replace('_', "__")
 }
 
 fn post(events: &async_channel::Sender<Event>, event: Event) {
@@ -58,6 +66,7 @@ impl ksni::Tray for SniTray {
         use ksni::menu::{CheckmarkItem, StandardItem};
         self.entries
             .iter()
+            .filter(|entry| entry.kind != Kind::Detail)
             .map(|entry| match (entry.kind, &entry.action) {
                 (Kind::Separator, _) => ksni::MenuItem::Separator,
                 (Kind::Command, Some(action)) => {
@@ -104,6 +113,40 @@ mod tests {
     use std::time::{Duration, Instant};
     use zbus::blocking::{Connection, Proxy};
     use zbus::zvariant::OwnedValue;
+
+    #[test]
+    fn panel_menu_is_compact_and_control_window_retains_details() {
+        let detail = "Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts.";
+        let mut snapshot = crate::model::Snapshot::new("test", crate::model::Management::Supported);
+        // Long errors remain available in the wrapping window.
+        snapshot.last_error = Some(detail.into());
+        let mut entries = crate::model::build(&snapshot);
+        entries.push(Entry {
+            kind: Kind::Detail,
+            title: detail.into(),
+            action: None,
+            enabled: false,
+            check: None,
+        });
+        let (tx, _rx) = async_channel::unbounded();
+        let tray = SniTray {
+            entries: entries.clone(),
+            state: ServiceState::Unknown,
+            events: tx,
+        };
+        let menu = ksni::Tray::menu(&tray);
+        assert_eq!(menu.len(), entries.len() - 1);
+        assert!(entries.iter().any(|e| e.title == detail));
+        assert_eq!(label("hello_world\nnext"), "hello__world next");
+        assert_eq!(label(&"é".repeat(100)).chars().count(), 57);
+        assert!(label(detail).ends_with('…'));
+        for item in menu {
+            if let ksni::MenuItem::Standard(item) = item {
+                assert!(!item.label.contains('\n'));
+                assert!(item.label.chars().count() <= 57);
+            }
+        }
+    }
 
     #[test]
     fn dbus_menu_clicks_reach_the_shell_after_refresh() {
@@ -179,31 +222,59 @@ mod tests {
             t.state = ServiceState::Running;
         });
         while rx.try_recv().is_ok() {}
-        let items: Vec<(i32, HashMap<String, OwnedValue>)> = menu
-            .call(
-                "GetGroupProperties",
-                &(Vec::<i32>::new(), Vec::<String>::new()),
-            )
-            .unwrap();
-        for entry in entries.iter().filter(|e| e.enabled && e.action.is_some()) {
-            let id = items
-                .iter()
-                .find(|(_, p)| {
-                    p.get("label").is_some_and(|v| {
-                        <&str>::try_from(v).ok() == Some(label(&entry.title).as_str())
-                    })
-                })
-                .unwrap()
-                .0;
-            let _: () = menu
-                .call("Event", &(id, "clicked", OwnedValue::from(0_i32), 0_u32))
+        #[derive(serde::Deserialize, zbus::zvariant::Type)]
+        struct Layout {
+            id: i32,
+            properties: HashMap<String, OwnedValue>,
+            children: Vec<OwnedValue>,
+        }
+        for round in 0..2 {
+            let items: Vec<(i32, HashMap<String, OwnedValue>)> = menu
+                .call(
+                    "GetGroupProperties",
+                    &(Vec::<i32>::new(), Vec::<String>::new()),
+                )
                 .unwrap();
-            let event = rx.recv_blocking().unwrap();
-            assert!(
-                matches!(event, Event::Action(ref a) if Some(a) == entry.action.as_ref()),
-                "wrong action for {}",
-                entry.title
-            );
+            for entry in entries.iter().filter(|e| e.enabled && e.action.is_some()) {
+                let id = items
+                    .iter()
+                    .find(|(_, p)| {
+                        p.get("label").is_some_and(|v| {
+                            <&str>::try_from(v).ok() == Some(label(&entry.title).as_str())
+                        })
+                    })
+                    .unwrap()
+                    .0;
+                let (_, layout): (u32, Layout) = menu
+                    .call("GetLayout", &(id, 0_i32, Vec::<String>::new()))
+                    .unwrap();
+                assert_eq!(layout.id, id);
+                assert!(layout.properties.contains_key("label"));
+                assert!(layout.children.is_empty());
+                if round == 0 {
+                    let _: () = menu
+                        .call("Event", &(id, "clicked", OwnedValue::from(0_i32), 0_u32))
+                        .unwrap();
+                } else {
+                    let missing: Vec<i32> = menu
+                        .call(
+                            "EventGroup",
+                            &(vec![(id, "clicked", OwnedValue::from(0_i32), 0_u32)],),
+                        )
+                        .unwrap();
+                    assert!(missing.is_empty());
+                }
+                let event = rx.recv_blocking().unwrap();
+                assert!(
+                    matches!(event, Event::Action(ref a) if Some(a) == entry.action.as_ref()),
+                    "wrong action for {}",
+                    entry.title
+                );
+            }
+            // A changing controller error inserts a new row and invalidates the
+            // old layout again; fetching the new IDs must still work.
+            snapshot.last_error = Some("An observed controller error".into());
+            handle.update(|t| t.entries = crate::model::build(&snapshot));
         }
         handle.shutdown().wait();
     }
