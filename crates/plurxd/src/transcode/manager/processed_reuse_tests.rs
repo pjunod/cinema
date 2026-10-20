@@ -600,8 +600,10 @@ async fn fixture(destination: DvDestination) -> Fixture {
     dm.remove_metadata_level(255);
     for curve in &mut raw.rpu_data_mapping.as_mut().expect("mapping").curves {
         let polynomial = curve.polynomial.as_mut().expect("affine control");
-        polynomial.poly_coef_int[0] = vec![0, 1];
-        polynomial.poly_coef[0] = vec![0, 0];
+        polynomial.poly_coef_int[0][0] = 0;
+        polynomial.poly_coef_int[0][1] = 1;
+        polynomial.poly_coef[0][0] = 0;
+        polynomial.poly_coef[0][1] = 0;
     }
     raw.modified = true;
     let rpus = vec![raw.write_hevc_unspec62_nalu().expect("bounded control RPU"); 3];

@@ -9,25 +9,15 @@ first.
 ## Processed VOD successor root reuse
 
 Owner: Sol (implementation), coordinator (publication/native compiler).
-In progress on `codex/cinema-processed-successor-reuse`; not deployed.
-Exact-parent reuse no longer asks an already admitted graph to prove fresh
-throughput or create private qualification readers. Identity, reservation,
-source, executable and final attachment fences remain mandatory. Regression
-source covers idle, near-end and fully materialized roots under saturated
-capacity, single-worker custody and cancelled capture. Private staged successor provenance, fresh-input reconstruction and the
-admitted predecessor epoch now reach the common exact-root attachment path.
-Cleanup is armed with the actual successor owner at registry commit, before
-later async marking/sealing. Ordinary serialized descriptors still grant no
-execution authority, and shared encoding priority is not changed by staging.
-Authored lifecycle controls now cover two successive normal durable commits and
-parent retirements, mixed GPU1/CPU15 admission in the manager's real scheduler,
-cancellation at attachment/facts/seal boundaries, frozen-epoch rejection and
-actual-owner-bound controlled publication. They have not been executed. Early
-production checkpoint `b377f36f2` passed pinned fmt/all-target Clippy; complete
-candidate compilation, independent final review/fixes, the affected batch and
-required merge gate remain. Actual B #1211 is merged (`9753284e`, green lane
-5600); its history is incorporated without changing this candidate's tree.
-No live failure reproduction, renderer accuracy or deployment is claimed.
+Source complete on `codex/cinema-processed-successor-reuse`; not deployed.
+Exact-root reuse drops throughput gating, not identity/reservation fences.
+Private staged provenance and admitted epochs reach common attachment with
+actual-owner cleanup armed before async sealing; JSON still grants no authority.
+Authored controls cover two commits/retirements, GPU1/CPU15 capacity, cancellation,
+epoch motion and controlled publication. Early `b377f36f2` fmt/Clippy passed;
+complete compile, independent review/fixes, affected tests and merge gate remain.
+B #1211 merged (`9753284e`, green lane 5600); history-only integration is retained.
+No D behavioral pass, live reproduction or accuracy claim; [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair-in-progress-owner-sol-nativepublication-coordinator).
 
 ## Native server tray, startup policy and release upgrades
 
