@@ -149,6 +149,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test-only private D-Bus session, independent of the daemon and its activity ledger"
+    )]
     fn dbus_menu_clicks_reach_the_shell_after_refresh() {
         const CHILD: &str = "PLURX_MENU_TEST_BUS";
         if std::env::var_os(CHILD).is_none() {
