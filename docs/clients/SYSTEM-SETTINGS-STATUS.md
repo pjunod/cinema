@@ -139,8 +139,9 @@ The reviewed implementation commit `322c0c928` was preserved on
 documentation; those commits are excluded from this pull request. The port
 retained both sides of changelog/backlog insertions. The replay itself changed
 only those insertion contexts; this ledger records the new base and validation.
-Production comparison and renderer code are unchanged from the independently
-reviewed implementation.
+Production comparison and renderer JavaScript are unchanged from the
+independently reviewed implementation; the mobile CSS containment correction
+below preserves the approved layout.
 
 Astra's completed adversarial review and final shipping-render acceptance
 apply to that implementation. Sol reviewed the integration delta and reran
@@ -166,3 +167,10 @@ timer (two comparison bounds replace the startup benchmark bound). Patterns
 and scan roots remain unchanged. The native comparison is registered as an
 exact opt-in hardware fixture, separate from known-red product debt; the
 unknown-ignore count is unchanged. Production and renderer code are untouched.
+
+The complete `make web-unit-check` target passes after replacing two System
+mobile grid tracks with `minmax(0,1fr)`, retaining the approved single-column
+layout while preventing intrinsic-width overflow. CUA verified the shipping
+Linux fixture at a 390 px viewport: page client/scroll widths are both 375 px.
+The temporary viewport override was reset. This changes neither the native
+comparison pipeline nor its measurement receipt.
