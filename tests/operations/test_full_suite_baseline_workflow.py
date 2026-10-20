@@ -112,6 +112,7 @@ class FullSuiteBaselineWorkflowCase(unittest.TestCase):
         self.assertIn('scope_result: ${{ needs.scope.result }}', caller)
         supplement = (ROOT / '.github/workflows/baseline-supplements.yml').read_text()
         self.assertIn('workflow_dispatch:', supplement)
+        self.assertIn('sys.version_info[:3] == (3, 11, 2)', supplement)
         self.assertEqual(supplement.count("if: inputs.diagnostic_baseline == 'true' && inputs.scope_result == 'success'"), 2)
         self.assertNotIn('needs.scope', supplement)
         self.assertEqual(supplement.count('ref: ${{ inputs.expected_sha }}'), 2)

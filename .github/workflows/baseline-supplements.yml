@@ -108,7 +108,7 @@ jobs:
           echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - name: Verify the controlled Python unit environment
         run: |
-          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+          python3 -c 'import sys; assert sys.version_info[:3] == (3, 11, 2), sys.version'
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -327,7 +327,7 @@ jobs:
           echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
       - name: Verify the controlled Node unit environment
         run: |
-          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+          python3 -c 'import sys; assert sys.version_info[:3] == (3, 11, 2), sys.version'
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
