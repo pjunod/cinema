@@ -4,18 +4,18 @@
 
 GPT-6.1 Sol owns model implementation. GPT-6 Luna owns bounded tooling and mechanical source inventory. Following Paul's clarification, Fable 5.1 provides design advice and final adversarial review; it performs no further coding. Earlier authored files and commits are preserved, with their actual authorship intact. All work uses isolated agent-owned clones; the owner's checkout is untouched.
 
-The monolithic model draft is unqualified. Early exploration exceeded the 60-second smoke budget (65,236,225 distinct states and 37,650,419 queued at the last sample) and was stopped incomplete. A later calibration completed, but Sol found contradictory assignments disabling time/poll transitions, collapsed time samples and loss of aged traffic. That calibration supplies no accepted evidence. Sol is replacing the representation with explicitly bounded protocol fragments; Fable is advising on the scope and acceptance conditions. Excluded lifecycle composition must be explicit.
+The monolithic model draft is unqualified. Early exploration exceeded the 60-second smoke budget (65,236,225 distinct states and 37,650,419 queued at the last sample) and was stopped incomplete. A later calibration completed, but Sol found contradictory assignments disabling time/poll transitions, collapsed time samples and loss of aged traffic. That calibration supplies no accepted evidence. Sol is replacing the representation with seeded starting states and a shared transition relation, preserving authority interleavings. Fable supplied one text-only scope consultation; finite limits and non-vacuity remain explicit acceptance conditions.
 
 ## Current implementation and acceptance
 
 | Scope | Owner/model | State | Evidence still owed |
 |---|---|---|---|
 | Toolchain/bootstrap | GPT-6 Luna | Committed; TLC 1.7.4 and Temurin 21.0.12+8 fetch/resolve feasibility passed | Final synthetic tests and review |
-| Protocol/model and contract | GPT-6.1 Sol | Preserved draft inspected; finite fragment design in progress | Complete named configurations, clocks/source contract, intended controls and non-vacuity |
-| Source inventory | GPT-6 Luna | 84 candidate anchors across 31 files prepared | Semantic mapping review and current integrated hashes |
+| Protocol/model and contract | GPT-6.1 Sol | Shared transitions and independent samples implemented; development smoke completes in 11 seconds; baseline feasibility running | Complete named configurations, clocks/source contract, intended controls and non-vacuity |
+| Source inventory | GPT-6 Luna | 97 candidate anchors across 33 files prepared | Semantic mapping review and current integrated hashes |
 | Backend insertion bridge | Coordinator integration; earlier Fable authorship | Integrated through `14a881a4f`; real-backend cases and per-store acknowledgement seam authored | Final review and actual SQLite/three-voter execution |
 | Compiler/static checks | Component author and coordinator | Pinned Rust 1.97.1 contract compile-only, both feature variants' Clippy and touched-file rustfmt passed | Final changed-candidate fast gate |
-| Runner/receipts | GPT-6 Luna | Strict runner, CI contracts, source identity and scratch cleanup integrated | Reviewed model/source metadata, observed control output, final synthetic tests |
+| Runner/receipts | GPT-6 Luna | 15-config registry, 9-config smoke with 180-second aggregate cap, strict receipts and cleanup integrated | Reviewed model/source metadata, observed control output, final synthetic tests |
 | CI | Coordinator | Existing main/manual preflights provision pinned Java/TLC, check source drift and affected smoke | Final fast lane and retained receipts |
 | Review and promotion | Designated Fable reviewer; coordinator | Not ready | Complete candidate, adversarial review, fixes, once-per-unchanged-code evidence, merge |
 

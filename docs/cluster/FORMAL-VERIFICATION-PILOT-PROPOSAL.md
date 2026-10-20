@@ -480,7 +480,7 @@ mutations remain test-only; never patch production guards to demonstrate them.
 Keep a single pilot directory, `verification/durable-jobs/`, with the TLA+
 specification, named TLC configurations, mutation controls, machine-readable
 source/transition mapping and a short README explaining how to reproduce
-results. Add no separate status document until this ledger becomes unwieldy.
+results. The [status page](FORMAL-VERIFICATION-PILOT-STATUS.md) records current ownership and acceptance.
 
 | Proposed artifact | Job |
 |---|---|
@@ -502,8 +502,8 @@ repository credential is required.
 Proposed commands after implementation:
 
 ```bash
-scripts/check-formal smoke     # small complete safety run
-scripts/check-formal full  # safety + recovery + controls
+scripts/check-formal smoke  # safety, recovery and reachability witnesses
+scripts/check-formal full   # all 15 safety/recovery/control/witness configurations
 ```
 
 The runner accepts an explicitly configured local TLC artifact/runtime and
@@ -512,6 +512,18 @@ to finish with its expected verdict. Nonzero includes unexpected
 counterexample, missing dependency/property, hash mismatch, timeout, memory
 exhaustion, source mismatch or incomplete exploration. A control finding its
 specific expected counterexample is an expected verdict, not a positive proof.
+
+The model uses seeded starting states with one shared safety transition
+relation. Smoke explores at most six modeled events and baseline ten; the
+reachability configurations use at most sixteen. These finite schedules do not
+prove arbitrary-length protocol safety. Recovery uses a separate finite
+suffix with explicit fairness and time-advance premises. Seven normal-model
+reachability witnesses complement five deliberately defective controls. A
+witness reaches a named state; it is not an exhaustive safety result.
+
+Smoke has a 180-second aggregate model budget after tool resolution, with a
+60-second safety cap and 30-second recovery/witness caps. Full baseline has a
+900-second cap. Timeout or nonempty state queue supplies no passing evidence.
 
 Write logs, traces and receipts beneath ignored `target/verification/`.
 Each receipt records source commit/tree and dirty state, hashes of relevant
@@ -609,6 +621,9 @@ acceptance authorizes deleting tests. The first measured success criterion is
 more reproducible coverage of authority orderings at an understood cost.
 
 ### 11.1 Initial execution ledger
+
+Historical kickoff snapshot. Current ownership, implementation and acceptance
+are maintained on the [status page](FORMAL-VERIFICATION-PILOT-STATUS.md).
 
 | Milestone | Implementation | Acceptance | Owner / evidence |
 |---|---|---|---|
