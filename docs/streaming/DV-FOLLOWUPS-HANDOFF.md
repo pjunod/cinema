@@ -217,9 +217,14 @@ Synthetic frame color properties plus explicit `write_colr` now generate that
 record locally; a native standalone production-validator diagnostic is pending,
 not a unit pass. Failure paths retain actual bytes, source probe and encoder argv.
 The ninth reaches final predecessor revalidation; its external worker claim
-conflicts with the automatic driver's empty slot. Controlled test producer custody
-is under investigation, without weakening the guard. The six original passes
-remain; corrected compilation, bounded closure and nine failed-only retries are owed.
+conflicts with the automatic driver's empty slot. Coordinator-approved test-only
+driver coordination now keys a scoped guard to the exact physical encoding before
+the first wake. Captured tasks exit on cancellation, never resume into a generation;
+normal owner cleanup still settles before explicit task exit and capacity assertions.
+Assertions check absent slot, zero epoch/child pid and the real exclusive worker.
+This isolates driver scheduling; it does not qualify normal driver execution/reap.
+Production source/window/attachment validators are unchanged. The six original
+passes remain; corrected compilation, bounded closure and nine failed-only retries are owed.
 Actual B landing `9753284e` is incorporated. Required fast lane and API merge
 remain. The historical live request path remains unknown; this is no deployment
 or general Dolby rendering-accuracy claim.

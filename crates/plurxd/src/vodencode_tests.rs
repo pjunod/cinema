@@ -2077,6 +2077,10 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
     let permit = encoding.try_permit().await.expect("incumbent admission");
     let worker = permit.clone().try_claim_worker().expect("one physical producer");
     let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
+    // Custody control, not normal driver/reap qualification: this fixture holds
+    // the real worker externally, so coordinate the otherwise empty slot before
+    // the first create can kick its driver. Guard drop exits, never resumes it.
+    let _driver = serve.control_driver_for_test(&encoding);
     let mut req = request("correctness-only", 0.0);
     req.request_id = Some(uuid::Uuid::new_v4().to_string());
     req.kind = SessionKind::Transcode { height: encoding.options.target_height };
@@ -2088,6 +2092,7 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
             instance_nonce: Some([8; 16]), encoding: Arc::clone(&encoding), permit,
         }), request: &req, encoding: Some(Arc::clone(&encoding)), ..(&req).into()
     }, &file, &settings(), attribution, "incumbent".into()).await.expect("incumbent");
+    serve.assert_controlled_driver_held_for_test(&encoding).await;
     let rendition = rendition_of(&serve, "incumbent").await;
     assert!(encoding.try_permit().await.is_none(), "unrelated graph still needs fresh capacity");
     let last = rendition.plan.entries.last().expect("finite plan").index;
@@ -2111,6 +2116,7 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
         serve.try_create(VodRecipeRequest {
             root_admission: Some(root), request: &successor, encoding: Some(Arc::clone(&encoding)), ..(&successor).into()
         }, &file, &settings(), attribution, case.into()).await.expect("same graph attaches without a speed receipt");
+        serve.assert_controlled_driver_held_for_test(&encoding).await;
         assert!(Arc::ptr_eq(&rendition, &rendition_of(&serve, case).await));
         assert_eq!(rendition.readers.lock().await.len(), readers_before + 1, "only the actual successor reader was added");
         assert_eq!(encoding.admissions.software_in_use(), 2);
@@ -2123,6 +2129,7 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
     drop(root);
     assert_eq!(rendition.readers.lock().await.len(), 1, "cancellation installed no private demand");
     assert!(serve.end("incumbent", Terminal::Deleted).await);
+    serve.finish_controlled_driver_for_test(&encoding).await;
     assert_eq!(encoding.admissions.software_in_use(), 2, "unreaped worker retains credit after last parent");
     drop(worker);
     wait_until("last worker releases credit", Duration::from_secs(5), async || encoding.admissions.software_in_use() == 0).await;

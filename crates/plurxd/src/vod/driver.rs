@@ -1,9 +1,199 @@
 use super::*;
 
+// Custody-only fixtures hold a real exclusive worker outside the producer slot.
+// Coordinate their driver scheduling explicitly rather than making a second
+// launch fail and poisoning the real attachment validators. None of this state
+// or control flow exists in production. These controls do not qualify normal
+// driver scheduling, process execution or reap behavior.
+#[cfg(test)]
+mod controlled_driver {
+    use super::*;
+
+    #[derive(Default)]
+    struct State {
+        stop: tokio_util::sync::CancellationToken,
+        registered: std::sync::atomic::AtomicUsize,
+        held: std::sync::atomic::AtomicUsize,
+        exited: std::sync::atomic::AtomicUsize,
+        changed: tokio::sync::Notify,
+    }
+
+    type Controls =
+        std::collections::HashMap<usize, (std::sync::Weak<crate::vodencode::Encoding>, Arc<State>)>;
+    static CONTROLS: std::sync::OnceLock<StdMutex<Controls>> = std::sync::OnceLock::new();
+
+    struct Guard {
+        encoding: Arc<crate::vodencode::Encoding>,
+        state: Arc<State>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // Captured tasks exit on cancellation; they NEVER continue into
+            // driver_pass, including on panic or drop before their first poll.
+            self.state.stop.cancel();
+            let mut controls = CONTROLS
+                .get_or_init(Default::default)
+                .lock()
+                .expect("controls");
+            let key = Arc::as_ptr(&self.encoding) as usize;
+            if controls
+                .get(&key)
+                .is_some_and(|(_, state)| Arc::ptr_eq(state, &self.state))
+            {
+                controls.remove(&key);
+            }
+        }
+    }
+
+    fn state(encoding: &Arc<crate::vodencode::Encoding>) -> Option<Arc<State>> {
+        CONTROLS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("controls")
+            .get(&(Arc::as_ptr(encoding) as usize))
+            .filter(|(owner, _)| {
+                owner
+                    .upgrade()
+                    .is_some_and(|owner| Arc::ptr_eq(&owner, encoding))
+            })
+            .map(|(_, state)| Arc::clone(state))
+    }
+
+    struct Ticket(Arc<State>);
+    impl Drop for Ticket {
+        fn drop(&mut self) {
+            self.0.exited.fetch_add(1, AcqRel);
+            self.0.changed.notify_waiters();
+        }
+    }
+
+    pub(super) fn spawn(rendition: &Rendition) -> Option<tokio::task::JoinHandle<()>> {
+        let state = state(rendition.recipe.encoding.as_ref()?)?;
+        state.registered.fetch_add(1, AcqRel);
+        // Capture synchronously before spawn_driver returns or a first wake can
+        // race guard teardown. Ticket drops even if aborted before first poll.
+        let ticket = Ticket(state);
+        Some(tokio::spawn(async move {
+            ticket.0.held.fetch_add(1, AcqRel);
+            ticket.0.changed.notify_waiters();
+            ticket.0.stop.cancelled().await;
+            drop(ticket);
+        }))
+    }
+
+    impl VodServe {
+        pub(crate) fn control_driver_for_test(
+            &self,
+            encoding: &Arc<crate::vodencode::Encoding>,
+        ) -> Box<dyn Send + Sync> {
+            let state = Arc::new(State::default());
+            let inserted = {
+                let mut controls = CONTROLS
+                    .get_or_init(Default::default)
+                    .lock()
+                    .expect("controls");
+                match controls.entry(Arc::as_ptr(encoding) as usize) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert((Arc::downgrade(encoding), Arc::clone(&state)));
+                        true
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => false,
+                }
+            };
+            assert!(inserted, "one scheduling owner per physical encoding");
+            Box::new(Guard {
+                encoding: Arc::clone(encoding),
+                state,
+            })
+        }
+
+        pub(crate) async fn assert_controlled_driver_held_for_test(
+            &self,
+            encoding: &Arc<crate::vodencode::Encoding>,
+        ) {
+            let state = state(encoding).expect("registered physical encoding");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let changed = state.changed.notified();
+                    let registered = state.registered.load(Acquire);
+                    if registered > 0 && state.held.load(Acquire) == registered {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .expect("controlled driver reached its hold");
+            assert_eq!(state.exited.load(Acquire), 0);
+            let renditions: Vec<_> = self
+                .shared
+                .renditions
+                .lock()
+                .await
+                .values()
+                .filter(|rendition| {
+                    rendition
+                        .recipe
+                        .encoding
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, encoding))
+                })
+                .cloned()
+                .collect();
+            assert!(!renditions.is_empty(), "real rendition installed");
+            for rendition in renditions {
+                assert!(matches!(
+                    rendition.slot.belief().await,
+                    Producer::Absent { .. }
+                ));
+                assert_eq!(
+                    rendition.gen_epoch.load(Acquire),
+                    0,
+                    "no new generation or renderer launch"
+                );
+                assert_eq!(rendition.last_child_pid.load(Acquire), 0);
+                assert!(rendition.failure().is_none());
+                let permit = rendition
+                    .retained_admission
+                    .current()
+                    .expect("real reservation");
+                assert!(
+                    permit.try_claim_worker().is_none(),
+                    "fixture's exact worker remains exclusive"
+                );
+            }
+        }
+
+        pub(crate) async fn finish_controlled_driver_for_test(
+            &self,
+            encoding: &Arc<crate::vodencode::Encoding>,
+        ) {
+            let state = state(encoding).expect("registered physical encoding");
+            state.stop.cancel();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let changed = state.changed.notified();
+                    if state.exited.load(Acquire) == state.registered.load(Acquire) {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .expect("all controlled tasks exited before capacity assertions");
+        }
+    }
+}
+
 pub(super) fn spawn_driver(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
 ) -> tokio::task::JoinHandle<()> {
+    #[cfg(test)]
+    if let Some(driver) = controlled_driver::spawn(&rendition) {
+        return driver;
+    }
     tokio::spawn(async move {
         loop {
             let encoded_waiting = rendition

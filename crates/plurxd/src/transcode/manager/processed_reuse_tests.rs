@@ -132,7 +132,7 @@ async fn staged_processed_cancellation_at_attachment_facts_and_seal_releases_onl
             .vod
             .end(&f.session_id, crate::vodserve::Terminal::Deleted)
             .await;
-        assert_reservation_released(&mut f);
+        assert_reservation_released(&mut f).await;
     }
 }
 
@@ -179,7 +179,7 @@ async fn staged_processed_epoch_motion_after_attachment_refuses_frozen_seal() {
         .vod
         .end(&f.session_id, crate::vodserve::Terminal::Deleted)
         .await;
-    assert_reservation_released(&mut f);
+    assert_reservation_released(&mut f).await;
 }
 
 #[tokio::test]
@@ -462,15 +462,17 @@ async fn staged_processed_audio_canonicalization_reuses_default_and_alternate_aa
                 .end(&f.session_id, crate::vodserve::Terminal::Deleted)
                 .await;
             drop(facts);
-            assert_reservation_released(&mut f);
+            assert_reservation_released(&mut f).await;
         }
     }
 }
 
 // Byte-bound lifecycle controls, not Dolby pixel/reference-accuracy evidence.
 // The real completed-window validator checks the generated HEVC/PQ stream;
-// the exclusive worker claim prevents the fixture renderer from ever running.
+// controlled driver scheduling keeps its real exclusive worker outside the
+// slot without provoking a duplicate launch. This does not test driver/reap.
 struct Fixture {
+    _driver: Box<dyn Send + Sync>,
     _root: tempfile::TempDir,
     incumbent_owner: crate::vodserve::ResponseOwner,
     manager: Arc<TranscodeManager>,
@@ -703,10 +705,16 @@ async fn first_processed_attachment_arms_exact_owner_cleanup_before_returning() 
         .vod
         .end(&f.session_id, crate::vodserve::Terminal::Deleted)
         .await;
-    assert_reservation_released(&mut f);
+    assert_reservation_released(&mut f).await;
 }
 
-fn assert_reservation_released(f: &mut Fixture) {
+async fn assert_reservation_released(f: &mut Fixture) {
+    // Called only after the normal production owner cleanup has settled.
+    // Exiting the controlled tasks can never resume a renderer generation.
+    f.manager
+        .vod
+        .finish_controlled_driver_for_test(&f.encoding)
+        .await;
     assert_eq!(
         f.encoding.admissions.in_use(),
         1,
@@ -1271,6 +1279,7 @@ async fn fixture_with_audio(
         .expect("actual digest");
     encoding.candidate_recipe = Some(recipe_digest);
     let encoding = Arc::new(encoding);
+    let driver = manager.vod.control_driver_for_test(&encoding);
     let permit = encoding
         .admissions
         .try_admit_bundle(1, 15, &resources, Priority::Live)
@@ -1365,6 +1374,10 @@ async fn fixture_with_audio(
         )
         .await
         .expect("actual processed incumbent");
+    manager
+        .vod
+        .assert_controlled_driver_held_for_test(&encoding)
+        .await;
     let now = crate::media_sessions::unix_ms();
     let activation = plurx_core::domain::MediaSessionActivation {
         incarnation_id: incarnation,
@@ -1404,6 +1417,7 @@ async fn fixture_with_audio(
         .expect("publish route")
         .expect("confirmed");
     Fixture {
+        _driver: driver,
         incumbent_owner: manager
             .vod
             .hls_facts(&session_id)
