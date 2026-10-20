@@ -1207,11 +1207,7 @@ mod replicated {
         // Evidence only: the test knows the successor the facade lost.
         let live = publication_successor(&successor);
         store
-            .insert_item_fenced(
-                &movie(library_id, "successor live"),
-                &successor,
-                &live,
-            )
+            .insert_item_fenced(&movie(library_id, "successor live"), &successor, &live)
             .await
             .unwrap_or_else(|error| panic!("{backend}: committed successor is live: {error}"));
         assert_eq!(
