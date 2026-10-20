@@ -1596,7 +1596,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	# An idle-expired sign-in lands on the login page saying why.
 	@node tests/web/session-expiry.test.js
 	# The Transcoding backend buttons send objects, not pre-serialized strings.
-	@node --test tests/web/transcoder-backend-requests.test.js
+	@node --test tests/web/transcoder-backend-requests.test.js tests/web/system-settings.test.js
 	@node tests/web/read-after.test.js
 	# The validation runner already has this as `web-membership`, but this is
 	# the target a web change reaches for, and the Cluster panel is a web

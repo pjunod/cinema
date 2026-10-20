@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "required_package": "8.1.3-1",
+  "expected_version": "8.1.3-Jellyfin",
   "source_commit": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
   "source_sha256": "87bedcefc860cd234cdeddbebdcd3ce45aeedc81d0fbb258ed839ff778be3140",
   "macos_patches": {

@@ -24,6 +24,11 @@ bump may break compatibility and a **patch** bump never does.
   Visible successors retain HLS failure recovery; established retries and
   queued stall probes preserve their proper budgets and terminal diagnoses.
 
+- System settings separates Cinema and Jellyfin FFmpeg versions, shows concise
+  configured media capabilities and actual device bindings, and compares
+  representative decoding, processing and encoding work. Auto prefers working
+  hardware using real-media speed; collapsed diagnostics no longer poll.
+
 - Native Mac installs retain the complete patched Jellyfin media package,
   including Metal reference-white support, static Vulkan/libplacebo, the
   source parser and font authority. Known legacy media paths follow the

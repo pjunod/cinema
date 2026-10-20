@@ -99,7 +99,6 @@ function renderSettings(){
   restoreSettingsMounts(keep);
   revealSettingsAnchor(tab);
   if(tab==="developer")cinemaRemoteLoadManagement();
-  if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
   if(tab==="cluster"&&settingsClusterEnabled()){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
@@ -109,7 +108,7 @@ function settingsPanel(tab,d){
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness);
   if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
   if(tab==="users")        return usersPanel(d.users,d.settings);
-  if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
+  if(tab==="system")       return systemPanel(d.sys);
   if(tab==="cluster")      return clusterPanel(d);
   if(tab==="sharing")      return sharingManagementPanel(d);
   if(tab==="integrations") return integrationsPanel(d.settings,d.trakt);
