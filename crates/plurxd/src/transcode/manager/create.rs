@@ -750,7 +750,10 @@ impl TranscodeManager {
                             .and_then(|context| context.retained_output.as_ref()),
                         info.retained_output.as_ref(),
                     ) {
-                        return Err(vod_refusal_error("retained_artifact_unavailable", "the recovered presentation does not own the exact issued retained artifact"));
+                        return Err(vod_refusal_error(
+                            "retained_artifact_unavailable",
+                            "the recovered presentation does not own the exact issued retained artifact",
+                        ));
                     }
                     if let Some(admission) = serving_admission {
                         self.require_cluster_serving_authority(admission)?;
@@ -1221,7 +1224,7 @@ impl TranscodeManager {
         request: &SessionRequest,
     ) -> Result<plurx_core::transcode::dv_processing::DvSelection, String> {
         use plurx_core::transcode::dv_processing::{
-            dv_processing_preflight, DvFallbackReason, DvSelection,
+            DvFallbackReason, DvSelection, dv_processing_preflight,
         };
         let (existing, destination, allowed) = request.dv_processing_route()?;
         let reason = dv_processing_preflight(
@@ -4136,6 +4139,8 @@ impl TranscodeManager {
                 let Some(facts) = self.vod.hls_facts(session_id).await else {
                     return false;
                 };
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "facts").await;
                 // A replay did not attach anew; arm only the exact owner whose
                 // prepared-incarnation identity was checked above.
                 if pending
@@ -4179,6 +4184,8 @@ impl TranscodeManager {
                     )
                     .await;
                 let output = facts.response_owner.retained_output_facts();
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "before-seal").await;
                 let seal = plurx_core::store::PreparedOutputSeal {
                     incarnation_id: route.incarnation_id,
                     session_id: session_id.to_owned(),
@@ -4209,6 +4216,8 @@ impl TranscodeManager {
                     return false;
                 }
                 trace_prepared_capture(&seal, Some(true), true);
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "sealed").await;
                 cleanup
                     .owner
                     .lock()
@@ -4498,6 +4507,8 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
+                    #[cfg(all(test, target_os = "linux"))]
+                    Self::processed_preparation_test_boundary(session_id, "attached").await;
                     if let Some((work, owner)) = output_enqueue {
                         if !release_gate.released.load(Acquire) {
                             if let Some(facts) = self.vod.hls_facts(session_id).await {

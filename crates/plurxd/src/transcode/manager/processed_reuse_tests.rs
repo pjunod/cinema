@@ -6,6 +6,168 @@ use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandid
 use plurx_core::transcode::dv_processing::*;
 use std::sync::atomic::AtomicBool;
 
+// Test-only, one-shot pauses keyed by the unique successor id. No production
+// polling, global policy or mutable behavior is installed in release builds.
+#[derive(Default)]
+struct PreparationPause {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+type PauseMap = std::collections::HashMap<(String, &'static str), Arc<PreparationPause>>;
+static PAUSES: std::sync::OnceLock<std::sync::Mutex<PauseMap>> = std::sync::OnceLock::new();
+
+impl TranscodeManager {
+    pub(super) async fn processed_preparation_test_boundary(session: &str, boundary: &'static str) {
+        let pause = PAUSES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("preparation pauses")
+            .remove(&(session.to_owned(), boundary));
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+    }
+}
+
+fn pause_at(session: &str, boundary: &'static str) -> Arc<PreparationPause> {
+    let pause = Arc::new(PreparationPause::default());
+    assert!(
+        PAUSES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("preparation pauses")
+            .insert((session.to_owned(), boundary), Arc::clone(&pause))
+            .is_none()
+    );
+    pause
+}
+
+async fn prepare(f: &Fixture, session: &str, json: &str) -> bool {
+    f.manager
+        .vod_prepare_first_before(
+            json,
+            session,
+            f.user_id,
+            PreparedVodOwner {
+                node_id: "node".into(),
+                source_authority: None,
+            },
+            f.manager.session_adoption_token(session).expect("adoption"),
+            Some(1),
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+}
+
+fn spawn_prepare(f: &Fixture, session: &str, json: &str) -> tokio::task::JoinHandle<bool> {
+    let manager = Arc::clone(&f.manager);
+    let session = session.to_owned();
+    let json = json.to_owned();
+    let user_id = f.user_id;
+    tokio::spawn(async move {
+        manager
+            .vod_prepare_first_before(
+                &json,
+                &session,
+                user_id,
+                PreparedVodOwner {
+                    node_id: "node".into(),
+                    source_authority: None,
+                },
+                manager.session_adoption_token(&session).expect("adoption"),
+                Some(1),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await
+    })
+}
+
+async fn wait_for_cleanup(f: &Fixture, session: &str, owner: &crate::vodserve::ResponseOwner) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.manager.vod.response_owner_is_live(session, owner).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("successor-only cleanup");
+    assert!(f.manager.vod.hls_facts(&f.session_id).await.is_some());
+    assert_eq!(f.encoding.admissions.in_use(), 1);
+    assert_eq!(f.encoding.admissions.software_in_use(), 15);
+}
+
+#[tokio::test]
+async fn staged_processed_cancellation_at_attachment_facts_and_seal_releases_only_successor() {
+    for boundary in ["attached", "facts", "before-seal", "sealed"] {
+        let f = fixture(DvDestination::Hdr10).await;
+        let (_, session, json) = stage(&f).await;
+        let pause = pause_at(&session, boundary);
+        let work = spawn_prepare(&f, &session, &json);
+        tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+            .await
+            .expect(boundary);
+        let owner = f
+            .manager
+            .vod
+            .hls_facts(&session)
+            .await
+            .expect("attached")
+            .response_owner;
+        work.abort();
+        assert!(work.await.expect_err("cancelled").is_cancelled());
+        wait_for_cleanup(&f, &session, &owner).await;
+        f.manager
+            .vod
+            .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn staged_processed_epoch_motion_after_attachment_refuses_frozen_seal() {
+    let f = fixture(DvDestination::Profile81).await;
+    let (_, session, json) = stage(&f).await;
+    let pause = pause_at(&session, "before-seal");
+    let work = spawn_prepare(&f, &session, &json);
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("at seal");
+    let owner = f
+        .manager
+        .vod
+        .hls_facts(&session)
+        .await
+        .expect("attached")
+        .response_owner;
+    let now = crate::media_sessions::unix_ms() + 120_000;
+    let adopted = f
+        .manager
+        .store
+        .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+            incarnation_id: f.remote.incarnation_id.clone(),
+            expected_owner_node_id: "node".into(),
+            expected_owner_epoch: 1,
+            next_owner_node_id: "survivor".into(),
+            now_ms: now,
+            lease_expires_at_ms: now + 60_000,
+        })
+        .await
+        .expect("takeover")
+        .expect("new epoch");
+    assert_eq!(adopted.owner_epoch, 2);
+    pause.release.notify_one();
+    assert!(
+        !work.await.expect("preparation"),
+        "must not refresh the admitted epoch"
+    );
+    wait_for_cleanup(&f, &session, &owner).await;
+    f.manager
+        .vod
+        .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+        .await;
+}
+
 // Byte-bound lifecycle controls, not Dolby pixel/reference-accuracy evidence.
 // The real completed-window validator checks the generated HEVC/PQ stream;
 // the exclusive worker claim prevents the fixture renderer from ever running.
@@ -143,15 +305,16 @@ async fn staged_processed_root_refuses_current_input_and_owner_drift_without_spe
             let mut wrong = expectation(&f, &incarnation, &session);
             wrong.owner_node_id = node.into();
             wrong.owner_epoch = epoch;
-            assert!(f
-                .manager
-                .restore_staged_processed_root(
-                    &mut changed,
-                    &wrong,
-                    Instant::now() + Duration::from_secs(5)
-                )
-                .await
-                .is_err());
+            assert!(
+                f.manager
+                    .restore_staged_processed_root(
+                        &mut changed,
+                        &wrong,
+                        Instant::now() + Duration::from_secs(5)
+                    )
+                    .await
+                    .is_err()
+            );
         }
         assert!(
             f.manager.vod.hls_facts(&f.session_id).await.is_some(),
@@ -479,8 +642,10 @@ async fn fixture(destination: DvDestination) -> Fixture {
         decoder: plurx_core::transcode::DecodeBackend::Software,
     })
     .expect("real completed-window validation");
-    let runtime = Arc::new(crate::dv_runtime::RuntimeRecipe {
-        tools: Arc::new(crate::dv_runtime::ToolSet::lifecycle_fixture(backend)),
+    let runtime = Arc::new(crate::vodencode::dv_runtime::RuntimeRecipe {
+        tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(
+            backend,
+        )),
         source: Arc::clone(&source),
         source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
         source_tick: (1, 24),
@@ -522,7 +687,7 @@ async fn fixture(destination: DvDestination) -> Fixture {
         engine: crate::ffmpeg::EncodedEngine::capture(None)
             .await
             .expect("engine"),
-        admissions: Admissions::new(),
+        admissions: manager.admissions.clone(),
         store: store.clone(),
         speculative: AtomicBool::new(false),
         nonpreemptive_trial: false,
@@ -546,7 +711,7 @@ async fn fixture(destination: DvDestination) -> Fixture {
     let encoding = Arc::new(encoding);
     let permit = encoding
         .admissions
-        .try_admit_bundle(1, 15, resources, Priority::Live)
+        .try_admit_bundle(1, 15, &resources, Priority::Live)
         .expect("mixed admission")
         .into();
     let worker = crate::vodencode::EncodePermit::clone(&permit)
@@ -721,9 +886,99 @@ async fn stage(f: &Fixture) -> (String, String, String) {
     (incarnation, session, json)
 }
 
+async fn commit_and_retire(f: &mut Fixture, incarnation: &str, session: &str) {
+    let now = crate::media_sessions::unix_ms();
+    let committed = f
+        .manager
+        .store
+        .commit_media_session_preparation(
+            &f.remote.principal,
+            &f.remote.request.playback_id,
+            &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                staged_incarnation_id: incarnation.to_owned(),
+                expected_predecessor_owner_node_id: "node".into(),
+                expected_predecessor_owner_epoch: 1,
+                now_ms: now,
+                lease_expires_at_ms: now + 60_000,
+                control_receipt: None,
+                expected_desired_revision: None,
+            },
+        )
+        .await
+        .expect("durable CAS")
+        .expect("committed exact predecessor");
+    assert_eq!(committed.route.session_id, session);
+    let predecessor = committed.predecessor.expect("retired predecessor");
+    assert_eq!(predecessor.session_id, f.session_id);
+    assert!(
+        f.manager
+            .vod
+            .end(&predecessor.session_id, crate::vodserve::Terminal::Deleted)
+            .await
+    );
+    f.remote = serde_json::from_str(&committed.route.recipe_json).expect("sealed wire recipe");
+    assert!(
+        f.remote.retained_output.is_none(),
+        "ephemeral root is not a disk artifact"
+    );
+    f.session_id = session.to_owned();
+    assert_eq!(f.encoding.admissions.in_use(), 1);
+    assert_eq!(f.encoding.admissions.software_in_use(), 15);
+}
+
 #[tokio::test]
-async fn staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed(
-) {
+async fn staged_processed_second_successor_survives_normal_commit_and_parent_retirement() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let mut f = fixture(destination).await;
+        for _ in 0..2 {
+            let (incarnation, session, json) = stage(&f).await;
+            assert!(prepare(&f, &session, &json).await);
+            commit_and_retire(&mut f, &incarnation, &session).await;
+            let (_, root) = f
+                .manager
+                .vod
+                .capture_staged_processed_root(
+                    &SessionRequest {
+                        request_id: Some("future-incarnation".into()),
+                        ..f.remote.request.clone()
+                    },
+                    &StagedProcessedPredecessor {
+                        session_id: session.clone(),
+                        incarnation_id: incarnation.clone(),
+                        owner_node_id: "node".into(),
+                        owner_epoch: 1,
+                        successor_session_id: "future-session".into(),
+                        successor_incarnation_id: "future-incarnation".into(),
+                    },
+                    &principal_supersession_scope(&f.remote.principal),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .expect("new seed survives original-parent retirement");
+            assert!(Arc::ptr_eq(&root.encoding, &f.encoding));
+            assert!(root.permit.clone().try_claim_worker().is_none());
+            assert!(
+                f.encoding
+                    .admissions
+                    .try_admit_bundle(1, 15, &f.encoding.resources, Priority::Live)
+                    .is_none(),
+                "an unrelated fresh session cannot borrow incumbent credits"
+            );
+        }
+        f.manager
+            .vod
+            .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+            .await;
+        assert_eq!(f.encoding.admissions.software_in_use(), 15);
+        drop(f.worker.take());
+        assert_eq!(f.encoding.admissions.in_use(), 0);
+        assert_eq!(f.encoding.admissions.software_in_use(), 0);
+    }
+}
+
+#[tokio::test]
+async fn staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed()
+ {
     for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
         let mut f = fixture(destination).await;
         let (incarnation, session, json) = stage(&f).await;

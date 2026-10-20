@@ -3988,6 +3988,7 @@ dependencies = [
  "chrono",
  "clap",
  "crc32fast",
+ "dolby_vision",
  "flate2",
  "futures-util",
  "hex",
