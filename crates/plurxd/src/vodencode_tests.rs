@@ -2078,6 +2078,7 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
     let worker = permit.clone().try_claim_worker().expect("one physical producer");
     let serve = local_serve(base.path().join("vod"), Arc::clone(&encoding.store));
     let mut req = request("correctness-only", 0.0);
+    req.request_id = Some(uuid::Uuid::new_v4().to_string());
     req.kind = SessionKind::Transcode { height: encoding.options.target_height };
     let scope = [51; 32];
     let attribution = VodAttribution { user_name: "user", item_title: "reuse", supersession_user: "user" };
@@ -2101,6 +2102,7 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
         encoding.reset_active_production(100, false);
         assert!(encoding.active_production_evidence().is_none());
         let mut successor = req.clone();
+        successor.request_id = Some(uuid::Uuid::new_v4().to_string());
         successor.previous_session_id = Some("incumbent".into());
         successor.start_seconds = ticks_to_ms(rendition.plan.entry(start).expect("start").start_ticks, rendition.timescale) as f64 / 1000.0;
         let root = serve.capture_processed_root(&successor, "user", scope, Instant::now() + Duration::from_secs(5)).await.expect("exact retained root");
@@ -2115,6 +2117,7 @@ async fn processed_root_reuse_needs_no_speed_or_missing_qualification_window() {
         assert!(serve.end(case, Terminal::Deleted).await);
     }
     let mut cancelled = req.clone();
+    cancelled.request_id = Some(uuid::Uuid::new_v4().to_string());
     cancelled.previous_session_id = Some("incumbent".into());
     let root = serve.capture_processed_root(&cancelled, "user", scope, Instant::now() + Duration::from_secs(5)).await.expect("capture for cancellation");
     drop(root);

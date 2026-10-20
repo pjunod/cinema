@@ -201,14 +201,20 @@ owner: no HDR10-E is reported from descriptor selection alone; reconstructed P81
 retains its distinct carrier/FEL semantics. These controls do not run the renderer
 or establish Dolby pixel accuracy. Ordinary serialized recovery stays refused.
 
-Development checkpoint `b377f36f2` passed pinned Rust 1.97.1 fmt/all-target
-Clippy. The later `99cf2e71` fixture compile found four errors; source corrects
-them, with subsequent full-candidate compilation still pending. No behavioral
-tests have run for D. Actual B landing `9753284e` is incorporated with identical
-before/after integration tree. Complete-candidate independent review, fixes,
-one affected qualification batch, required fast lane and API merge remain.
-The historical live request path remains unknown; this is no deployment or
-general Dolby rendering-accuracy claim.
+Candidate `03cbfe62c` passed pinned Rust 1.97.1 fmt/all-target Clippy and test
+linking. Independent Astra complete review required F1 exact-owner race,
+F2 cleanup-settlement and F3 real AAC controls; bounded closure approved the
+repairs. The first fifteen-case affected batch has six genuine passes and nine
+fixture setup failures, not nine demonstrated production failures. Eight staged
+controls supplied an invalid coarse source tick; the other omitted its admitted
+incarnation. Repairs probe actual source packet timing, retain the 24000/1001
+cadence and 1/24000 source tick through the checked output, and supply real
+incumbent/successor request incarnations. No production validator is relaxed.
+The repaired fixtures need pinned compilation, bounded same-reviewer closure
+and retries of only those nine cases; the six unchanged passes remain valid.
+Actual B landing `9753284e` is incorporated. Required fast lane and API merge
+remain. The historical live request path remains unknown; this is no deployment
+or general Dolby rendering-accuracy claim.
 
 Regression anchors for the eventual PR and merge message:
 - `Regression-Test: crates/plurxd/src/vodencode_tests.rs::processed_root_reuse_needs_no_speed_or_missing_qualification_window`

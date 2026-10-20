@@ -773,84 +773,143 @@ async fn fixture_with_audio(
         include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/authored.mp4"),
     )
     .expect("source bytes");
-    let audio_probe = if audio.is_some() {
-        let video = root.path().join("source-video.mp4");
-        std::fs::rename(&path, &video).expect("retain authored video");
-        let mux = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-            .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&video)
-            .args([
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:sample_rate=48000:duration=0.125",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=880:sample_rate=48000:duration=0.125",
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-map",
-                "2:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "-disposition:a:0",
-                "default",
-                "-disposition:a:1",
-                "0",
-            ])
-            .arg(&path)
-            .kill_on_drop(true)
-            .output()
-            .await
-            .expect("mux real audio source");
-        assert!(
-            mux.status.success(),
-            "{}",
-            String::from_utf8_lossy(&mux.stderr)
-        );
-        let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
-            .args([
-                "-v",
-                "error",
-                "-show_streams",
-                "-show_format",
-                "-of",
-                "json",
-            ])
-            .arg(&path)
-            .kill_on_drop(true)
-            .output()
-            .await
-            .expect("probe real source");
-        assert!(
-            probe.status.success(),
-            "{}",
-            String::from_utf8_lossy(&probe.stderr)
-        );
-        Some(serde_json::from_slice::<serde_json::Value>(&probe.stdout).expect("source probe"))
+    // The authored source starts at 48048/24000. Remux its actual pictures
+    // onto a zero-origin film clock, retaining its 24000/1001 cadence rather
+    // than pretending the source uses one coarse 1/24-second container tick.
+    let video = root.path().join("source-video.mp4");
+    std::fs::rename(&path, &video).expect("retain authored video");
+    let mut mux = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    mux.args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&video);
+    if audio.is_some() {
+        mux.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=0.125",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000:duration=0.125",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-map",
+            "2:a:0",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-disposition:a:0",
+            "default",
+            "-disposition:a:1",
+            "0",
+        ]);
     } else {
-        None
+        mux.args(["-map", "0:v:0", "-an"]);
+    }
+    let mux = mux
+        .args(["-c:v", "copy", "-video_track_timescale", "24000"])
+        .arg(&path)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("mux real fixture source");
+    assert!(
+        mux.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mux.stderr)
+    );
+    let source_probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-show_packets",
+            "-of",
+            "json",
+        ])
+        .arg(&path)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("probe real source clock and tracks");
+    assert!(
+        source_probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source_probe.stderr)
+    );
+    let actual: serde_json::Value =
+        serde_json::from_slice(&source_probe.stdout).expect("source probe");
+    let video = actual["streams"]
+        .as_array()
+        .expect("streams")
+        .iter()
+        .find(|stream| stream["codec_type"] == "video")
+        .expect("actual source video");
+    let rational = |name: &str| {
+        let (numerator, denominator) = video[name]
+            .as_str()
+            .expect("measured source rational")
+            .split_once('/')
+            .expect("rational separator");
+        (
+            numerator.parse::<u32>().expect("numerator"),
+            denominator.parse::<u32>().expect("denominator"),
+        )
     };
+    let source_tick = rational("time_base");
+    let (rate_num, rate_den) = rational("avg_frame_rate");
+    let grid = plurx_core::transcode::VodFrameGrid::new(rate_num, rate_den).expect("measured grid");
+    assert_eq!(source_tick, (1, 24000));
+    assert_eq!((grid.numerator, grid.denominator), (24000, 1001));
+    let keys: Vec<_> = actual["packets"]
+        .as_array()
+        .expect("actual source packets")
+        .iter()
+        .filter(|packet| packet["stream_index"] == video["index"])
+        .enumerate()
+        .map(|(ordinal, packet)| {
+            let pts = packet["pts"].as_i64().expect("actual source PTS");
+            assert_eq!(packet["dts"].as_i64(), Some(pts), "no reordered source");
+            assert_eq!(packet["duration"].as_u64(), Some(u64::from(rate_den)));
+            DvFrameKey {
+                absolute_video_index: video["index"].as_u64().expect("video index") as u32,
+                continuity_epoch: 0,
+                pts: DvTimestamp::new(pts, source_tick.1).expect("source clock"),
+                display_ordinal: ordinal as u64,
+            }
+        })
+        .collect();
+    assert_eq!(keys.len(), 3, "three real source pictures");
+    assert_eq!(
+        keys[0].pts,
+        DvTimestamp::new(0, rate_num).expect("zero origin")
+    );
     let metadata = std::fs::metadata(&path).expect("metadata");
     let mut probe = serde_json::json!({"format":{"duration":"2.0"},"streams":[{
         "index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10",
         "width":64,"height":64,"sample_aspect_ratio":"1:1","pix_fmt":"yuv420p10le",
-        "avg_frame_rate":"24/1","r_frame_rate":"24/1","field_order":"progressive",
+        "field_order":"progressive",
         "color_transfer":"smpte2084","color_primaries":"bt2020","color_space":"bt2020nc",
         "side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":7,
             "dv_level":6,"rpu_present_flag":1,"el_present_flag":1,"bl_present_flag":1,
             "dv_bl_signal_compatibility_id":1}]
     }]});
-    if let Some(actual) = audio_probe {
+    for field in [
+        "avg_frame_rate",
+        "r_frame_rate",
+        "time_base",
+        "start_pts",
+        "start_time",
+    ] {
+        probe["streams"][0][field] = video[field].clone();
+    }
+    if audio.is_some() {
         let tracks: Vec<_> = actual["streams"]
             .as_array()
             .expect("streams")
@@ -969,15 +1028,9 @@ async fn fixture_with_audio(
     );
     let output = root.path().join("completed.mp4");
     let mut control = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
-    control.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "color=black:size=64x64:rate=24",
-    ]);
+    control
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg(format!("color=black:size=64x64:rate={rate_num}/{rate_den}"));
     if audio.is_some() {
         control.args([
             "-f",
@@ -988,10 +1041,14 @@ async fn fixture_with_audio(
             "0:v:0",
             "-map",
             "1:a:0",
+            // Put synthetic AAC encoder priming before its zero-origin
+            // packet, so the mux does not shift the video by 1024/48000.
+            "-af",
+            "asetpts=PTS+1024",
             "-c:a",
             "aac",
             "-t",
-            "0.125",
+            "0.126",
         ]);
     } else {
         control.arg("-an");
@@ -1015,7 +1072,7 @@ async fn fixture_with_audio(
             "-colorspace",
             "bt2020nc",
             "-video_track_timescale",
-            "24",
+            "24000",
             "-movflags",
             "+frag_keyframe+empty_moov+default_base_moof",
         ])
@@ -1045,17 +1102,10 @@ async fn fixture_with_audio(
     }
     raw.modified = true;
     let rpus = vec![raw.write_hevc_unspec62_nalu().expect("bounded control RPU"); 3];
-    let keys: Vec<_> = (0..3)
-        .map(|ordinal| DvFrameKey {
-            absolute_video_index: 0,
-            continuity_epoch: 0,
-            pts: DvTimestamp::new(ordinal, 24).expect("clock"),
-            display_ordinal: ordinal as u64,
-        })
-        .collect();
+
     let bytes = std::fs::read(output).expect("completed bytes");
     let bytes = if destination == DvDestination::Profile81 {
-        dv_author_profile81_window(&bytes, raster, 24, 0, 1, &rpus, 6)
+        dv_author_profile81_window(&bytes, raster, rate_num, 0, rate_den, &rpus, 6)
             .expect("actual reconstructed P81 authoring")
     } else {
         bytes
@@ -1101,8 +1151,8 @@ async fn fixture_with_audio(
         mode: DvProcessingMode::Fel,
         source_keys: &keys,
         source_rpus: &rpus,
-        source_tick: (1, 24),
-        grid: plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid"),
+        source_tick,
+        grid,
         first_global_frame: 0,
         encoded: &bytes,
         raster,
@@ -1115,8 +1165,12 @@ async fn fixture_with_audio(
     let receipt = dv_receipt_completed_window(
         &selected_plan,
         &keys,
-        &[DvDuration::new(1, 24, DvDurationProvenance::DeclaredFixtureInterval).expect("duration");
-            3],
+        &[DvDuration::new(
+            i64::from(rate_den),
+            rate_num,
+            DvDurationProvenance::CodedPacketObserved,
+        )
+        .expect("duration"); 3],
         &rpus,
     )
     .expect("checked control receipt");
@@ -1127,7 +1181,7 @@ async fn fixture_with_audio(
         )),
         source: Arc::clone(&source),
         source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
-        source_tick: (1, 24),
+        source_tick,
         native_bl: (64, 64),
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         preferences,
@@ -1155,7 +1209,7 @@ async fn fixture_with_audio(
         plan,
         resources,
         options,
-        grid: plurx_core::transcode::VodFrameGrid::new(24, 1).expect("grid"),
+        grid,
         reorder_frames: false,
         subtitle: None,
         subtitle_digest: None,
