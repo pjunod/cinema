@@ -80,7 +80,7 @@ def stop_build(process, grace=10):
 
 def build_stage(argv):
     """Long native staging lifecycle; Docker inspections retain output()'s 30s bound."""
-    print("Building the native host tray; compiler and package-manager progress follows.", file=sys.stderr, flush=True)
+    print("Preparing the host tray; download or explicit developer-build progress follows.", file=sys.stderr, flush=True)
     previous = {}
     process = None
     with tempfile.TemporaryFile() as receipt:
@@ -310,20 +310,25 @@ def install(args):
             raise ValueError("a different installation owns this user's tray login entry")
     if args.dry_run:
         print(json.dumps({"project": identity["project"], "browser_origin": identity["browser_origin"],
-                          "tray": str(tray), "record": str(record), "build": "native GTK tray only; no host server packages", "update_mode": update_mode}))
+                          "tray": str(tray), "record": str(record), "build": "source" if getattr(args, "build_tray", False) else "GitHub prebuilt tray; runtime dependencies only", "update_mode": update_mode}))
         return
     private_dir(state.parent)
     private_dir(state)
     private_dir(cohort.parent)
     with tempfile.TemporaryDirectory(prefix=".compose-tray-build-", dir=cohort.parent) as work:
         staged = Path(work) / "tray"
-        facts = build_stage([sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged])
+        command = [sys.executable, ROOT / "scripts/install-linux-source-runtime", "--stage-tray", staged]
+        if getattr(args, "build_tray", False):
+            command.append("--build-tray")
+        if getattr(args, "tray_release", None):
+            command.extend(["--tray-release", args.tray_release])
+        facts = build_stage(command)
         built = Path(facts["tray"])
         if built != staged / "plurx-tray" or built.is_symlink() or not built.is_file():
             raise ValueError("native tray builder returned an unexpected staged executable")
         shutil.copyfile(ROOT / "scripts/plurx-compose-control", staged / "plurx-compose-control")
         (staged / "plurx-compose-control").chmod(0o755)
-        atomic_text(staged / "source-install.json", json.dumps({"schema_version": 1, "owner_uid": os.getuid(), "project": identity["project"], "checkout": str(checkout), "source_commit": facts["source_commit"]}) + "\n")
+        atomic_text(staged / "source-install.json", json.dumps({"schema_version": 1, "owner_uid": os.getuid(), "project": identity["project"], "checkout": str(checkout), "source_commit": facts["source_commit"], "tray_version": facts.get("version"), "tray_origin": facts.get("origin", "source"), "tray_release": facts.get("release_tag"), "tray_sha256": facts.get("sha256")}) + "\n")
         if cohort.exists():
             marker = cohort / "source-install.json"
             if not marker.is_file() or marker.is_symlink():
@@ -368,12 +373,16 @@ def install(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build-tray", action="store_true", help="developer option: compile the tray locally")
+    parser.add_argument("--tray-release", help="stable GitHub tray release tag; default: latest stable")
     parser.add_argument("--checkout", type=Path, default=ROOT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-autostart", action="store_true")
     parser.add_argument("--update-mode", choices=("source", "published"), help="explicit deployment owner; retained on refresh")
     parser.add_argument("--image-reference", help="operator-selected published image reference; no signature verification is inferred")
     args = parser.parse_args(argv)
+    if args.build_tray and args.tray_release:
+        parser.error("--build-tray and --tray-release are mutually exclusive")
     try:
         install(args)
         return 0

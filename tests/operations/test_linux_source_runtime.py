@@ -301,7 +301,7 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
             session = runtime.Session(os.getuid(), "desktop", {"HOME": str(root)})
             destination = root / "companion"
             with mock.patch.object(runtime, "ROOT", root), mock.patch.object(runtime, "eligible_session", return_value=session), mock.patch.object(runtime, "owning_user_context"), mock.patch.object(runtime, "native_format", return_value="deb"), mock.patch.object(runtime, "build_context", return_value=("a" * 40, "0.7.0", "amd64", Path("/fixture/cargo"), controls, {})), mock.patch.object(runtime, "source_identity", return_value=("a" * 40, "0.7.0")), mock.patch.object(runtime, "output", return_value="plurx-tray 0.7.0 (" + "a" * 40 + ")"), mock.patch.object(runtime, "run") as run, mock.patch.object(runtime, "nfpm_tool") as nfpm, mock.patch.object(runtime, "policy_snapshot") as policy:
-                receipt = runtime.stage_tray(destination)
+                receipt = runtime.stage_tray(destination, build_from_source=True)
             self.assertEqual(receipt["tray"], str(destination / "plurx-tray"))
             self.assertEqual((destination / "plurx-tray").read_bytes(), elf)
             self.assertTrue((destination / "icons/tv.plurx.Server.svg").is_file())

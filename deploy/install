@@ -26,6 +26,8 @@
 #   --subtitle-engine-package DIR
 #                   macOS: verified pinned whisper.cpp bundle; release archives
 #                   supply it, and source installs build it automatically
+#   --build-tray    developer option: compile the Linux tray locally
+#   --tray-release TAG  select a prebuilt Linux tray release (vX.Y.Z)
 #   --server-only   explicit legacy daemon-only install, without the tray app
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
@@ -65,6 +67,8 @@ subtitle_engine_package=
 uninstall=0
 dry_run=0
 server_only=0
+build_tray=0
+tray_release=
 
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -201,6 +205,9 @@ while [ $# -gt 0 ]; do
     --source-parser=*) source_parser=${1#--source-parser=} ;;
     --subtitle-engine-package) shift; [ $# -gt 0 ] || die "--subtitle-engine-package needs a path"; subtitle_engine_package=$1 ;;
     --subtitle-engine-package=*) subtitle_engine_package=${1#--subtitle-engine-package=} ;;
+    --build-tray) build_tray=1 ;;
+    --tray-release) shift; [ $# -gt 0 ] || die "--tray-release needs a tag"; tray_release=$1 ;;
+    --tray-release=*) tray_release=${1#--tray-release=} ;;
     --server-only) server_only=1 ;;
     --uninstall) uninstall=1 ;;
     --dry-run) dry_run=1 ;;
@@ -209,6 +216,8 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+[ "$build_tray" != 1 ] || [ -z "$tray_release" ] || die "--build-tray and --tray-release are mutually exclusive"
 
 detect_platform() {
   case $(uname -s) in
@@ -392,6 +401,8 @@ linux_native_source_install() {
   [ -z "$binary" ] || set -- "$@" --binary "$binary"
   [ "$dry_run" != 1 ] || set -- "$@" --dry-run
   [ "$no_start" != 1 ] || set -- "$@" --no-start
+  [ "$build_tray" != 1 ] || set -- "$@" --build-tray
+  [ -z "$tray_release" ] || set -- "$@" --tray-release "$tray_release"
   python3 "$root/scripts/install-linux-source-runtime" "$@"
 }
 
@@ -1171,7 +1182,10 @@ docker_install_host_tray() {
     return 0
   fi
   if linux_has_local_gui; then
-    python3 "$root/scripts/install-compose-tray" --checkout "$root" --update-mode source
+    set -- --checkout "$root" --update-mode source
+    [ "$build_tray" != 1 ] || set -- "$@" --build-tray
+    [ -z "$tray_release" ] || set -- "$@" --tray-release "$tray_release"
+    python3 "$root/scripts/install-compose-tray" "$@"
   else
     say "no eligible local graphical login; to add host controls later run: python3 $root/scripts/install-compose-tray --checkout $root --update-mode source"
   fi

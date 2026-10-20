@@ -79,7 +79,7 @@ It writes `deploy/.env` (with your uid/gid) and
 `deploy/docker-compose.override.yml` from their examples when they are
 missing, creates the data directory named in `.env`, runs `make docker-up`,
 and then waits for `/readyz` and prints the version the server reports.
-On a Linux laptop's ordinary local graphical login, this also builds and opens
+On a Linux laptop's ordinary local graphical login, this also downloads and opens
 an unprivileged **host** tray for that exact Compose deployment. The container
 image stays headless. Headless, SSH-only and root installs skip the GUI; root
 prints a command to run later as the desktop user. To add the tray to an
@@ -90,8 +90,16 @@ python3 scripts/install-compose-tray --checkout "$PWD" --update-mode source
 # For a deployment made with docker-image-up, select --update-mode published instead.
 ```
 
-The host needs the native Rust/GTK build prerequisites and access to the selected
-local Docker Unix socket. This supports the standard two-service project in
+The host needs Python 3, the GTK4 runtime, `xdg-utils` and access to the selected
+local Docker Unix socket. The installer downloads the latest stable standalone
+tray for amd64 or arm64 from GitHub and verifies its release `SHA256SUMS` before
+staging. It installs runtime packages only; Rust, GTK development headers and a
+host server package are not needed. Initial download verification uses GitHub
+HTTPS/checksums, separately from the native updater's signed manifests.
+Use `--tray-release vX.Y.Z` to select a stable tray release. A release without
+tray artifacts fails before runtime package changes and never falls back to
+compilation. Developers can explicitly choose `--build-tray`; with Make use
+`INSTALL_FLAGS=--build-tray`. This supports the standard two-service project in
 `deploy/docker-compose.yml`, including local overrides that retain the owned restart-policy variable.
 Literal restart overrides are refused before promising persistent startup.
 Refresh preserves the explicit source/published deployment choice. The tray pins Docker
@@ -662,8 +670,12 @@ make install          # or: make install-linux
 ```
 
 In a verified local GUI session on apt/dpkg or dnf/rpm Linux, the installer
-builds the native server, controller and GTK tray, assembles the matching native
-package cohort and installs it through the package manager. Known legacy source
+builds the native server/controller and obtains the exact matching prebuilt
+GTK tray, assembles the matching native package cohort and installs it through
+the package manager. The released tray must match both the checkout version and
+source commit; unreleased developer checkouts require
+`INSTALL_FLAGS=--build-tray` to opt into local tray compilation and GTK development
+packages. Ordinary native release packages already contain the prebuilt tray. Known legacy source
 units migrate only after confirmed graceful exit; unknown custom units refuse
 migration. Existing enabled/running choices survive. The current install opens
 the tray/control window, separately from its future login preference. Headless

@@ -1404,6 +1404,7 @@ paths = [
   "scripts/build-macos-source-runtime",
   "scripts/install-linux-source-runtime",
   "scripts/install-compose-tray",
+  "scripts/linux-tray-release",
   "scripts/package-macos",
   "scripts/build-subtitle-engine",
   "scripts/subtitle-engine-manifest.json",
