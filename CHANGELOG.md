@@ -16,6 +16,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- macOS source installation installs the pinned Rust toolchain when missing,
+  bootstrapping rustup through Homebrew and installing Homebrew if needed.
+  Existing toolchains are reused without a download.
 - Safari Play and Resume prepare the persistent media element during the user
   gesture, before asynchronous stream readiness. Browser permission refusals
   now stop recovery immediately and retain position and track choices for an

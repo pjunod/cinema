@@ -3,7 +3,8 @@
 
 This local, ad-hoc signed package is deliberately distinct from a verified
 GitHub release. Offline --binary still requires Rust and Swift for the tray
-and controllers. All output stays under the checkout's target directory.
+and controllers. Missing Rust build tools are installed as needed; package
+output stays under the checkout's target directory.
 """
 import argparse
 import hashlib
@@ -30,6 +31,59 @@ def run(argv, **kwargs):
 
 def output(argv, **kwargs):
     return subprocess.check_output([str(value) for value in argv], text=True, **kwargs).strip()
+
+
+def find_tool(name, candidates):
+    found = shutil.which(name)
+    if found:
+        return found
+    return next((str(path) for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+
+
+def ensure_rustup():
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    prefixes = [Path("/opt/homebrew"), Path("/usr/local")]
+    rustup = find_tool("rustup", [cargo_home / "bin/rustup", *(
+        prefix / "opt/rustup/bin/rustup" for prefix in prefixes)])
+    if rustup:
+        return rustup
+    brew = find_tool("brew", [prefix / "bin/brew" for prefix in prefixes])
+    if not brew:
+        print("source runtime: installing Homebrew for rustup (may request your administrator password)", flush=True)
+        with tempfile.TemporaryDirectory(prefix="plurx-homebrew-") as work:
+            installer = Path(work) / "install.sh"
+            run(["/usr/bin/curl", "--fail", "--show-error", "--silent", "--location", "--proto", "=https",
+                 "--tlsv1.2", "--output", installer,
+                 "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"])
+            run(["/bin/bash", installer])
+        brew = find_tool("brew", [prefix / "bin/brew" for prefix in prefixes])
+        if not brew:
+            raise ValueError("Homebrew installation finished but brew cannot be found; follow its shellenv instructions and retry")
+    print("source runtime: installing rustup through Homebrew", flush=True)
+    run([brew, "install", "rustup"])
+    rustup = Path(output([brew, "--prefix", "rustup"])) / "bin/rustup"
+    if not rustup.is_file() or not os.access(rustup, os.X_OK):
+        raise ValueError("Homebrew installed rustup but its executable cannot be found")
+    return str(rustup)
+
+
+def ensure_rust_toolchain():
+    channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M).group(1)
+    rustup = ensure_rustup()
+    lookup = [rustup, "which", "--toolchain", channel, "rustc"]
+    env = {**os.environ, "RUSTUP_AUTO_INSTALL": "0"}
+    try:
+        rustc = Path(output(lookup, env=env, stderr=subprocess.DEVNULL))
+    except subprocess.CalledProcessError:
+        print(f"source runtime: installing pinned Rust {channel}", flush=True)
+        run([rustup, "toolchain", "install", channel, "--profile", "minimal", "--no-self-update"])
+        try:
+            rustc = Path(output(lookup, env=env))
+        except subprocess.CalledProcessError as error:
+            raise ValueError(f"rustup installed Rust {channel} but cannot locate its rustc") from error
+    if output([rustc, "--version"]).split()[1] != channel:
+        raise ValueError("installed Rust compiler differs from rust-toolchain.toml")
+    return rustc
 
 
 def load_recipe(name):
@@ -103,16 +157,9 @@ def build(args):
         raise ValueError("source runtime requires an exact committed checkout")
     if output(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"]):
         raise ValueError("commit tracked source changes before building an exact source runtime")
-    channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M).group(1)
-    rustup = shutil.which("rustup") or str(Path.home() / ".cargo/bin/rustup")
-    try:
-        rustc = Path(output([rustup, "which", "--toolchain", channel, "rustc"], env={**os.environ, "RUSTUP_AUTO_INSTALL": "0"}))
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise ValueError(f"source tray installation requires the installed Rust {channel} toolchain, including with --binary") from error
-    if output([rustc, "--version"]).split()[1] != channel:
-        raise ValueError("installed Rust compiler differs from rust-toolchain.toml")
     if not shutil.which("swift"):
         raise ValueError("source tray installation requires Swift/Xcode command line tools, including with --binary")
+    rustc = ensure_rust_toolchain()
     env = {**os.environ, "PATH": str(rustc.parent) + os.pathsep + os.environ.get("PATH", ""),
            "RUSTC": str(rustc), "PLURX_BUILD_SHA": source_commit}
     cargo = rustc.parent / "cargo"
@@ -216,7 +263,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.dry_run:
-        print(f"would build native Rust controllers and Swift tray, verify matching daemon and pinned media/subtitle runtime, and stage {args.output}")
+        print(f"would prepare pinned Rust (install missing Homebrew/rustup if needed), build native Rust controllers and Swift tray, verify matching daemon and pinned media/subtitle runtime, and stage {args.output}")
         return 0
     try:
         print(build(args))
