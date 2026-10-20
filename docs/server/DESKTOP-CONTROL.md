@@ -73,6 +73,13 @@ holds controls for local recovery. Check for updates explains the existing
 source/image deployment command; native release archives cannot update a
 container. No image signature verification is claimed.
 
+Local Linux source replacement retains a protected candidate receipt and original
+running/startup policy before downtime. The native controller holds its launch
+interlock across package replacement and exact identity/readiness verification;
+retry reconciles that saved candidate. A partial package result stays held for
+recovery. macOS validates migration conflicts before stopping the old agent and
+retains a private identity/policy receipt for verified legacy recovery.
+
 A previous source install is not adopted merely because its HTTP port responds.
 The controller requires a native installation record with exact paths, owner,
 service and release identity. The macOS installer preserves source configuration

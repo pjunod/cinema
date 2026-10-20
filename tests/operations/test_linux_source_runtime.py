@@ -4,6 +4,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -87,8 +88,21 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
                 events.append(["prepared"])
                 if fail_prepare:
                     raise ValueError("missing source companion")
-                return "0.7.0", [stage / "server.deb", stage / "desktop.deb"]
-            with mock.patch.object(runtime, "ROOT", root), mock.patch.object(runtime, "RECORD", root / "installation.json"), mock.patch.object(runtime, "DROPINS", root / "no-dropins"), mock.patch.object(runtime, "eligible_session", return_value=session), mock.patch.object(runtime, "native_format", return_value="deb"), mock.patch.object(runtime, "source_identity", return_value=("a" * 40, "0.7.0")), mock.patch.object(runtime, "installed_version", return_value="0.7.0-1" if existing else None), mock.patch.object(runtime, "inspect_legacy", return_value=legacy_files), mock.patch.object(runtime, "stop_legacy_main", side_effect=lambda: events.append(["legacy-drained"])), mock.patch.object(runtime, "policy_snapshot", return_value=(existing, enabled, running)), mock.patch.object(runtime, "prepare", side_effect=prepare), mock.patch.object(runtime, "run", side_effect=command), mock.patch.object(runtime.subprocess, "Popen") as launch, mock.patch.object(runtime.os, "geteuid", return_value=1000), mock.patch.object(runtime.os, "getuid", return_value=1000), contextlib.redirect_stdout(io.StringIO()):
+                return "0.7.0", [stage / "plurxd_0.7.0-1_amd64.deb", stage / "plurx-desktop_0.7.0-1_amd64.deb"]
+            def publish(stage, artifacts, legacy, identity, packager, original):
+                events.append(["durable-candidate", original])
+                return {"candidate": str(root / "pending/candidate.json"), "phase": "prepared",
+                        "request": {"version": "0.7.0", "original_policy": original,
+                                    "legacy_files": [{"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "backup": str(root / "backup")} for path in legacy]}}
+            def transaction(candidate):
+                original = next(event[1] for event in events if event[0] == "durable-candidate")
+                events.append(["native-transaction", str(candidate)])
+                return {"kind": "status", "service_state": "running" if original["running"] else "stopped", "version": "0.7.0",
+                        "server_startup": {"state": "enabled" if original["enabled"] else "disabled"}}
+            with contextlib.ExitStack() as patches:
+                launch = patches.enter_context(mock.patch.object(runtime.subprocess, "Popen"))
+                for patch in (mock.patch.object(runtime, "ROOT", root), mock.patch.object(runtime, "RECORD", root / "installation.json"), mock.patch.object(runtime, "DROPINS", root / "no-dropins"), mock.patch.object(runtime, "eligible_session", return_value=session), mock.patch.object(runtime, "native_format", return_value="deb"), mock.patch.object(runtime, "source_identity", return_value=("a" * 40, "0.7.0")), mock.patch.object(runtime, "installed_version", return_value="0.7.0-1" if existing else None), mock.patch.object(runtime, "inspect_legacy", return_value=legacy_files), mock.patch.object(runtime, "stop_legacy_main", side_effect=lambda: events.append(["legacy-drained"])), mock.patch.object(runtime, "policy_snapshot", return_value=(existing, enabled, running)), mock.patch.object(runtime, "prepare", side_effect=prepare), mock.patch.object(runtime, "pending_installation", return_value=None), mock.patch.object(runtime, "publish_pending", side_effect=publish), mock.patch.object(runtime, "preflight_packages", side_effect=lambda commands: events.append(["package-preflight"])), mock.patch.object(runtime, "preflight_service_account", side_effect=lambda: events.append(["account-preflight"])), mock.patch.object(runtime, "mark_pending", side_effect=lambda candidate, phase: events.append(["phase", phase])), mock.patch.object(runtime, "complete_pending", side_effect=lambda candidate: events.append(["complete", str(candidate)])), mock.patch.object(runtime, "invoke_source_transaction", side_effect=transaction), mock.patch.object(runtime, "run", side_effect=command), mock.patch.object(runtime.os, "geteuid", return_value=1000), mock.patch.object(runtime.os, "getuid", return_value=1000), contextlib.redirect_stdout(io.StringIO())):
+                    patches.enter_context(patch)
                 args = argparse.Namespace(binary=None, no_start=no_start, dry_run=False)
                 if fail_prepare:
                     with self.assertRaisesRegex(ValueError, "missing source"):
@@ -99,18 +113,18 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
 
     def test_fresh_binary_gui_install_stays_stopped_with_both_startup_preferences_off(self):
         events, launches = self.install_fixture(no_start=True)
-        self.assertIn(["systemctl", "disable", "plurxd.service"], events)
-        self.assertNotIn([str(runtime.CONTROL), "start"], events)
+        self.assertIn(["durable-candidate", {"existing": False, "enabled": False, "running": False}], events)
         self.assertIn([str(runtime.CONTROL), "startup", "set", "tray", "off"], events)
         self.assertEqual(len(launches), 1)
         self.assertEqual(launches[0].args[0], ["/usr/bin/plurx-tray", "--window"])
-        install = next(event for event in events if event[:2] == ["apt-get", "install"])
-        self.assertIn("--reinstall", install)
-        self.assertLess(events.index(["prepared"]), events.index(install))
+        native = next(index for index, event in enumerate(events) if event[0] == "native-transaction")
+        self.assertLess(events.index(["prepared"]), events.index(["package-preflight"]))
+        self.assertLess(events.index(["package-preflight"]), native)
+        self.assertFalse(any(event[:2] == ["apt-get", "install"] for event in events))
 
     def test_existing_disabled_stopped_policy_survives_normal_gui_install(self):
         events, launches = self.install_fixture(existing=True)
-        self.assertIn(["systemctl", "disable", "plurxd.service"], events)
+        self.assertIn(["durable-candidate", {"existing": True, "enabled": False, "running": False}], events)
         self.assertNotIn([str(runtime.CONTROL), "start"], events)
         self.assertNotIn([str(runtime.CONTROL), "startup", "set", "tray", "off"], events)
         self.assertEqual(len(launches), 1)
@@ -118,10 +132,12 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
 
     def test_existing_running_enabled_policy_survives_no_start_install(self):
         events, _ = self.install_fixture(existing=True, enabled=True, running=True, no_start=True, native_record=True)
-        self.assertIn(["systemctl", "enable", "plurxd.service"], events)
-        self.assertIn([str(runtime.CONTROL), "start"], events)
-        self.assertLess(events.index(["prepared"]), events.index([str(runtime.CONTROL), "stop", "--confirm-interruption"]))
+        self.assertIn(["durable-candidate", {"existing": True, "enabled": True, "running": True}], events)
+        self.assertNotIn([str(runtime.CONTROL), "stop", "--confirm-interruption"], events)
+        self.assertNotIn([str(runtime.CONTROL), "start"], events)
         self.assertNotIn([str(runtime.CONTROL), "startup", "set", "tray", "off"], events)
+        native = next(index for index, event in enumerate(events) if event[0] == "native-transaction")
+        self.assertLess(events.index(["package-preflight"]), native)
 
     def test_legacy_long_drain_never_escalates_or_treats_pid_or_state_alone_as_stopped(self):
         observations = [("active", 404), ("inactive", 404), ("active", 0), ("inactive", 0)]
@@ -141,20 +157,121 @@ class LinuxSourceRuntimeTests(unittest.TestCase):
         events, _ = self.install_fixture(existing=True, enabled=True, running=True, legacy=True)
         disable = events.index(["systemctl", "disable", "plurxd.service"])
         remove = next(index for index, event in enumerate(events) if event[:2] == ["rm", "--"])
-        install = next(index for index, event in enumerate(events) if event[:2] == ["apt-get", "install"])
-        enable = events.index(["systemctl", "enable", "plurxd.service"])
+        native = next(index for index, event in enumerate(events) if event[0] == "native-transaction")
         self.assertLess(events.index(["prepared"]), events.index(["legacy-drained"]))
         self.assertLess(events.index(["legacy-drained"]), disable)
         self.assertLess(disable, remove)
-        self.assertLess(remove, install)
-        self.assertLess(install, enable)
-        self.assertIn([str(runtime.CONTROL), "start"], events)
+        self.assertLess(remove, native)
+        self.assertLess(events.index(["phase", "legacy_removing"]), remove)
         self.assertNotIn(["systemctl", "stop", "plurxd.service"], events)
 
     def test_failed_staging_never_stops_or_replaces_existing_service(self):
         events, launches = self.install_fixture(existing=True, running=True, fail_prepare=True)
         self.assertEqual(events, [["prepared"]])
         self.assertEqual(launches, [])
+
+    def pending_fixture(self, root, *, phase="native_transaction", legacy_files=None, running=True, enabled=True):
+        return {"candidate": str(root / "candidate.json"), "phase": phase,
+                "request": {"version": "0.7.0", "source_commit": "a" * 40,
+                            "original_policy": {"existing": True, "enabled": enabled, "running": running},
+                            "legacy_files": legacy_files or []}}
+
+    def test_pre_unpack_failure_retry_reuses_saved_candidate_and_original_running_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pending = self.pending_fixture(root)
+            session = runtime.Session(1000, "desktop", {"HOME": str(root)})
+            verified = {"kind": "status", "version": "0.7.0", "service_state": "running", "server_startup": {"state": "enabled"}}
+            failure = subprocess.CalledProcessError(100, ["apt-get", "install"])
+            with mock.patch.object(runtime, "eligible_session", return_value=session), mock.patch.object(runtime, "owning_user_context"), mock.patch.object(runtime, "user_argv", side_effect=lambda session, argv: argv), mock.patch.object(runtime, "pending_installation", return_value=pending), mock.patch.object(runtime, "policy_snapshot") as snapshot, mock.patch.object(runtime, "prepare") as prepare, mock.patch.object(runtime, "mark_pending"), mock.patch.object(runtime, "complete_pending") as complete, mock.patch.object(runtime, "invoke_source_transaction", side_effect=[failure, verified]) as transaction, mock.patch.object(runtime.subprocess, "Popen") as launch, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                args = argparse.Namespace(binary=None, no_start=False, dry_run=False)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runtime.install(args)
+                complete.assert_not_called()
+                launch.assert_not_called()
+                runtime.install(args)
+                snapshot.assert_not_called()
+                prepare.assert_not_called()
+                self.assertEqual(transaction.call_args_list, [mock.call(str(root / "candidate.json")), mock.call(str(root / "candidate.json"))])
+                self.assertEqual(pending["request"]["original_policy"], {"existing": True, "enabled": True, "running": True})
+                complete.assert_called_once_with(str(root / "candidate.json"))
+                launch.assert_called_once()
+
+    def test_legacy_unit_removal_failure_retry_does_not_resnapshot_missing_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            unit = root / "plurxd.service"
+            unit.write_text("identified original unit")
+            pending = self.pending_fixture(root, phase="prepared", legacy_files=[{"path": str(unit), "sha256": hashlib.sha256(unit.read_bytes()).hexdigest(), "backup": str(root / "backup")}])
+            phases = []
+            attempts = []
+            def phase(candidate, value):
+                pending["phase"] = value
+                phases.append(value)
+            def command(argv, **kwargs):
+                argv = list(map(str, argv))
+                attempts.append(argv)
+                if argv[:2] == ["rm", "--"]:
+                    unit.unlink()
+                    raise subprocess.CalledProcessError(1, argv)
+            with mock.patch.object(runtime, "DROPINS", root / "absent-dropins"), mock.patch.object(runtime, "mark_pending", side_effect=phase), mock.patch.object(runtime, "stop_legacy_main") as stop, mock.patch.object(runtime, "run", side_effect=command), mock.patch.object(runtime, "policy_snapshot") as snapshot:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    runtime.migrate_pending_legacy(pending)
+                self.assertEqual(pending["phase"], "legacy_removing")
+                self.assertFalse(unit.exists())
+                runtime.migrate_pending_legacy(pending)
+                self.assertEqual(pending["phase"], "legacy_removed")
+                self.assertTrue(pending["request"]["original_policy"]["running"])
+                self.assertTrue(pending["request"]["original_policy"]["enabled"])
+                stop.assert_called_once()
+                snapshot.assert_not_called()
+                self.assertEqual(attempts.count(["systemctl", "disable", "plurxd.service"]), 1)
+
+    def test_requested_running_policy_requires_verified_ready_state_and_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pending = self.pending_fixture(root)
+            session = runtime.Session(1000, "desktop", {})
+            for state, version in (("starting", "0.7.0"), ("unhealthy", "0.7.0"), ("running", "0.6.0")):
+                with self.subTest(state=state, version=version), mock.patch.object(runtime, "mark_pending"), mock.patch.object(runtime, "invoke_source_transaction", return_value={"kind": "status", "service_state": state, "version": version, "server_startup": {"state": "enabled"}}), mock.patch.object(runtime, "complete_pending") as complete, mock.patch.object(runtime.subprocess, "Popen") as launch:
+                    with self.assertRaisesRegex(ValueError, "did not prove"):
+                        runtime.finish_source_install(pending, argparse.Namespace(no_start=False), session)
+                    complete.assert_not_called()
+                    launch.assert_not_called()
+
+    def test_source_transaction_invocation_uses_staged_controller_and_verified_envelope(self):
+        candidate = Path("/var/lib/plurx-source-installer/fixture/candidate.json")
+        response = {"schema_version": 1, "ok": True, "result": {"kind": "status", "service_state": "stopped"}, "error": None}
+        with mock.patch.object(runtime, "output", return_value=json.dumps(response)) as output:
+            self.assertEqual(runtime.invoke_source_transaction(candidate)["service_state"], "stopped")
+            self.assertEqual(output.call_args.args[0], [candidate.parent / "plurx-control", "source-install", "--candidate", candidate])
+            self.assertTrue(output.call_args.kwargs["root"])
+        response["result"]["kind"] = "operation"
+        with mock.patch.object(runtime, "output", return_value=json.dumps(response)):
+            with self.assertRaisesRegex(ValueError, "verified installation status"):
+                runtime.invoke_source_transaction(candidate)
+
+    def test_package_dependency_preflight_precedes_downtime_and_uses_cached_mutation(self):
+        commands = runtime.package_commands("deb", "0.7.0-1", "0.7.0", [Path("/candidate/plurxd.deb"), Path("/candidate/plurx-desktop.deb")])
+        self.assertIn("--no-download", commands[0])
+        with mock.patch.object(runtime, "run") as run:
+            runtime.preflight_packages(commands)
+        self.assertIn("--download-only", run.call_args_list[0].args[0])
+        self.assertNotIn("--no-download", run.call_args_list[0].args[0])
+        self.assertIn("--simulate", run.call_args_list[1].args[0])
+        self.assertIn("--no-download", run.call_args_list[1].args[0])
+        self.assertTrue(all(call.kwargs["root"] for call in run.call_args_list))
+
+    def test_pending_dry_run_retains_original_policy_without_service_observation(self):
+        session = runtime.Session(1000, "desktop", {})
+        pending = self.pending_fixture(Path("/fixture"), phase="legacy_removing")
+        with mock.patch.object(runtime, "eligible_session", return_value=session), mock.patch.object(runtime, "owning_user_context"), mock.patch.object(runtime, "pending_installation", return_value=pending), mock.patch.object(runtime, "policy_snapshot") as snapshot, mock.patch.object(runtime, "prepare") as prepare, contextlib.redirect_stdout(io.StringIO()) as output:
+            runtime.install(argparse.Namespace(dry_run=True))
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["original_policy"], pending["request"]["original_policy"])
+        self.assertEqual(value["phase"], "legacy_removing")
+        snapshot.assert_not_called()
+        prepare.assert_not_called()
 
     def test_unknown_custom_legacy_unit_and_symlink_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:

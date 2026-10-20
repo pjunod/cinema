@@ -22,6 +22,7 @@ function harness(){
  const controls={};for(const key of ['profile','language','confirm','status','clock','use','stop','resume','failures'])controls[`[data-translation-${key}]`]=node();
  controls['[data-translation-profile]'].value=P;controls['[data-translation-language]'].value='de';controls['[data-translation-confirm]'].checked=true;panel.fields=controls;
  const ctx=vm.createContext({console,Uint8Array,TextEncoder,TextDecoder,Response,AbortController,URLSearchParams,Map,Set,BigInt,crypto:webcrypto,performance:{now:()=>now},Date,API:'/api/v1',AUTH_GENERATION:1,TOKEN:'private-fixture',PAGE_RENDER_GENERATION:1,ME:{is_admin:true},location:{hash:'#/item/1'},window:{VTTCue:class{constructor(start,end,text){this.startTime=start;this.endTime=end;this.text=text;}}},document:{getElementById:id=>nodes[id]||null,createElement:tag=>{const el=node();if(tag==='track')el.track=track();return el;}},setTimeout:(fn,ms)=>{const id=++nextTimer;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),esc:x=>String(x).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),toast(){},closeMenu(){},endWait(){},PlaybackPolicy:{subtitleBurnAction:()=>"native"},subNeedsBurn:()=>false,positionForPlaybackIntent:()=>0,supersedePlaybackControlIntent:p=>p.controlIntentGeneration=(p.controlIntentGeneration||0)+1,notifyPlaybackControl(){},restartPendingPlaybackOpen:()=>false,nativeHlsSubtitleOrdinal:()=>-1,pbSyncSubIcon(){},tok:x=>x,playbackFileContextForPlayer:p=>p.fileContext,playbackFileUrl:(_c,s)=>'/source/'+s,subLabelMenu:()=>"Original",fetch:async(url,init)=>{calls.push({url,init});return ctx.respond(url,init);},respond:()=>{throw Error('Unexpected request');}});
+ vm.runInContext(fs.readFileSync(path.join(WEB,'core/diagnostics-hash.js'),'utf8'),ctx);
  vm.runInContext(fs.readFileSync(path.join(WEB,'player/subtitle-translation.js'),'utf8'),ctx);
  vm.runInContext(fs.readFileSync(path.join(WEB,'player/audio-sync.js'),'utf8'),ctx);
  const player={fileId:'9007199254740993',started:true,mediaAttachment:{id:1},audio:[{index:0,language:'deu'}],curAudio:0,curSub:-1,offset:0,subs:[{index:0,text:true,language:'de'}],method:'direct_play',fileContext:{source_ref:{kind:'local',file_id:'9007199254740993'}}};ctx.PLAYER=player;
@@ -99,6 +100,28 @@ function settings(h){
  h.nodes['subtitle-translation-form']=panel;
  const setup={capture:h.ctx.translationCapture(),panel,controllers:new Set(),retired:false,rows:[],edit:0,catalog:{profiles:[structuredClone(profile)],models:[],workers:[]},saved:{version:1,revision:'0.'+S,enabled:true,model_id:profile.model_id,profile_id:P,preferred_spoken_language:'de'},clock:{server:100000,at:1000,transit:0}};setup.current=()=>h.ctx.translationSetupCurrent(setup);h.ctx.setupSeed=setup;vm.runInContext('TRANSLATION_SETUP=setupSeed',h.ctx);return {setup,panel,fields,worker};
 }
+test('LAN HTTP translation actions generate UUID intents without randomUUID',async()=>{
+ const h=harness(),s=settings(h);h.ctx.crypto={getRandomValues:bytes=>webcrypto.getRandomValues(bytes)};
+ const ids=new Set();
+ for(let i=0;i<32;i++){const envelope=h.ctx.translationEnvelope(s.setup);assert.match(envelope.request_id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);ids.add(envelope.request_id);assert.equal(envelope.intent_expires_at_ms,160000);}
+ assert.equal(ids.size,32);
+ h.ctx.respond=()=>response({...s.setup.saved,server_now_ms:100000});await h.ctx.saveTranslationSettings();assert.equal(h.calls.length,1);assert.equal(h.ctx.translationId(JSON.parse(h.calls[0].init.body).request_id),true);
+ for(const action of ['install','verify']){h.ctx.respond=url=>response(url.endsWith('/'+action)?{version:2,purpose:'translation',model_id:profile.model_id,profile_id:P,operations:[],server_now_ms:100000}:{...s.setup.catalog,version:1,server_now_ms:100000});await h.ctx.translationSetupModel(action);await settle();const call=h.calls.find(call=>call.url.endsWith('/'+action));assert.ok(call);assert.equal(h.ctx.translationId(JSON.parse(call.init.body).request_id),true);}
+});
+test('LAN HTTP translation opens with a UUID playback identity and starts work',async()=>{
+ const h=harness();h.ctx.crypto={getRandomValues:bytes=>webcrypto.getRandomValues(bytes)};
+ vm.runInContext('SUBTITLE_TRANSLATION=null',h.ctx);h.ctx.respond=()=>{throw Error('fixture status unavailable');};await h.ctx.translationOpen(node());
+ assert.equal(h.calls.length,1);assert.match(h.calls[0].url,/subtitle-translation\/options$/);assert.equal(h.ctx.translationId(vm.runInContext('SUBTITLE_TRANSLATION.playbackId',h.ctx)),true);
+ // Existing player actions use the same HTTP-compatible envelope.
+ h.state.operation=null;h.state.assetId=null;h.ctx.translationPoll=async()=>{};h.ctx.respond=()=>response({version:1,operation_id:OP,operation_epoch:'1',view_revision:'1',asset_id:null,state:'checking_source',demand_id:DEMAND,demand_generation:'1',server_now_ms:100000});
+ await h.ctx.translationStart(h.state);assert.equal(h.calls.length,2);assert.equal(h.ctx.translationId(JSON.parse(h.calls[1].init.body).request_id),true);
+});
+test('LAN HTTP caption reads verify exact bytes without SubtleCrypto',async()=>{
+ const h=harness(),s=segment(h);h.ctx.crypto={getRandomValues:bytes=>webcrypto.getRandomValues(bytes)};h.ctx.respond=()=>response(s.bytes);
+ await h.ctx.translationSegment(h.state,s.reference,h.state.lease,0);assert.equal(h.state.segments.size,1);
+ const corrupt=Buffer.from(s.bytes);corrupt[corrupt.length-1]^=1;h.ctx.respond=()=>response(corrupt);
+ await assert.rejects(h.ctx.translationSegment(h.state,s.reference,h.state.lease,0),/Caption segment digest mismatch/);assert.equal(h.state.segments.size,1);
+});
 test('Settings CAS save keeps enabled unconfigured and preserves edits made during save',async()=>{
  const h=harness(),s=settings(h);s.fields['[data-translation-setting-profile]'].value='';s.setup.saved.model_id=null;s.setup.saved.profile_id=null;s.setup.catalog=null;let finish;h.ctx.respond=()=>new Promise(resolve=>finish=resolve);
  const save=h.ctx.saveTranslationSettings();const body=JSON.parse(h.calls[0].init.body);assert.equal(body.enabled,true);assert.equal(body.model_id,null);assert.equal(body.profile_id,null);assert.equal(body.expected_revision,'0.'+S);

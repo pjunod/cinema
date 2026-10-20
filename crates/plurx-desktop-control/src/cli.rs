@@ -53,6 +53,11 @@ pub enum ControlCommand {
         lines: u16,
     },
     ValidateInstallation,
+    /// Explicit root-authorized local source packages, independently of signed releases.
+    SourceInstall {
+        #[arg(long)]
+        candidate: PathBuf,
+    },
     Bootstrap {
         #[command(subcommand)]
         command: BootstrapCommand,
@@ -126,6 +131,8 @@ pub enum BootstrapCommand {
         package: PathBuf,
         #[arg(long)]
         no_start: bool,
+        #[arg(long)]
+        preflight: bool,
     },
     Macos {
         #[arg(long)]
@@ -194,16 +201,39 @@ pub fn control_entry() -> i32 {
             Err(e) => emit(Err(e)),
         };
     }
+    if let ControlCommand::SourceInstall { candidate } = &cli.command {
+        if cli.installation.is_some() {
+            return emit(Err(Error::new(
+                ErrorCode::InvalidRequest,
+                "source installation uses canonical native paths",
+            )));
+        }
+        return emit(crate::source_install::run(candidate));
+    }
     if let ControlCommand::Bootstrap { command } = &cli.command {
-        let (package, no_start, source) = match command {
-            BootstrapCommand::Macos { package, no_start } => (package, no_start, false),
-            BootstrapCommand::MacosSource { package, no_start } => (package, no_start, true),
+        let (package, no_start, source, preflight) = match command {
+            BootstrapCommand::Macos { package, no_start } => (package, no_start, false, false),
+            BootstrapCommand::MacosSource {
+                package,
+                no_start,
+                preflight,
+            } => (package, no_start, true, *preflight),
         };
         if cli.installation.is_some() {
             return emit(Err(Error::new(
                 ErrorCode::InvalidRequest,
                 "bootstrap uses only canonical native installation paths",
             )));
+        }
+        if preflight {
+            return emit(native::preflight_source_package(package).map(|()| {
+                ControlResultV1::Update {
+                    state: UpdateState::Idle,
+                    version: None,
+                    transaction_id: None,
+                    detail: Some("Read-only native source migration preflight passed".into()),
+                }
+            }));
         }
         let installed = if source {
             native::bootstrap_source_package(package, *no_start)
@@ -333,7 +363,9 @@ pub fn helper_entry() -> i32 {
     }
     if matches!(
         cli.command,
-        ControlCommand::Bootstrap { .. } | ControlCommand::ValidateInstallation
+        ControlCommand::Bootstrap { .. }
+            | ControlCommand::ValidateInstallation
+            | ControlCommand::SourceInstall { .. }
     ) {
         return emit(Err(Error::new(
             ErrorCode::AuthorizationDenied,

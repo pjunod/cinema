@@ -157,6 +157,7 @@ temp_files=
 cleanup_temp_files() {
   local f parent uid
   set +e
+  if [ -n "${macos_migration_state:-}" ]; then macos_recover_legacy_native; fi
   if [ "${subtitle_engine_promoted:-0}" = 1 ] || { [ -n "${subtitle_engine_backup:-}" ] && [ -d "$subtitle_engine_backup" ]; }; then
     parent=$(dirname -- "$subtitle_engine_destination")
     uid=$(id -u)
@@ -833,39 +834,133 @@ macos_render_plist() {
   fi
 }
 
-# A legacy daemon predates the durable controller protocol. Ask it to exit
-# cleanly, then prove launchd reports no PID before native migration. Never use
-# bootout while it is running: launchd can escalate that operation to SIGKILL.
+# Keep the pre-migration identity/policy on disk before signalling launchd.
+# Recovery accepts only the unchanged legacy files and no native promotion.
+macos_legacy_intent() {
+  python3 - "$1" "$macos_migration_state" "$HOME" "${2:-}" "${3:-}" "${4:-}" <<'MIGRATION_INTENT'
+import hashlib, json, os, pathlib, plistlib, re, stat, sys
+mode, state, home, extra, loaded, running = sys.argv[1:]
+state, home = pathlib.Path(state), pathlib.Path(home)
+path = state / "intent.json"
+def policy(text):
+    if not text.strip().endswith("}") or "{" not in text:
+        raise ValueError("malformed launchd startup policy")
+    match = re.search(r'"com\.plurx\.plurxd"\s*=>\s*(true|false)', text)
+    return match.group(1) == "true" if match else False
+def fingerprint(file):
+    for parent in [file, *file.parents]:
+        if parent.is_symlink(): raise ValueError("legacy identity contains a symlink")
+    fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022:
+            raise ValueError("unsafe legacy identity")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""): digest.update(chunk)
+    return {"device": info.st_dev, "inode": info.st_ino, "bytes": info.st_size, "sha256": digest.hexdigest()}
+def save(value):
+    temporary = state / "intent.next"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(value, stream, sort_keys=True); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    fd = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    fd = os.open(state.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+try:
+    if mode == "snapshot":
+        state.mkdir(mode=0o700)
+        plist = home / "Library/LaunchAgents/com.plurx.plurxd.plist"
+        with plist.open("rb") as stream: definition = plistlib.load(stream)
+        args = definition.get("ProgramArguments", [])
+        if definition.get("Label") != "com.plurx.plurxd" or not args or pathlib.Path(args[0]).name != "plurxd":
+            raise ValueError("unrelated legacy registration")
+        binary = pathlib.Path(args[0])
+        save({"schema_version": 1, "phase": "prepared", "plist": str(plist), "binary": str(binary),
+              "plist_identity": fingerprint(plist), "binary_identity": fingerprint(binary),
+              "loaded": loaded == "0", "running": running == "1", "disabled": policy(extra)})
+    else:
+        if path.is_symlink() or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
+            raise ValueError("unsafe migration intent")
+        value = json.loads(path.read_text())
+        if mode in ("complete", "recovered", "recovery_required"):
+            value["phase"] = mode; save(value)
+        elif mode == "verify":
+            if value["phase"] != "prepared": raise ValueError("migration is no longer pending")
+            for native in [home / "Applications/Plurx Server.app", home / "Library/Application Support/plurx/runtime", home / "Library/Application Support/plurx/installation.json"]:
+                if native.exists() or native.is_symlink(): raise ValueError("partial native promotion requires explicit recovery")
+            if fingerprint(pathlib.Path(value["plist"])) != value["plist_identity"] or fingerprint(pathlib.Path(value["binary"])) != value["binary_identity"]:
+                raise ValueError("legacy identity changed; do not restart")
+            if policy(extra) != value["disabled"]: raise ValueError("legacy startup policy changed; do not restart")
+            print("running" if value["running"] else ("loaded-stopped" if value["loaded"] else "unloaded-stopped"))
+        elif mode == "loaded":
+            program = re.search(r"(?m)^\s*program = (.+)$", extra)
+            if not program or program.group(1) != value["binary"]: raise ValueError("loaded legacy executable changed")
+except (OSError, ValueError, KeyError, plistlib.InvalidFileException) as error:
+    print("install: migration recovery verification: " + str(error), file=sys.stderr)
+    sys.exit(1)
+MIGRATION_INTENT
+}
+
+macos_recover_legacy_native() {
+  [ -n "${macos_migration_state:-}" ] && [ "${macos_migration_committed:-0}" != 1 ] || return 0
+  local disabled disposition state code target
+  target="gui/$(id -u)/$macos_agent_label"
+  if ! disabled=$(launchctl print-disabled "gui/$(id -u)" 2>/dev/null) \
+      || ! disposition=$(macos_legacy_intent verify "$disabled"); then
+    macos_legacy_intent recovery_required >/dev/null 2>&1
+    say "Recovery required: native migration is held; inspect $macos_migration_state/intent.json (no automatic restart)"
+    return 0
+  fi
+  if state=$(launchctl print "$target" 2>/dev/null); then code=0; else code=$?; fi
+  if [ "$code" = 0 ]; then
+    if ! macos_legacy_intent loaded "$state"; then code=1; fi
+  elif [ "$code" = 113 ] && [ "$disposition" = running ]; then
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$macos_agent_label.plist" || code=1
+    [ "$code" = 1 ] || code=0
+  elif [ "$code" = 113 ] && [ "$disposition" = unloaded-stopped ]; then
+    code=0
+  else
+    code=1
+  fi
+  if [ "$code" = 0 ] && [ "$disposition" = running ]; then
+    launchctl kickstart "$target" || code=1
+  fi
+  if [ "$code" = 0 ]; then
+    macos_legacy_intent recovered
+    say 'verified unchanged legacy installation recovered; original startup policy kept'
+  else
+    macos_legacy_intent recovery_required >/dev/null 2>&1
+    say "Recovery required: legacy registration cannot be safely restored; inspect $macos_migration_state/intent.json"
+  fi
+}
+
 macos_stop_legacy_for_native() {
-  local state code target pid tries=0 plist
+  local state code target pid tries=0 disabled plist
   macos_legacy_was_running=0
   macos_native_expect_ready=0
   target="gui/$(id -u)/$macos_agent_label"
   if state=$(launchctl print "$target" 2>/dev/null); then code=0; else code=$?; fi
   [ "$code" = 0 ] || [ "$code" = 113 ] || die 'cannot establish legacy launchd state; existing server kept'
-  if [ "$code" = 113 ]; then
-    if [ ! -e "$HOME/Library/Application Support/plurx/installation.json" ] \
-        && [ ! -e "$HOME/Library/LaunchAgents/$macos_agent_label.plist" ]; then
-      macos_native_expect_ready=1
-    fi
-    return 0
-  fi
   pid=$(printf '%s\n' "$state" | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)[[:space:]]*$/\1/p')
-  [ -n "$pid" ] || return 0
-  macos_native_expect_ready=1
+  [ -z "$pid" ] || macos_native_expect_ready=1
   [ ! -e "$HOME/Library/Application Support/plurx/installation.json" ] || return 0
   plist="$HOME/Library/LaunchAgents/$macos_agent_label.plist"
-  python3 - "$plist" <<'VERIFY_LEGACY'
-import os, pathlib, plistlib, sys
-path = pathlib.Path(sys.argv[1])
-if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
-    sys.exit("install: cannot identify an owned legacy LaunchAgent; existing server kept")
-with path.open("rb") as stream:
-    value = plistlib.load(stream)
-arguments = value.get("ProgramArguments", [])
-if value.get("Label") != "com.plurx.plurxd" or not arguments or pathlib.Path(arguments[0]).name != "plurxd":
-    sys.exit("install: unrelated legacy LaunchAgent; existing server kept")
-VERIFY_LEGACY
+  if [ "$code" = 113 ] && [ ! -e "$plist" ]; then
+    macos_native_expect_ready=1
+    return 0
+  fi
+  disabled=$(launchctl print-disabled "gui/$(id -u)" 2>/dev/null) || die 'cannot establish legacy startup policy; existing server kept'
+  macos_migration_state=$package-migration
+  if [ -n "$pid" ]; then
+    macos_legacy_intent snapshot "$disabled" "$code" 1
+  else
+    macos_legacy_intent snapshot "$disabled" "$code" 0
+    return 0
+  fi
   say "waiting for legacy plurxd ($pid) to exit cleanly before installing the tray"
   launchctl kill SIGTERM "$target" || die 'legacy daemon did not accept graceful shutdown; no force-stop attempted'
   while :; do
@@ -898,6 +993,7 @@ macos_native_source_install() {
     # state. The native controller preserves stopped/running and startup policy.
     python3 "$root/scripts/build-macos-source-runtime" "$@"
   fi
+  run "$package/control/plurx-control" bootstrap macos-source --package "$package" --preflight
   if [ "$dry_run" != 1 ]; then macos_stop_legacy_for_native; fi
   set -- bootstrap macos-source --package "$package"
   if [ "$request_no_start" = 1 ] \
@@ -923,6 +1019,10 @@ print(origin.port or 80)
 READ_PORT
 )
     wait_ready "$port" "$HOME/Library/Logs/plurxd.log"
+  fi
+  if [ -n "${macos_migration_state:-}" ]; then
+    macos_legacy_intent complete
+    macos_migration_committed=1
   fi
   uid=$(id -u)
   app="$HOME/Applications/Plurx Server.app"

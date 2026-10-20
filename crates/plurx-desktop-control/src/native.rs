@@ -339,6 +339,221 @@ impl std::io::Write for DigestWriter<'_> {
         Ok(())
     }
 }
+/// Read-only source migration preflight. Release archive architecture/trust
+/// routing remains independent of this explicitly local source entry point.
+pub fn preflight_source_package(root: &Path) -> Result<()> {
+    if !cfg!(target_os = "macos") || native_uid() == 0 || !root.is_absolute() {
+        return Err(invalid(
+            "source migration preflight requires the ordinary macOS owning user",
+        ));
+    }
+    verify_bootstrap_identity(root, BootstrapPackageOrigin::LocalSource)?;
+    let record = default_record()?;
+    if record.exists() {
+        let (system, _) = supervisor::output(
+            "/bin/launchctl",
+            &["print".into(), format!("system/{LAUNCH_LABEL}")],
+            Duration::from_secs(2),
+        )?;
+        if system != 113 {
+            return Err(invalid(
+                "system-domain service exists or cannot be excluded before migration",
+            ));
+        }
+        let installed = InstallationV1::load(&record)?;
+        installed.managed()?;
+        return Ok(());
+    }
+    let home = home_for(native_uid())?;
+    preflight_macos_migration_with(&home, native_uid(), supervisor::output)
+}
+
+fn preflight_destination(path: &Path, uid: u32) -> Result<()> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(invalid(
+            "migration destination must be normalized and absolute",
+        ));
+    }
+    let mut ancestor = path;
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(meta) if meta.is_dir() => {
+                secure_fs::open_dir(ancestor, uid)?;
+                return Ok(());
+            }
+            Ok(_) => return Err(invalid("migration destination is not a trusted directory")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| invalid("migration destination parent"))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn preflight_macos_destinations(home: &Path, uid: u32) -> Result<()> {
+    let record = home.join("Library/Application Support/plurx/installation.json");
+    let runtime = home.join("Library/Application Support/plurx/runtime");
+    let app = home.join("Applications/Plurx Server.app");
+    for path in [&record, &runtime, &app] {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Err(invalid("native app, runtime or record already exists without a managed installation; explicit recovery/migration required")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for path in [
+        home.join("Applications"),
+        runtime,
+        home.join("Library/LaunchAgents"),
+        home.join("Library/Logs"),
+    ] {
+        preflight_destination(&path, uid)?;
+    }
+    Ok(())
+}
+
+/// Fixture seam for preflight: no mkdir, copy, bootout, signal or startup
+/// policy changes are permitted through this read-only executor.
+pub fn preflight_macos_migration_with<F>(home: &Path, uid: u32, mut execute: F) -> Result<()>
+where
+    F: FnMut(&str, &[String], Duration) -> Result<(i32, String)>,
+{
+    preflight_macos_destinations(home, uid)?;
+    let (system, _) = execute(
+        "/bin/launchctl",
+        &["print".into(), format!("system/{LAUNCH_LABEL}")],
+        Duration::from_secs(2),
+    )?;
+    if system != 113 {
+        return Err(invalid(
+            "system-domain service exists or cannot be excluded before migration",
+        ));
+    }
+    let (code, info) = execute(
+        "/bin/launchctl",
+        &["print".into(), format!("gui/{uid}/{LAUNCH_LABEL}")],
+        Duration::from_secs(2),
+    )?;
+    if code != 0 && code != 113 {
+        return Err(invalid(
+            "cannot establish loaded legacy identity before migration",
+        ));
+    }
+    let login = home.join("Library/LaunchAgents/com.plurx.plurxd.plist");
+    match std::fs::symlink_metadata(&login) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && code == 113 => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(invalid(
+                "loaded legacy service has no durable owned registration",
+            ))
+        }
+        Err(error) => return Err(error.into()),
+        Ok(meta) if !meta.is_file() || meta.uid() != uid || meta.mode() & 0o022 != 0 => {
+            return Err(invalid(
+                "legacy registration is not an owned safe regular file",
+            ))
+        }
+        Ok(_) => (),
+    }
+    secure_fs::open_dir(
+        login
+            .parent()
+            .ok_or_else(|| invalid("legacy plist parent"))?,
+        uid,
+    )?
+    .read("com.plurx.plurxd.plist", 1024 * 1024)?;
+    let (status, json) = execute(
+        "/usr/bin/plutil",
+        &[
+            "-convert".into(),
+            "json".into(),
+            "-o".into(),
+            "-".into(),
+            login.to_string_lossy().into_owned(),
+        ],
+        Duration::from_secs(2),
+    )?;
+    if status != 0 {
+        return Err(invalid(
+            "legacy registration cannot be parsed before migration",
+        ));
+    }
+    let plist: serde_json::Value = serde_json::from_str(&json)?;
+    let args = plist
+        .get("ProgramArguments")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| invalid("legacy executable identity is absent"))?;
+    let binary = args
+        .first()
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+        .ok_or_else(|| invalid("legacy executable identity is absent"))?;
+    if plist.get("Label").and_then(|value| value.as_str()) != Some(LAUNCH_LABEL)
+        || !binary.is_absolute()
+        || binary.file_name().and_then(|name| name.to_str()) != Some("plurxd")
+        || args.len() > 2
+        || (args.len() == 2 && args[1].as_str() != Some("run"))
+    {
+        return Err(invalid(
+            "legacy service identity/arguments require explicit migration",
+        ));
+    }
+    let meta = std::fs::symlink_metadata(&binary)?;
+    if !meta.is_file()
+        || (meta.uid() != uid && meta.uid() != 0)
+        || meta.mode() & 0o022 != 0
+        || meta.mode() & 0o111 == 0
+    {
+        return Err(invalid("legacy executable is not a trusted regular file"));
+    }
+    preflight_destination(
+        binary
+            .parent()
+            .ok_or_else(|| invalid("legacy executable parent"))?,
+        uid,
+    )?;
+    if code == 0 {
+        let program = info
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("program = "));
+        if program != binary.to_str() {
+            return Err(invalid(
+                "loaded service executable differs from its on-disk registration",
+            ));
+        }
+    }
+    let env = plist
+        .get("EnvironmentVariables")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| invalid("legacy environment is not a dictionary"))?;
+    for value in [
+        env.get("PLURX_DATA_DIR"),
+        env.get("PLURX_CONFIG"),
+        plist.get("StandardOutPath"),
+        plist.get("StandardErrorPath"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = PathBuf::from(
+            value
+                .as_str()
+                .ok_or_else(|| invalid("legacy path is not a string"))?,
+        );
+        preflight_destination(
+            path.parent().ok_or_else(|| invalid("legacy path parent"))?,
+            uid,
+        )?;
+    }
+    Ok(())
+}
+
 fn private_dir(path: &Path, uid: u32) -> Result<()> {
     if path.exists() {
         secure_fs::open_dir(path, uid)?;
@@ -811,6 +1026,8 @@ pub fn bootstrap_macos_with<F>(
 where
     F: FnMut(&str, &[String], Duration) -> Result<(i32, String)>,
 {
+    // Reject deterministic conflicts before unregistering even a stopped job.
+    preflight_macos_destinations(home, i.owner_uid)?;
     let system = format!("system/{LAUNCH_LABEL}");
     let (system_code, _) = execute(
         "/bin/launchctl",

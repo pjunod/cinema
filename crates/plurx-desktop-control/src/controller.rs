@@ -256,6 +256,21 @@ pub(crate) fn authorize_start(store: &TransactionStore, j: &mut JournalV1) -> Re
     j.start_permit_expires = Some(crate::unix_time()?.saturating_add(90));
     store.save(j)
 }
+/// Identity is already authenticated by BoundDaemon; readiness additionally pins
+/// source/version and the pre-stop node rather than trusting systemctl's exit.
+pub(crate) fn readiness_matches(
+    i: &InstallationV1,
+    j: &JournalV1,
+    id: &DaemonIdentityV1,
+    expected_commit: Option<&str>,
+) -> bool {
+    id.ready
+        && id.version == i.current_version
+        && expected_commit.is_none_or(|c| id.build == c)
+        && j.expected_node_id
+            .as_ref()
+            .is_none_or(|node| node == &id.node_id)
+}
 pub(crate) fn wait_ready(
     i: &InstallationV1,
     j: &JournalV1,
@@ -265,13 +280,7 @@ pub(crate) fn wait_ready(
     loop {
         if let Ok(bound) = BoundDaemon::connect(i) {
             let id = bound.identity;
-            if id.ready
-                && id.version == i.current_version
-                && expected_commit.is_none_or(|c| id.build == c)
-                && j.expected_node_id
-                    .as_ref()
-                    .is_none_or(|node| node == &id.node_id)
-            {
+            if readiness_matches(i, j, &id, expected_commit) {
                 return Ok(());
             }
         }

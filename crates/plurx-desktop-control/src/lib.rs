@@ -25,6 +25,8 @@ pub mod protocol;
 #[cfg(unix)]
 pub mod secure_fs;
 #[cfg(unix)]
+pub mod source_install;
+#[cfg(unix)]
 pub mod supervisor;
 #[cfg(unix)]
 pub mod transaction;
