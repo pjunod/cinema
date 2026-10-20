@@ -1,6 +1,33 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1235 passed these existing regressions; its landed macOS commit needs current anchors.
+[[fixes]]
+id = "desktop.macos-error-details-and-menu-completion"
+commits = ["a544a3fa40da66297b6f59dc6aae0c0b2da2b66a"]
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "case .showErrorDetails:"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testErrorDetailsShowFullFailureWithoutControllerCalls"
+
+[[fixes]]
+id = "desktop.macos-compact-menu-rows"
+commits = []
+supplements = "desktop.macos-error-details-and-menu-completion"
+source = "clients/server-tray/macos/Sources/PlurxTrayUI/MenuRenderer.swift"
+source_anchor = "public static let maximumTitleWidth: CGFloat = 320"
+test = "clients/server-tray/macos/Tests/PlurxTrayUITests/AppKitTests.swift"
+test_anchor = "testLongMenuRowsStayCompactAndKeepFullDetails"
+
+[[fixes]]
+id = "desktop.macos-quiet-upgrade-results"
+commits = []
+supplements = "desktop.macos-error-details-and-menu-completion"
+source = "clients/server-tray/macos/Sources/PlurxTrayCore/TrayController.swift"
+source_anchor = "if update.state == .failed || update.state == .recoveryRequired { environment?.showUpgrade(update) }"
+test = "clients/server-tray/macos/Tests/PlurxTrayCoreTests/TrayControllerTests.swift"
+test_anchor = "testUpgradeResultsOnlyRequestAttentionForFailures"
+
 # PR #1220 remediation keeps the upgrade confirmation consistent with recovery.
 [[fixes]]
 id = "desktop.native-upgrade-recovery-clarity"
