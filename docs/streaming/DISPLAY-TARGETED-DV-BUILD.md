@@ -5,6 +5,14 @@
 
 ## PR A implementation checkpoint
 
+- Actual immutable43 Rust batch completed: 98 selected, 94 passed, four fixture
+  failures retained. Repairs are test-only: wall-clock-relative lease expiry,
+  distinct offline sources rather than deduplicated requests, owner-node versus
+  consumer-target semantics, and an exact empty114 title-schema rewind before
+  historical113/112 rewinds. New partial-schema refusal coverage is authored.
+  Compile and independent targeted repair closure precede failed/invalidated-only
+  retries. The actual380a B/interface integration is independently approved;
+  its native compilation is batched with these repairs. No94pass or141shader rerun.
 - Full independent Astra review of `0d47bc6ac` is retained. Targeted independent
   review APPROVED the sole F1 repair at `43cce364a9e8`; its pinned native Clippy
   and Hiqlite-contract compilation passed. Post-review Rust qualification runs

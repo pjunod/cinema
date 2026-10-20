@@ -548,13 +548,29 @@ async fn title_priority_observation_requires_live_higher_priority_same_node_work
         for (index, id) in ids.iter().enumerate() {
             assert_eq!(
                 store
-                    .probe_can_preempt_title(id, &title.id, "title-node", 1_001)
+                    .probe_can_preempt_title(
+                        id,
+                        &title.id,
+                        if index == 2 {
+                            "other-node"
+                        } else {
+                            "title-node"
+                        },
+                        1_001,
+                    )
                     .await
                     .expect("priority observation"),
                 index == 0,
                 "{backend}: candidate {index}"
             );
         }
+        // MediaProbe is unassigned execution: a waiter's target is its
+        // consumer, not a job executor constraint. The title's actual owner
+        // may still execute that same readable source for a remote consumer.
+        assert!(store
+            .probe_can_preempt_title(&ids[2], &title.id, "title-node", 1_001)
+            .await
+            .expect("remote consumer does not restrict unassigned execution"));
         let ClaimOutcome::Claimed { job: blocker } = store
             .claim_job(ClaimJob {
                 job_id: ids[1].clone(),

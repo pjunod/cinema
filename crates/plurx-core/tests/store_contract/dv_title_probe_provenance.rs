@@ -237,21 +237,17 @@ async fn title_fresh_source_and_identical_probe_upserts_rotate_atomically_in_bot
         for fenced in [false, true] {
             let mut file = seed(&store, &format!("fresh-source-{fenced}")).await;
             let mut previous = bound(&store, file.id, &scanner).await.probe_revision;
+            let now = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_millis(),
+            )
+            .expect("Unix milliseconds");
             let mut lease = if fenced {
                 Some(acquired(
                     store
-                        .acquire_lease(
-                            "repair:probe",
-                            "direct-probe",
-                            i64::try_from(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .expect("clock")
-                                    .as_millis(),
-                            )
-                            .expect("Unix milliseconds"),
-                            200_000,
-                        )
+                        .acquire_lease("repair:probe", "direct-probe", now, now + 200_000)
                         .await
                         .expect("coordinator"),
                     backend,

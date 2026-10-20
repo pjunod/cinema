@@ -71,16 +71,26 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         )
         .await
         .expect("DV file");
-    let unreadable = store
-        .upsert_file(
-            item,
-            dir.path().join("offline.mkv").to_str().expect("path"),
-            size,
-            mtime,
-            &Default::default(),
-        )
-        .await
-        .expect("offline file");
+    // One demand per physical source: repeated requests for one offline file
+    // correctly join its existing job instead of filling a candidate page.
+    let mut unreadable = Vec::new();
+    for index in 0..128 {
+        unreadable.push(
+            store
+                .upsert_file(
+                    item,
+                    dir.path()
+                        .join(format!("offline-{index}.mkv"))
+                        .to_str()
+                        .expect("path"),
+                    size,
+                    mtime,
+                    &Default::default(),
+                )
+                .await
+                .expect("distinct offline file"),
+        );
+    }
     let scanner = "a".repeat(64);
     let revision = store.dv_title_demands(&scanner, 0).await.expect("demand")[0].probe_revision;
     let revision = store
@@ -146,9 +156,13 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         panic!("lease");
     };
     let coordinator = ProbeCoordinator::from_lease(&lease);
-    for index in 0..129 {
+    for (index, file_id) in unreadable
+        .iter()
+        .copied()
+        .chain(std::iter::once(file))
+        .enumerate()
+    {
         let id = uuid::Uuid::new_v4().to_string();
-        let file_id = if index < 128 { unreadable } else { file };
         let pipeline = "a".repeat(64);
         assert!(matches!(
             store
