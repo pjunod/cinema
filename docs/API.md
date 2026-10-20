@@ -592,6 +592,22 @@ applied at startup; `encoder_selected` and `tone_map` report what its probes
 actually selected. `hwaccel_requested` is the saved node preference, and
 `hwaccel_restart_required` distinguishes a pending change from active state.
 
+`ffmpeg_support` reports `executable`, optional `expected_executable`,
+`package_verified`, `package_problems`, `checked_at` (Unix seconds), and
+`rows`. Each row carries `id`, `label`, `required_for`, `applicable`,
+`required`, `included`, `missing`, `runtime` and optional `runtime_detail`.
+The shared hardware contract is
+[`ffmpeg-support-matrix.json`](../scripts/ffmpeg-support-matrix.json): Mac
+requires VideoToolbox and Metal; detected Intel, AMD and NVIDIA nodes require
+their applicable Quick Sync, VA-API and NVENC/CUDA surfaces. GPU nodes also
+require Vulkan/libplacebo. Inventory is collected once at startup, separately
+from the selected encoder. Mac package checks bind source, patches, binaries,
+parser and font authority; Metal and Vulkan execute independent synthetic HDR
+graphs. `included` alone proves no execution. `not_tested` is not a pass, and
+synthetic completion does not qualify real-source playback or picture quality.
+Settings prominently warns on package problems, missing required support, or
+failed required probes; unrelated hardware requirements remain advisory.
+
 `PUT /api/v1/system/transcoder` accepts `{"node_id":"…","preference":"qsv"}`.
 The preference is one of `auto`, `nvenc`, `qsv`, `vaapi`, `videotoolbox` or
 `software`. The response contains `node_id`, `preference` and

@@ -105,3 +105,81 @@ class MacosVideoDependencyOffersCase(unittest.TestCase):
         (target / "configure").write_text("arbitrary changed generated code\n")
         with self.assertRaisesRegex(ValueError, "exact audited transformation"):
             TOOL.audit_historical_sources(self.root, self.inputs, "autoreconf -fi")
+
+    def test_reviewed_lame_alternate_is_bound_to_role_revision_and_canonical_identity(self):
+        approved = TOOL.SOURCE_ALTERNATIVES["lame"]
+        self.assertTrue(TOOL.source_identity_matches("lame", approved["alternate"], approved["canonical"]))
+        for field, value in [("revision", "6532"), ("kind", "git-source-archive"), ("sha256", "unreviewed")]:
+            altered = {**approved["alternate"], field: value}
+            self.assertFalse(TOOL.source_identity_matches("lame", altered, approved["canonical"]))
+        self.assertFalse(TOOL.source_identity_matches("other", approved["alternate"], approved["canonical"]))
+        self.assertFalse(TOOL.source_identity_matches("lame", approved["alternate"], {**approved["canonical"], "revision": "other"}))
+
+    def test_reviewed_retained_helper_is_verified_without_relabelling_consumption(self):
+        TOOL.extract_source(self.root, "demo", "pinned", self.root / "demo", self.recipe)
+        retained = self.root / "extraction-helpers/macos-video-dependency-offers.py"
+        retained.parent.mkdir()
+        retained.write_text("reviewed earlier extractor\n")
+        identity = TOOL.digest(retained)
+        self.preparation["dependency_source_inputs"]["helper_sha256"] = identity
+        (self.root / "prepared-source.json").write_text(json.dumps(self.preparation))
+        receipt = self.root / "dependency-source-consumption.jsonl"
+        row = json.loads(receipt.read_text())
+        row["extraction_helper_sha256"] = identity
+        receipt.write_text(json.dumps(row) + "\n")
+        original_receipt = receipt.read_bytes()
+        with patch.object(TOOL, "REVIEWED_EXTRACTION_HELPERS", {identity}):
+            self.assertEqual(TOOL.verify_consumption(self.root), self.facts)
+            self.assertEqual(receipt.read_bytes(), original_receipt)
+            with self.assertRaisesRegex(ValueError, "prepared dependency input"):
+                TOOL.verify_preparation(self.root)
+            retained.write_text("tampered extractor\n")
+            with self.assertRaisesRegex(ValueError, "prepared dependency input"):
+                TOOL.verify_consumption(self.root)
+        with self.assertRaisesRegex(ValueError, "unreviewed retained"):
+            TOOL.verify_consumption(self.root)
+
+    def test_retained_policy_requires_approved_identities_even_if_receipt_is_rehashed(self):
+        TOOL.extract_source(self.root, "demo", "pinned", self.root / "demo", self.recipe)
+        retained = self.root / "extraction-helpers/macos-video-dependency-sources.json"
+        retained.parent.mkdir()
+        retained.write_text(json.dumps(self.facts, indent=4))
+        self.preparation["dependency_source_inputs"]["policy_sha256"] = TOOL.digest(retained)
+        (self.root / "prepared-source.json").write_text(json.dumps(self.preparation))
+        self.assertEqual(TOOL.verify_consumption(self.root), self.facts)
+        retained.write_text(json.dumps({"demo": {**self.facts["demo"], "commit": "unreviewed"}}))
+        self.preparation["dependency_source_inputs"]["policy_sha256"] = TOOL.digest(retained)
+        (self.root / "prepared-source.json").write_text(json.dumps(self.preparation))
+        with self.assertRaisesRegex(ValueError, "policy is not approved"):
+            TOOL.verify_consumption(self.root)
+
+    def test_external_support_link_requires_exact_member_of_pinned_tool_source(self):
+        tools = self.root / "tools"
+        (tools / "archives").mkdir(parents=True)
+        installed = self.root / "installed/install-sh"
+        installed.parent.mkdir()
+        installed.write_text("approved support source\n")
+        tool_archive = tools / "archives/automake.tar.gz"
+        with tarfile.open(tool_archive, "w:gz") as output:
+            output.add(installed, arcname="automake-pinned/lib/install-sh")
+        target = self.root / "source/install-sh"
+        target.symlink_to(installed)
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        with patch.object(TOOL, "GENERATION_TOOL_ARCHIVES", {"automake": {TOOL.digest(tool_archive)}}):
+            TOOL.retain_compiled_snapshot(self.root, evidence, tools)
+            with tarfile.open(evidence / "compiled-source.tar.gz") as snapshot:
+                self.assertTrue(snapshot.getmember("install-sh").isfile())
+                self.assertEqual(snapshot.extractfile("install-sh").read(), installed.read_bytes())
+            index = json.loads((evidence / "compiled-source-index.json").read_text())
+            self.assertEqual(index["install-sh"]["member"], "automake-pinned/lib/install-sh")
+            installed.write_text("unapproved support source\n")
+            altered = self.root / "altered-evidence"
+            altered.mkdir()
+            with self.assertRaisesRegex(ValueError, "escapes verified"):
+                TOOL.retain_compiled_snapshot(self.root, altered, tools)
+            tool_archive.write_bytes(b"tampered archive")
+            tampered = self.root / "tampered-evidence"
+            tampered.mkdir()
+            with self.assertRaisesRegex(ValueError, "archive mismatch"):
+                TOOL.retain_generation_tools(tools, tampered)

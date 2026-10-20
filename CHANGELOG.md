@@ -16,6 +16,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Native Mac installs retain the complete patched Jellyfin media package,
+  including Metal reference-white support, static Vulkan/libplacebo, the
+  source parser and font authority. Known legacy media paths follow the
+  current runtime. Settings warns prominently about the wrong package,
+  missing hardware-specific features or failed execution probes, with a
+  separate build/execution matrix for Mac, Intel, AMD and NVIDIA hardware.
+
 - macOS source installation installs the pinned Rust toolchain when missing,
   bootstrapping rustup through Homebrew and installing Homebrew if needed.
   Existing toolchains are reused without a download.

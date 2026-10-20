@@ -1,3 +1,18 @@
+# Media support ownership review (PR #1239, 2026-10-20; Astra reviewed):
+# ffmpeg_support.rs adds one awaited spawn_blocking for local package hashing.
+# It owns only paths/hash inputs, no child or producer authority. An already
+# started blocking hash finishes even if its awaiting startup caller is dropped;
+# pre-read metadata caps are 2 MiB for the manifest and 256 MiB per companion.
+# There is no hash cancellation deadline; trusted local package reads reach EOF.
+# Three Command constructors are inventory (10s/2MiB), synthetic processing
+# (15s/1MiB), and Windows GPU inventory (10s/64KiB). All use the existing
+# bounded_command_*_cancellable collector with ChildWork::background: owned
+# registration, bounded output, kill-on-drop, and explicit kill/wait on timeout.
+# Capture byte limits apply separately to stdout and stderr.
+# These boot-only probes are cached by OnceCell; Settings polls launch none.
+# There is no session/rolling-producer authority or independent task/reap loop.
+# Patterns, roots and exact-equality requirements remain unchanged.
+
 # Desktop native control ownership review (PR #1220, 2026-10-19):
 # +6 namespaced task sites in desktop_control.rs: DesktopServer retains the
 # listener JoinHandle and cancels/joins it in finish; prepare/commit retain
@@ -3124,7 +3139,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # waits for all exits before capacity assertions; it never runs driver_pass.
 # -2 removed production tasks: serve/delivery.rs refresh expiry and
 # vodserve.rs ProcessedProbeLease drop cleanup. Net +1, no new shipped task.
-expected_occurrences = 983
+expected_occurrences = 984
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -5239,7 +5254,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # a three-frame control. Each output future is directly awaited and has
 # kill_on_drop(true); no separate per-command timeout or process-group/reap
 # guarantee on cancellation is asserted. No production launcher is added.
-expected_occurrences = 288
+expected_occurrences = 291
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

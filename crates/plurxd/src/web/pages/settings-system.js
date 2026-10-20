@@ -314,6 +314,31 @@ function blockedGetsHtml(b){
   const advice=node?`<div class="muted" style="margin-top:2px">Raising “Waiting segment requests” under Streaming is what changes the second number. The first one it will not change.</div>`:"";
   return `${head} <span class="muted">· since start-up:</span> ${parts.join(" · ")}${advice}`;
 }
+function ffmpegSupportWarning(sys){
+  const support=sys.ffmpeg_support;
+  if(!support)return "";
+  const missing=(support.rows||[]).filter(row=>row.required&&!row.included), failed=(support.rows||[]).filter(row=>row.required&&row.included&&["failed","unavailable"].includes(row.runtime)), problems=support.package_problems||[];
+  if(!missing.length&&!problems.length&&!failed.length)return "";
+  return `<section class="media-runtime-warning" role="alert"><h2>${missing.length?"FFmpeg lacks required support":problems.length?"FFmpeg package is not verified":"Required media hardware check failed"}</h2>
+    <p>${missing.length?`This node is missing ${esc(missing.map(row=>row.label).join(", "))}.`:problems.length?"This node is not using the verified media runtime expected by Plurx.":`Execution failed for ${esc(failed.map(row=>row.label).join(", "))}.`}</p>
+    ${problems.length?`<p>${esc(problems.join(" · "))}</p>`:""}
+    <p>Using <code>${esc(support.executable)}</code></p>
+    <p>${missing.length||problems.length?"Install the complete Plurx Jellyfin FFmpeg package and restart this node.":"Check the failed probe details and GPU driver or device access, then restart this node."} See the media support matrix below.</p></section>`;
+}
+function ffmpegSupportCard(sys){
+  const support=sys.ffmpeg_support;
+  if(!support)return "";
+  const states={passed:"Passed",failed:"Failed",blocked:"Blocked",unavailable:"Unavailable",not_tested:"Not tested",not_applicable:"Not applicable"};
+  const rows=support.rows||[], active=rows.filter(row=>row.applicable), others=rows.filter(row=>!row.applicable);
+  const render=row=>`<tr><th scope="row">${esc(row.label)}${row.missing?.length&&row.applicable?`<small>${esc(row.missing.join(" · "))}</small>`:""}</th><td>${esc(row.required_for)}${row.required?"":" · optional"}</td><td class="${row.included?'media-support-good':row.required?'media-support-bad':''}">${row.included?"✓ Included":"✕ Missing"}</td><td class="${row.runtime==='passed'?'media-support-good':row.runtime==='failed'?'media-support-bad':''}">${esc(states[row.runtime]||"Not tested")}${row.runtime_detail?`<small>${esc(row.runtime_detail)}</small>`:""}</td></tr>`;
+  return `<section class="card media-support" id="ffmpeg-support-card"><div class="media-support-heading"><h2 class="section">Media runtime</h2><span class="${support.package_verified?'media-support-good':'muted'}">${support.package_verified?"✓ Verified Plurx Jellyfin package":"Package identity not verified"}</span></div>
+    <dl class="kvgrid"><dt>Using</dt><dd><code>${esc(support.executable)}</code></dd>${support.expected_executable?`<dt>Expected</dt><dd><code>${esc(support.expected_executable)}</code></dd>`:""}</dl>
+    <h3>Support for this node</h3><p class="muted">Requirements follow this node’s hardware. Build support and execution results are separate.</p>
+    <div class="media-support-table"><table><thead><tr><th scope="col">Capability</th><th scope="col">Required for</th><th scope="col">In build</th><th scope="col">Execution probe</th></tr></thead><tbody>${active.map(render).join("")}</tbody></table></div>
+    <p class="muted">Included means the required feature and options exist. Passed means its named test completed. Not tested is not a pass. Real-source playback and picture quality qualification remain separate.</p>
+    ${others.length?`<details><summary>Other hardware · not required on this node</summary><ul>${others.map(row=>`<li>${esc(row.label)} — not required</li>`).join("")}</ul></details>`:""}
+    <p class="muted">Checked ${esc(new Date(support.checked_at*1000).toLocaleString())}. Checks run at startup; reading this page does not launch new tests.</p></section>`;
+}
 function transcoderCard(sys){
   if(!sys.node_id)return "";
   const enc=sys.encoders||{}, active=sys.hwaccel_pref||"auto", requested=sys.hwaccel_requested||active;
@@ -332,7 +357,7 @@ function transcoderCard(sys){
   const available=choices.some(([value])=>value===requested);
   const pending=sys.hwaccel_restart_required||requested!==active||optimization.restart_required;
   return `<div class="card" id="transcoder-card"><h2 class="section" style="margin-top:0">Transcoding backend</h2>
-    <p class="muted">Benchmarked automatically at startup. Auto uses the fastest supported backend on this node; an explicit choice stays selected.</p>
+    <p class="muted">Benchmarked automatically at startup. Auto uses the fastest supported backend in the SDR encoding test; an explicit choice stays selected. CPU can win this short test even when hardware acceleration works. Hardware support is checked separately in the matrix above.</p>
     <label for="node-hwaccel">Preferred backend</label>
     <select id="node-hwaccel" data-node-id="${esc(sys.node_id)}">${choices.map(([value,label])=>`<option value="${value}"${value===(available?requested:"auto")?" selected":""}>${esc(label)}</option>`).join("")}</select>
     ${available?"":`<p class="muted">The saved backend is unavailable. Choose and save an available option.</p>`}
@@ -390,7 +415,7 @@ function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .filter(([,ok])=>ok).map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
-  return `${setHead("System",`${esc(sys.display_name||sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
+  return `${setHead("System",`${esc(sys.display_name||sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${ffmpegSupportCard(sys)}${transcoderCard(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
       <dl class="kvgrid system-grid">
         ${sys.hostname?`<dt>Host</dt><dd>${esc(sys.hostname)}</dd>`:""}
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>

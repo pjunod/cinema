@@ -120,6 +120,81 @@ def unpack_media(archive, destination):
             raise ValueError(f"pinned media archive lacks executable {name}")
 
 
+def validate_media_package(package, machine):
+    """A stock upstream archive is not the Plurx native processing runtime."""
+    load_recipe("package-macos").validate_native_package(package)
+    media = load_recipe("build-macos-video-ffmpeg")
+    manifest = json.loads((package / "provenance/manifest.json").read_text())
+    if manifest.get("mode") != "compiled-pinned-jellyfin":
+        raise ValueError("macOS source runtime requires the patched Jellyfin FFmpeg package")
+    expected = {path.name: digest(path) for path in sorted((ROOT / "scripts/macos-video-ffmpeg-patches").glob("*.patch"))}
+    if not expected or manifest.get("compiled_source", {}).get("local_patches") != expected:
+        raise ValueError("media package does not contain the current Plurx FFmpeg patches")
+    for name in ["ffmpeg", "ffprobe"]:
+        if manifest["binaries"][name].get("architecture") != machine:
+            raise ValueError("media package architecture differs from this native source runtime")
+        if not os.access(package / name, os.X_OK):
+            raise ValueError(f"media package lacks executable {name}")
+    media.validate_font_tools(package, manifest.get("font_tools"))
+    executable = package / "ffmpeg"
+    filters = output([executable, "-hide_banner", "-filters"], stderr=subprocess.STDOUT)
+    declared = set(re.findall(r"^\s*[.A-Z|]{2,}\s+(\w+)\s", filters, re.M))
+    required = set(media.REQUIRED["filters"]) | {"libplacebo", "tonemap_opencl", "subtitles_vt_images", "overlay_videotoolbox", "bwdif_videotoolbox"}
+    if missing := required - declared:
+        raise ValueError("media package lacks required filters: " + ", ".join(sorted(missing)))
+    hwaccels = output([executable, "-hide_banner", "-hwaccels"], stderr=subprocess.STDOUT).splitlines()
+    if not {"videotoolbox", "vulkan"}.issubset(line.strip() for line in hwaccels):
+        raise ValueError("media package requires VideoToolbox and Vulkan support")
+    with tempfile.TemporaryDirectory(prefix="plurx-media-contract-") as work:
+        evidence = Path(work)
+        (evidence / "full-help.txt").write_text(output([executable, "-hide_banner", "-h", "full"], stderr=subprocess.STDOUT))
+        media.verify_strict_options(executable, evidence)
+        if not media.verify_prepared_hable_white(executable, evidence, expected):
+            raise ValueError("media package lacks the Metal Hable reference-white contract")
+        if not media.verify_prepared_subtitle_options(executable, evidence, expected):
+            raise ValueError("media package lacks the native subtitle contract")
+
+
+def stage_media_package(package, destination, machine):
+    validate_media_package(package, machine)
+    # Keep the parser, fonts, licenses and inspectable build provenance beside
+    # their exact binaries. Copy only the media closure when reusing an
+    # installed runtime, never its old daemon or subtitle engine.
+    for name in ["ffmpeg", "ffprobe", "fc-list", "fc-conflist", "fontconfig", "provenance", "plurx-source-parser.wasm"]:
+        source = package / name
+        if source.is_dir():
+            shutil.copytree(source, destination / name)
+        else:
+            shutil.copyfile(source, destination / name)
+            (destination / name).chmod(source.stat().st_mode & 0o777)
+
+
+def select_media_package(explicit, cache, machine):
+    configured = explicit or os.environ.get("PLURX_MACOS_FFMPEG_PACKAGE")
+    if configured:
+        package = Path(configured).absolute()
+        validate_media_package(package, machine)
+        return package
+    inputs = [ROOT / "scripts" / name for name in ["build-macos-source-media", "build-macos-video-ffmpeg", "prepare-macos-video-ffmpeg", "build-macos-vulkan", "macos-vulkan-sources.json", "ffmpeg-support-matrix.json"]]
+    key = hashlib.sha256("".join(digest(path) for path in inputs).encode()).hexdigest()
+    cached = cache / ("ffmpeg-" + key)
+    candidates = [cached, Path.home() / "Library/Application Support/plurx/runtime/current/runtime"]
+    for package in candidates:
+        if not (package / "provenance/manifest.json").is_file():
+            continue
+        try:
+            validate_media_package(package, machine)
+            return package
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            continue
+    print("source runtime: building complete patched Jellyfin FFmpeg with Metal, Vulkan/libplacebo, fonts and parser; the first build takes longer", flush=True)
+    if cached.exists():
+        raise ValueError("cached media package failed verification; retain/remove it explicitly before rebuilding: " + str(cached))
+    run([sys.executable, ROOT / "scripts/build-macos-source-media", "--output", cached, "--jobs", "4"])
+    validate_media_package(cached, machine)
+    return cached
+
+
 def verify_identity(binary, source_commit):
     if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
         raise ValueError("daemon must be an executable regular file")
@@ -180,37 +255,19 @@ def build(args):
         package = temporary / "package"
         runtime = package / "runtime"
         runtime.mkdir(parents=True)
-        media = load_recipe("build-macos-video-ffmpeg")
-        archive = temporary / "media.tar.xz"
-        release_arch, expected = media.ARCHIVES[machine]
-        name = f"jellyfin-ffmpeg_{media.TAG[1:]}_portable_{release_arch}-gpl.tar.xz"
-        cached_archive = cache / f"{expected}.tar.xz"
-        local_archive = args.ffmpeg_archive
-        if local_archive is None and cached_archive.is_file() and not cached_archive.is_symlink() and digest(cached_archive) == expected:
-            local_archive = cached_archive
-        media.acquire(local_archive, f"https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/{media.TAG}/{name}", expected, archive)
-        if not cached_archive.exists():
-            shutil.copyfile(archive, cached_archive)
-        unpack_media(archive, runtime)
+        if args.ffmpeg_archive:
+            raise ValueError("--ffmpeg-archive contains unpatched upstream binaries; use --ffmpeg-package for the complete native runtime")
+        media_package = select_media_package(args.ffmpeg_package, cache, machine)
+        stage_media_package(media_package, runtime, machine)
         parser = args.source_parser
+        if parser is not None and digest(parser) != digest(runtime / "plurx-source-parser.wasm"):
+            raise ValueError("--source-parser must match the verified media package companion")
         if parser is None:
-            parser_builder = ROOT / "scripts/build-macos-source-parser"
-            parser_package = cache / ("parser-" + digest(parser_builder))
-            parser = parser_package / "bin/plurx-source-parser.wasm"
-            stamp = parser_package / "source-cache.json"
-            cached = False
-            if parser.is_file() and not parser.is_symlink() and stamp.is_file() and not stamp.is_symlink():
-                cached = json.loads(stamp.read_text()).get("module_sha256") == digest(parser)
-            if not cached:
-                built_parser = temporary / "parser"
-                run([sys.executable, parser_builder, "--output", built_parser, "--jobs", "4"])
-                write_json(built_parser / "source-cache.json", {"module_sha256": digest(built_parser / "bin/plurx-source-parser.wasm")})
-                if parser_package.exists():
-                    shutil.rmtree(parser_package)
-                built_parser.rename(parser_package)
+            parser = runtime / "plurx-source-parser.wasm"
         if parser.is_symlink() or not parser.is_file() or parser.read_bytes()[:8] != b"\0asm\1\0\0\0":
             raise ValueError("source parser must be a regular WebAssembly module")
-        shutil.copyfile(parser, runtime / "plurx-source-parser.wasm")
+        if parser != runtime / "plurx-source-parser.wasm":
+            shutil.copyfile(parser, runtime / "plurx-source-parser.wasm")
         engine = args.subtitle_engine_package
         if engine is None:
             engine_builder = ROOT / "scripts/build-subtitle-engine"
@@ -258,6 +315,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--ffmpeg-archive", type=Path)
+    parser.add_argument("--ffmpeg-package", type=Path, help="verified patched Jellyfin package with Metal, Vulkan/libplacebo, fonts and parser; otherwise reuse a complete cached/installed package")
     parser.add_argument("--source-parser", type=Path)
     parser.add_argument("--subtitle-engine-package", type=Path)
     parser.add_argument("--dry-run", action="store_true")

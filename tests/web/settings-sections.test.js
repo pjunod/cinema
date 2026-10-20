@@ -45,6 +45,43 @@ let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
 
+test("media support warning remains prominent for a working encoder with missing required Metal", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
+  const html=render({encoders:{videotoolbox:true},ffmpeg_support:{executable:'/operator/ffmpeg<wrong>',package_problems:[],rows:[
+    {label:"Metal HDR tone mapping",required:true,included:false},
+    {label:"NVENC",required:false,included:false}
+  ]}});
+  assert.match(html,/role="alert"/);
+  assert.match(html,/FFmpeg lacks required support/);
+  assert.match(html,/Metal HDR tone mapping/);
+  assert.doesNotMatch(html,/NVENC/);
+  assert.match(html,/ffmpeg&lt;wrong&gt;/);
+  assert.equal(render({ffmpeg_support:{executable:"ffmpeg",package_problems:[],rows:[{required:true,included:true}]}}),"");
+});
+
+test("media support matrix separates build inclusion from untested execution and unrelated hardware", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportCard")}\nreturn ffmpegSupportCard;`)(esc);
+  const html=render({ffmpeg_support:{executable:"ffmpeg",checked_at:1,package_verified:true,rows:[
+    {id:"metal",label:"Metal",applicable:true,required:true,included:true,runtime:"not_tested",missing:[]},
+    {id:"nvenc",label:"NVENC",applicable:false,required:false,included:false,runtime:"not_applicable",missing:["h264_nvenc"]}
+  ]}});
+  assert.match(html,/✓ Included/);
+  assert.match(html,/Not tested/);
+  assert.match(html,/Other hardware · not required on this node/);
+  assert.doesNotMatch(html,/>Passed</);
+  assert.doesNotMatch(html,/h264_nvenc/);
+});
+
+test("media support warns when a required included device fails execution", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
+  const html=render({ffmpeg_support:{executable:"ffmpeg",package_problems:[],rows:[
+    {label:"VideoToolbox",required:true,included:true,runtime:"failed"}
+  ]}});
+  assert.match(html,/Required media hardware check failed/);
+  assert.match(html,/Execution failed for VideoToolbox/);
+  assert.doesNotMatch(html,/Install the complete/);
+});
+
 test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
   const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
   const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});

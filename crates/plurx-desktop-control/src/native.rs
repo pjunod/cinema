@@ -779,6 +779,35 @@ pub fn daemon_path(i: &InstallationV1) -> Result<PathBuf> {
         }
     }
 }
+
+/// Retire media-tool paths written by the old macOS installer while retaining
+/// genuine operator overrides. Resolve through `current` so upgrades and
+/// rollback select the daemon and its media closure together.
+pub fn packaged_media_override(
+    runtime: &Path,
+    tool: &str,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let packaged = runtime.join("current/runtime").join(tool);
+    let Some(value) = inherited.filter(|value| !value.is_empty()) else {
+        return Some(packaged);
+    };
+    let path = Path::new(value);
+    if path.file_name() != Some(std::ffi::OsStr::new(tool)) {
+        return None;
+    }
+    let parent = path.parent()?;
+    let legacy = ["/opt/homebrew/libexec/plurx", "/usr/local/libexec/plurx"]
+        .iter()
+        .any(|prefix| {
+            parent.parent() == Some(Path::new(prefix))
+                && parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("jellyfin-ffmpeg-"))
+        });
+    (legacy || path.starts_with(runtime.join("versions"))).then_some(packaged)
+}
 /// The replacement's compiled roots, not downloaded metadata, define its next bridge.
 pub fn installed_trust_keys(i: &InstallationV1, authenticated_signer: &str) -> Result<Vec<String>> {
     let path = if i.method == InstallMethod::MacosNative {

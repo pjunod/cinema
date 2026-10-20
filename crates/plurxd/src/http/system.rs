@@ -251,6 +251,7 @@ pub async fn setup(
 
 #[derive(Serialize)]
 pub struct SystemDto {
+    pub ffmpeg_support: crate::ffmpeg_support::SupportReport,
     pub node_id: String,
     pub hwaccel_requested: String,
     pub hwaccel_restart_required: bool,
@@ -422,6 +423,7 @@ pub async fn system_info(
         .unwrap_or_else(|| state.server_name.clone());
     let hostname = state.node_hostname.clone();
     Ok(Json(SystemDto {
+        ffmpeg_support: crate::ffmpeg_support::report(&state.system).await,
         node_id: state.node_id.clone(),
         hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
         hwaccel_restart_required,
