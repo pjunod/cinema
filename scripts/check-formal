@@ -72,6 +72,55 @@ class RunnerError(Exception):
     """A fail-closed runner or mapping error."""
 
 
+def parse_config_contract(config_text: str) -> tuple[set[str], list[str]]:
+    """Read declared properties and explicit config-level reductions fail-closed."""
+    properties: set[str] = set()
+    reductions: list[str] = []
+    property_block = False
+    known = {
+        "SPECIFICATION", "INIT", "NEXT", "CONSTANT", "CONSTANTS",
+        "INVARIANT", "INVARIANTS", "PROPERTY", "PROPERTIES",
+        "CONSTRAINT", "CONSTRAINTS", "SYMMETRY", "VIEW",
+        "CHECK_DEADLOCK", "ALIAS", "POSTCONDITION",
+    }
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    for number, raw in enumerate(config_text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(r"\*"):
+            continue
+        token_match = re.match(r"([A-Z][A-Z_]*)\b", stripped)
+        directive_token = token_match.group(1) if token_match else None
+        indented_directive = raw[0].isspace() and directive_token in known
+        if raw[0].isspace() and not indented_directive:
+            if property_block:
+                if directive_token and directive_token.isupper() and directive_token not in known:
+                    raise RunnerError(f"unknown TLC config directive at line {number}: {directive_token}")
+                if not identifier.fullmatch(stripped):
+                    raise RunnerError(f"malformed property declaration at config line {number}: {stripped}")
+                properties.add(stripped)
+            continue
+        property_block = False
+        match = re.fullmatch(r"([A-Z][A-Z_]*)\s*(.*?)\s*", stripped)
+        if not match:
+            raise RunnerError(f"unknown TLC config directive at line {number}: {stripped}")
+        directive, value = match.groups()
+        if directive not in known:
+            raise RunnerError(f"unknown TLC config directive at line {number}: {directive}")
+        if directive in ("INVARIANT", "PROPERTY"):
+            if not identifier.fullmatch(value):
+                raise RunnerError(f"malformed {directive} declaration at config line {number}")
+            properties.add(value)
+        elif directive in ("INVARIANTS", "PROPERTIES"):
+            if value:
+                raise RunnerError(f"plural {directive} block cannot have an inline value at line {number}")
+            property_block = True
+        elif directive in ("CONSTRAINT", "CONSTRAINTS", "SYMMETRY", "VIEW"):
+            if not identifier.fullmatch(value):
+                raise RunnerError(f"malformed {directive} declaration at config line {number}")
+            reductions.append(f"{directive} {value}")
+    return properties, reductions
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -210,14 +259,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                 ):
                     drift.append(f"configuration properties must be a non-empty unique name list: {name}")
                 else:
-                    declared = {
-                        match.group(2)
-                        for match in re.finditer(
-                            r"^\s*(INVARIANT|PROPERTY)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\\\*.*)?$",
-                            config_text,
-                            re.MULTILINE,
-                        )
-                    }
+                    declared, _ = parse_config_contract(config_text)
                     if set(properties) != declared:
                         drift.append(f"reviewed properties differ from config declarations: {name}")
                 error_match = record.get("expected_error_match")
@@ -245,6 +287,13 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                     value = analysis.get(field)
                     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
                         drift.append(f"{field} metadata must be a string list (possibly empty): {name}")
+                if isinstance(analysis.get("reductions"), list):
+                    try:
+                        _, declared_reductions = parse_config_contract(config_text)
+                        if analysis["reductions"] != declared_reductions:
+                            drift.append(f"reviewed reductions differ from config declarations: {name}")
+                    except RunnerError as exc:
+                        drift.append(f"invalid config contract for {name}: {exc}")
         except RunnerError as exc:
             drift.append(str(exc))
 

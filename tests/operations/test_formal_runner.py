@@ -135,6 +135,42 @@ class RegistryProfileTests(unittest.TestCase):
         self.assertEqual(formal.config_timeout("smoke", "witness-displacement.cfg", 30, 10), 10)
         with self.assertRaises(formal.RunnerError):
             formal.select_configs("smoke", "witness-time-advance.cfg")
+
+
+class ConfigContractParsingTests(unittest.TestCase):
+    def test_multiline_properties_stop_before_config_reductions(self) -> None:
+        text = """SPECIFICATION Spec
+INVARIANTS
+  S0_TypeAndIdentity
+  S1_ExclusiveCurrentAttempt
+PROPERTIES
+  S5_CancellationPrecedence
+CONSTRAINT PublicationWitnessBound
+SYMMETRY Symm
+VIEW ModelView
+"""
+        properties, reductions = formal.parse_config_contract(text)
+        self.assertEqual(
+            properties,
+            {"S0_TypeAndIdentity", "S1_ExclusiveCurrentAttempt", "S5_CancellationPrecedence"},
+        )
+        self.assertEqual(
+            reductions,
+            ["CONSTRAINT PublicationWitnessBound", "SYMMETRY Symm", "VIEW ModelView"],
+        )
+
+    def test_indented_known_directive_is_not_mistaken_for_a_property(self) -> None:
+        properties, reductions = formal.parse_config_contract(
+            "INVARIANTS\n  S0_TypeAndIdentity\n  VIEW ModelView\n"
+        )
+        self.assertEqual(properties, {"S0_TypeAndIdentity"})
+        self.assertEqual(reductions, ["VIEW ModelView"])
+
+    def test_malformed_property_block_is_rejected_instead_of_consuming_directives(self) -> None:
+        with self.assertRaises(formal.RunnerError):
+            formal.parse_config_contract("INVARIANTS\n  SYMMETRY Symm extra\n")
+        with self.assertRaises(formal.RunnerError):
+            formal.parse_config_contract("UNKNOWN_DIRECTIVE Anything\n")
         self.assertEqual(formal.select_configs("full", "baseline.cfg"), ["baseline.cfg"])
 
     def test_violation_rejects_wrong_exit(self) -> None:
