@@ -1,6 +1,6 @@
 # Full suite on every PR — audit, execution contract, and implementation plan
 
-**Status:** open — M0 instrumentation built and diagnostic baseline measured; qualification remains open ·
+**Status:** open — M0 diagnostic baseline measured; M1 Rust repair and qualification in progress ·
 **Requested:** 2026-10-20 · **Audit source:** `c1c344132` ·
 **Evidence captured:** 2026-10-20 14:21:12 UTC
 
@@ -20,6 +20,10 @@ Existing source fixes are identified separately from unimplemented work.
 No passing complete run is claimed until its outcomes are recorded.
 Current measurements are tracked in
 [FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md).
+The authorized next milestone is tracked in
+[RUST-SUITE-REPAIR-2026-10-20.md](RUST-SUITE-REPAIR-2026-10-20.md): preserve
+the 25 failed identities, correct their causes and qualify repeated/full
+Rust execution before enabling any new automatic PR policy.
 
 ## 1. Outcome — every landing has complete, fresh test evidence
 

@@ -1195,6 +1195,19 @@ struct Shared {
     hooks: crate::seam_hooks::HookSlot<dyn VodSharedHooks>,
 }
 
+/// Per-driver ordering scope captured before the normal task is spawned.
+/// Production uses a ready scope; instance hooks can observe registration and
+/// pause the real task without replacing its loop or its cleanup behavior.
+pub(crate) trait VodDriverHooks: Send + Sync {
+    fn spawned(&self, _task: tokio::task::AbortHandle) {}
+    fn before_turn(&self) -> crate::seam_hooks::HookFuture<'_> {
+        Box::pin(crate::seam_hooks::HookReady)
+    }
+}
+
+pub(crate) struct NoopVodDriverHooks;
+impl VodDriverHooks for NoopVodDriverHooks {}
+
 /// The points of the VOD registry ([`Shared`]) that a race test can pause at,
 /// and one it can answer in place of the Store (TRANSCODE-DECOMPOSITION-PLAN
 /// §3.9, M8).
@@ -1205,6 +1218,14 @@ struct Shared {
 /// is the struct and the set of await points, not scheduling. `Any` is a
 /// supertrait only so a test can reach the test hooks behind the registry.
 pub(crate) trait VodSharedHooks: std::any::Any + Send + Sync {
+    /// Capture one driver's ordering scope before its actual task is spawned.
+    fn driver_hooks(
+        &self,
+        _encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Arc<dyn VodDriverHooks> {
+        Arc::new(NoopVodDriverHooks)
+    }
+
     fn private_cleanup_failure(&self, _phase: &str) -> bool {
         false
     }
@@ -1317,6 +1338,13 @@ pub(crate) struct VodSharedTestHooks {
 
 #[cfg(test)]
 impl VodSharedHooks for VodSharedTestHooks {
+    fn driver_hooks(
+        &self,
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Arc<dyn VodDriverHooks> {
+        driver::controlled_driver::hooks(encoding)
+    }
+
     fn private_cleanup_failure_for(&self, phase: &str, key: &str) -> bool {
         let failures = self.private_failures.lock().expect("private failures");
         failures.contains(phase) || failures.contains(&format!("{phase}:{key}"))

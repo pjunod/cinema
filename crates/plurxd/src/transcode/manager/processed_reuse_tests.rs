@@ -18,7 +18,10 @@ type PauseMap = std::collections::HashMap<(String, &'static str), Arc<Preparatio
 static PAUSES: std::sync::OnceLock<std::sync::Mutex<PauseMap>> = std::sync::OnceLock::new();
 
 impl TranscodeManager {
-    pub(super) async fn processed_preparation_test_boundary(session: &str, boundary: &'static str) {
+    pub(in crate::transcode) async fn processed_preparation_test_boundary(
+        session: &str,
+        boundary: &'static str,
+    ) {
         let pause = PAUSES
             .get_or_init(Default::default)
             .lock()
@@ -467,10 +470,70 @@ async fn staged_processed_audio_canonicalization_reuses_default_and_alternate_aa
     }
 }
 
+#[tokio::test]
+async fn processed_reuse_real_driver_pause_cleans_up_after_fixture_panic() {
+    let f = fixture(DvDestination::Hdr10).await;
+    let finished = f
+        .manager
+        .vod
+        .controlled_driver_cleanup_probe_for_test(&f.encoding);
+    let original = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _fixture = f;
+        panic!("injected processed-reuse fixture panic with actual driver parked");
+    }))
+    .expect_err("the fixture panic remains observable");
+    finished.await;
+    assert_eq!(
+        original.downcast_ref::<&str>().copied(),
+        Some("injected processed-reuse fixture panic with actual driver parked")
+    );
+}
+
+#[tokio::test]
+async fn processed_reuse_real_driver_pause_cleans_up_after_observer_cancellation() {
+    let f = fixture(DvDestination::Hdr10).await;
+    let finished = f
+        .manager
+        .vod
+        .controlled_driver_cleanup_probe_for_test(&f.encoding);
+    let (ready, observing) = tokio::sync::oneshot::channel();
+    let observer = tokio::spawn(async move {
+        let _fixture = f;
+        let _ = ready.send(());
+        std::future::pending::<()>().await;
+    });
+    let readiness = tokio::time::timeout(Duration::from_secs(5), observing).await;
+    observer.abort();
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), observer)
+        .await
+        .expect("bounded observer cancellation join");
+    finished.await;
+    readiness
+        .expect("observer owns actual paused driver fixture")
+        .expect("observer ready");
+    assert!(cancelled
+        .expect_err("observer must be cancelled")
+        .is_cancelled());
+}
+
+#[tokio::test]
+async fn processed_reuse_real_driver_cancels_registration_after_teardown() {
+    let mut f = fixture(DvDestination::Hdr10).await;
+    f.manager
+        .vod
+        .assert_driver_registration_teardown_for_test(&f.encoding)
+        .await;
+    f.manager
+        .vod
+        .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+        .await;
+    assert_reservation_released(&mut f).await;
+}
+
 // Byte-bound lifecycle controls, not Dolby pixel/reference-accuracy evidence.
 // The real completed-window validator checks the generated HEVC/PQ stream;
-// controlled driver scheduling keeps its real exclusive worker outside the
-// slot without provoking a duplicate launch. This does not test driver/reap.
+// a typed ordering pause holds the real normal driver while the fixture owns
+// its exclusive worker outside the slot. Producer execution/reap is not claimed.
 struct Fixture {
     _driver: Box<dyn Send + Sync>,
     _root: tempfile::TempDir,
@@ -965,6 +1028,9 @@ async fn fixture_with_audio(
             "node".into(),
         ),
     );
+    // Install the existing instance hooks before any custody ordering point.
+    // Default answers remain ready/None; only an explicitly armed pause holds.
+    let _ = manager.test_hooks();
     let snapshot = store
         .playback_planning_snapshot(file_id, &QUALITY_PLANNING_KEYS)
         .await

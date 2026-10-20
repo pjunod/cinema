@@ -38,7 +38,12 @@ use super::placeholder_census::STORE_SOURCES;
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     // Progressive translation checks both the committed extension shape and its
     // singleton marker before migration/admission; neither may use a stale replica.
-    ("hiqlite.rs", 50),
+    // Library annotations adds the same committed shape/marker admission fences.
+    ("hiqlite.rs", 52),
+    // Ratings and memberships retain read-after-write behavior after a refresh
+    // or a person's list edit. These five existing reads do not raise the
+    // unannotated ceiling.
+    ("hiqlite_annotations.rs", 5),
     ("hiqlite_background_jobs.rs", 2),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),

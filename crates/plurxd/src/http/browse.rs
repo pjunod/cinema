@@ -1916,6 +1916,57 @@ mod tests {
         (counts.snapshot(), counts.cluster_index_availability_calls())
     }
 
+    async fn k04_wait_for_echo(
+        metrics: &plurx_core::cluster::migration::status::PassiveRaftMetrics,
+        echo: u64,
+        route: &str,
+    ) -> (
+        plurx_core::cluster::migration::status::PassiveRaftMetricsView,
+        plurx_core::cluster::migration::status::ServingProof,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let snapshot = metrics.snapshot();
+                if snapshot
+                    .sample
+                    .and_then(|sample| sample.last_applied_index)
+                    .is_some_and(|index| index >= echo)
+                {
+                    if let Some(proof) = metrics.eligible_serving_proof() {
+                        break (snapshot, proof);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{route}: real sampled apply must reach echo {echo} with zero-lag proof; {:?}",
+                metrics.snapshot()
+            )
+        })
+    }
+
+    async fn k04_fresh_route_reads<T: serde::Serialize>(
+        metrics: &plurx_core::cluster::migration::status::PassiveRaftMetrics,
+        echo: u64,
+        route: &str,
+        handler: impl std::future::Future<Output = Result<Json<T>, super::ApiError>>,
+    ) -> ([u64; 3], u64) {
+        // Establish the premise before the independent request. The request
+        // itself is measured once, including a failure if its proof expires.
+        let (before, proof) = k04_wait_for_echo(metrics, echo, route).await;
+        let result = route_reads_of(handler).await;
+        println!(
+            "K-04 one-attempt {route} echo={echo} before={before:?} after={:?} original_proof_still_valid={} counts={:?}",
+            metrics.snapshot(),
+            metrics.serving_proof_remains_valid(&proof),
+            result.0
+        );
+        result
+    }
+
     /// K-04's M4 bar (BOUNDED-REPLICA-READS-ROLLOUT.md §5.5: library and item
     /// at most one Authority read per request, home at most two) measured on a
     /// real replicated voter with the route accounting the daemon exports. The
@@ -2041,6 +2092,7 @@ mod tests {
             .expect("applied index")
             .index;
         let echo = Some(applied);
+        let metrics = selected.replication_monitor().metrics_handle();
 
         let item = |read_after| {
             super::item_detail(
@@ -2078,14 +2130,17 @@ mod tests {
         // [local, authority, write]
         const LOCAL: usize = 0;
         const AUTHORITY: usize = 1;
-        let (item_echo, item_lookups) = route_reads_of(item(echo)).await;
+        let (item_echo, item_lookups) =
+            k04_fresh_route_reads(&metrics, applied, "item", item(echo)).await;
         assert_eq!(
             item_lookups, 1,
             "the fixture must reach the cluster-artefact fallback"
         );
-        let (library_echo, _) = route_reads_of(library_grid(echo)).await;
-        let (previews_echo, _) = route_reads_of(previews(echo)).await;
-        let (hubs_echo, _) = route_reads_of(hubs(echo)).await;
+        let (library_echo, _) =
+            k04_fresh_route_reads(&metrics, applied, "library", library_grid(echo)).await;
+        let (previews_echo, _) =
+            k04_fresh_route_reads(&metrics, applied, "previews", previews(echo)).await;
+        let (hubs_echo, _) = k04_fresh_route_reads(&metrics, applied, "hubs", hubs(echo)).await;
         // Header-less clients: one Authority read per watch dependency.
         let (item_bare, _) = route_reads_of(item(None)).await;
         let (library_bare, _) = route_reads_of(library_grid(None)).await;
@@ -2125,7 +2180,36 @@ mod tests {
             hubs_bare[AUTHORITY], 2,
             "hubs without an echo: {hubs_bare:?}"
         );
+        // A real expired proof cannot satisfy the same echo. Stop the actual
+        // sampler, retain the original capability, and observe its own expiry;
+        // do not manufacture a clock or retry the measured fallback request.
+        let (_, original) = k04_wait_for_echo(&metrics, applied, "expiry setup").await;
         sampler.abort();
+        assert!(sampler
+            .await
+            .expect_err("sampler was aborted")
+            .is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while metrics.serving_proof_remains_valid(&original) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the original real proof must expire without refreshing");
+        assert!(
+            metrics.eligible_serving_proof().is_none(),
+            "expired sampler cannot qualify a new echo proof: {:?}",
+            metrics.snapshot()
+        );
+        let (expired_echo, _) = route_reads_of(previews(echo)).await;
+        // Expiry removes bounded catalogue reads too: list_libraries,
+        // home_preview_pages, watch_summary and item_max_heights each issue
+        // one actual Authority query. This one-movie fixture has no folders,
+        // so child_counts([]) returns without a query. AuthUser is pre-resolved.
+        assert_eq!(
+            expired_echo, [0, 4, 0],
+            "the single expired-proof request must perform exactly its four Authority queries and no local reads or writes"
+        );
         selected.shutdown().await.expect("drain replicated voter");
     }
 

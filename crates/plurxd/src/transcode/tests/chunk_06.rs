@@ -2461,6 +2461,192 @@
             .rsplit(',').next().expect("frame digest column").trim().to_owned()
     }
 
+    #[derive(Debug)]
+    struct F6CleanupReceipt {
+        retirement: Result<bool, String>,
+        loop_joined: bool,
+        child_reaped: bool,
+        session_retired: bool,
+        registry_empty: bool,
+    }
+
+    impl F6CleanupReceipt {
+        fn qualified(&self) -> bool {
+            self.retirement.is_ok()
+                && self.loop_joined
+                && self.child_reaped
+                && self.session_retired
+                && self.registry_empty
+        }
+    }
+
+    struct F6CleanupOwner {
+        _root: Arc<tempfile::TempDir>,
+        manager: Arc<TranscodeManager>,
+        existing: Arc<Session>,
+        fence: crate::serving_fence::ServingFence,
+        fence_loop: tokio::task::JoinHandle<()>,
+        receipt: tokio::sync::oneshot::Sender<F6CleanupReceipt>,
+    }
+
+    struct F6CleanupGuard(Option<F6CleanupOwner>);
+
+    impl Drop for F6CleanupGuard {
+        fn drop(&mut self) {
+            let Some(owner) = self.0.take() else {
+                return;
+            };
+            // Transfer before awaiting: observer cancellation must not cancel the
+            // actual process owner or discard its scratch while it is still live.
+            tokio::spawn(async move {
+                let F6CleanupOwner {
+                    _root,
+                    manager,
+                    existing,
+                    fence,
+                    mut fence_loop,
+                    receipt,
+                } = owner;
+                // Fixture-only bounds: ten seconds for normal retirement, then
+                // five seconds to join the aborted fence task. The original
+                // request and grace assertions keep their deadlines.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let retirement = manager
+                    .retire_session_until("existing", &existing, Some(deadline))
+                    .await;
+                drop(fence);
+                // The fence task must not remain detached even after a test panic.
+                fence_loop.abort();
+                let loop_joined = tokio::time::timeout(Duration::from_secs(5), &mut fence_loop)
+                    .await
+                    .is_ok_and(|joined| {
+                        joined.is_ok() || joined.is_err_and(|error| error.is_cancelled())
+                    });
+                let observation = F6CleanupReceipt {
+                    retirement,
+                    loop_joined,
+                    child_reaped: existing.child.try_lock().is_ok_and(|child| child.is_none()),
+                    session_retired: existing.control.is_retired()
+                        && existing.retirement_cleanup_finished.load(Acquire),
+                    registry_empty: manager.sessions.try_lock().is_ok_and(|sessions| sessions.is_empty()),
+                };
+                let _ = receipt.send(observation);
+                drop(_root);
+            });
+        }
+    }
+
+    async fn f6_cleanup_receipt(
+        receiver: tokio::sync::oneshot::Receiver<F6CleanupReceipt>,
+    ) -> Result<F6CleanupReceipt, String> {
+        tokio::time::timeout(Duration::from_secs(20), receiver)
+            .await
+            .map_err(|_| "bounded cleanup observation expired".to_owned())?
+            .map_err(|_| "cleanup owner ended without a reap/join receipt".to_owned())
+    }
+
+    struct F6MediaFixture {
+        media: std::path::PathBuf,
+        executable: std::path::PathBuf,
+        publisher_pid: u32,
+        manager: Arc<TranscodeManager>,
+        existing: Arc<Session>,
+        fence: crate::serving_fence::ServingFence,
+        cleanup_receiver: Option<tokio::sync::oneshot::Receiver<F6CleanupReceipt>>,
+        _cleanup: F6CleanupGuard,
+    }
+
+    impl F6MediaFixture {
+        async fn start() -> Self {
+            use plurx_core::cluster::migration::status::ReplicationMonitor;
+            use plurx_core::store::SqliteStore;
+            let root = Arc::new(crate::test_tempdir().expect("isolated real-media root"));
+            let media = root.path().join("media");
+            std::fs::create_dir(&media).expect("owned publisher directory");
+            let executable = crate::ffmpeg::encoder_executable_path().expect("pinned FFmpeg");
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let fence =
+                crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+            let manager = Arc::new(
+                TranscodeManager::new(
+                    store,
+                    root.path().join("manager"),
+                    EncoderCaps::default(),
+                    Pipeline::Cpu,
+                )
+                .with_serving_authority(fence.authority()),
+            );
+            // No await from actual child creation to transferring it to cleanup.
+            let mut sessions = manager.sessions.lock().await;
+            let mut command = tokio::process::Command::new(&executable);
+            command
+                .args([
+                    "-v",
+                    "error",
+                    "-nostdin",
+                    "-re",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=160x120:rate=10",
+                    "-an",
+                    "-c:v",
+                    "libx264",
+                    "-threads",
+                    "1",
+                    "-preset",
+                    "ultrafast",
+                    "-g",
+                    "10",
+                    "-bf",
+                    "0",
+                    "-hls_time",
+                    "1",
+                    "-hls_list_size",
+                    "0",
+                    "-hls_flags",
+                    "temp_file+omit_endlist",
+                    "-hls_segment_filename",
+                ])
+                .arg(media.join("segment%05d.ts"))
+                .arg(media.join("index.m3u8"))
+                .stdout(std::process::Stdio::null())
+                .kill_on_drop(true);
+
+            let child = command.spawn().expect("actual realtime media publisher");
+            let publisher_pid = child.id().expect("live publisher pid");
+            let existing = watchdog_session(&media, Some(child), false);
+            sessions.insert("existing".to_owned(), Arc::clone(&existing));
+            drop(sessions);
+            let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let cleanup = F6CleanupGuard(Some(F6CleanupOwner {
+                _root: root,
+                manager: Arc::clone(&manager),
+                existing: Arc::clone(&existing),
+                fence: fence.clone(),
+                fence_loop,
+                receipt: sender,
+            }));
+            Self {
+                media,
+                executable,
+                publisher_pid,
+                manager,
+                existing,
+                fence,
+                cleanup_receiver: Some(receiver),
+                _cleanup: cleanup,
+            }
+        }
+
+        async fn finish(mut self) -> Result<F6CleanupReceipt, String> {
+            let receiver = self.cleanup_receiver.take().expect("one cleanup observer");
+            drop(self);
+            f6_cleanup_receipt(receiver).await
+        }
+    }
+
     /// F6's historical 2468 ms outage had zero viewers. Exercise the existing
     /// grace with one real publisher and independently decode its before,
     /// during and after media. This establishes media continuity at the owner;
@@ -2468,71 +2654,162 @@
     #[tokio::test]
     async fn serving_fence_preserves_real_media_through_2468ms_and_reaps_after_grace() {
         super::require_ffmpeg();
-        use plurx_core::cluster::migration::status::ReplicationMonitor;
-        use plurx_core::store::SqliteStore;
-        let root = crate::test_tempdir().expect("isolated real-media root");
-        let media = root.path().join("media");
-        std::fs::create_dir(&media).expect("owned publisher directory");
-        let executable = crate::ffmpeg::encoder_executable_path().expect("pinned FFmpeg");
-        let mut command = tokio::process::Command::new(&executable);
-        command.args(["-v", "error", "-nostdin", "-re", "-f", "lavfi", "-i",
-            "testsrc2=size=160x120:rate=10", "-t", "30", "-an", "-c:v", "libx264",
-            "-threads", "1", "-preset", "ultrafast", "-g", "10", "-bf", "0",
-            "-hls_time", "1", "-hls_list_size", "0", "-hls_flags", "temp_file+omit_endlist",
-            "-hls_segment_filename"])
-            .arg(media.join("segment%05d.ts"))
-            .arg(media.join("index.m3u8"))
-            .stdout(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let child = command.spawn().expect("actual realtime media publisher");
-        let publisher_pid = child.id().expect("live publisher pid");
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let fence = crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
-        let manager = Arc::new(TranscodeManager::new(store, root.path().join("manager"),
-            EncoderCaps::default(), Pipeline::Cpu).with_serving_authority(fence.authority()));
-        let existing = watchdog_session(&media, Some(child), false);
-        manager.sessions.lock().await.insert("existing".to_owned(), Arc::clone(&existing));
-        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
-        let before = f6_next_decodable_segment(&media, None).await;
-        let before_frame = f6_decode_frame(&executable, &before).await;
-        assert_eq!(manager.active_sessions().await, 1, "nonzero owned publisher session");
-        let admitted_generation = fence.authority().admit().expect("initial admission");
+        use futures_util::FutureExt;
+        let fixture = F6MediaFixture::start().await;
+        let observation = std::panic::AssertUnwindSafe(async {
+            let media = &fixture.media;
+            let executable = &fixture.executable;
+            let publisher_pid = fixture.publisher_pid;
+            let manager = &fixture.manager;
+            let existing = &fixture.existing;
+            let fence = &fixture.fence;
+            let before = f6_next_decodable_segment(media, None).await;
+            let before_frame = f6_decode_frame(executable, &before).await;
+            assert_eq!(
+                manager.active_sessions().await,
+                1,
+                "nonzero owned publisher session"
+            );
+            let admitted_generation = fence.authority().admit().expect("initial admission");
 
-        fence.validation_set_ready(false).await;
-        assert!(fence.authority().admit().is_none(), "new admission stays fenced");
-        let loss_boundary = f6_latest_completed_segment(&media).expect("completed media at loss");
-        let loss_started = std::time::Instant::now();
-        tokio::time::sleep(Duration::from_millis(2468)).await;
-        let during = f6_next_decodable_segment(&media, Some(&loss_boundary)).await;
-        let loss_elapsed = loss_started.elapsed();
-        assert!(loss_elapsed < super::manager_control::SERVING_FENCE_SESSION_GRACE,
-            "this positive control must recover inside the grace: {loss_elapsed:?}");
-        fence.validation_set_ready(true).await;
-        let recovery_boundary = f6_latest_completed_segment(&media).expect("completed media at recovery");
-        assert!(!fence.authority().is_current(admitted_generation), "stale generation remains fenced after recovery");
-        assert!(fence.authority().admit().is_some(), "fresh admission recovers");
-        assert!(!existing.control.is_retired());
-        assert_eq!(existing.child.lock().await.as_ref().and_then(|child| child.id()), Some(publisher_pid));
-        let during_frame = f6_decode_frame(&executable, &during).await;
-        let after = f6_next_decodable_segment(&media, Some(&recovery_boundary)).await;
-        let after_frame = f6_decode_frame(&executable, &after).await;
-        assert_ne!(before_frame, during_frame, "actual picture advances during the loss");
-        assert_ne!(during_frame, after_frame, "actual picture advances after recovery");
-        assert_eq!(manager.active_sessions().await, 1);
-        println!("F6 real publisher pid={publisher_pid} loss_ms={} before={} during={} after={} frame_md5={before_frame},{during_frame},{after_frame}",
-            loss_elapsed.as_millis(), before.display(), during.display(), after.display());
+            fence.validation_set_ready(false).await;
+            assert!(
+                fence.authority().admit().is_none(),
+                "new admission stays fenced"
+            );
+            let loss_boundary = f6_latest_completed_segment(media).expect("completed media at loss");
+            let loss_started = std::time::Instant::now();
+            tokio::time::sleep(Duration::from_millis(2468)).await;
+            let during = f6_next_decodable_segment(media, Some(&loss_boundary)).await;
+            let loss_elapsed = loss_started.elapsed();
+            assert!(
+                loss_elapsed < super::manager_control::SERVING_FENCE_SESSION_GRACE,
+                "this positive control must recover inside the grace: {loss_elapsed:?}"
+            );
+            fence.validation_set_ready(true).await;
+            let recovery_boundary =
+                f6_latest_completed_segment(media).expect("completed media at recovery");
+            assert!(
+                !fence.authority().is_current(admitted_generation),
+                "stale generation remains fenced after recovery"
+            );
+            assert!(
+                fence.authority().admit().is_some(),
+                "fresh admission recovers"
+            );
+            assert!(!existing.control.is_retired());
+            assert_eq!(
+                existing
+                    .child
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|child| child.id()),
+                Some(publisher_pid)
+            );
+            let during_frame = f6_decode_frame(executable, &during).await;
+            let after = f6_next_decodable_segment(media, Some(&recovery_boundary)).await;
+            let after_frame = f6_decode_frame(executable, &after).await;
+            assert_ne!(
+                before_frame, during_frame,
+                "actual picture advances during the loss"
+            );
+            assert_ne!(
+                during_frame, after_frame,
+                "actual picture advances after recovery"
+            );
+            assert_eq!(manager.active_sessions().await, 1);
+            println!("F6 real publisher pid={publisher_pid} loss_ms={} before={} during={} after={} frame_md5={before_frame},{during_frame},{after_frame}",
+                    loss_elapsed.as_millis(), before.display(), during.display(), after.display());
 
-        // A fresh sustained loss must still enforce the terminal boundary.
-        tokio::time::sleep(super::manager_control::SERVING_FENCE_SESSION_GRACE).await;
-        assert!(existing.child.lock().await.as_mut().expect("retained publisher")
-            .try_wait().expect("observe actual publisher").is_none(),
-            "the negative control must fence a live child, not naturally ended media");
-        fence.validation_set_ready(false).await;
-        wait_until_retired(&manager, &existing, "sustained loss retires real publisher").await;
-        assert!(existing.child.lock().await.is_none(), "terminal cleanup reaps the child");
-        assert_eq!(manager.active_sessions().await, 0);
-        drop(fence);
-        fence_loop.await.expect("fence loop exits");
+            // A fresh sustained loss must still enforce the terminal boundary.
+            tokio::time::sleep(super::manager_control::SERVING_FENCE_SESSION_GRACE).await;
+            assert!(
+                existing
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .expect("retained publisher")
+                    .try_wait()
+                    .expect("observe actual publisher")
+                    .is_none(),
+                "the negative control must fence a live child, not naturally ended media"
+            );
+            fence.validation_set_ready(false).await;
+            wait_until_retired(manager, existing, "sustained loss retires real publisher").await;
+            assert!(
+                existing.child.lock().await.is_none(),
+                "terminal cleanup reaps the child"
+            );
+            assert_eq!(manager.active_sessions().await, 0);
+            }).catch_unwind().await;
+            let cleanup = fixture.finish().await;
+            if let Err(original) = observation {
+                eprintln!("F6 cleanup after original assertion panic: {cleanup:?}");
+                std::panic::resume_unwind(original);
+            }
+            assert!(
+                cleanup.as_ref().is_ok_and(|receipt| receipt.qualified()),
+                "F6 owned publisher/task cleanup: {cleanup:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn serving_fence_real_media_cleanup_survives_an_observer_panic() {
+            super::require_ffmpeg();
+            use futures_util::FutureExt;
+            let fixture = F6MediaFixture::start().await;
+            let observation = std::panic::AssertUnwindSafe(async {
+                let _ = f6_next_decodable_segment(&fixture.media, None).await;
+                panic!("F6 injected observer panic after actual media");
+        })
+        .catch_unwind()
+        .await;
+        let cleanup = fixture.finish().await;
+        assert!(
+            cleanup.as_ref().is_ok_and(|receipt| receipt.qualified()),
+            "panic cleanup must reap and join: {cleanup:?}"
+        );
+        let original = observation.expect_err("the injected panic must remain observable");
+        assert_eq!(
+            original.downcast_ref::<&str>().copied(),
+            Some("F6 injected observer panic after actual media")
+        );
+    }
+
+    #[tokio::test]
+    async fn serving_fence_real_media_cleanup_survives_observer_cancellation() {
+        super::require_ffmpeg();
+        let (ready, observing) = tokio::sync::oneshot::channel();
+        let observer = tokio::spawn(async move {
+            let mut fixture = F6MediaFixture::start().await;
+            let _ = f6_next_decodable_segment(&fixture.media, None).await;
+            let receipt = fixture
+                .cleanup_receiver
+                .take()
+                .expect("one cleanup observer");
+            assert!(
+                ready.send(receipt).is_ok(),
+                "cancellation controller is live"
+            );
+            std::future::pending::<()>().await;
+            drop(fixture);
+        });
+        let readiness = tokio::time::timeout(Duration::from_secs(15), observing).await;
+        // Always cancel AND join this observer, even when media setup fails.
+        // The guard's own cleanup is bounded independently of this observer.
+        observer.abort();
+        let cancelled = tokio::time::timeout(Duration::from_secs(5), observer)
+            .await.expect("bounded observer cancellation join");
+        let receipt = readiness.expect("real media before cancelling observer")
+            .expect("observer readiness");
+        assert!(cancelled.expect_err("observer must be cancelled").is_cancelled());
+        let cleanup = f6_cleanup_receipt(receipt).await;
+        assert!(
+            cleanup.as_ref().is_ok_and(|receipt| receipt.qualified()),
+            "cancel cleanup must reap and join: {cleanup:?}"
+        );
     }
 
     /// The 2026-10-04 incident: a leader restart and a one-second leader stall

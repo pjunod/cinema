@@ -1467,6 +1467,11 @@ mod tests {
     #[test]
     fn historical_rewind_refuses_translation_data_and_partial_shapes_without_mutation() {
         for scenario in [
+            "annotations-lists",
+            "annotations-ratings",
+            "annotations-fetches",
+            "annotations-marker",
+            "annotations-shape",
             "translation-job",
             "translation-data",
             "translation-shape",
@@ -1476,7 +1481,42 @@ mod tests {
         ] {
             let connection = rusqlite::Connection::open_in_memory().expect("fixture");
             SqliteStore::migrate(&connection).expect("current schema");
+            if matches!(
+                scenario,
+                "annotations-lists" | "annotations-ratings" | "annotations-fetches"
+            ) {
+                connection.execute_batch(
+                    "INSERT INTO users(id,username,password_hash) VALUES(600001,'rewind-owner','hash');
+                     INSERT INTO libraries(id,name,kind,paths) VALUES(600001,'rewind-library','movies','[]');
+                     INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(600001,600001,'movie','Retained annotation','retained annotation');",
+                ).expect("annotations ownership fixture");
+            }
             match scenario {
+                "annotations-lists" => {
+                    connection.execute_batch("INSERT INTO library_annotations_lists VALUES(600001,'favorite',600001,123);")
+                        .expect("retained list membership");
+                }
+                "annotations-ratings" => {
+                    connection.execute_batch("INSERT INTO library_annotations_ratings VALUES(600001,'imdb',8.1,10,100);")
+                        .expect("retained provider rating");
+                }
+                "annotations-fetches" => {
+                    connection
+                        .execute_batch(
+                            "INSERT INTO library_annotations_rating_fetches VALUES(600001,123,1);",
+                        )
+                        .expect("retained provider fetch marker");
+                }
+                "annotations-marker" => {
+                    connection
+                        .execute_batch("DELETE FROM library_annotations_schema;")
+                        .expect("missing annotations marker");
+                }
+                "annotations-shape" => {
+                    connection
+                        .execute_batch("DROP INDEX library_annotations_lists_recent;")
+                        .expect("partial annotations fixture");
+                }
                 "translation-job" => {
                     connection.execute_batch("INSERT INTO background_jobs(id,kind,payload_version,payload_json,dedupe_key,priority,state,not_before_ms,created_at_ms,updated_at_ms,target_node_id) VALUES('fixture-orphan-translation','subtitle_translation_prepare',1,'{\"fixture\":\"preserve\"}','fixture-orphan-translation',0,'cancelled',0,0,0,'fixture-node');").expect("orphaned accepted translation fixture");
                 }
@@ -1532,10 +1572,25 @@ mod tests {
                     .expect("receipt rows").collect::<Result<Vec<_>,_>>().expect("complete receipt rows");
                 let jobs = connection.prepare("SELECT json_array(id,kind,payload_version,payload_json,dedupe_key,priority,state,target_node_id,owner_node_id,owner_boot_id,claim_id,fence,revision,lease_expires_ms,failure_policy,failed_attempts,attempt_limit,retry_deadline_ms,attempt_errors,index_diagnostic_json,yield_count,abandoned_count,not_before_ms,checkpoint_json,result_ref,last_error_code,created_at_ms,updated_at_ms) FROM background_jobs ORDER BY id").expect("background job snapshot")
                     .query_map([], |row| row.get::<_,String>(0)).expect("background job rows").collect::<Result<Vec<_>,_>>().expect("complete background job rows");
-                let markers = connection.prepare("SELECT 'translation',singleton,version FROM subtitle_translation_schema UNION ALL SELECT 'managed',singleton,version FROM subtitle_managed_schema ORDER BY 1,2,3").expect("independent marker snapshot")
+                let annotations = [
+                    "SELECT json_array(user_id,list,item_id,added_at_ms) FROM library_annotations_lists ORDER BY user_id,list,item_id",
+                    "SELECT json_array(item_id,source,value,scale,votes) FROM library_annotations_ratings ORDER BY item_id,source",
+                    "SELECT json_array(item_id,fetched_at_ms,omdb_consulted) FROM library_annotations_rating_fetches ORDER BY item_id",
+                ].map(|sql| connection.prepare(sql).expect("annotations snapshot")
+                    .query_map([], |row| row.get::<_,String>(0)).expect("annotations rows")
+                    .collect::<Result<Vec<_>,_>>().expect("complete annotations rows"));
+                let markers = connection.prepare("SELECT 'translation',singleton,version FROM subtitle_translation_schema UNION ALL SELECT 'managed',singleton,version FROM subtitle_managed_schema UNION ALL SELECT 'annotations',singleton,version FROM library_annotations_schema ORDER BY 1,2,3").expect("independent marker snapshot")
                     .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)))
                     .expect("marker rows").collect::<Result<Vec<_>,_>>().expect("complete independent marker rows");
-                (version, objects, capabilities, receipts, jobs, markers)
+                (
+                    version,
+                    objects,
+                    capabilities,
+                    receipts,
+                    jobs,
+                    markers,
+                    annotations,
+                )
             };
             let before = snapshot();
             assert!(
@@ -1600,7 +1655,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 68] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 69] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1727,6 +1782,9 @@ mod tests {
             // v112: the shared rewind verifies exact shape and refuses all
             // translation data before removing the empty extension.
             "CREATE TABLE subtitle_translation_schema",
+            // v113: the shared rewind verifies the exact annotations shape,
+            // marker and empty data tables before removing the extension.
+            "CREATE TABLE library_annotations_schema",
         ];
 
         assert!(

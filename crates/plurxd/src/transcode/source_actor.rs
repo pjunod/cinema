@@ -1,6 +1,13 @@
 //! Owned Source producer admission and lifetime. HTTP callers only wait.
 use super::*;
 
+// Observe refusals without granting admission or retrying failed work.
+fn record_source_refusal(stage: &str, error: &impl std::fmt::Debug) {
+    tracing::warn!(target: "plurxd::transcode", stage, error = ?error, "Source operation failed");
+    #[cfg(test)]
+    eprintln!("Source producer refusal: stage={stage} error={error:?}");
+}
+
 /// Actual daemon components retained by immutable Source renditions. Only
 /// the owned worker factory constructs this gate; there is no wire constructor.
 pub(crate) struct SourceProducerAuthority {
@@ -838,9 +845,13 @@ impl SourceProducerAuthority {
             .store
             .refresh_source_ingress_admission(&self.ingress, &members)
             .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
+            .map_err(|error| {
+                record_source_refusal("source_preparation.permission_store", &error);
+                SourceWorkerError::Unresolved
+            })?
         else {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
+            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.permission_refused", "Source preparation refused");
+            return Err(SourceWorkerError::Unavailable);
         };
         permission
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
@@ -849,17 +860,25 @@ impl SourceProducerAuthority {
             .store
             .prepare_source_activation_authority(assignment, &self.master, &members)
             .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.activation_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
+            .map_err(|error| {
+                record_source_refusal("source_preparation.activation_store", &error);
+                SourceWorkerError::Unresolved
+            })?
         else {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.activation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
+            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.activation_refused", "Source preparation refused");
+            return Err(SourceWorkerError::Unavailable);
         };
         if !self
             .store
             .authorize_source_media_preparation(&proof)
             .await
-            .map_err(|_| { tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_store", "Source preparation refused"); SourceWorkerError::Unresolved })?
+            .map_err(|error| {
+                record_source_refusal("source_preparation.preparation_store", &error);
+                SourceWorkerError::Unresolved
+            })?
         {
-            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_refused", "Source preparation refused"); return Err(SourceWorkerError::Unavailable);
+            tracing::warn!(target: "plurxd::transcode", stage = "source_preparation.preparation_refused", "Source preparation refused");
+            return Err(SourceWorkerError::Unavailable);
         }
         Ok(proof)
     }
@@ -1111,7 +1130,10 @@ impl TranscodeManager {
             .store
             .fragment_index(file.id, &identity)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
+            .map_err(|error| {
+                record_source_refusal("source_index.lookup", &error);
+                SourceWorkerError::Unresolved
+            })?
             .is_some()
         {
             return Ok(());
@@ -1129,7 +1151,10 @@ impl TranscodeManager {
             .store
             .source_index_probe_evidence(&authority)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
+            .map_err(|error| {
+                record_source_refusal("source_index.probe_evidence", &error);
+                SourceWorkerError::Unresolved
+            })?
             .ok_or(SourceWorkerError::Unsupported)?;
         authority
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
@@ -1154,7 +1179,10 @@ impl TranscodeManager {
             .expect("Source index owner")
             .outcome()
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?;
+            .map_err(|error| {
+                record_source_refusal("source_index.operation", &error);
+                SourceWorkerError::Unresolved
+            })?;
         if !built.source_unchanged {
             return Err(SourceWorkerError::Unavailable);
         }
@@ -1169,7 +1197,10 @@ impl TranscodeManager {
         self.store
             .put_fragment_index(file.id, &index)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?;
+            .map_err(|error| {
+                record_source_refusal("source_index.publish", &error);
+                SourceWorkerError::Unresolved
+            })?;
         if !fence.unchanged() {
             return Err(SourceWorkerError::Unavailable);
         }
@@ -1310,7 +1341,10 @@ impl TranscodeManager {
                         &owner.assignment.binding().incarnation_id().to_string(),
                     )
                     .await
-                    .map_err(|_| SourceWorkerError::Unresolved)?
+                    .map_err(|error| {
+                        record_source_refusal("source_start.route_absence", &error);
+                        SourceWorkerError::Unresolved
+                    })?
                     .is_some()
                 {
                     unowned_existing = true;
@@ -1436,7 +1470,10 @@ impl TranscodeManager {
                         &members,
                     )
                     .await
-                    .map_err(|_| SourceWorkerError::Unresolved)?
+                    .map_err(|error| {
+                        record_source_refusal("source_start.activation_authority", &error);
+                        SourceWorkerError::Unresolved
+                    })?
                 else {
                     return Err(SourceWorkerError::Unavailable);
                 };
@@ -1473,7 +1510,10 @@ impl TranscodeManager {
                     .store
                     .activate_source_media_session(&authority, &activation)
                     .await
-                    .map_err(|_| SourceWorkerError::Unresolved)?
+                    .map_err(|error| {
+                        record_source_refusal("source_start.activation_write", &error);
+                        SourceWorkerError::Unresolved
+                    })?
                     .ok_or(SourceWorkerError::Unavailable)?;
                 if outcome.route.session_id != session_id {
                     return Err(SourceWorkerError::Conflict);
@@ -1521,7 +1561,10 @@ impl TranscodeManager {
                         &members,
                     )
                     .await
-                    .map_err(|_| SourceWorkerError::Unresolved)?
+                    .map_err(|error| {
+                        record_source_refusal("source_start.publication_authority", &error);
+                        SourceWorkerError::Unresolved
+                    })?
                 else {
                     return Err(SourceWorkerError::Unavailable);
                 };
@@ -1530,7 +1573,10 @@ impl TranscodeManager {
                     .store
                     .complete_source_media_session_publication(&proof)
                     .await
-                    .map_err(|_| SourceWorkerError::Unresolved)?
+                    .map_err(|error| {
+                        record_source_refusal("source_start.publication_write", &error);
+                        SourceWorkerError::Unresolved
+                    })?
                     .ok_or(SourceWorkerError::Unavailable)?;
                 proof
                     .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
@@ -1545,6 +1591,7 @@ impl TranscodeManager {
         .unwrap_or(Err(SourceWorkerError::Deadline));
         if let Err(error) = &start {
             tracing::warn!(target: "plurxd::transcode", stage = startup_stage, error_class = ?error, "Source producer startup failed");
+            self.hooks.get().source_start_refused(startup_stage, error);
         }
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();

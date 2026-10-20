@@ -2065,16 +2065,19 @@
         // Burst then crawl, sized so this legacy (no-demand) viewer earns its
         // first snapshot from the burst instead of at ENDLIST. The legacy
         // publication clock wants `ROLLING_INITIAL_RUNWAY_MS` (48 s) ahead of
-        // the wall clock since bootstrap; at a 1x crawl the producer never
+        // the wall clock since bootstrap; at a near-1x crawl the producer barely
         // gains on that clock, so the runway has to come from the burst. A
         // 50 s burst closes the 6 s copy segment past 48 s at once; the next
-        // segments then close at 1x, 6 s apart, so the served window (capped
+        // segments then close at 1.25x, 4.8 s apart, so the served window (capped
         // at 48 s until a fetch) stays a full publication batch ahead of the
-        // staged frontier for about twelve seconds -- the window in which the
+        // staged frontier for about ten seconds -- the window in which the
         // assertions below run. A larger burst stages a complete next batch
         // immediately and is held by the publication clock, correctly. The
         // 180 s clip keeps ENDLIST out of the test entirely.
-        store.put_setting(keys::HLS_READRATE, "1").await.expect("s");
+        // Publication/EOF ownership is this case's purpose. Keep a concrete
+        // input pace with headroom; the production 1x threshold is unchanged.
+        const FIXTURE_READRATE: f64 = 1.25;
+        store.put_setting(keys::HLS_READRATE, "1.25").await.expect("s");
         store
             .put_setting(keys::HLS_BURST_SECS, "50")
             .await
@@ -2240,7 +2243,7 @@
             mgr.flow_control(&session, &info.session_id).await;
             assert!(!session.suspended.load(Relaxed));
             let status = mgr.session_status(&info.session_id).await.expect("status");
-            assert_eq!(status.readrate, 1.0, "HLS exposes its effective input pace");
+            assert_eq!(status.readrate, FIXTURE_READRATE, "HLS exposes its effective input pace");
             assert_eq!(status.production_policy, "publication_clock_legacy");
             assert_eq!(status.hold_reason, None);
             assert_eq!(status.resume_below_bytes, None);

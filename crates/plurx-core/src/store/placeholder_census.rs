@@ -33,6 +33,10 @@ use super::hiqlite::validate_sql;
 pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
     (
+        "hiqlite_annotations.rs",
+        include_str!("hiqlite_annotations.rs"),
+    ),
+    (
         "hiqlite_background_jobs.rs",
         include_str!("hiqlite_background_jobs.rs"),
     ),
@@ -113,6 +117,7 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
 /// this list feeds a separate validator below. The directory equality test
 /// makes adding a module without adding its SQL to the census impossible.
 const SQLITE_SOURCES: &[(&str, &str)] = &[
+    ("annotations.rs", include_str!("sqlite/annotations.rs")),
     ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
     (
         "background_jobs.rs",

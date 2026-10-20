@@ -1,0 +1,188 @@
+{
+  "baseline_sha": "86f1385005b27122e8a8d3a3d5bd9501eb2fdb16",
+  "baseline_run": 5667,
+  "required_repetitions": 10,
+  "cases": [
+    {
+      "target": "plurx_core",
+      "name": "process::census::every_production_spawn_goes_through_the_launcher",
+      "owner": "crates/plurx-core/src/process/census.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::consistent_read_census::consistent_read_census_admits_a_raised_entry_with_an_authority_reason",
+      "owner": "crates/plurx-core/src/store/consistent_read_census.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::consistent_read_census::consistent_read_census_matches_the_checked_in_table",
+      "owner": "crates/plurx-core/src/store/consistent_read_census.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::hiqlite_import::tests::replicated_tables_exclude_node_local_and_derived_state",
+      "owner": "crates/plurx-core/src/store/hiqlite_import/tests.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::placeholder_census::sqlite_module_list_matches_the_directory",
+      "owner": "crates/plurx-core/src/store/placeholder_census.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::placeholder_census::the_census_covers_every_slice_exactly_once",
+      "owner": "crates/plurx-core/src/store/placeholder_census.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::replicated::tests::every_sqlite_transaction_site_is_classified",
+      "owner": "crates/plurx-core/src/store/replicated.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::sqlite::dv_conversion::tests::the_downgrade_fixture_undoes_every_migration_after_the_guard",
+      "owner": "crates/plurx-core/src/store/sqlite/dv_conversion.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::sqlite::tests::sharing_sqlite_main103_upgrade_appends104_105_and_private92_93_refuse",
+      "owner": "crates/plurx-core/src/store/sqlite/tests.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::sqlite::tests::v6_rebuild_preserves_everything",
+      "owner": "crates/plurx-core/src/store/sqlite/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::hls::link_receipts::tests::known_processed_descriptor_survives_unrelated_ordinary_catalog_timeout",
+      "owner": "crates/plurxd/src/http/hls/link_receipts.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::browse::tests::browse_routes_meet_the_k04_authority_bar_on_a_replicated_voter",
+      "owner": "crates/plurxd/src/http/browse.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::shared_source_playback::tests::sharing_source_http_real_encoded_h1_h2_playlist_init_and_segment",
+      "owner": "crates/plurxd/src/http/shared_source_playback/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::shared_source_playback::tests::sharing_source_http_real_h1_h2_playlist_init_and_segment_echo_exact_lineage",
+      "owner": "crates/plurxd/src/http/shared_source_playback/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::shared_source_playback::tests::sharing_source_http_start_disconnect_joins_actual_actor_and_fresh_exact_replay",
+      "owner": "crates/plurxd/src/http/shared_source_playback/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::shared_source_playback::tests::sharing_source_http_uninvoked_g0_cleanup_retains_failed_release_and_retries_exact_end",
+      "owner": "crates/plurxd/src/http/shared_source_playback/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::shared_source_playback::tests::sharing_source_http_failed_claim_and_assignment_retain_joined_exact_task_stages",
+      "owner": "crates/plurxd/src/http/shared_source_playback/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "http::shared_source_playback::tests::sharing_source_http_queued_h1_h2_writer_closes_before_actual_settlement",
+      "owner": "crates/plurxd/src/http/shared_source_playback/tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::a_client_fetch_advances_publication_frontier_without_legacy_hold",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_05.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::every_vod_refusal_code_is_classified",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_04.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::source_actor::tests::source_status_purpose_floor_race_refuses_without_activity",
+      "owner": "crates/plurxd/src/transcode/tests/source_actor.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::source_actor::tests::source_status_saved_switch_race_refuses_without_activity",
+      "owner": "crates/plurxd/src/transcode/tests/source_actor.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::seam_census::seam_census_of_the_workspace",
+      "owner": "crates/plurxd/src/transcode/tests/seam_census.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::serving_fence_preserves_real_media_through_2468ms_and_reaps_after_grace",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_06.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::source_actor::tests::source_status_survives_a_concurrent_same_owner_lease_renewal",
+      "owner": "crates/plurxd/src/transcode/tests/source_actor.rs"
+    }
+  ],
+  "nested_source_sha256": {
+    "crates/plurx-core/src/cluster/migration/tests.rs": "13e6e594985626a5d8867c567c098ad99105f21d06594f2ed1a9bceaf5d3d1fc",
+    "crates/plurx-tray/src/linux/tray.rs": "96316161819168b936d873288c9824669f403df899fdc6c06bccde08fac98b91",
+    "crates/plurx-tray/src/tests.rs": "6bcae3c034bc3a863c88d85c66e5182426d9dc579045295c6f94a926e6c694fc"
+  },
+  "restore_children": [
+    "cluster::migration::tests::restore_source_endpoints_deadline_and_fast_output_failure_are_not_retried",
+    "cluster::migration::tests::restore_source_endpoints_refuse_unknown_wrong_endpoint_and_post_acquisition_retries",
+    "cluster::migration::tests::restore_source_endpoints_reacquire_only_before_the_body_and_exhaust_finitely"
+  ],
+  "tray_children": [
+    "linux::tray::tests::dbus_menu_clicks_reach_the_shell_after_refresh",
+    "tests::process::xdg_runner_child"
+  ],
+  "additional_repeated_cases": [
+    {
+      "target": "plurx_core",
+      "name": "process::census::an_explicit_test_child_path_does_not_hide_production_spawns",
+      "owner": "crates/plurx-core/src/process/census.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::sqlite::tests::v113_annotations_upgrade_preserves_catalogue_and_reopens_ratings_and_lists",
+      "owner": "crates/plurx-core/src/store/sqlite/tests.rs"
+    },
+    {
+      "target": "plurx_core",
+      "name": "store::sqlite::dv_conversion::tests::historical_rewind_refuses_translation_data_and_partial_shapes_without_mutation",
+      "owner": "crates/plurx-core/src/store/sqlite/dv_conversion.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::serving_fence_real_media_cleanup_survives_an_observer_panic",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_06.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::serving_fence_real_media_cleanup_survives_observer_cancellation",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_06.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::manager_create::processed_reuse_tests::processed_reuse_real_driver_pause_cleans_up_after_fixture_panic",
+      "owner": "crates/plurxd/src/transcode/manager/processed_reuse_tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::manager_create::processed_reuse_tests::processed_reuse_real_driver_pause_cleans_up_after_observer_cancellation",
+      "owner": "crates/plurxd/src/transcode/manager/processed_reuse_tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::manager_create::processed_reuse_tests::processed_reuse_real_driver_cancels_registration_after_teardown",
+      "owner": "crates/plurxd/src/transcode/manager/processed_reuse_tests.rs"
+    }
+  ]
+}

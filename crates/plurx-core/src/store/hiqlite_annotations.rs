@@ -77,7 +77,7 @@ impl AnnotationStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let Some(fetch) = self
             .client()
-            // authority: a ratings read is a cache read; the item's own row decides what exists.
+            // authority: a completed refresh must be visible before deciding whether to fetch again.
             .query_consistent_map::<FetchRow, _>(sql, params!(item_id))
             .await
             .map_err(database_error)?
@@ -91,7 +91,7 @@ impl AnnotationStore for HiqliteAuthStore {
         validate_sql(sql)?;
         let mut ratings = self
             .client()
-            // authority: the same cache read as the fetch marker above.
+            // authority: a caller must observe the committed ratings replacement it just wrote.
             .query_consistent_map::<RatingRow, _>(sql, params!(item_id))
             .await
             .map_err(database_error)?

@@ -184,6 +184,7 @@ async fn actual_source_failed_task_stages() {
         let first = invoke()
             .await
             .expect_err("failed actual write stays unresolved");
+        let first_reason = format!("{first:?}");
         use axum::response::IntoResponse;
         assert_eq!(
             first.into_response().status(),
@@ -198,7 +199,9 @@ async fn actual_source_failed_task_stages() {
             .expect("retained task")
             .first()
             .cloned()
-            .expect("actual owner entry");
+            .unwrap_or_else(|| {
+                panic!("actual owner entry; assignment_failure={assignment_failure}; first={first_reason}")
+            });
         assert!(matches!(
             *entry.task.joined.lock().expect("actual joined task"),
             Some(SourceStartTaskJoined::Returned)
@@ -352,7 +355,7 @@ async fn sharing_source_http_uninvoked_g0_cleanup_retains_failed_release_and_ret
     let client = fixture.selected.local_client().expect("actual voter");
     client.execute("CREATE TRIGGER fixture_source_assignment_failure BEFORE UPDATE OF dispatch_generation ON sharing_source_session_bindings WHEN NEW.dispatch_generation=1 BEGIN SELECT RAISE(ABORT,'fixture assignment unavailable'); END", hiqlite::params![]).await.expect("actual failed assignment");
     client.execute("CREATE TRIGGER fixture_source_g0_release_failure BEFORE UPDATE OF reservation_state ON sharing_source_session_bindings WHEN NEW.reservation_state='released' BEGIN SELECT RAISE(ABORT,'fixture release unavailable'); END", hiqlite::params![]).await.expect("actual failed cleanup");
-    fixture_start(
+    let refusal = fixture_start(
         axum::extract::State((*fixture.state).clone()),
         fixture.headers.clone(),
         axum::extract::Path((
@@ -372,7 +375,7 @@ async fn sharing_source_http_uninvoked_g0_cleanup_retains_failed_release_and_ret
         .expect("retained owner")
         .first()
         .cloned()
-        .expect("actual fresh acquired owner");
+        .unwrap_or_else(|| panic!("actual fresh acquired owner; first={refusal:?}"));
     let incarnation = entry
         .task
         .stage

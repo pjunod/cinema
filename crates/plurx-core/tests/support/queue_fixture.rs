@@ -693,6 +693,14 @@ fn validated_annotations_rewind(connection: &rusqlite::Connection) -> String {
         shape(&expected),
         "exact current annotations shape required"
     );
+    let marker: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM library_annotations_schema WHERE singleton=1 AND version=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("annotations fixture marker");
+    assert_eq!(marker, 1, "current annotations marker required");
     let tables = [
         "library_annotations_lists",
         "library_annotations_ratings",

@@ -23,11 +23,11 @@ impl AnnotationStore for SqliteStore {
             let Some((fetched_at_ms, omdb)) = fetch else {
                 return Ok(None);
             };
-            let mut statement = conn.prepare(
-                "SELECT source, value, scale, votes FROM library_annotations_ratings \
-                 WHERE item_id = ?1",
-            )?;
-            let mut ratings = statement
+            let mut ratings = conn
+                .prepare(
+                    "SELECT source, value, scale, votes FROM library_annotations_ratings \
+                     WHERE item_id = ?1",
+                )?
                 .query_map(params![item_id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -129,15 +129,17 @@ impl AnnotationStore for SqliteStore {
         item_id: i64,
     ) -> Result<ItemListFlags, StoreError> {
         self.with_conn(move |conn| {
-            let mut statement = conn.prepare(
-                "SELECT list, added_at_ms FROM library_annotations_lists \
-                 WHERE user_id = ?1 AND item_id = ?2",
-            )?;
+            let rows = conn
+                .prepare(
+                    "SELECT list, added_at_ms FROM library_annotations_lists \
+                     WHERE user_id = ?1 AND item_id = ?2",
+                )?
+                .query_map(params![user_id, item_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
             let mut flags = ItemListFlags::default();
-            for row in statement.query_map(params![user_id, item_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })? {
-                let (list, added) = row?;
+            for (list, added) in rows {
                 match ItemList::parse(&list) {
                     Some(ItemList::Watchlist) => {
                         flags.watchlist = true;
@@ -160,12 +162,12 @@ impl AnnotationStore for SqliteStore {
         offset: i64,
     ) -> Result<Vec<ListedItem>, StoreError> {
         self.with_conn(move |conn| {
-            let mut statement = conn.prepare(
-                "SELECT item_id, added_at_ms FROM library_annotations_lists \
-                 WHERE user_id = ?1 AND list = ?2 \
-                 ORDER BY added_at_ms DESC, item_id DESC LIMIT ?3 OFFSET ?4",
-            )?;
-            let rows = statement
+            let rows = conn
+                .prepare(
+                    "SELECT item_id, added_at_ms FROM library_annotations_lists \
+                     WHERE user_id = ?1 AND list = ?2 \
+                     ORDER BY added_at_ms DESC, item_id DESC LIMIT ?3 OFFSET ?4",
+                )?
                 .query_map(params![user_id, list.as_str(), limit, offset], |row| {
                     Ok(ListedItem {
                         item_id: row.get(0)?,
@@ -187,12 +189,12 @@ impl AnnotationStore for SqliteStore {
         let ids = serde_json::to_string(item_ids)
             .map_err(|error| StoreError::Task(format!("encode item ids: {error}")))?;
         self.with_conn(move |conn| {
-            let mut statement = conn.prepare(
-                "SELECT item_id FROM library_annotations_lists \
-                 WHERE user_id = ?1 AND list = ?2 \
-                   AND item_id IN (SELECT value FROM json_each(?3)) ORDER BY item_id",
-            )?;
-            let rows = statement
+            let rows = conn
+                .prepare(
+                    "SELECT item_id FROM library_annotations_lists \
+                     WHERE user_id = ?1 AND list = ?2 \
+                       AND item_id IN (SELECT value FROM json_each(?3)) ORDER BY item_id",
+                )?
                 .query_map(params![user_id, list.as_str(), ids], |row| row.get(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
