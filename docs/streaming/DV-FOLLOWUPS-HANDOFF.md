@@ -223,9 +223,16 @@ the first wake. Captured tasks exit on cancellation, never resume into a generat
 normal owner cleanup still settles before explicit task exit and capacity assertions.
 Assertions check absent slot, zero epoch/child pid and the real exclusive worker.
 This isolates driver scheduling; it does not qualify normal driver execution/reap.
-Production source/window/attachment validators are unchanged. The six original
-passes remain; corrected compilation, bounded closure and nine failed-only retries are owed.
-Actual B landing `9753284e` is incorporated. Required fast lane and API merge
+Production source/window/attachment validators are unchanged. Candidate `748761ed`
+passed pinned compilation/linking and same-Astra bounded closure. Its nine-case
+retry added the genuine no-speed root-reuse pass; seven positives are retained.
+Eight staged controls then failed incomplete request JSON (`audio_offset_ms`).
+The fixture now constructs complete typed session/remote requests and verifies
+real serialization/deserialization preserves canonical audio and destination while
+dropping private context. Current main is incorporated through `196cabc19`, with
+D-domain bytes unchanged before this fixture repair. Current-base compilation,
+bounded delta closure and only eight failed retries remain; do not repeat the
+seven valid positives. Actual B landing `9753284e` is incorporated. Fast lane and API merge
 remain. The historical live request path remains unknown; this is no deployment
 or general Dolby rendering-accuracy claim.
 

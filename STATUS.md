@@ -8,7 +8,7 @@ first.
 
 ## Processed VOD successor root reuse
 
-Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225), not deployed. Exact748 source passed pinned fmt/all-target Clippy and independent source/fixture closure. The actual format preflight passed; six positives are retained and nine failed cases await the corrected binary. Exact-root reuse preserves identity, owner and reservation fences; serialized requests grant no authority.
+Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225), not deployed. Exact748 passed pinned compilation/linking and independent closure; its retry added one genuine pass, retaining seven positives. Eight staged fixtures failed incomplete request JSON. Complete typed requests now preserve canonical audio through serialization; current-base compilation, bounded closure, failed-only retries and fast lane remain. Exact-root reuse preserves identity, owner and reservation fences; serialized requests grant no authority.
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). Current root-reuse qualification/gate is recorded in the [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair-in-progress-owner-sol-nativepublication-coordinator) and PR.
 

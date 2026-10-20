@@ -1313,35 +1313,65 @@ async fn fixture_with_audio(
     context.owner_node_id = Some("node".into());
     let incarnation = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
-    let mut request: SessionRequest = serde_json::from_value(serde_json::json!({
-        "file_id":file_id,"playback_id":"processed-lifecycle","automatic":true,
-        "kind":{"kind":"transcode","height":64},"start_seconds":0.0,"hdr10":true,"presentation":"vod"
-    })).expect("request");
-    request.request_id = Some(incarnation.clone());
-    request.dv_processing_destination = Some(destination);
-    request.audio_index = projected.audio_index;
-    request.audio_offset_ms = projected.audio_offset_ms;
-    request.audio_delivery = projected.audio_delivery;
-    request.audio_claim = projected.audio_claim;
-    request.candidate_context = Some(Box::new(context));
-    let mut remote: crate::media_sessions::RemoteStartRequest = serde_json::from_str(
-        &crate::media_sessions::takeover_eligible_route(&session_id, &incarnation).recipe_json,
-    )
-    .expect("envelope");
-    remote.principal =
-        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
-    remote.request = request;
-    remote.candidate_id = Some(candidate.id);
-    remote.candidate_catalog = Some(crate::media_sessions::CandidateCatalogContext {
-        caps,
-        candidate,
-        binding,
-    });
-    remote.source_size = file.size;
-    remote.source_mtime = file.mtime;
-    remote.decoder_caps = None;
-    remote.retained_output = None;
-    remote.retained_output_receiver = Some(1);
+    let request = SessionRequest {
+        continuous_media: None,
+        quality_catalog: None,
+        candidate_context: Some(Box::new(context)),
+        sdr_master_codecs: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
+        file_id,
+        playback_id: "processed-lifecycle".into(),
+        request_id: Some(incarnation.clone()),
+        control_sequence: None,
+        automatic: true,
+        previous_session_id: None,
+        reopen_reason: None,
+        kind: SessionKind::Transcode { height: 64 },
+        start_seconds: 0.0,
+        audio_index: projected.audio_index,
+        audio_delivery: projected.audio_delivery,
+        audio_claim: projected.audio_claim,
+        subtitle_burn: None,
+        audio_offset_ms: projected.audio_offset_ms,
+        hdr10: true,
+        dv_processing_destination: Some(destination),
+        presentation: Presentation::Vod,
+        block_budget_secs: None,
+        transport: None,
+    };
+    let remote = crate::media_sessions::RemoteStartRequest {
+        retained_output_receiver: Some(1),
+        retained_output: None,
+        candidate_id: Some(candidate.id),
+        candidate_catalog: Some(crate::media_sessions::CandidateCatalogContext {
+            caps,
+            candidate,
+            binding,
+        }),
+        presentation_target: None,
+        decoder_caps: None,
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: incarnation.clone(),
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
+        source_size: file.size,
+        source_mtime: file.mtime,
+        typeless_playlist: true,
+        library_channel: None,
+        request,
+    };
+    let wire: crate::media_sessions::RemoteStartRequest =
+        serde_json::from_str(&serde_json::to_string(&remote).expect("serialize typed envelope"))
+            .expect("deserialize typed envelope");
+    assert!(wire.request.candidate_context.is_none());
+    assert_eq!(wire.request.audio_index, remote.request.audio_index);
+    assert_eq!(wire.request.audio_offset_ms, remote.request.audio_offset_ms);
+    assert_eq!(wire.request.audio_delivery, remote.request.audio_delivery);
+    assert_eq!(wire.request.audio_claim, remote.request.audio_claim);
+    assert_eq!(wire.request.dv_processing_destination, Some(destination));
     let settings = manager
         .vod_settings(&remote.request)
         .await
