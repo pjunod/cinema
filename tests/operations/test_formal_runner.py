@@ -67,6 +67,21 @@ The depth of the complete state graph search is 1.
 """
 
 
+def temporal_violation_output() -> str:
+    states = "".join(
+        f"State {number}: {'Stuttering' if number == 8 else '<Next predicate>'}\n"
+        for number in range(1, 9)
+    )
+    return (
+        "Error: Temporal properties were violated.\n"
+        "Error: The following behavior constitutes a counter-example:\n"
+        + states
+        + "135 states generated, 78 distinct states found, 0 states left on queue.\n"
+        "Finished checking temporal properties in 00s at (synthetic).\n"
+        "Finished in 00s at (synthetic).\n"
+    )
+
+
 class TLCOutputClassificationTests(unittest.TestCase):
     def test_positive_completion_requires_clean_exit_summary_and_counts(self) -> None:
         result = formal.classify(complete_output(), 0, PASS, False, None)
@@ -138,6 +153,13 @@ class RegistryProfileTests(unittest.TestCase):
 
 
 class ConfigContractParsingTests(unittest.TestCase):
+    def test_bounds_accept_homogeneous_string_and_numeric_sets(self) -> None:
+        self.assertTrue(formal.valid_bound(["hiqlite", "sqlite"]))
+        self.assertTrue(formal.valid_bound([0, 1, 2, 3]))
+        self.assertFalse(formal.valid_bound([1, -1]))
+        self.assertFalse(formal.valid_bound(["hiqlite", 1]))
+        self.assertFalse(formal.valid_bound([["nested"]]))
+
     def test_multiline_properties_stop_before_config_reductions(self) -> None:
         text = """SPECIFICATION Spec
 INVARIANTS
@@ -197,20 +219,55 @@ VIEW ModelView
             "expected_error_match": {
                 "line": "Temporal properties were violated.",
                 "attribution": "sole_property",
-                "allowed_error_lines": ["The behavior up to this point is:"],
+                "allowed_error_lines": ["The following behavior constitutes a counter-example:"],
             },
+            "minimum_trace_states": 2,
             "analysis": {"properties": ["L1_FreshClaimEventually"]},
         }
-        output = violation_output().replace(
-            "Invariant S2_PublicationAuthority is violated.",
-            "Temporal properties were violated.",
-        )
-        result = formal.classify(output, 37, expected, False, None)
+        result = formal.classify(temporal_violation_output(), 37, expected, False, None)
         self.assertTrue(result["complete"])
+        self.assertIsNone(result["depth"])
+        self.assertEqual(result["completion_kind"], "temporal_counterexample_detected")
         expected["analysis"]["properties"].append("S2_PublicationAuthority")
-        result = formal.classify(output, 37, expected, False, None)
+        result = formal.classify(temporal_violation_output(), 37, expected, False, None)
         self.assertFalse(result["complete"])
         self.assertIn("exactly property", result["reason"])
+
+    def test_temporal_counterexample_without_completion_marker_is_incomplete(self) -> None:
+        expected = {
+            "verdict": "violation",
+            "expected_error": "L1_FreshClaimEventually",
+            "expected_exit": 37,
+            "expected_error_match": {
+                "line": "Temporal properties were violated.",
+                "attribution": "sole_property",
+                "allowed_error_lines": ["The following behavior constitutes a counter-example:"],
+            },
+            "minimum_trace_states": 2,
+            "analysis": {"properties": ["L1_FreshClaimEventually"]},
+        }
+        output = temporal_violation_output().replace("Finished checking temporal properties in 00s at (synthetic).\n", "")
+        result = formal.classify(output, 37, expected, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("completion marker", result["reason"])
+
+    def test_temporal_counterexample_requires_stuttering_or_back_edge(self) -> None:
+        expected = {
+            "verdict": "violation",
+            "expected_error": "L1_FreshClaimEventually",
+            "expected_exit": 37,
+            "expected_error_match": {
+                "line": "Temporal properties were violated.",
+                "attribution": "sole_property",
+                "allowed_error_lines": ["The following behavior constitutes a counter-example:"],
+            },
+            "minimum_trace_states": 2,
+            "analysis": {"properties": ["L1_FreshClaimEventually"]},
+        }
+        output = temporal_violation_output().replace("State 8: Stuttering\n", "State 8: <Next predicate>\n")
+        result = formal.classify(output, 37, expected, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("stuttering or back-edge", result["reason"])
 
     def test_violation_rejects_missing_counterexample(self) -> None:
         output = violation_output().replace("State 1: <Initial predicate>\n", "")

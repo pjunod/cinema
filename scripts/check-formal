@@ -72,6 +72,23 @@ class RunnerError(Exception):
     """A fail-closed runner or mapping error."""
 
 
+def valid_bound(value: Any) -> bool:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(value) and value >= 0
+    if not isinstance(value, list) or not value:
+        return False
+    if all(isinstance(item, str) and item for item in value):
+        return len(set(value)) == len(value)
+    valid_numbers = all(
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(item)
+        and item >= 0
+        for item in value
+    )
+    return valid_numbers and len(set(value)) == len(value)
+
+
 def parse_config_contract(config_text: str) -> tuple[set[str], list[str]]:
     """Read declared properties and explicit config-level reductions fail-closed."""
     properties: set[str] = set()
@@ -236,19 +253,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                     drift.append(f"configuration bounds must be a non-empty reviewed table: {name}")
                 else:
                     for key, value in bounds.items():
-                        valid_number = (
-                            isinstance(value, (int, float))
-                            and not isinstance(value, bool)
-                            and math.isfinite(value)
-                            and value >= 0
-                        )
-                        valid_values = (
-                            isinstance(value, list)
-                            and bool(value)
-                            and all(isinstance(item, str) and item for item in value)
-                            and len(set(value)) == len(value)
-                        )
-                        if not isinstance(key, str) or not key or not (valid_number or valid_values):
+                        if not isinstance(key, str) or not key or not valid_bound(value):
                             drift.append(f"invalid nonnegative numeric/model-value bound in {name}: {key}")
                 properties = analysis.get("properties")
                 if (
@@ -604,6 +609,8 @@ STATE_RE = re.compile(
 )
 DEPTH_RE = re.compile(r"depth of the complete state graph search is\s+(\d+)", re.IGNORECASE)
 COMPLETE_RE = re.compile(r"Model checking completed\. No error has been found\.", re.IGNORECASE)
+TEMPORAL_FINISHED_RE = re.compile(r"^Finished checking temporal properties in\s+\S+", re.MULTILINE)
+TEMPORAL_TRACE_END_RE = re.compile(r"^(?:State\s+\d+:\s+Stuttering|Back to state\s+\d+)\s*$", re.MULTILINE)
 ERROR_RE = re.compile(r"^Error:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
 FATAL_RE = re.compile(
     r"(?:Parsing Error|Semantic Error|OutOfMemoryError|Exception in thread|TLC encountered an error|No such file|cannot find module)",
@@ -634,10 +641,12 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
         reason = log_problem
     elif FATAL_RE.search(output):
         reason = "TLC reported a parse, runtime, or fatal error"
-    elif states is None or depth is None:
-        reason = "TLC output lacks completed state counts or graph depth"
+    elif states is None:
+        reason = "TLC output lacks terminal state counts"
     elif expected["verdict"] == "pass":
-        if returncode != 0:
+        if depth is None:
+            reason = "positive TLC exploration lacks graph depth"
+        elif returncode != 0:
             reason = f"expected successful TLC exit 0, got {returncode}"
         elif errors:
             reason = "unexpected TLC error marker in positive configuration"
@@ -654,10 +663,17 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
         wanted = expected["expected_error"]
         expected_exit = expected.get("expected_exit")
         error_match = expected.get("expected_error_match")
+        temporal_violation = (
+            isinstance(error_match, dict)
+            and error_match.get("attribution") == "sole_property"
+            and error_match.get("line") == "Temporal properties were violated."
+        )
         if not isinstance(expected_exit, int) or isinstance(expected_exit, bool):
             reason = "expected TLC violation exit code has not been reviewed"
         elif not isinstance(error_match, dict):
             reason = "exact TLC violation output mapping has not been reviewed"
+        elif depth is None and not temporal_violation:
+            reason = "TLC output lacks graph depth for this non-temporal counterexample"
         elif returncode != expected_exit:
             reason = f"expected reviewed TLC violation exit {expected_exit}, got {returncode}"
         elif not errors or errors[0] != error_match.get("line"):
@@ -668,6 +684,12 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
             reason = f"TLC error line does not identify expected property {wanted}"
         elif error_match.get("attribution") == "sole_property" and expected.get("analysis", {}).get("properties") != [wanted]:
             reason = f"generic TLC error cannot be attributed to exactly property {wanted}"
+        elif temporal_violation and not TEMPORAL_FINISHED_RE.search(output):
+            reason = "temporal counterexample lacks the TLC temporal-check completion marker"
+        elif temporal_violation and states["queued"] != 0:
+            reason = "temporal counterexample ended with states still queued"
+        elif temporal_violation and not TEMPORAL_TRACE_END_RE.search(output):
+            reason = "temporal counterexample lacks a stuttering or back-edge trace terminator"
         elif trace_states < expected.get("minimum_trace_states", 2):
             reason = f"expected trace has {trace_states} states; requires {expected.get('minimum_trace_states', 2)}"
         else:
@@ -675,8 +697,8 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
             complete = True
             counterexample_found = actual == "violation"
             completion_kind = (
-                "normal_reachability_witness_detected"
-                if actual == "witness"
+                "normal_reachability_witness_detected" if actual == "witness"
+                else "temporal_counterexample_detected" if temporal_violation
                 else "expected_defect_counterexample_detected"
             )
     return {
