@@ -1,22 +1,14 @@
 # Formal verification pilot — status
 
-**Status:** M0 in progress; no formal result or milestone accepted · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Base:** `3808640c79` · **PR:** [#1241](http://forge.lan:3000/noirr/plurx/pulls/1241) · **Merge readiness:** not ready
+**Status:** M0 interface frozen; M1/M2/M3 implementation active; acceptance pending · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Base:** `3808640c79` · **PR:** [#1241](http://forge.lan:3000/noirr/plurx/pulls/1241) · **Merge readiness:** not ready
 
 The pilot is in an agent-owned clone. The stable TLC 1.7.4 artifact and Temurin JDK 21.0.12+8 pins are prepared and verified. TLC help runs on the local macOS ARM64 JDK. This is toolchain feasibility evidence only; no protocol specification, model-check result or backend acceptance is claimed.
 
-Fable task `t_7622df11` has resumed through an isolated copy of the existing
-credential-routing fix. The installed route misclassified an identity-linked
-API credential and recorded false local exhaustion. A direct API check
-returned HTTP 200 as `claude-fable-5-1`; only that credential's local failure
-state was reset. No shared installation was changed. M0 model work is running;
-no model result is claimed.
+Fable 5.1 task `t_7622df11` has frozen the seven-configuration model/runner interface and is implementing the protocol and source map. Fable task `t_5136edeb` owns the real backend insertion conformance bridge in a separate clone. GPT-6 Luna owns the bounded runner and strict receipts. The recovered API route is active; no model verdict or backend acceptance is claimed.
 
 The build proceeds as one related batch for a single PR to `main`. When that PR is complete, the coordinator requests the directed final adversarial Fable 5.1 review, fixes its findings, and runs the affected fast lane once. Only failed or invalidated evidence is rerun. Model checking, compile checks and static inspection are available during development; no unit suites run before the final review. The pilot adds no product feature gate.
 
-The pinned Rust 1.97.1 compile-only baseline is running in an agent-owned
-build directory. GPT-6 Luna is implementing the explicit checksummed
-toolchain bootstrap. The draft PR allocates bookkeeping checks only; no
-pre-review unit or conformance suites have been started.
+The pinned Rust 1.97.1 `hiqlite-store` all-target baseline check completed. The explicit checksummed toolchain bootstrap is committed. The draft PR allocates bookkeeping checks only; no pre-review unit or conformance suites have been started.
 
 
 ## Current implementation and acceptance
@@ -25,9 +17,10 @@ pre-review unit or conformance suites have been started.
 |---|---|---|---|
 | Toolchain pin/bootstrap | GPT-6 Luna | Committed `bf3c9c537`; fetch/resolve feasibility passed | Final synthetic tests and review |
 | Pinned compiler loop | Codex coordinator | Rust 1.97.1 core `hiqlite-store` all-target check completed | Changed-source checks if Rust tests are added |
-| Protocol/model | Fable 5.1 | Pinned worker resumed; M0 in progress | M0 freeze, M1 exploration/controls |
-| Runtime diagnosis | GPT-6 Luna and designated control session | Resolved with existing dependencies and isolated committed fix | Complete protocol/model artifacts |
-| Backend/runner/CI | Fable contract plus bounded builder | Not started | M2/M3 implementation, final qualification |
+| Protocol/model | Fable 5.1, `t_7622df11` | M0 model/runner interface frozen; M1 being built | Source contract, complete exploration and intended controls |
+| Backend bridge | Fable 5.1, `t_5136edeb` | M2 author active in isolated clone | Real retained-state and ambiguous-reply conformance |
+| Runner/receipts | GPT-6 Luna | M3 author active against frozen M0 interface | Strict verdicts, source drift and final synthetic controls |
+| CI integration | Codex coordinator | Existing preflights wired for affected smoke and explicit provisioning | Review and final CI qualification |
 | Review/fast lane/merge | Coordinator and designated Fable reviewer | Not ready | Complete PR, review fixes, once-per-candidate evidence |
 
 The authoritative blocking workflow on this source is

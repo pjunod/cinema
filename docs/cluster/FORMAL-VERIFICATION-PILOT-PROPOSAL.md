@@ -490,8 +490,8 @@ results. Add no separate status document until this ledger becomes unwieldy.
 | `verification/durable-jobs/mapping.json` | Source symbols, assumptions, property coverage and conformance links |
 | `verification/durable-jobs/toolchain.json` | Exact TLC release/artifact SHA-256, supported Java version and resolved invocation |
 | `verification/durable-jobs/README.md` | Commands, verdict interpretation, bounds and trusted components |
-| `scripts/verify-durable-jobs` | Bounded runner, strict completion checks, controls and receipt emission |
-| `tests/operations/test_formal_verification_receipt.py` | Meaningful runner controls: incomplete run, bad artifact, missing property, expected mutation and stale source evidence |
+| `scripts/check-formal` | Bounded runner, strict completion checks, controls and receipt emission |
+| `tests/operations/test_formal_runner.py` | Meaningful runner controls: incomplete run, bad artifact, missing property, expected mutation and stale source evidence |
 
 Keep downloaded tool binaries and generated logs out of tracked source. Pin
 a supported published TLC artifact and compatible Java runtime in M0; never
@@ -503,8 +503,8 @@ repository credential is required.
 Proposed commands after implementation:
 
 ```bash
-scripts/verify-durable-jobs --profile smoke     # small complete safety run
-scripts/verify-durable-jobs --profile baseline  # safety + recovery + controls
+scripts/check-formal smoke     # small complete safety run
+scripts/check-formal full  # safety + recovery + controls
 ```
 
 The runner accepts an explicitly configured local TLC artifact/runtime and
