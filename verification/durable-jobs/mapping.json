@@ -588,7 +588,7 @@
         "table": "review §2 vendored output error source"
       }
     ],
-    "review_basis": "author source correspondence confirmed against CONTRACT at 85895bb46; independent adversarial review pending"
+    "review_basis": "author source correspondence confirmed against CONTRACT at 85895bb46; final adversarial review by Fable 5.1 thread t_9e6136d9 on 88f73b08c completed CHANGES_REQUESTED for F1/F2; root fixes and runtime qualification pending, no approval claim"
   },
   "configs": {
     "baseline.cfg": {

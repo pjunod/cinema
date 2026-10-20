@@ -61,7 +61,7 @@ class FormalToolchainTest(unittest.TestCase):
                 member.type = tarfile.SYMTYPE
                 member.linkname = "../../escape"
                 tar.addfile(member)
-            with self.assertRaisesRegex(bootstrap.ToolchainError, "unsupported link"):
+            with self.assertRaisesRegex(bootstrap.ToolchainError, "archive link escapes extraction root"):
                 bootstrap._safe_extract_tar(linked, root / "extract-link")
 
     def test_install_receipt_is_bound_to_verified_archive_java_bytes(self):
