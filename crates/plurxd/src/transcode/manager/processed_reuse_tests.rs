@@ -637,7 +637,7 @@ async fn fixture(destination: DvDestination) -> Fixture {
     )
     .expect("backend control");
     let source_facts = DvSourceFacts::new(
-        file.dolby_vision.clone(),
+        file.dolby_vision,
         0,
         plurx_core::transcode::DecodeSourceIdentity::from_sha256(hex::encode(Sha256::digest(
             std::fs::read(&path).expect("source hash"),
