@@ -11,6 +11,8 @@ import unittest
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/bootstrap-formal-toolchain"
+ROOT = Path(__file__).resolve().parents[2]
+TEST_SCRATCH = ROOT / "target/formal-tests"
 LOADER = importlib.machinery.SourceFileLoader("bootstrap_formal_toolchain", str(SCRIPT))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 bootstrap = importlib.util.module_from_spec(SPEC)
@@ -18,6 +20,10 @@ LOADER.exec_module(bootstrap)
 
 
 class FormalToolchainTest(unittest.TestCase):
+    def temporary_directory(self):
+        TEST_SCRATCH.mkdir(parents=True, exist_ok=True)
+        return tempfile.TemporaryDirectory(dir=TEST_SCRATCH)
+
     def test_platform_selection_rejects_unpinned_architectures(self):
         with mock.patch.object(bootstrap.platform, "system", return_value="Darwin"), mock.patch.object(
             bootstrap.platform, "machine", return_value="x86_64"
@@ -26,7 +32,7 @@ class FormalToolchainTest(unittest.TestCase):
                 bootstrap._current_platform()
 
     def test_tar_extraction_rejects_traversal_and_links(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with self.temporary_directory() as directory:
             root = Path(directory)
             archive = root / "unsafe.tar.gz"
             with tarfile.open(archive, "w:gz") as tar:
@@ -59,7 +65,7 @@ class FormalToolchainTest(unittest.TestCase):
                 bootstrap._safe_extract_tar(linked, root / "extract-link")
 
     def test_install_receipt_is_bound_to_verified_archive_java_bytes(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with self.temporary_directory() as directory:
             root = Path(directory)
             archive = root / "jdk.tar.gz"
             java_bytes = (
@@ -105,7 +111,7 @@ class FormalToolchainTest(unittest.TestCase):
                 }
             ],
         }
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+        with self.temporary_directory() as directory, mock.patch.object(
             bootstrap, "_current_platform", return_value=("macos", "arm64")
         ):
             with self.assertRaisesRegex(bootstrap.ToolchainError, "TLC jar is missing"):
