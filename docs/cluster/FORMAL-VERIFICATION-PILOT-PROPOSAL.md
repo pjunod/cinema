@@ -571,34 +571,23 @@ counterexample is a finding, never a reason to declare completion early.
 
 ### 10.1 Repository gates stay authoritative
 
-Run focused regressions and affected compilation for each task; commit with
-the normal tracked hook; dispatch and pass **Effort development gate** on the
-current task candidate before merging into the effort. Do not use CI as a
-Rust compiler. Any task changing Rust first establishes the pinned 1.97.1
-compile loop from [the compiler handoff](../ci/AGENT-COMPILE-LOOP.md).
+Use the pinned Rust 1.97.1 [compile loop](../ci/AGENT-COMPILE-LOOP.md) and
+normal commits. The single-PR execution in §12 governs test timing. Runtime
+fixes require `fix(`/`perf(` scope and `Regression-Test:` fields in the PR and
+landing message; model or test work must not conceal a production fix.
 
-Production behavior fixes discovered here receive separate `fix(`/`perf(`
-task scope, real regressions and `Regression-Test:` lines in both PR and
-landing messages. A test-only or model-only change does not relabel a runtime
-fix as documentation. Amend file ownership and acceptance if a corrective
-task becomes necessary.
+Existing preflights provision pinned Java/TLC, check source drift and run the
+affected bounded smoke profile. Preserve effort `compile_only` coverage and
+retain failure artifacts. The 900-second baseline/lifecycle checks are local
+qualification evidence, outside the 10/15-minute preflight budget. Missing
+tools or incomplete exploration fail the selected check. Add no workflow jobs
+or suppression of existing checks; see the [CI disposition](FORMAL-VERIFICATION-PILOT-REVIEW.md#4-ci-provisioning-without-another-job).
 
-Neither current workflow provisions Java. M0 owns pinned/checksummed JDK
-setup and version verification in the existing main/effort preflight jobs;
-M1 adds affected smoke execution, including effort `compile_only`. Include
-provisioning plus smoke in their 10/15-minute budgets; do not put a 15-minute
-baseline into a 10-minute job. Retain baseline receipts as explicit task and
-promotion evidence. The [CI disposition](FORMAL-VERIFICATION-PILOT-REVIEW.md#4-ci-provisioning-without-another-job)
-names insertion points and dependency pinning. This authorizes minimal steps
-in the existing workflow files, not new jobs or suppression of existing checks.
-M3 adds measured catalog selection/drift handling. Missing Java/TLC fails a
-selected verification check; it never silently skips it.
-
-Freeze task merges, integrate current `main`, rerun the baseline and affected
-backend evidence on that exact candidate, and promote only after **Main
-promotion gate** and its qualification receipt pass. If the candidate moves,
-qualify the new tree. Do not waive existing qualification because the model
-passed. Production deployment and physical acceptance are separate work.
+Integrate current `main`, freeze the candidate, obtain review, fix findings,
+and qualify the resulting source. Merge requires **Main promotion gate** and
+the qualification receipt. Changed checked inputs invalidate affected results;
+documentation-only bookkeeping follows §9's hash-equivalence rule. Production
+deployment and physical acceptance are separate work.
 
 ## 11. Completion — stronger evidence before any test reduction
 
@@ -619,20 +608,6 @@ property, model bounds, implementation bridge, residual risk and replacement
 command, and show before/after runtime. Neither this proposal nor pilot
 acceptance authorizes deleting tests. The first measured success criterion is
 more reproducible coverage of authority orderings at an understood cost.
-
-### 11.1 Initial execution ledger
-
-Historical kickoff snapshot. Current ownership, implementation and acceptance
-are maintained on the [status page](FORMAL-VERIFICATION-PILOT-STATUS.md).
-
-| Milestone | Implementation | Acceptance | Owner / evidence |
-|---|---|---|---|
-| Proposal | Six required amendments incorporated 2026-10-20 | Fable: approve with amendments; author disposition recorded, no second approval | [Review record](FORMAL-VERIFICATION-PILOT-REVIEW.md); no model or formal result |
-| M0 | In progress | Not accepted | Fable 5.1 semantics; GPT-6 Luna toolchain; coordinator integration |
-| M1 | Not started | Not run | Unassigned |
-| M2 | Not started | Not run | Unassigned |
-| M3 | Not started | Not run | Unassigned |
-| Promotion | Not started | Not qualified | Unassigned |
 
 ## 12. Execution direction — one batch, review, then the fast lane
 
