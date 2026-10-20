@@ -224,3 +224,28 @@ M0 may proceed after these design dispositions. The canonical ledger still
 records M0–M3 as unimplemented and unaccepted. New source differences or
 counterexamples reopen the corresponding assumption or property; this review
 does not preapprove a changed model boundary.
+
+## Final implementation review — 2026-10-20
+
+Independent Fable 5.1 (`claude-fable-5-1`, task `t_9e6136d9`) reviewed
+candidate `88f73b08c` against `2c0e8b14df`. The same saved session completed
+a targeted continuation of initially unread areas, retaining its first
+findings. It performed no builds, tests, TLC runs or source edits. Final
+verdict: **changes requested**, not approval or runtime evidence.
+
+| Finding/comment | Coordinator disposition |
+|---|---|
+| F1 · Recovery old-reply non-adoption claim was vacuous | Narrowed README/CONTRACT and mapping prose: `DeliverOldReply` is a Boolean scheduling placeholder with no payload or boot comparison. L1 checks eventual current claim, not rejection of that reply. Fresh-scenario delivery guards are described separately. No model/config bytes changed. |
+| F1 · Recovery seed description | Recorded Init clock0, old running claim expiry2 and not-before2/3; fair time reaches the applicable barrier. No directly seeded queued/yielded/failure-retry case or time above3 is claimed. |
+| F2 · Archive test expected an error never emitted | Test now expects the actual escaping-link rejection; extraction protection is unchanged. |
+| C1–C5 · Reductions and scope | Documented monotone revisions, permutation invariance of S5–S7, absorbing cancelling state, takeover over-approximation and disabled finite-boundary deadlock checking. |
+| C8 · Smoke could exceed a stricter mapped timeout | Runner now takes the minimum of mapped timeout, profile cap and remaining profile budget; existing contract test covers the stricter mapping. |
+| C10 · Effort compile-only formal steps | Retained intentionally: the accepted CI disposition requires affected formal smoke in compile-only effort runs. No Rust/Apple/Android unit suite is added there. |
+| C11 · S5 control exit13 | Confirmed on exact model `96d4e492…`: actual exit13, named action-property violation, four-state trace. Final runner must still observe its pinned outcome. |
+| C12 · Review basis said pending | Updated to completed review with findings and coordinator dispositions; qualification remains separate. |
+
+The full report and machine verdict are retained with PR1241 evidence.
+Remaining review residuals concern maintenance SQL predicate re-derivation,
+witness-depth derivation and previously untraced helpers; no additional
+critical-code gap was declared. The real backend and strict-runner checks
+remain required. No test reduction or whole-cluster deadlock claim follows.
