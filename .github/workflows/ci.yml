@@ -1785,10 +1785,6 @@ jobs:
           echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
           python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
-      - id: cargo-cache
-        uses: ./.github/actions/cargo-cache
-        with:
-          lane: web-layout
       # Pinned so the browser-bundle cache key below is meaningful; bump both
       # together. A cache hit skips the ~150 MB Chromium download every run.
       - name: Cache Playwright browsers
@@ -1813,6 +1809,11 @@ jobs:
           (pathlib.Path(os.environ['PLURX_BASELINE_DIR']) / 'context-seek-layout.json').write_text(json.dumps(context))
           PYCONTEXT
           python3 -m validation.baseline_python --context "$PLURX_BASELINE_DIR/context-seek-layout.json" --suite-dir tests/web --output "$PLURX_BASELINE_DIR/python-seek-layout.json"
+      - id: cargo-cache
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: web-layout
       - name: Check every affected web layout
         if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make ui-check
@@ -1823,6 +1824,7 @@ jobs:
         if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make control-browser-check
       - name: Provision headed Cinema browser dependencies
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: |
           set -eu
           if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v xauth >/dev/null 2>&1; then

@@ -95,6 +95,17 @@ class FullSuiteBaselineWorkflowCase(unittest.TestCase):
             trace = (root / "trace").read_text() if (root / "trace").exists() else ""
             return result, output, trace
 
+    def test_browser_discovery_precedes_cache_workspace_mutation(self):
+        web = jobs()["web_layout"]
+        self.assertLess(web.index("Run standalone seek-control browser unit discovery"),
+                        web.index("lane: web-layout"))
+        cache = web.split("      - id: cargo-cache\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("!cancelled() && (inputs.diagnostic_baseline == 'true' || success())", cache)
+        provision = step(web, "Provision headed Cinema browser dependencies")
+        cinema = step(web, "Test Cinema remote browser contracts")
+        for block in (provision, cinema):
+            self.assertIn("!cancelled() && (inputs.diagnostic_baseline == 'true' || success())", block)
+
     def binding(self, **overrides):
         sha = "a" * 40
         env = dict(DIAGNOSTIC_BASELINE="true", EXPECTED_SHA=sha, GITHUB_SHA=sha,
