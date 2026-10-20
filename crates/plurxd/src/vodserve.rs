@@ -850,6 +850,8 @@ pub(crate) struct PreparedRootAdmission {
 /// A staged successor must capture this together with the exact live root;
 /// neither a serialized catalog row nor this seed alone admits any work.
 #[derive(Clone)]
+// Production consumers of this provenance require the Linux processing owner.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct ProcessedReuseSeed {
     pub(crate) query: crate::media_pool::QualityCatalogRequest,
     pub(crate) caps: plurx_core::playback::DeviceCaps,
@@ -876,6 +878,8 @@ impl ProcessedReuseSeed {
 
 /// Constructed only by the manager after validating a pending staged ledger.
 /// Deserialization, catalog restoration and ordinary recovery cannot mint it.
+// The fields are validated by the Linux-only staged-root restoration path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct StagedProcessedPredecessor {
     pub(crate) session_id: String,
     pub(crate) incarnation_id: String,

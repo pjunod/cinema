@@ -27,7 +27,7 @@ impl VodServe {
     /// Called only with the manager's verified staged-ledger predecessor.
     /// Capture descriptive provenance and physical custody atomically. The
     /// caller re-derives scope from current authoritative inputs before attach.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(crate) async fn capture_staged_processed_root(
         &self,
         request: &SessionRequest,
