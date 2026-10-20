@@ -135,21 +135,21 @@ fn publication_row_id() -> i64 {
 /// moment between a real commit and its reply, are internal to this method.
 /// This seam exposes exactly those two boundaries and nothing else.
 ///
-/// Architecture notes:
 /// - Compiled only with `hiqlite-contract-tests`, which the daemon never
 ///   enables; production code carries no toggle, no counter and no branch.
 /// - A seam can only observe a submission or discard a real `Ok` reply. It
 ///   cannot fabricate success, skip the backend, or alter statements, so it
 ///   cannot verify a different implementation than the one shipped.
-/// - The installed seam is process-scoped because `HiqliteAuthStore` is
-///   defined in an unowned module; contract tests already serialise every
-///   replicated fixture behind `HIQLITE_CASE`, and the guard refuses a second
-///   concurrent installation rather than racing. Moving the slot onto the
-///   store struct is a one-line follow-up for that module's owner.
+/// - A seam belongs to one store handle. The slot is a field of
+///   `HiqliteAuthStore`, shared by clones of that handle (they share the one
+///   client whose submissions the seam observes) and invisible to any other
+///   store opened on the same cluster. Installation is scoped by an RAII
+///   guard that clears only the slot it filled.
 #[cfg(feature = "hiqlite-contract-tests")]
 pub mod conformance {
     use std::sync::{Arc, Mutex};
 
+    use super::HiqliteAuthStore;
     use crate::cluster::coordination::Lease;
     use crate::error::StoreError;
 
@@ -177,39 +177,47 @@ pub mod conformance {
         fn lose_acknowledgement(&self, attempt: &InsertionAttempt) -> Option<StoreError>;
     }
 
-    static INSTALLED: Mutex<Option<Arc<dyn InsertionSeam>>> = Mutex::new(None);
+    /// The per-store seam slot. Clones of a store share the slot; a store
+    /// opened separately gets its own empty one.
+    #[derive(Clone, Default)]
+    pub(crate) struct InsertionSeamSlot(Arc<Mutex<Option<Arc<dyn InsertionSeam>>>>);
 
-    /// Keeps a seam installed until dropped.
-    pub struct InstalledSeam(());
-
-    impl Drop for InstalledSeam {
-        fn drop(&mut self) {
-            *INSTALLED
+    impl InsertionSeamSlot {
+        fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<dyn InsertionSeam>>> {
+            self.0
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        pub(super) fn installed(&self) -> Option<Arc<dyn InsertionSeam>> {
+            self.lock().clone()
         }
     }
 
-    /// Install `seam` for the chosen insertion. Panics if one is already
-    /// installed: the conformance tests own the replicated fixture
-    /// exclusively, so overlap is a test bug, not a race to tolerate.
-    pub fn install(seam: Arc<dyn InsertionSeam>) -> InstalledSeam {
-        let mut slot = INSTALLED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            slot.is_none(),
-            "an insertion conformance seam is already installed"
-        );
-        *slot = Some(seam);
-        InstalledSeam(())
+    /// Keeps a seam installed in one store's slot until dropped.
+    pub struct InstalledSeam(InsertionSeamSlot);
+
+    impl Drop for InstalledSeam {
+        fn drop(&mut self) {
+            *self.0.lock() = None;
+        }
     }
 
-    pub(super) fn installed() -> Option<Arc<dyn InsertionSeam>> {
-        INSTALLED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+    /// Install `seam` on `store` for the chosen insertion. Panics if that
+    /// store already has one: overlapping seams on one handle would make the
+    /// observed trace ambiguous, which is a test bug rather than a race to
+    /// tolerate.
+    pub fn install(store: &HiqliteAuthStore, seam: Arc<dyn InsertionSeam>) -> InstalledSeam {
+        let slot = store.insertion_seam.clone();
+        {
+            let mut installed = slot.lock();
+            assert!(
+                installed.is_none(),
+                "an insertion conformance seam is already installed on this store"
+            );
+            *installed = Some(seam);
+        }
+        InstalledSeam(slot)
     }
 }
 
@@ -1005,7 +1013,7 @@ impl FencedPublicationStore for HiqliteAuthStore {
         // authority: current allocator installation selects the identity-fenced write path.
         let allocated = self.client().query_consistent_map::<ItemIdentityValue,_>("SELECT count(*) AS value FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",params!()).await.map_err(database_error)?.first().is_some_and(|r|r.value==1);
         #[cfg(feature = "hiqlite-contract-tests")]
-        let seam = conformance::installed();
+        let seam = self.insertion_seam.installed();
         for attempt in 0..4 {
             let id = if allocated {
                 // authority: select the next candidate against the committed monotonic watermark.

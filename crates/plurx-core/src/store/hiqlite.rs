@@ -481,6 +481,10 @@ pub struct HiqliteAuthStore {
     cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
     watch_fences: Arc<super::watch_fence::WatchWriteFences>,
     pub(super) media_session_projection: Arc<std::sync::atomic::AtomicU8>,
+    /// Conformance observation slot for the chosen fenced insertion; shared
+    /// by clones of this handle, private to it. Contract-test builds only.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    pub(super) insertion_seam: super::hiqlite_publication::conformance::InsertionSeamSlot,
 }
 
 /// Cache activity is advisory recency, not ownership or completion. One
@@ -5151,6 +5155,8 @@ impl HiqliteAuthStore {
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
             watch_fences: Arc::new(super::watch_fence::WatchWriteFences::default()),
             media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            #[cfg(feature = "hiqlite-contract-tests")]
+            insertion_seam: Default::default(),
         }
     }
 

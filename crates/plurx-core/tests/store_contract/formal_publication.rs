@@ -868,13 +868,21 @@ mod replicated {
         .expect("raw replicated client")
     }
 
-    async fn fresh_store(cluster: &ContractCluster) -> Arc<dyn Store> {
-        let store: HiqliteAuthStore = open_contract_hiqlite_store(cluster).await;
+    /// The store under test, reset, as the concrete handle so a seam can be
+    /// installed on it. Callers coerce to `&dyn Store` where needed.
+    async fn fresh_store(cluster: &ContractCluster) -> Arc<HiqliteAuthStore> {
+        let store = open_contract_hiqlite_store(cluster).await;
         store
             .validation_reset_contract_state()
             .await
             .expect("reset replicated contract state");
         Arc::new(store)
+    }
+
+    /// Another client of the same cluster without the reset, for isolation
+    /// examples: it shares the data, not the handle.
+    async fn other_store(cluster: &ContractCluster) -> Arc<HiqliteAuthStore> {
+        Arc::new(open_contract_hiqlite_store(cluster).await)
     }
 
     async fn raw_titles(client: &hiqlite::Client, library_id: i64) -> Vec<String> {
@@ -987,7 +995,8 @@ mod replicated {
     ) {
         let _case = HIQLITE_CASE.lock().await;
         let cluster = ContractCluster::start().await;
-        let store = fresh_store(&cluster).await;
+        let handle = fresh_store(&cluster).await;
+        let store: Arc<dyn Store> = handle.clone();
         let client = raw_client(&cluster).await;
         let backend = "hiqlite-3-voter";
         let now = unix_now_ms();
@@ -1095,7 +1104,8 @@ mod replicated {
     async fn formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade() {
         let _case = HIQLITE_CASE.lock().await;
         let cluster = ContractCluster::start().await;
-        let store = fresh_store(&cluster).await;
+        let handle = fresh_store(&cluster).await;
+        let store: Arc<dyn Store> = handle.clone();
         let client = raw_client(&cluster).await;
         let backend = "hiqlite-3-voter";
         let now = unix_now_ms();
@@ -1109,7 +1119,41 @@ mod replicated {
             lost: Mutex::new(false),
         });
         let lost = {
-            let _installed = install(seam.clone());
+            let _installed = install(&handle, seam.clone());
+            // Isolation: the seam belongs to `handle`. A separately opened
+            // client of the same cluster submits the same kind of insertion
+            // through its own handle, and neither boundary is observed.
+            let other: Arc<dyn Store> = other_store(&cluster).await;
+            let other_library = create_library(other.as_ref(), "formal-other-client").await;
+            let other_lease = acquired(
+                other
+                    .acquire_lease(
+                        &Scan::resource(other_library),
+                        "node-b",
+                        now,
+                        now + DOMAIN_TTL_MS,
+                    )
+                    .await
+                    .expect("other client's domain lease"),
+                backend,
+            );
+            other
+                .insert_item_fenced(
+                    &movie(other_library, "other client"),
+                    &other_lease,
+                    &publication_successor(&other_lease),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other client acknowledged: {error}"));
+            assert!(
+                seam.observed.lock().expect("observed").is_empty(),
+                "{backend}: a seam never observes another handle's submissions"
+            );
+            assert_eq!(
+                raw_titles(&client, other_library).await,
+                vec!["other client".to_owned()],
+                "{backend}"
+            );
             publisher
                 .insert_item(&movie(library_id, "committed unacknowledged"))
                 .await
@@ -1182,9 +1226,12 @@ mod replicated {
         let revoked_fence = PublicationFence::new(live.clone());
         let revoked_publisher = PublicationStore::fenced(store.as_ref(), revoked_fence.clone());
         let revoked = {
-            let _installed = install(Arc::new(RevokeAfterCommit {
-                fence: revoked_fence.clone(),
-            }));
+            let _installed = install(
+                &handle,
+                Arc::new(RevokeAfterCommit {
+                    fence: revoked_fence.clone(),
+                }),
+            );
             revoked_publisher
                 .insert_item(&movie(library_id, "revoked after commit"))
                 .await
@@ -1213,7 +1260,8 @@ mod replicated {
     {
         let _case = HIQLITE_CASE.lock().await;
         let cluster = ContractCluster::start().await;
-        let store = fresh_store(&cluster).await;
+        let handle = fresh_store(&cluster).await;
+        let store: Arc<dyn Store> = handle.clone();
         let client = raw_client(&cluster).await;
         let backend = "hiqlite-3-voter";
         for result in client
@@ -1240,7 +1288,7 @@ mod replicated {
         });
         let successor = publication_successor(&scan.lease);
         let id = {
-            let _installed = install(one.clone());
+            let _installed = install(&handle, one.clone());
             store
                 .insert_item_fenced(&movie(library_id, "retried"), &scan.lease, &successor)
                 .await
@@ -1283,7 +1331,7 @@ mod replicated {
         });
         let next = publication_successor(&successor);
         let exhausted = {
-            let _installed = install(every.clone());
+            let _installed = install(&handle, every.clone());
             store
                 .insert_item_fenced(&movie(library_id, "never committed"), &successor, &next)
                 .await
