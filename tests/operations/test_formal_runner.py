@@ -19,10 +19,12 @@ SPEC.loader.exec_module(formal)
 
 PASS = {
     "verdict": "pass",
+    "purpose": "safety",
     "expected_error": None,
 }
 VIOLATION = {
     "verdict": "violation",
+    "purpose": "defect_control",
     "expected_error": "S2_PublicationAuthority",
     "expected_exit": 23,
     "expected_error_match": {
@@ -30,7 +32,21 @@ VIOLATION = {
         "attribution": "named_property",
         "allowed_error_lines": ["The behavior up to this point is:"],
     },
+    "minimum_trace_states": 2,
     "analysis": {"properties": ["S2_PublicationAuthority"]},
+}
+WITNESS = {
+    "verdict": "witness",
+    "purpose": "reachability_witness",
+    "expected_error": "Witness_ThreeSamples",
+    "expected_exit": 37,
+    "expected_error_match": {
+        "line": "Invariant Witness_ThreeSamples is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": ["The behavior up to this point is:"],
+    },
+    "minimum_trace_states": 2,
+    "analysis": {"properties": ["Witness_ThreeSamples"]},
 }
 
 
@@ -89,7 +105,37 @@ class TLCOutputClassificationTests(unittest.TestCase):
         self.assertEqual(result["state_counts"]["generated"], 2)
         self.assertFalse(result["exploration_complete"])
         self.assertTrue(result["counterexample_found"])
-        self.assertEqual(result["completion_kind"], "expected_counterexample_detected")
+        self.assertEqual(result["completion_kind"], "expected_defect_counterexample_detected")
+
+    def test_reachability_witness_is_not_reported_as_a_defect_or_exhaustive_pass(self) -> None:
+        result = formal.classify(violation_output("Witness_ThreeSamples"), 37, WITNESS, False, None)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["actual_verdict"], "witness")
+        self.assertEqual(result["completion_kind"], "normal_reachability_witness_detected")
+        self.assertFalse(result["counterexample_found"])
+        self.assertFalse(result["exploration_complete"])
+        self.assertEqual(result["trace_states"], 2)
+
+    def test_reachability_witness_requires_two_trace_states(self) -> None:
+        output = violation_output("Witness_ThreeSamples").replace("State 2: <Next predicate>\n", "")
+        result = formal.classify(output, 37, WITNESS, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("requires 2", result["reason"])
+
+
+class RegistryProfileTests(unittest.TestCase):
+    def test_registry_profiles_are_explicit_and_bounded(self) -> None:
+        self.assertEqual(len(formal.CONFIG_ORDER), 15)
+        self.assertEqual(len(formal.SMOKE_CONFIGS), 9)
+        self.assertEqual(formal.select_configs("smoke", None), list(formal.SMOKE_CONFIGS))
+        self.assertEqual(formal.select_configs("full", None), list(formal.CONFIG_ORDER))
+        self.assertEqual(formal.select_configs("smoke", "control-bind-before-work.cfg"), ["control-bind-before-work.cfg"])
+        self.assertEqual(formal.config_timeout("smoke", "smoke.cfg", 60, 170), 60)
+        self.assertEqual(formal.config_timeout("smoke", "recovery.cfg", 900, 170), 30)
+        self.assertEqual(formal.config_timeout("smoke", "witness-displacement.cfg", 30, 10), 10)
+        with self.assertRaises(formal.RunnerError):
+            formal.select_configs("smoke", "witness-time-advance.cfg")
+        self.assertEqual(formal.select_configs("full", "baseline.cfg"), ["baseline.cfg"])
 
     def test_violation_rejects_wrong_exit(self) -> None:
         result = formal.classify(violation_output(), 1, VIOLATION, False, None)
@@ -132,13 +178,13 @@ class TLCOutputClassificationTests(unittest.TestCase):
 
     def test_violation_rejects_missing_counterexample(self) -> None:
         output = violation_output().replace("State 1: <Initial predicate>\n", "")
-        result = formal.classify(output, 12, VIOLATION, False, None)
+        result = formal.classify(output, 23, VIOLATION, False, None)
         self.assertFalse(result["complete"])
-        self.assertIn("trace is missing", result["reason"])
+        self.assertIn("requires 2", result["reason"])
 
     def test_violation_rejects_parse_failure_even_if_expected_name_appears(self) -> None:
         output = "Parsing Error: S2_PublicationAuthority\n" + violation_output()
-        result = formal.classify(output, 12, VIOLATION, False, None)
+        result = formal.classify(output, 23, VIOLATION, False, None)
         self.assertFalse(result["complete"])
         self.assertIn("fatal error", result["reason"])
 

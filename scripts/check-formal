@@ -31,7 +31,38 @@ CONFIG_ORDER = (
     "control-renewal-revives-cancel.cfg",
     "recovery.cfg",
     "control-retry-stalls.cfg",
+    "witness-three-samples.cfg",
+    "witness-four-submissions.cfg",
+    "witness-cancelled-renewal.cfg",
+    "witness-replay.cfg",
+    "witness-bind-refusal.cfg",
+    "witness-precommit-rollback.cfg",
+    "witness-displacement.cfg",
+    "control-bind-before-work.cfg",
 )
+SMOKE_CONFIGS = (
+    "smoke.cfg",
+    "recovery.cfg",
+    "witness-three-samples.cfg",
+    "witness-four-submissions.cfg",
+    "witness-cancelled-renewal.cfg",
+    "witness-replay.cfg",
+    "witness-bind-refusal.cfg",
+    "witness-precommit-rollback.cfg",
+    "witness-displacement.cfg",
+)
+SMOKE_WALL_BUDGET_SECONDS = 180
+SMOKE_CONFIG_TIMEOUTS = {
+    "smoke.cfg": 60,
+    "recovery.cfg": 30,
+    **{name: 30 for name in SMOKE_CONFIGS if name.startswith("witness-")},
+}
+PURPOSE_VERDICTS = {
+    "safety": "pass",
+    "liveness": "pass",
+    "defect_control": "violation",
+    "reachability_witness": "witness",
+}
 MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_HEAP_BYTES = 4 * 1024 * 1024 * 1024
 POLL_SECONDS = 0.2
@@ -91,7 +122,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
 
     configs = mapping.get("configs")
     if not isinstance(configs, dict) or set(configs) != set(CONFIG_ORDER):
-        drift.append("mapping config set differs from the seven frozen runner configs")
+        drift.append("mapping config set differs from the reviewed 15-config registry")
         configs = configs if isinstance(configs, dict) else {}
     for name in CONFIG_ORDER:
         record = configs.get(name)
@@ -109,23 +140,43 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
             elif expected != actual:
                 drift.append(f"config source drift requires review: {name}")
             verdict = record.get("verdict")
+            purpose = record.get("purpose")
             error = record.get("expected_error")
-            if verdict not in ("pass", "violation"):
+            if verdict not in ("pass", "violation", "witness"):
                 drift.append(f"invalid expected verdict for {name}")
-            if (verdict == "violation") != (isinstance(error, str) and bool(error)):
-                drift.append(f"expected error does not agree with verdict for {name}")
+            if purpose not in PURPOSE_VERDICTS:
+                drift.append(f"configuration purpose is not reviewed: {name}")
+            elif PURPOSE_VERDICTS[purpose] != verdict:
+                drift.append(f"purpose and expected outcome disagree for {name}")
+            requires_trace = verdict in ("violation", "witness")
+            if requires_trace != (isinstance(error, str) and bool(error)):
+                drift.append(f"expected property does not agree with outcome for {name}")
+            minimum_trace_states = record.get("minimum_trace_states")
+            if requires_trace:
+                if (
+                    not isinstance(minimum_trace_states, int)
+                    or isinstance(minimum_trace_states, bool)
+                    or minimum_trace_states < 2
+                ):
+                    drift.append(f"counterexample/witness must require at least two trace states: {name}")
+            elif minimum_trace_states is not None:
+                drift.append(f"positive exhaustive configuration cannot set a trace minimum: {name}")
             expected_exit = record.get("expected_exit")
             if verdict == "pass":
                 if isinstance(expected_exit, bool) or expected_exit != 0:
                     drift.append(f"positive configuration must pin successful exit 0: {name}")
                 if record.get("expected_error_match") is not None:
                     drift.append(f"positive configuration cannot declare a violation error line: {name}")
-            elif verdict == "violation":
+            elif verdict in ("violation", "witness"):
                 if not isinstance(expected_exit, int) or isinstance(expected_exit, bool) or not 1 <= expected_exit <= 255:
-                    drift.append(f"violation exit code is not reviewed: {name}")
+                    drift.append(f"counterexample exit code is not reviewed: {name}")
                 if not isinstance(record.get("expected_error_match"), dict):
-                    drift.append(f"exact violation error mapping is pending observation: {name}")
-            if not isinstance(record.get("timeout_seconds"), int) or record["timeout_seconds"] < 1:
+                    drift.append(f"exact counterexample error mapping is pending observation: {name}")
+            if (
+                not isinstance(record.get("timeout_seconds"), int)
+                or isinstance(record.get("timeout_seconds"), bool)
+                or record["timeout_seconds"] < 1
+            ):
                 drift.append(f"invalid timeout for {name}")
             analysis = record.get("analysis")
             if not isinstance(analysis, dict) or analysis.get("status") != "reviewed":
@@ -140,7 +191,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                             isinstance(value, (int, float))
                             and not isinstance(value, bool)
                             and math.isfinite(value)
-                            and value > 0
+                            and value >= 0
                         )
                         valid_values = (
                             isinstance(value, list)
@@ -149,7 +200,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                             and len(set(value)) == len(value)
                         )
                         if not isinstance(key, str) or not key or not (valid_number or valid_values):
-                            drift.append(f"invalid positive numeric/model-value bound in {name}: {key}")
+                            drift.append(f"invalid nonnegative numeric/model-value bound in {name}: {key}")
                 properties = analysis.get("properties")
                 if (
                     not isinstance(properties, list)
@@ -170,7 +221,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                     if set(properties) != declared:
                         drift.append(f"reviewed properties differ from config declarations: {name}")
                 error_match = record.get("expected_error_match")
-                if record.get("verdict") == "violation":
+                if record.get("verdict") in ("violation", "witness"):
                     if isinstance(error_match, dict):
                         line = error_match.get("line")
                         attribution = error_match.get("attribution")
@@ -425,7 +476,7 @@ def _rss_bytes(pid: int) -> int | None:
     return None
 
 
-def execute(argv: list[str], cwd: Path, log_path: Path, timeout: int) -> dict[str, Any]:
+def execute(argv: list[str], cwd: Path, log_path: Path, timeout: float) -> dict[str, Any]:
     start = time.monotonic()
     peak_rss: int | None = None
     timed_out = False
@@ -458,7 +509,7 @@ def execute(argv: list[str], cwd: Path, log_path: Path, timeout: int) -> dict[st
                 except ProcessLookupError:
                     pass
                 break
-            time.sleep(POLL_SECONDS)
+            time.sleep(min(POLL_SECONDS, max(0.0, timeout - (time.monotonic() - start))))
         try:
             returncode = process.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -521,6 +572,7 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
         else None
     )
     depth = int(depth_match.group(1)) if depth_match else None
+    trace_states = len(re.findall(r"^State\s+\d+:", output, re.MULTILINE))
     reason = None
     actual = "incomplete"
     complete = False
@@ -567,13 +619,17 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
             reason = f"TLC error line does not identify expected property {wanted}"
         elif error_match.get("attribution") == "sole_property" and expected.get("analysis", {}).get("properties") != [wanted]:
             reason = f"generic TLC error cannot be attributed to exactly property {wanted}"
-        elif not re.search(r"^State\s+1:", output, re.MULTILINE):
-            reason = "expected counterexample state trace is missing"
+        elif trace_states < expected.get("minimum_trace_states", 2):
+            reason = f"expected trace has {trace_states} states; requires {expected.get('minimum_trace_states', 2)}"
         else:
-            actual = "violation"
+            actual = expected["verdict"]
             complete = True
-            counterexample_found = True
-            completion_kind = "expected_counterexample_detected"
+            counterexample_found = actual == "violation"
+            completion_kind = (
+                "normal_reachability_witness_detected"
+                if actual == "witness"
+                else "expected_defect_counterexample_detected"
+            )
     return {
         "actual_verdict": actual,
         "complete": complete,
@@ -584,6 +640,7 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
         "exit_code": returncode,
         "state_counts": states,
         "depth": depth,
+        "trace_states": trace_states,
     }
 
 
@@ -591,16 +648,25 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
+def select_configs(mode: str, config: str | None) -> list[str]:
+    if config is not None:
+        if config not in CONFIG_ORDER:
+            raise RunnerError(f"unknown config {config!r}; known configs: {', '.join(CONFIG_ORDER)}")
+        return [config]
+    return list(SMOKE_CONFIGS) if mode == "smoke" else list(CONFIG_ORDER)
+
+
+def config_timeout(mode: str, name: str, configured: int, remaining: float | None) -> float:
+    profile_limit = SMOKE_CONFIG_TIMEOUTS.get(name, configured) if mode == "smoke" else configured
+    return float(profile_limit if remaining is None else min(profile_limit, max(0.01, remaining)))
+
+
 def run(args: argparse.Namespace) -> int:
     mapping = read_json(MAPPING_PATH, "runner mapping")
     drift, input_hashes = mapping_inputs(mapping)
     if drift:
         raise RunnerError("mapping check failed: " + "; ".join(drift))
-    selected = [args.config] if args.config else (
-        ["smoke.cfg"] if args.mode == "smoke" else list(CONFIG_ORDER)
-    )
-    if any(name not in CONFIG_ORDER for name in selected):
-        raise RunnerError(f"unknown config {args.config!r}; known configs: {', '.join(CONFIG_ORDER)}")
+    selected = select_configs(args.mode, args.config)
 
     output_root = durable_output(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -656,11 +722,29 @@ def run(args: argparse.Namespace) -> int:
         "tlc": toolchain["tlc"],
     }
     write_json(receipt_path, aggregate)
+    model_started = time.monotonic()
+    profile_deadline = (
+        model_started + SMOKE_WALL_BUDGET_SECONDS
+        if args.mode == "smoke" and args.config is None
+        else None
+    )
+    aggregate["resource_policy"]["profile_wall_timeout_seconds"] = (
+        SMOKE_WALL_BUDGET_SECONDS if profile_deadline is not None else None
+    )
+    write_json(receipt_path, aggregate)
     java = toolchain["java"]["path"]
     jar = toolchain["tlc"]["path"]
     config_dir = ROOT / "verification/durable-jobs"
     for name in selected:
         record = mapping["configs"][name]
+        remaining = None if profile_deadline is None else profile_deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            aggregate["status"] = "failed"
+            aggregate["failure"] = "smoke profile exhausted its 180-second aggregate model budget"
+            aggregate["remaining_configs"] = selected[len(aggregate["configs"]):]
+            write_json(receipt_path, aggregate)
+            print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": aggregate["failure"]}, sort_keys=True))
+            return 1
         cfg = repo_file(f"verification/durable-jobs/{name}", "TLC config")
         out_dir = run_dir / name.removesuffix(".cfg")
         out_dir.mkdir(mode=0o700)
@@ -685,7 +769,9 @@ def run(args: argparse.Namespace) -> int:
             "-cleanup",
             model_path.name,
         ]
-        execution = execute(argv, config_dir, raw_log, record["timeout_seconds"])
+        configured_timeout = record["timeout_seconds"]
+        effective_timeout = config_timeout(args.mode, name, configured_timeout, remaining)
+        execution = execute(argv, config_dir, raw_log, effective_timeout)
         try:
             scratch_cleanup = cleanup_metadir(out_dir, metadir)
         except RunnerError as exc:
@@ -709,6 +795,7 @@ def run(args: argparse.Namespace) -> int:
         config_receipt = {
             "config": name,
             "expected_verdict": record["verdict"],
+            "purpose": record["purpose"],
             "expected_error": record["expected_error"],
             "expected_exit": record["expected_exit"],
             "analysis": record["analysis"],
@@ -716,7 +803,8 @@ def run(args: argparse.Namespace) -> int:
             "config_sha256": input_hashes[f"verification/durable-jobs/{name}"],
             "source_hashes": {k: v for k, v in input_hashes.items() if k != model_file and not k.endswith(".cfg")},
             "argv": argv,
-            "timeout_seconds": record["timeout_seconds"],
+            "timeout_seconds": effective_timeout,
+            "configured_timeout_seconds": configured_timeout,
             "elapsed_seconds": execution["elapsed_seconds"],
             "peak_rss_bytes": execution["peak_rss_bytes"],
             "raw_log": {"path": str(raw_log), "sha256": sha256(raw_log)},
@@ -742,8 +830,8 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check-mapping", help="offline source and input drift check")
     check.add_argument("--affected-base", help="base commit for changed-path impact reporting")
-    smoke = commands.add_parser("smoke", help="run only smoke.cfg")
-    full = commands.add_parser("full", help="run all seven mapped TLC configurations")
+    smoke = commands.add_parser("smoke", help="run the bounded smoke, recovery, and witness profile")
+    full = commands.add_parser("full", help="run all 15 mapped TLC configurations")
     for command, mode in ((smoke, "smoke"), (full, "full")):
         command.add_argument("--cache-dir", type=Path, default=ROOT / "target/formal-toolchain")
         command.add_argument("--output-dir", type=Path, default=ROOT / "target/verification/durable-jobs")

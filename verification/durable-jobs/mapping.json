@@ -20,7 +20,8 @@
         "properties": null,
         "reductions": null,
         "assumptions": null
-      }
+      },
+      "purpose": "safety"
     },
     "baseline.cfg": {
       "sha256": null,
@@ -35,7 +36,8 @@
         "properties": null,
         "reductions": null,
         "assumptions": null
-      }
+      },
+      "purpose": "safety"
     },
     "control-binding-ignored.cfg": {
       "sha256": null,
@@ -50,7 +52,9 @@
         "properties": null,
         "reductions": null,
         "assumptions": null
-      }
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
     },
     "control-replay-fresh-fence.cfg": {
       "sha256": null,
@@ -65,7 +69,9 @@
         "properties": null,
         "reductions": null,
         "assumptions": null
-      }
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
     },
     "control-renewal-revives-cancel.cfg": {
       "sha256": null,
@@ -80,7 +86,9 @@
         "properties": null,
         "reductions": null,
         "assumptions": null
-      }
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
     },
     "recovery.cfg": {
       "sha256": null,
@@ -95,7 +103,8 @@
         "properties": null,
         "reductions": null,
         "assumptions": null
-      }
+      },
+      "purpose": "liveness"
     },
     "control-retry-stalls.cfg": {
       "sha256": null,
@@ -103,6 +112,144 @@
       "expected_error": "L1_FreshClaimEventually",
       "expected_exit": null,
       "expected_error_match": null,
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
+    },
+    "witness-three-samples.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_ThreeSamples",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "witness-four-submissions.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_FourSubmissions",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "witness-cancelled-renewal.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_CancelledRenewal",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "witness-replay.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_Replay",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "witness-bind-refusal.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_BindRefusal",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "witness-precommit-rollback.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_PrecommitRollback",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "witness-displacement.cfg": {
+      "sha256": null,
+      "verdict": "witness",
+      "purpose": "reachability_witness",
+      "expected_error": "Witness_Displacement",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "pending_fable_config_contract",
+        "bounds": null,
+        "properties": null,
+        "reductions": null,
+        "assumptions": null
+      }
+    },
+    "control-bind-before-work.cfg": {
+      "sha256": null,
+      "verdict": "violation",
+      "purpose": "defect_control",
+      "expected_error": "S2_PublicationAuthority",
+      "expected_exit": null,
+      "expected_error_match": null,
+      "minimum_trace_states": 2,
       "timeout_seconds": 900,
       "analysis": {
         "status": "pending_fable_config_contract",
