@@ -14,6 +14,9 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [FORMAL-VERIFICATION-PILOT-PROPOSAL.md](FORMAL-VERIFICATION-PILOT-PROPOSAL.md) | The bounded TLA+/TLC pilot contract, source anchors, verification limits, milestones and acceptance bar. | open |
+| [FORMAL-VERIFICATION-PILOT-REVIEW.md](FORMAL-VERIFICATION-PILOT-REVIEW.md) | Fable's design findings and the author's dispositions; amendments are recorded without claiming a second approval. | done |
+| [FORMAL-VERIFICATION-PILOT-STATUS.md](FORMAL-VERIFICATION-PILOT-STATUS.md) | Current milestone, owner, feasibility evidence and acceptance still owed. | open |
 | [RAFT-FAULT-TESTING-IMPLEMENTATION.md](RAFT-FAULT-TESTING-IMPLEMENTATION.md) | The bounded proposal and build contract for three repeatable Raft fault scenarios, generated WAL regressions, and replay evidence, preserving the current CI/CD process and adding no product gates. | open |
 | [RAFT-FAULT-TESTING-REVIEW.md](RAFT-FAULT-TESTING-REVIEW.md) | Independent adversarial findings on the fault-testing proposal and the author's amendments for protocol timing, partition evidence, complete data comparison, and child cleanup. | done |
 | [STATUS-HISTORY.md](STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
