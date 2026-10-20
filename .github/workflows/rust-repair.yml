@@ -342,7 +342,9 @@ jobs:
                   # Metadata and old listing children remain inside the same bounded, owned observer group.
                   return ['bash', '-e', '-o', 'pipefail', '-c', 'cargo metadata --format-version=1 --locked --offline --no-deps > "$1/workspace-metadata.json"; shift; exec "$@"', 'inventory', str(output), *listing]
               if phase == 'static':
-                  return ['make', 'fmt-check', 'spike-lock-check', 'lint', 'test-socket-permission-check']
+                  return ['bash', '-e', '-o', 'pipefail', '-c',
+                          'make fmt-check spike-lock-check lint test-socket-permission-check\n'
+                          'python3 -m unittest tests.operations.test_rust_repair_evidence tests.operations.test_rust_repair_workflow']
               if phase == 'units':
                   return ['env', 'RUST_MIN_STACK=8388608', *LINEAGE, '--', '--test-threads=1'] if CELL == 'store-lineage' else NATIVE
               return [*SERIAL, CASES[phase], '--', '--exact', '--ignored', '--test-threads=1']

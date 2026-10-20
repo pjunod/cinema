@@ -54,7 +54,8 @@ hashes before and after execution. The complete M0 dependency is carried unchang
 that task is not yet merged into the effort. Its workflow remains available as the historical
 diagnostic command; the new repair workflow owns M1 acceptance.
 
-The declared sequence is compile, inventory, static checks, ten rounds of
+The declared sequence is compile, inventory, static checks (including the
+21 evidence/controller controls), ten rounds of
 the affected Core/daemon cohort, the complete ordinary Rust cell, and the
 two exact serial media cases. Each round runs the inventoried real
 binaries with 22 test threads and all original failed identities. Eight additional
@@ -95,7 +96,8 @@ not performance estimates or permission to drop cases.
 | Local Linux compiler setup | Pinned 1.97.1 verified. Generic image lacks unrelated tray GTK libraries. A baseline two-job affected-target check recorded an OOM kill in the shared 7.747-GiB Docker VM; lower build concurrency is required. The same baseline affected-target check then passed in 80 seconds with one build job. No candidate test outcome is inferred from that setup failure. |
 | Final local workspace check | All targets passed in 1 minute 56 seconds; two subsequent fixture-only diagnostic-hook installation calls are included in the Clippy compile below. |
 | Final workspace Clippy | All targets passed with `-D warnings` in 1 minute 33 seconds, including the final fixture hook calls and redundant-borrow cleanup. |
-| Final daemon native regressions | Pending. |
+| Final daemon native regressions | 17 platform-applicable cases passed in 61.34 seconds on committed `5a277dbdf`, including all original 15 daemon failures. With Core, all 25 original identities pass locally. Three new Linux-only driver controls remain owed. |
+| Replicated annotations/import contracts | Both actual `dyn Store` annotation and populated v14 three-voter import/parity cases passed in 20.02 seconds, with `cluster-read-cost-validation,hiqlite-contract-tests`. |
 | Ten Linux cohort repetitions | Pending. |
 | Full ordinary Rust and exact serial media cells | Pending. |
 | Independent review | Store schema/preservation, native accounting, browse proof, real publisher cleanup and real driver teardown reviewed; no remaining blocker. |
