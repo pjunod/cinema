@@ -9,13 +9,13 @@ first.
 ## Processed VOD successor root reuse
 
 Owner: Sol (implementation), coordinator (publication/native compiler).
-Source complete on `codex/cinema-processed-successor-reuse`; not deployed.
+PR #1225 on `codex/cinema-processed-successor-reuse`; not deployed.
 Exact-root reuse drops throughput gating, not identity/reservation fences.
 Private staged provenance and admitted epochs reach common attachment with
 actual-owner cleanup armed before async sealing; JSON still grants no authority.
-Authored controls cover two commits/retirements, GPU1/CPU15 capacity, cancellation,
-epoch motion and controlled publication. Early `b377f36f2` fmt/Clippy passed;
-complete compile, independent review/fixes, affected tests and merge gate remain.
+Compiled `641007159` received independent Astra review: F1 exact-owner races,
+F2 cleanup settlement and F3 real encoded-audio controls required changes.
+Repairs are authored; pinned compile, bounded closure, affected tests/gate remain.
 B #1211 merged (`9753284e`, green lane 5600); history-only integration is retained.
 No D behavioral pass, live reproduction or accuracy claim; [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair-in-progress-owner-sol-nativepublication-coordinator).
 

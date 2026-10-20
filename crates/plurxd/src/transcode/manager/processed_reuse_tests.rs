@@ -97,7 +97,12 @@ async fn wait_for_cleanup(
         .vod
         .test_assert_prepared_owner_detached(session, owner)
         .await;
-    assert!(f.manager.vod.hls_facts(&f.session_id).await.is_some());
+    assert!(
+        f.manager
+            .vod
+            .response_owner_is_live(&f.session_id, &f.incumbent_owner)
+            .await
+    );
     assert_eq!(f.encoding.admissions.in_use(), 1);
     assert_eq!(f.encoding.admissions.software_in_use(), 15);
 }
@@ -312,11 +317,162 @@ async fn staged_processed_replacement_never_inherits_preparation_or_cleanup_auth
     }
 }
 
+#[tokio::test]
+async fn staged_processed_audio_canonicalization_reuses_default_and_alternate_aac_exactly() {
+    use plurx_core::playback::audio::AudioAction;
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        for (selected, offset) in [(None, 0), (Some(1), 125)] {
+            let mut f = fixture_with_audio(destination, Some((selected, offset))).await;
+            let expected_index = selected.unwrap_or(0);
+            assert_eq!(f.remote.request.audio_index, Some(expected_index));
+            assert_eq!(f.remote.request.audio_offset_ms, offset);
+            assert_eq!(f.encoding.options.audio_index, Some(expected_index));
+            let expected_audio = f.encoding.options.audio.as_ref().expect("encoded AAC");
+            assert!(
+                matches!(&expected_audio.action, AudioAction::Encode { codec, sample_rate: 48_000, .. } if codec == "aac")
+            );
+            let context = f
+                .remote
+                .request
+                .candidate_context
+                .as_ref()
+                .expect("private context");
+            let original = context
+                .catalog_query
+                .as_ref()
+                .expect("original copy provenance");
+            assert_eq!(
+                original.copy_contract,
+                Some(if destination == DvDestination::Profile81 {
+                    (false, true, true)
+                } else {
+                    (false, false, false)
+                })
+            );
+            if selected.is_none() {
+                assert!(
+                    matches!(&original.audio_delivery.as_ref().expect("original audio").action, AudioAction::Copy { codec, .. } if codec == "aac")
+                );
+                assert_ne!(
+                    original
+                        .audio_delivery
+                        .as_ref()
+                        .expect("original audio")
+                        .byte_identity(),
+                    expected_audio.byte_identity()
+                );
+            }
+            let incumbent = f
+                .manager
+                .vod
+                .hls_facts(&f.session_id)
+                .await
+                .expect("incumbent")
+                .response_owner;
+            let (incarnation, session, json) = stage(&f).await;
+            let remote: crate::media_sessions::RemoteStartRequest =
+                serde_json::from_str(&json).expect("wire");
+            assert!(remote.request.candidate_context.is_none());
+            for mutation in ["track", "offset", "claim", "bytes"] {
+                let mut changed = remote.clone();
+                match mutation {
+                    "track" => changed.request.audio_index = Some(1 - expected_index),
+                    "offset" => changed.request.audio_offset_ms += 1,
+                    "claim" => {
+                        changed.request.audio_claim.as_mut().expect("claim").sinks[0].max_channels =
+                            1
+                    }
+                    "bytes" => {
+                        let AudioAction::Encode { bitrate_kbps, .. } = &mut changed
+                            .request
+                            .audio_delivery
+                            .as_mut()
+                            .expect("audio")
+                            .action
+                        else {
+                            panic!("canonical AAC");
+                        };
+                        *bitrate_kbps += 32;
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    f.manager
+                        .restore_staged_processed_root(
+                            &mut changed,
+                            &expectation(&f, &incarnation, &session),
+                            Instant::now() + Duration::from_secs(5),
+                        )
+                        .await
+                        .is_err(),
+                    "{destination:?}/{selected:?}/{mutation}"
+                );
+                assert!(f.manager.vod.hls_facts(&session).await.is_none());
+                assert!(
+                    f.manager
+                        .vod
+                        .response_owner_is_live(&f.session_id, &incumbent)
+                        .await
+                );
+            }
+            assert!(
+                prepare(&f, &session, &json).await,
+                "canonical audio survives serialized first prime"
+            );
+            let facts = f
+                .manager
+                .vod
+                .hls_facts(&session)
+                .await
+                .expect("attached successor");
+            let actual = facts.encoding.as_ref().expect("reused encoding");
+            assert!(Arc::ptr_eq(actual, &f.encoding));
+            assert_eq!(actual.options.audio_index, Some(expected_index));
+            assert_eq!(
+                actual
+                    .options
+                    .audio
+                    .as_ref()
+                    .expect("audio")
+                    .byte_identity(),
+                expected_audio.byte_identity()
+            );
+            assert_eq!(f.encoding.admissions.in_use(), 1);
+            assert_eq!(f.encoding.admissions.software_in_use(), 15);
+            let route = f
+                .manager
+                .store
+                .media_session_route_by_incarnation(&incarnation)
+                .await
+                .expect("route")
+                .expect("sealed");
+            let response: serde_json::Value =
+                serde_json::from_str(&route.response_json).expect("response");
+            assert_eq!(response["prepared_output_capture_complete"], true);
+            let sealed: crate::media_sessions::RemoteStartRequest =
+                serde_json::from_str(&route.recipe_json).expect("sealed recipe");
+            assert_eq!(sealed.request.audio_index, Some(expected_index));
+            assert_eq!(sealed.request.audio_offset_ms, offset);
+            f.manager
+                .vod
+                .end(&session, crate::vodserve::Terminal::Deleted)
+                .await;
+            f.manager
+                .vod
+                .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+                .await;
+            drop(facts);
+            assert_reservation_released(&mut f);
+        }
+    }
+}
+
 // Byte-bound lifecycle controls, not Dolby pixel/reference-accuracy evidence.
 // The real completed-window validator checks the generated HEVC/PQ stream;
 // the exclusive worker claim prevents the fixture renderer from ever running.
 struct Fixture {
     _root: tempfile::TempDir,
+    incumbent_owner: crate::vodserve::ResponseOwner,
     manager: Arc<TranscodeManager>,
     remote: crate::media_sessions::RemoteStartRequest,
     encoding: Arc<crate::vodencode::Encoding>,
@@ -575,6 +731,13 @@ fn digest(bytes: &[u8]) -> DvDigest {
 }
 
 async fn fixture(destination: DvDestination) -> Fixture {
+    fixture_with_audio(destination, None).await
+}
+
+async fn fixture_with_audio(
+    destination: DvDestination,
+    audio: Option<(Option<i64>, i64)>,
+) -> Fixture {
     use std::os::unix::fs::MetadataExt;
     let root = crate::test_tempdir().expect("processed lifecycle");
     let store: Arc<dyn Store> =
@@ -610,8 +773,75 @@ async fn fixture(destination: DvDestination) -> Fixture {
         include_bytes!("../../../../plurx-core/tests/fixtures/dv-runtime/authored.mp4"),
     )
     .expect("source bytes");
+    let audio_probe = if audio.is_some() {
+        let video = root.path().join("source-video.mp4");
+        std::fs::rename(&path, &video).expect("retain authored video");
+        let mux = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&video)
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=0.125",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:sample_rate=48000:duration=0.125",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-map",
+                "2:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-disposition:a:0",
+                "default",
+                "-disposition:a:1",
+                "0",
+            ])
+            .arg(&path)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .expect("mux real audio source");
+        assert!(
+            mux.status.success(),
+            "{}",
+            String::from_utf8_lossy(&mux.stderr)
+        );
+        let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+            .args([
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-of",
+                "json",
+            ])
+            .arg(&path)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .expect("probe real source");
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        Some(serde_json::from_slice::<serde_json::Value>(&probe.stdout).expect("source probe"))
+    } else {
+        None
+    };
     let metadata = std::fs::metadata(&path).expect("metadata");
-    let probe = serde_json::json!({"format":{"duration":"2.0"},"streams":[{
+    let mut probe = serde_json::json!({"format":{"duration":"2.0"},"streams":[{
         "index":0,"codec_type":"video","codec_name":"hevc","profile":"Main 10",
         "width":64,"height":64,"sample_aspect_ratio":"1:1","pix_fmt":"yuv420p10le",
         "avg_frame_rate":"24/1","r_frame_rate":"24/1","field_order":"progressive",
@@ -620,6 +850,20 @@ async fn fixture(destination: DvDestination) -> Fixture {
             "dv_level":6,"rpu_present_flag":1,"el_present_flag":1,"bl_present_flag":1,
             "dv_bl_signal_compatibility_id":1}]
     }]});
+    if let Some(actual) = audio_probe {
+        let tracks: Vec<_> = actual["streams"]
+            .as_array()
+            .expect("streams")
+            .iter()
+            .filter(|stream| stream["codec_type"] == "audio")
+            .cloned()
+            .collect();
+        assert_eq!(tracks.len(), 2);
+        probe["streams"]
+            .as_array_mut()
+            .expect("streams")
+            .extend(tracks);
+    }
     let file_id = store
         .upsert_file(
             item,
@@ -664,13 +908,13 @@ async fn fixture(destination: DvDestination) -> Fixture {
         "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls",
         "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
     })).expect("caps");
-    let query = crate::media_pool::QualityCatalogRequest {
+    let mut query = crate::media_pool::QualityCatalogRequest {
         file_id,
         source_size: file.size,
         source_mtime: file.mtime,
         caps: caps.clone(),
-        audio_index: None,
-        audio_offset_ms: 0,
+        audio_index: audio.and_then(|(index, _)| index),
+        audio_offset_ms: audio.map_or(0, |(_, offset)| offset),
         audio_claim: AudioClaim::from_caps(&caps).expect("claim"),
         audio_delivery: None,
         subtitle_burn: None,
@@ -681,13 +925,31 @@ async fn fixture(destination: DvDestination) -> Fixture {
             (false, false, false)
         }),
     };
+    if audio.is_some() {
+        let selected =
+            TranscodeManager::candidate_audio_from_snapshot(&snapshot, query.audio_index);
+        let track = file
+            .audio_streams
+            .iter()
+            .find(|stream| Some(stream.index) == selected);
+        query.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+            track,
+            &query.audio_claim.as_ref().expect("claim").profile(),
+            plurx_core::playback::audio::AudioRoute::Progressive,
+            query.audio_offset_ms,
+        ));
+    }
     let projected = TranscodeManager::processed_catalog_query(&snapshot, &query)
         .expect("canonical encoded audio");
+    let mut resolved_file = file.clone();
+    resolved_file.audio_offset_ms = projected.audio_offset_ms;
+    let file = &resolved_file;
     let options = TranscodeOptions {
         target_height: 64,
         pipeline: Pipeline::Hdr10Passthrough,
         video_bitrate_kbps: 300,
         audio: projected.audio_delivery.clone(),
+        audio_index: projected.audio_index,
         ..Default::default()
     };
     let facts =
@@ -706,18 +968,38 @@ async fn fixture(destination: DvDestination) -> Fixture {
         plan.output_contract().effective_height().expect("height"),
     );
     let output = root.path().join("completed.mp4");
-    let status = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
+    let mut control = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin());
+    control.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=black:size=64x64:rate=24",
+    ]);
+    if audio.is_some() {
+        control.args([
             "-f",
             "lavfi",
             "-i",
-            "color=black:size=64x64:rate=24",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:a",
+            "aac",
+            "-t",
+            "0.125",
+        ]);
+    } else {
+        control.arg("-an");
+    }
+    let status = control
+        .args([
             "-frames:v",
             "3",
-            "-an",
             "-c:v",
             "libx265",
             "-pix_fmt",
@@ -946,6 +1228,7 @@ async fn fixture(destination: DvDestination) -> Fixture {
     request.request_id = Some(incarnation.clone());
     request.dv_processing_destination = Some(destination);
     request.audio_index = projected.audio_index;
+    request.audio_offset_ms = projected.audio_offset_ms;
     request.audio_delivery = projected.audio_delivery;
     request.audio_claim = projected.audio_claim;
     request.candidate_context = Some(Box::new(context));
@@ -1038,6 +1321,12 @@ async fn fixture(destination: DvDestination) -> Fixture {
         .expect("publish route")
         .expect("confirmed");
     Fixture {
+        incumbent_owner: manager
+            .vod
+            .hls_facts(&session_id)
+            .await
+            .expect("initial exact owner")
+            .response_owner,
         _root: root,
         manager,
         remote,
