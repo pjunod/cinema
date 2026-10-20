@@ -189,3 +189,29 @@ class LinuxTrayReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'size bound'):
                 release.fetch(response.geturl(), 2)
             response.read.assert_called_once_with(3)
+
+    def test_release_upload_includes_archives_and_both_downstream_asset_sets(self):
+        import fnmatch
+        import re
+        workflow = (ROOT / '.github/workflows/github-release.yml').read_text()
+        linux_upload = workflow.split('name: release-linux-${{ matrix.arch }}', 1)[1].split('retention-days:', 1)[0]
+        patterns = re.findall(r'^            (dist/[^\n]+)$', linux_upload, re.M)
+        for arch in ('amd64', 'arm64'):
+            name = release.asset_name(VERSION, arch)
+            self.assertTrue(any(fnmatch.fnmatch('dist/' + name, pattern) for pattern in patterns))
+            self.assertEqual(workflow.count('"plurx-tray-${VERSION}-linux-' + arch + '.tar.gz"'), 2)
+
+    def test_release_container_binds_binary_version_to_resolved_source(self):
+        workflow = (ROOT / '.github/workflows/github-release.yml').read_text()
+        desktop = workflow.split('name: Build the optional desktop against', 1)[1].split('name: Package the standalone host tray', 1)[0]
+        self.assertIn('--env PLURX_BUILD_SHA', desktop)
+        self.assertIn('--env VERSION', desktop)
+        self.assertIn('test "$(target-desktop/release/plurx-tray --version)" = "plurx-tray $VERSION ($PLURX_BUILD_SHA)"', desktop)
+
+    def test_native_cohort_rejects_binary_stamp_that_contradicts_metadata(self):
+        module = types.SimpleNamespace(stage=mock.Mock(return_value={'version': VERSION, 'source_commit': COMMIT, 'tray': '/candidate/plurx-tray'}))
+        args = types.SimpleNamespace(build_tray=False, tray_release=None)
+        with mock.patch.object(runtime, 'source_identity', return_value=(COMMIT, VERSION)), mock.patch.object(runtime, 'tray_release_module', return_value=module), mock.patch.object(runtime, 'tray_runtime_dependencies'), mock.patch.object(runtime, 'output', return_value=f'plurx-tray {VERSION} (unknown)'), mock.patch.object(runtime, 'build_context') as build:
+            with self.assertRaisesRegex(ValueError, 'differs from its artifact identity'):
+                runtime.prepare(self.root, args, 'deb')
+            build.assert_not_called()

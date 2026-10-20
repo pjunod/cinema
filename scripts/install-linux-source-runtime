@@ -233,6 +233,12 @@ def tray_runtime_dependencies(packager):
     run(command, root=True, stdout=sys.stderr)
 
 
+def verify_released_tray(receipt):
+    expected = f"plurx-tray {receipt['version']} ({receipt['source_commit']})"
+    if output([receipt["tray"], "--version"]) != expected:
+        raise ValueError("released tray executable differs from its artifact identity")
+
+
 def build_context(packager, *, build_tray=False):
     commit, version = source_identity()
     channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M)[1]
@@ -268,6 +274,8 @@ def prepare(stage, args, packager):
         release = tray_release_module().stage(stage / "released-tray", tag=getattr(args, "tray_release", None) or "v" + version)
         if release["source_commit"] != commit or release["version"] != version:
             raise ValueError("native source cohorts need the exact matching tray release; use --build-tray for an unreleased development checkout")
+        tray_runtime_dependencies(packager)
+        verify_released_tray(release)
     commit, version, architecture, cargo, controls, env = build_context(packager, build_tray=getattr(args, "build_tray", False))
     if release and (release["source_commit"] != commit or release["version"] != version):
         raise ValueError("source changed while preparing the released tray")
@@ -351,9 +359,7 @@ def stage_tray(destination, *, dry_run=False, build_from_source=False, release=N
         receipt = tray_release_module().stage(destination, tag=release)
         try:
             tray_runtime_dependencies(native_format())
-            expected = f"plurx-tray {receipt['version']} ({receipt['source_commit']})"
-            if output([destination / "plurx-tray", "--version"]) != expected:
-                raise ValueError("released tray executable differs from its artifact identity")
+            verify_released_tray(receipt)
             eligible_session(session.environment)
         except BaseException:
             shutil.rmtree(destination)
