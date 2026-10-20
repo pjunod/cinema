@@ -4,7 +4,12 @@
 
 The pilot is in an agent-owned clone. The stable TLC 1.7.4 artifact and Temurin JDK 21.0.12+8 pins are prepared and verified. TLC help runs on the local macOS ARM64 JDK. This is toolchain feasibility evidence only; no protocol specification, model-check result or backend acceptance is claimed.
 
-Fable task `t_7622df11` is awaiting route recovery: its pinned Hermes invocation returned an API credits error before producing model work. The coordinator has requested the working route from the designated Fable control session; actual account balance is not inferred from that message. M0 remains open until source mapping, model boundary, tool behavior and feasibility are resolved. M1, M2 and M3 have not been accepted.
+Fable task `t_7622df11` has resumed through an isolated copy of the existing
+credential-routing fix. The installed route misclassified an identity-linked
+API credential and recorded false local exhaustion. A direct API check
+returned HTTP 200 as `claude-fable-5-1`; only that credential's local failure
+state was reset. No shared installation was changed. M0 model work is running;
+no model result is claimed.
 
 The build proceeds as one related batch for a single PR to `main`. When that PR is complete, the coordinator requests the directed final adversarial Fable 5.1 review, fixes its findings, and runs the affected fast lane once. Only failed or invalidated evidence is rerun. Model checking, compile checks and static inspection are available during development; no unit suites run before the final review. The pilot adds no product feature gate.
 
@@ -20,8 +25,8 @@ pre-review unit or conformance suites have been started.
 |---|---|---|---|
 | Toolchain pin/bootstrap | GPT-6 Luna | Committed `bf3c9c537`; fetch/resolve feasibility passed | Final synthetic tests and review |
 | Pinned compiler loop | Codex coordinator | Rust 1.97.1 core `hiqlite-store` all-target check completed | Changed-source checks if Rust tests are added |
-| Protocol/model | Fable 5.1 | API-route prerequisite unresolved; no model written | M0 freeze, M1 exploration/controls |
-| Runtime diagnosis | GPT-6 Luna and designated control session | Checking existing dependencies and committed route fix | Working pinned Fable invocation |
+| Protocol/model | Fable 5.1 | Pinned worker resumed; M0 in progress | M0 freeze, M1 exploration/controls |
+| Runtime diagnosis | GPT-6 Luna and designated control session | Resolved with existing dependencies and isolated committed fix | Complete protocol/model artifacts |
 | Backend/runner/CI | Fable contract plus bounded builder | Not started | M2/M3 implementation, final qualification |
 | Review/fast lane/merge | Coordinator and designated Fable reviewer | Not ready | Complete PR, review fixes, once-per-candidate evidence |
 
