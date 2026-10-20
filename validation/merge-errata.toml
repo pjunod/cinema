@@ -420,3 +420,11 @@ reason = "Landing commit 98c224c59 of PR #1198 (test-harness and clippy repairs 
 [[errata]]
 commit = "411a97b8f27d84e3d72e860944d12f7f5ad8798c"
 reason = "Corrective commit 411a97b8 reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 preflight task 22052 reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."
+
+[[errata]]
+commit = "e64ce97386c2778122a70e10545d5e1c618152af"
+reason = "Corrective commit e64ce973 reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 full local history audit reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."
+
+[[errata]]
+commit = "845a868ff6c51ecfc6db7f3f46c3771068bfec03"
+reason = "Corrective commit 845a868f reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 full local history audit reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."
