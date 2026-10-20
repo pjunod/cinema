@@ -3025,6 +3025,7 @@ impl TranscodeManager {
                 .ok_or("processed staged scope unavailable")?;
             if root.reuse_scope != Some(scope)
                 || self.processed_hint_key(&planning, &seed.query) != Some(scope)
+                || req.audio_claim != projected.audio_claim
                 || projected.audio_index != req.audio_index
                 || projected.audio_offset_ms != req.audio_offset_ms
             {
