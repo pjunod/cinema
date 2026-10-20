@@ -191,7 +191,7 @@ def collect_entrypoint(context, directory, root, provenance, *, environment, sou
         try:
             runpy.run_path(str(script), run_name='__main__')
         except SystemExit as error:
-            exit_code = error.code if type(error.code) is int else (0 if error.code is None else 1)
+            exit_code = int(error.code) if isinstance(error.code, int) else (0 if error.code is None else 1)
         except Exception as error:
             entrypoint_error = f'{type(error).__name__}: {error}'
             exit_code = 1

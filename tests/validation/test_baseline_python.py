@@ -257,6 +257,32 @@ class PythonBaselineTests(unittest.TestCase):
         self.assertEqual(Path.cwd(), original_cwd)
         self.assertIs(unittest.main, original_main)
 
+    def test_native_unittest_main_boolean_exit_preserves_pass_and_failure(self):
+        # CPython 3.11 unittest.main exits with not result.wasSuccessful(),
+        # while newer versions use integer codes. Keep native discovery,
+        # default exit=True and execution; emulate only that exit-code type.
+        import sys
+        def boolean_exit(code=0):
+            raise SystemExit(bool(code))
+        for passes in (True, False):
+            with self.subTest(passes=passes), mock.patch.object(sys, 'exit', side_effect=boolean_exit):
+                report = self.entrypoint(
+                    'import sys, unittest\n'
+                    'class Fixture(unittest.TestCase):\n'
+                    '    def test_native(self):\n'
+                    f'        self.assertTrue({passes!r})\n'
+                    'if __name__ == "__main__":\n'
+                    '    sys.argv.pop(1)\n'
+                    '    unittest.main()\n')
+            self.assertTrue(report['complete'])
+            self.assertEqual(report['framework_calls'], 1)
+            self.assertEqual(report['counts']['discovered'], 1)
+            self.assertEqual(report['passed'], passes)
+            self.assertEqual(report['counts']['passed'], int(passes))
+            self.assertEqual(report['counts']['failed'], int(not passes))
+            self.assertEqual(report['execution_returncode'], int(not passes))
+            self.assertIs(type(report['execution_returncode']), int)
+
     def test_entrypoint_that_changes_source_cannot_claim_committed_candidate(self):
         with mock.patch.object(baseline, 'verify_source', side_effect=[
                 {'mode': 'git'}, ManifestError('Checkout must be clean')]):

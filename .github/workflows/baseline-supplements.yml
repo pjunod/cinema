@@ -180,6 +180,10 @@ jobs:
                'status': 'unqualified',
                'owner': 'tools/dv_quality/backends/rpu-reuse: native decoder fixture owner (unassigned)',
                'requires': 'Four real decoder exit/crash controls require prepared runtime binaries and source fixtures; this top-level campaign is never imported as a unit module.'},
+              {'id': 'encoded-p81-authoring-fixture', 'path': 'tools/dv_processing/test_author.py',
+               'status': 'unqualified', 'source_declared_test_methods': 1,
+               'owner': 'tools/dv_processing: native P81 reconstruction fixture owner (unassigned)',
+               'requires': 'Actual baseline found missing P81_HELPER; this native authored-packet/FFmpeg regression also requires P81_ENCODED, P81_TIMING and P81_RPUS inputs, which are not provisioned by the portable cell.'},
               {'id': 'manual-stream-controls', 'path': 'tools/dv_processing/test_stream.py',
                'status': 'unqualified',
                'owner': 'tools/dv_processing: renderer/media fixture owner (unassigned)',
@@ -202,7 +206,7 @@ jobs:
                          'profile': 'unittest', 'features': [], 'toolchain': platform.python_version(),
                          'suite_dir': directory}
               if directory == 'tools/dv_processing':
-                  context.update(test_files=['test_author.py', 'test_metadata.py'])
+                  context.update(test_files=['test_metadata.py'])
               elif directory == 'tools/dv_quality/backends/parsed-rpu':
                   context.update(test_files=['test_image_identity.py', 'test_check_negatives.py'])
               elif directory == 'tools/dv_quality/backends/combined':

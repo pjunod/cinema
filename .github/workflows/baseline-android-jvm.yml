@@ -1,0 +1,204 @@
+name: diagnostic Android JVM runtime outcome capture
+
+# A separate repeat captures reports omitted by the first full baseline.
+# The checked-out tested commit remains frozen; this workflow transport may be newer.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact frozen source commit to execute
+        required: true
+        type: string
+        default: "86f1385005b27122e8a8d3a3d5bd9501eb2fdb16"
+      diagnostic_baseline:
+        description: Must remain true; no publication or retained outcomes are allowed
+        required: true
+        type: string
+        default: "true"
+
+jobs:
+  android_jvm_capture:
+    name: repeat Android JVM runtime outcome capture
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
+    timeout-minutes: 20
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected_sha }}
+      # The toolchain image only changes when its Dockerfile does, yet both
+      # Android jobs used to rebuild it from scratch — cmdline-tools plus four
+      # sdkmanager downloads — on every run. Keyed on the Dockerfile hash, a
+      # pull replaces the rebuild; any failure falls back to the local build.
+
+      - name: Bind tested source separately from workflow transport
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          DIAGNOSTIC_BASELINE: ${{ inputs.diagnostic_baseline }}
+          WORKFLOW_TRANSPORT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYBIND'
+          import json, os, pathlib, re, subprocess
+          expected = os.environ['EXPECTED_SHA']
+          assert os.environ['DIAGNOSTIC_BASELINE'] == 'true', 'This workflow only permits diagnostic capture'
+          assert re.fullmatch('[0-9a-f]{40}', expected), 'Expected source must be an exact commit'
+          actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          assert actual == expected, 'Checkout differs from frozen tested source'
+          transport = os.environ['WORKFLOW_TRANSPORT_SHA']
+          assert re.fullmatch('[0-9a-f]{40}', transport), 'Workflow transport identity unavailable'
+          output = pathlib.Path('target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-jvm-repeat')
+          output.mkdir(parents=True, exist_ok=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('PLURX_BASELINE_DIR=' + str(output) + '\n')
+              environment.write('PLURX_TEST_CANDIDATE_SHA=' + actual + '\n')
+              environment.write('PLURX_TEST_CANDIDATE_TREE=' + tree + '\n')
+          (output / 'repeat-provenance.json').write_text(json.dumps(dict(
+              tested_sha=actual, tested_tree=tree, workflow_transport_sha=transport,
+              observation_kind='repeat-runtime-outcome-capture', primary_run_id=5620,
+              primary_tested_sha='86f1385005b27122e8a8d3a3d5bd9501eb2fdb16',
+              same_source_as_primary=actual == '86f1385005b27122e8a8d3a3d5bd9501eb2fdb16',
+              comparison='Separate repeat; runner contention and Gradle/Docker cache state may differ. Preserve primary run 5620 timing as the first observation.',
+              cache_policy='Same Gradle cache keys and local-image reuse as the original JVM lane.',
+              gradle_result_cache_enabled_by_source=True
+          ), indent=2) + '\n')
+          PYBIND
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-jvm-repeat"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-jvm-repeat' --execution-scope external-containers
+      - name: Reuse the pinned Android toolchain image from Forgejo
+        env:
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+        run: |
+          tag="${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }} -u fleet --password-stdin || true
+          if docker pull "$tag"; then
+            docker tag "$tag" plurx-android-build
+            echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
+          else
+            make android-image
+            echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
+          fi
+      - name: Cache Gradle dependencies
+        uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            clients/android/.gradle-validation/caches
+            clients/android/.gradle-validation/wrapper
+          key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+      - name: Force only JVM Test tasks to execute for this repeat
+        shell: bash
+        run: |
+          python3 - <<'PYINIT'
+          import hashlib, json, os, pathlib, re
+          run, attempt = os.environ['GITHUB_RUN_ID'], os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+          assert re.fullmatch('[0-9]+', run) and re.fullmatch('[0-9]+', attempt), 'Invalid run identity'
+          path = pathlib.Path('clients/android/.gradle-validation/init.d') / ('plurx-baseline-jvm-repeat-' + run + '-' + attempt + '.gradle')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          body = 'allprojects { tasks.withType(org.gradle.api.tasks.testing.Test).configureEach { outputs.upToDateWhen { false }; outputs.cacheIf { false } } }\n'
+          with path.open('x') as script:
+              script.write(body)
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('PLURX_BASELINE_TEST_INIT=' + str(path) + '\n')
+          base = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+          (base / 'gradle-test-task-freshness.gradle').write_text(body)
+          provenance = base / 'repeat-provenance.json'
+          document = json.loads(provenance.read_text())
+          document['test_execution_override'] = dict(path=str(path), sha256=hashlib.sha256(body.encode()).hexdigest(),
+                                                     scope='org.gradle.api.tasks.testing.Test only', preserves_compile_cache=True)
+          provenance.write_text(json.dumps(document, indent=2) + '\n')
+          PYINIT
+      - name: Run unit tests and lint in the pinned Android toolchain
+        run: |
+          mkdir -p target/validation/buildx
+          BUILDX_CONFIG=target/validation/buildx make android-test
+      - name: Preserve runtime JUnit XML and Gradle HTML before runner cleanup
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PYREPORTS'
+          import hashlib, json, os, pathlib, shutil, sys, xml.etree.ElementTree as ET
+          base = pathlib.Path(os.environ.get('PLURX_BASELINE_DIR', 'target/full-suite-baseline/source-binding-failed'))
+          destination = base / 'android-jvm-reports'
+          destination.mkdir(parents=True, exist_ok=True)
+          sources = dict(junit=pathlib.Path('clients/android/app/build/test-results/testDebugUnitTest'),
+                         html=pathlib.Path('clients/android/app/build/reports/tests/testDebugUnitTest'))
+          copied = {}
+          for kind, source in sources.items():
+              copied[kind] = source.is_dir()
+              if source.is_dir():
+                  shutil.copytree(source, destination / kind, dirs_exist_ok=True)
+          xml_files = sorted((destination / 'junit').rglob('*.xml')) if copied['junit'] else []
+          errors, reports, outcomes = [], [], []
+          for path in xml_files:
+              raw = path.read_bytes()
+              relative = path.relative_to(destination).as_posix()
+              try:
+                  document = ET.fromstring(raw)
+                  cases = list(document.iter('testcase'))
+                  for case in cases:
+                      status = ('error' if case.find('error') is not None else 'failed' if case.find('failure') is not None
+                                else 'skipped' if case.find('skipped') is not None else 'passed')
+                      outcomes.append(dict(classname=case.get('classname'), name=case.get('name'),
+                                           time_seconds=case.get('time'), status=status, source_report=relative))
+                  reports.append(dict(path=relative, sha256=hashlib.sha256(raw).hexdigest(), testcase_rows=len(cases)))
+              except ET.ParseError as error:
+                  errors.append(relative + ': invalid XML: ' + str(error))
+          if not xml_files:
+              errors.append('No runtime JUnit XML reports were produced; method outcomes and runtime test count are unavailable')
+          receipt = dict(schema=1, tested_sha=os.environ.get('PLURX_TEST_CANDIDATE_SHA'),
+                         tested_tree=os.environ.get('PLURX_TEST_CANDIDATE_TREE'),
+                         observation_kind='repeat-runtime-outcome-capture', copied=copied,
+                         xml_files=len(xml_files), testcase_rows=len(outcomes), reports=reports, outcomes=outcomes,
+                         status='collected' if not errors else 'missing-or-invalid', errors=errors,
+                         test_body_freshness='A Test-only init override disables up-to-date and result-cache reuse for this repeat. Raw task logs and XML retain the execution evidence.',
+                         limitation='These are observed runtime testcase rows, not independent discovery or proof that every expected test executed.')
+          (destination / 'collection.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(dict(status=receipt['status'], xml_files=len(xml_files), testcase_rows=len(outcomes), errors=errors)))
+          raise SystemExit(1 if errors else 0)
+          PYREPORTS
+      - name: Remove only this repeat JVM Test init script
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PYCLEAN'
+          import json, os, pathlib
+          created = os.environ.get('PLURX_BASELINE_TEST_INIT')
+          if created:
+              path = pathlib.Path(created)
+              expected = pathlib.Path('clients/android/.gradle-validation/init.d') / ('plurx-baseline-jvm-repeat-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1') + '.gradle')
+              assert path == expected, 'Refusing to remove an unowned init script'
+              existed = path.exists()
+              path.unlink(missing_ok=True)
+              base = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+              (base / 'init-cleanup.json').write_text(json.dumps(dict(path=str(path), removed=existed)) + '\n')
+          PYCLEAN
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-jvm-repeat-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
+
