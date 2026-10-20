@@ -14,14 +14,14 @@ permissions:
 jobs:
   privileged:
     name: disposable private mount namespace tests
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, general, high-cpu]
     timeout-minutes: 60
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
-      options: --user 0 --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+      options: --user 0 --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
     defaults:
       run:
         shell: bash
@@ -94,6 +94,25 @@ jobs:
           from pathlib import Path
           import re
           reasons = []
+          def read_kernel(path):
+              try:
+                  return Path(path).read_text().strip()
+              except OSError:
+                  return None
+          status = {}
+          for line in (read_kernel("/proc/self/status") or "").splitlines():
+              if ":" in line:
+                  key, value = line.split(":", 1)
+                  if key in ("CapEff", "CapBnd", "Seccomp", "NoNewPrivs"):
+                      status[key] = value.strip()
+          kernel = {key: status.get(key) for key in ("CapEff", "CapBnd", "Seccomp", "NoNewPrivs")}
+          kernel["lsm_current"] = read_kernel("/proc/self/attr/current")
+          try:
+              has_sys_admin = bool(int(status["CapEff"], 16) & (1 << 21))
+          except (KeyError, ValueError):
+              has_sys_admin = False
+          if not has_sys_admin:
+              reasons.append("CAP_SYS_ADMIN is absent from CapEff or its status is unavailable")
           if not re.fullmatch(r"[0-9a-f]{40}", os.environ.get("EXPECTED_SHA", "")):
               reasons.append("expected_sha is not an exact lowercase 40-character commit identity")
           if os.geteuid() != 0:
@@ -102,9 +121,14 @@ jobs:
               reasons.append("Docker daemon socket exposed to capability-bearing job")
           if os.environ.get("DOCKER_HOST"):
               reasons.append("Docker daemon endpoint exposed to capability-bearing job")
-          receipt = dict(qualified=not reasons, reasons=reasons,
+          receipt = dict(qualified=not reasons, reasons=reasons, kernel=kernel,
+                         cap_sys_admin_effective=has_sys_admin,
                          isolation="disposable job container; private child mount namespaces")
-          (Path(os.environ["RUNNER_TEMP"]) / "privileged-baseline/confinement.json").write_text(json.dumps(receipt, indent=2))
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "privileged-baseline"
+          (evidence / "confinement.json").write_text(json.dumps(receipt, indent=2))
+          (evidence / "capability.json").write_text(json.dumps(dict(
+              qualified=False, kernel=kernel, cap_sys_admin_effective=has_sys_admin,
+              status="unqualified; " + "; ".join(reasons) if reasons else "unqualified; private namespace probe pending"), indent=2))
           if reasons:
               raise SystemExit("unqualified: " + "; ".join(reasons))
           PYCONFINEMENT
@@ -202,8 +226,11 @@ jobs:
           import os
           from pathlib import Path
           result = int(os.environ["CAPABILITY_RESULT"])
-          (Path(os.environ["PLURX_PRIVILEGED_DIR"]) / "capability.json").write_text(json.dumps(dict(
+          evidence = Path(os.environ["PLURX_PRIVILEGED_DIR"])
+          confinement = json.loads((evidence / "confinement.json").read_text())
+          (evidence / "capability.json").write_text(json.dumps(dict(
               qualified=result == 0, returncode=result,
+              kernel=confinement["kernel"], cap_sys_admin_effective=confinement["cap_sys_admin_effective"],
               probe="private mount namespace, private TMPDIR, 64k tmpfs mount and unmount",
               status="qualified" if result == 0 else "unqualified; privileged test cells not executed"), indent=2))
           PYCAPABILITY

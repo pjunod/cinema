@@ -35,6 +35,8 @@ class BaselinePrivilegedWorkflowTests(unittest.TestCase):
         self.assertIn('clean: true', SOURCE)
         self.assertIn('persist-credentials: false', SOURCE)
         self.assertIn('--cap-add SYS_ADMIN --security-opt seccomp=unconfined', SOURCE)
+        self.assertIn('--security-opt apparmor=unconfined', SOURCE)
+        self.assertIn('runs-on: [self-hosted, Linux, X64, lab, baremetal, general, high-cpu]', SOURCE)
         self.assertNotIn('--privileged', SOURCE)
         self.assertNotIn('--device', SOURCE)
         self.assertNotRegex(SOURCE, r'(?m)^\s+volumes:')
@@ -82,6 +84,38 @@ class BaselinePrivilegedWorkflowTests(unittest.TestCase):
             self.assertEqual([cell['argv'][-2:] for cell in cells], [['make', 'bind-mount-check'], ['make', 'storage-pressure-check']])
             self.assertTrue(all(cell['timeout_seconds'] == 1200 for cell in cells))
             self.assertTrue(all(cell['argv'][:4] == ['unshare', '--mount', '--propagation', 'private'] for cell in cells))
+
+    def test_missing_sys_admin_fails_before_setup_with_kernel_qualification_receipt(self):
+        self.check_kernel_qualification('0000000000000000', False)
+
+    def test_effective_sys_admin_and_lsm_are_recorded_without_assuming_probe_passed(self):
+        self.check_kernel_qualification('0000000000200000', True)
+
+    def check_kernel_qualification(self, effective, expected_capability):
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'privileged-baseline'
+            evidence.mkdir()
+            original_read = Path.read_text
+            def read(path, *args, **kwargs):
+                if str(path) == '/proc/self/status':
+                    return f'CapEff:\t{effective}\nCapBnd:\t0000000000200000\nSeccomp:\t0\nNoNewPrivs:\t0\n'
+                if str(path) == '/proc/self/attr/current':
+                    return 'unconfined\n'
+                return original_read(path, *args, **kwargs)
+            environment = {'RUNNER_TEMP': directory, 'EXPECTED_SHA': 'a' * 40}
+            with patch.dict(os.environ, environment, clear=True), patch.object(os, 'geteuid', return_value=0), patch.object(Path, 'exists', return_value=False), patch.object(Path, 'read_text', autospec=True, side_effect=read):
+                if expected_capability:
+                    exec(compile(heredoc('PYCONFINEMENT'), '<confinement>', 'exec'), {})
+                else:
+                    with self.assertRaisesRegex(SystemExit, 'CAP_SYS_ADMIN'):
+                        exec(compile(heredoc('PYCONFINEMENT'), '<confinement>', 'exec'), {})
+            confinement = json.loads((evidence / 'confinement.json').read_text())
+            qualification = json.loads((evidence / 'capability.json').read_text())
+            self.assertEqual(confinement['cap_sys_admin_effective'], expected_capability)
+            self.assertEqual(confinement['qualified'], expected_capability)
+            self.assertFalse(qualification['qualified'])
+            self.assertEqual(qualification['kernel'], {'CapEff': effective, 'CapBnd': '0000000000200000', 'Seccomp': '0', 'NoNewPrivs': '0', 'lsm_current': 'unconfined'})
+            self.assertLess(SOURCE.index('PYCONFINEMENT'), SOURCE.index('rust-toolchain@'))
 
     def test_namespace_wrapper_is_valid_shell_and_uses_only_private_temp_probe(self):
         code = heredoc('PRIVATECELL')
