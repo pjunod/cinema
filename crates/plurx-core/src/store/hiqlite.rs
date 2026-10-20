@@ -303,7 +303,7 @@ const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
 const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
-const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =

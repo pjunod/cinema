@@ -846,13 +846,16 @@ mod replicated {
         open_contract_hiqlite_store, ContractCluster, CONTRACT_API_SECRET, HIQLITE_CASE,
     };
     use super::*;
-    use plurx_core::store::publication_conformance::{install, InsertionAttempt, InsertionSeam};
+    use plurx_core::store::publication_conformance::{
+        install, Acknowledgement, InsertionAttempt, InsertionSeam,
+    };
     use plurx_core::store::{HiqliteAuthStore, PublicationFence, PublicationStore};
     use std::sync::Mutex;
 
-    /// Error text production reuses when a replicated reply never arrives
-    /// (`hiqlite.rs`, `REPLICATED_STORE_TIMEOUT`); an *assumption* pinned
-    /// by value because that constant is private to the store module.
+    /// Error text production reports when a replicated reply never arrives
+    /// (`hiqlite.rs`, `REPLICATED_STORE_TIMEOUT`); the seam's `Lose` maps to
+    /// exactly that error. Pinned here so a drift in the production text is
+    /// visible to this example.
     const LOST_REPLY: &str = "replicated store operation timed out";
 
     async fn raw_client(cluster: &ContractCluster) -> hiqlite::Client {
@@ -924,13 +927,13 @@ mod replicated {
                 .push(attempt.clone());
         }
 
-        fn lose_acknowledgement(&self, _attempt: &InsertionAttempt) -> Option<StoreError> {
+        fn acknowledgement(&self, _attempt: &InsertionAttempt) -> Acknowledgement {
             let mut lost = self.lost.lock().expect("lost");
             if *lost {
-                return None;
+                return Acknowledgement::Deliver;
             }
             *lost = true;
-            Some(StoreError::Database(LOST_REPLY.to_owned()))
+            Acknowledgement::Lose
         }
     }
 
@@ -944,9 +947,9 @@ mod replicated {
     impl InsertionSeam for RevokeAfterCommit {
         async fn before_submission(&self, _attempt: &InsertionAttempt) {}
 
-        fn lose_acknowledgement(&self, _attempt: &InsertionAttempt) -> Option<StoreError> {
+        fn acknowledgement(&self, _attempt: &InsertionAttempt) -> Acknowledgement {
             self.fence.revoke();
-            None
+            Acknowledgement::Deliver
         }
     }
 
@@ -979,8 +982,8 @@ mod replicated {
             }
         }
 
-        fn lose_acknowledgement(&self, _attempt: &InsertionAttempt) -> Option<StoreError> {
-            None
+        fn acknowledgement(&self, _attempt: &InsertionAttempt) -> Acknowledgement {
+            Acknowledgement::Deliver
         }
     }
 

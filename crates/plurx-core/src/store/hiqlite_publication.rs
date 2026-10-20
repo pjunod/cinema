@@ -137,9 +137,10 @@ fn publication_row_id() -> i64 {
 ///
 /// - Compiled only with `hiqlite-contract-tests`, which the daemon never
 ///   enables; production code carries no toggle, no counter and no branch.
-/// - A seam can only observe a submission or discard a real `Ok` reply. It
-///   cannot fabricate success, skip the backend, or alter statements, so it
-///   cannot verify a different implementation than the one shipped.
+/// - A seam can only observe a submission or lose a real `Ok` reply as the
+///   replicated timeout. It cannot fabricate success, skip the backend, alter
+///   statements or choose an error, so it cannot verify a different
+///   implementation than the one shipped.
 /// - A seam belongs to one store handle. The slot is a field of
 ///   `HiqliteAuthStore`, shared by clones of that handle (they share the one
 ///   client whose submissions the seam observes) and invisible to any other
@@ -170,11 +171,33 @@ pub mod conformance {
         async fn before_submission(&self, attempt: &InsertionAttempt);
 
         /// Runs only after the backend returned a real successful
-        /// transaction result. Returning `Some(error)` discards that
-        /// acknowledgement and surfaces `error` to the caller instead, which
-        /// models a committed-but-unacknowledged submission. The commit itself
-        /// has already happened and is not undone.
-        fn lose_acknowledgement(&self, attempt: &InsertionAttempt) -> Option<StoreError>;
+        /// transaction result and decides whether that acknowledgement
+        /// reaches the caller. The commit itself has already happened and is
+        /// not undone. A seam may also act on local state here (for example
+        /// revoke a `PublicationFence`) and still deliver.
+        fn acknowledgement(&self, attempt: &InsertionAttempt) -> Acknowledgement;
+    }
+
+    /// What a seam does with a real successful transaction result. `Lose`
+    /// surfaces the one replicated transport timeout error production
+    /// reports for an unanswered request; no other error is expressible, so
+    /// a seam cannot steer the caller into the identity-conflict retry
+    /// branch or any other classification.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Acknowledgement {
+        Deliver,
+        Lose,
+    }
+
+    impl Acknowledgement {
+        pub(super) fn apply<T>(self, delivered: T) -> Result<T, StoreError> {
+            match self {
+                Self::Deliver => Ok(delivered),
+                Self::Lose => Err(StoreError::Database(
+                    super::super::hiqlite::REPLICATED_STORE_TIMEOUT.to_owned(),
+                )),
+            }
+        }
     }
 
     /// The per-store seam slot. Clones of a store share the slot; a store
@@ -1068,14 +1091,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 )
                 .await;
             // A lost reply is a transport outcome after a real result. The
-            // seam may only discard a genuine `Ok`; it never invents one and
-            // never takes the identity-conflict retry branch below.
+            // seam may only deliver or lose a genuine `Ok`; losing it yields
+            // the replicated timeout error, which the identity-conflict retry
+            // branch below never matches.
             #[cfg(feature = "hiqlite-contract-tests")]
             let submission = match (submission, &seam) {
-                (Ok(results), Some(seam)) => match seam.lose_acknowledgement(&observed) {
-                    Some(lost) => Err(lost),
-                    None => Ok(results),
-                },
+                (Ok(results), Some(seam)) => seam.acknowledgement(&observed).apply(results),
                 (submission, _) => submission,
             };
             let results = match submission {
