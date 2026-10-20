@@ -1,0 +1,119 @@
+"""Fail-closed parsing tests for synthetic TLC output; no Java/TLC process runs."""
+
+from __future__ import annotations
+
+import importlib.util
+import copy
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("check_formal", ROOT / "scripts/check-formal")
+assert SPEC is not None and SPEC.loader is not None
+formal = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(formal)
+
+
+PASS = {
+    "verdict": "pass",
+    "expected_error": None,
+}
+VIOLATION = {
+    "verdict": "violation",
+    "expected_error": "S2_PublicationAuthority",
+}
+
+
+def complete_output() -> str:
+    return """Model checking completed. No error has been found.
+3 states generated, 2 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 2.
+"""
+
+
+def violation_output(name: str = "S2_PublicationAuthority") -> str:
+    return f"""Error: Invariant {name} is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+State 2: <Next predicate>
+2 states generated, 2 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 1.
+"""
+
+
+class TLCOutputClassificationTests(unittest.TestCase):
+    def test_positive_completion_requires_clean_exit_summary_and_counts(self) -> None:
+        result = formal.classify(complete_output(), 0, PASS, False, None)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["actual_verdict"], "pass")
+        self.assertEqual(result["state_counts"]["distinct"], 2)
+        self.assertEqual(result["depth"], 2)
+
+    def test_positive_rejects_nonzero_exit_even_with_success_text(self) -> None:
+        result = formal.classify(complete_output(), 1, PASS, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("exit 0", result["reason"])
+
+    def test_positive_rejects_missing_completion_marker(self) -> None:
+        output = complete_output().replace("Model checking completed. No error has been found.\n", "")
+        result = formal.classify(output, 0, PASS, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("completion marker", result["reason"])
+
+    def test_positive_rejects_error_even_if_success_marker_is_present(self) -> None:
+        output = complete_output() + "Error: unrelated failure\n"
+        result = formal.classify(output, 0, PASS, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("unexpected TLC error", result["reason"])
+
+    def test_violation_requires_expected_exit_named_error_and_trace(self) -> None:
+        result = formal.classify(violation_output(), 12, VIOLATION, False, None)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["actual_verdict"], "violation")
+        self.assertEqual(result["state_counts"]["generated"], 2)
+
+    def test_violation_rejects_wrong_exit(self) -> None:
+        result = formal.classify(violation_output(), 1, VIOLATION, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("exit 12", result["reason"])
+
+    def test_violation_rejects_wrong_named_error(self) -> None:
+        result = formal.classify(violation_output("DifferentInvariant"), 12, VIOLATION, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("S2_PublicationAuthority", result["reason"])
+
+    def test_violation_rejects_missing_counterexample(self) -> None:
+        output = violation_output().replace("State 1: <Initial predicate>\n", "")
+        result = formal.classify(output, 12, VIOLATION, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("trace is missing", result["reason"])
+
+    def test_violation_rejects_parse_failure_even_if_expected_name_appears(self) -> None:
+        output = "Parsing Error: S2_PublicationAuthority\n" + violation_output()
+        result = formal.classify(output, 12, VIOLATION, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("fatal error", result["reason"])
+
+    def test_timeout_and_oversized_log_are_incomplete(self) -> None:
+        timeout = formal.classify(complete_output(), 0, PASS, True, None)
+        oversized = formal.classify(complete_output(), 0, PASS, False, "log too large")
+        self.assertFalse(timeout["complete"])
+        self.assertIn("timed out", timeout["reason"])
+        self.assertFalse(oversized["complete"])
+        self.assertIn("log too large", oversized["reason"])
+
+
+class MappingFailClosedTests(unittest.TestCase):
+    def test_unreviewed_fable_mapping_cannot_be_accepted(self) -> None:
+        mapping = copy.deepcopy(formal.read_json(formal.MAPPING_PATH, "test mapping"))
+        mapping["model_file"] = "verification/durable-jobs/__runner_test_missing__.tla"
+        mapping["model_sha256"] = None
+        mapping["source_mapping"] = {"status": "pending_fable_authority", "tables": []}
+        drift, _ = formal.mapping_inputs(mapping)
+        self.assertTrue(any("pending review" in issue for issue in drift))
+        self.assertTrue(any("missing or unsafe model" in issue for issue in drift))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1409,6 +1409,7 @@ paths = [
   "crates/plurxd/src/ffmpeg_support.rs",
   "scripts/install-linux-source-runtime",
   "scripts/bootstrap-formal-toolchain",
+  "scripts/check-formal",
   "scripts/install-compose-tray",
   "scripts/linux-tray-release",
   "scripts/package-macos",

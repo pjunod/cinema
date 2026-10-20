@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""Run the pinned, mapped DurableJobs TLC configurations and write receipts."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parent.parent
+MAPPING_PATH = ROOT / "verification/durable-jobs/mapping.json"
+TOOLCHAIN_MANIFEST = ROOT / "verification/durable-jobs/toolchain.json"
+BOOTSTRAP = ROOT / "scripts/bootstrap-formal-toolchain"
+CONFIG_ORDER = (
+    "smoke.cfg",
+    "baseline.cfg",
+    "control-binding-ignored.cfg",
+    "control-replay-fresh-fence.cfg",
+    "control-renewal-revives-cancel.cfg",
+    "recovery.cfg",
+    "control-retry-stalls.cfg",
+)
+MAX_LOG_BYTES = 64 * 1024 * 1024
+POLL_SECONDS = 0.2
+
+
+class RunnerError(Exception):
+    """A fail-closed runner or mapping error."""
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunnerError(f"cannot read {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RunnerError(f"{label} must be a JSON object: {path}")
+    return value
+
+
+def repo_file(relative: str, label: str) -> Path:
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RunnerError(f"unsafe {label} path: {relative}")
+    path = ROOT / candidate
+    if path.is_symlink() or not path.is_file():
+        raise RunnerError(f"missing or unsafe {label}: {path}")
+    return path
+
+
+def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    """Return drift diagnostics and the exact reviewed hashes used by the check."""
+    drift: list[str] = []
+    hashes: dict[str, str] = {}
+    model = mapping.get("model_file")
+    if not isinstance(model, str):
+        drift.append("mapping has no model_file")
+    else:
+        try:
+            path = repo_file(model, "model")
+            actual = sha256(path)
+            hashes[model] = actual
+            expected = mapping.get("model_sha256")
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                drift.append(f"model hash is not reviewed: {model}")
+            elif expected != actual:
+                drift.append(f"model source drift requires review: {model}")
+        except RunnerError as exc:
+            drift.append(str(exc))
+
+    configs = mapping.get("configs")
+    if not isinstance(configs, dict) or set(configs) != set(CONFIG_ORDER):
+        drift.append("mapping config set differs from the seven frozen runner configs")
+        configs = configs if isinstance(configs, dict) else {}
+    for name in CONFIG_ORDER:
+        record = configs.get(name)
+        if not isinstance(record, dict):
+            drift.append(f"mapping lacks config record: {name}")
+            continue
+        try:
+            path = repo_file(f"verification/durable-jobs/{name}", "TLC config")
+            actual = sha256(path)
+            hashes[f"verification/durable-jobs/{name}"] = actual
+            expected = record.get("sha256")
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                drift.append(f"config hash is not reviewed: {name}")
+            elif expected != actual:
+                drift.append(f"config source drift requires review: {name}")
+            verdict = record.get("verdict")
+            error = record.get("expected_error")
+            if verdict not in ("pass", "violation"):
+                drift.append(f"invalid expected verdict for {name}")
+            if (verdict == "violation") != (isinstance(error, str) and bool(error)):
+                drift.append(f"expected error does not agree with verdict for {name}")
+            if not isinstance(record.get("timeout_seconds"), int) or record["timeout_seconds"] < 1:
+                drift.append(f"invalid timeout for {name}")
+        except RunnerError as exc:
+            drift.append(str(exc))
+
+    source_mapping = mapping.get("source_mapping")
+    if not isinstance(source_mapping, dict) or source_mapping.get("status") != "reviewed":
+        drift.append("authority source mapping is pending review")
+        return drift, hashes
+    tables = source_mapping.get("tables")
+    if not isinstance(tables, list) or not tables:
+        drift.append("reviewed authority mapping has no table anchors")
+        return drift, hashes
+    seen_tables: set[str] = set()
+    for row in tables:
+        if not isinstance(row, dict):
+            drift.append("authority mapping contains a non-object table row")
+            continue
+        table = row.get("table")
+        source = row.get("source")
+        anchor = row.get("anchor")
+        expected = row.get("sha256")
+        if not all(isinstance(item, str) and item for item in (table, source, anchor)):
+            drift.append("authority mapping row needs table, source, and exact anchor")
+            continue
+        if table in seen_tables:
+            drift.append(f"duplicate authority table mapping: {table}")
+        seen_tables.add(table)
+        try:
+            source_path = repo_file(source, "authority source")
+            text = source_path.read_text(encoding="utf-8")
+            actual = sha256(source_path)
+            hashes[source] = actual
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                drift.append(f"authority source hash is not reviewed: {source}")
+            elif expected != actual:
+                drift.append(f"authority source drift requires review: {source}")
+            if text.count(anchor) != 1:
+                drift.append(f"authority anchor must occur exactly once: {table}")
+        except (RunnerError, UnicodeError) as exc:
+            drift.append(str(exc))
+    return drift, hashes
+
+
+def changed_paths(base: str | None) -> list[str]:
+    if base is None:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(f"cannot inspect changed paths against {base}: {exc}") from exc
+    if result.returncode:
+        raise RunnerError(f"cannot inspect changed paths against {base}: {result.stderr[-500:]}")
+    return sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+
+
+def mapping_check(base: str | None) -> int:
+    mapping = read_json(MAPPING_PATH, "runner mapping")
+    drift, hashes = mapping_inputs(mapping)
+    changed = changed_paths(base)
+    config_map = mapping.get("configs")
+    config_names = config_map.keys() if isinstance(config_map, dict) else ()
+    governed = {
+        mapping.get("model_file"),
+        "verification/durable-jobs/mapping.json",
+        "verification/durable-jobs/toolchain.json",
+        "scripts/bootstrap-formal-toolchain",
+        "scripts/check-formal",
+        "validation/points.toml",
+        *(f"verification/durable-jobs/{name}" for name in config_names),
+    }
+    source_mapping = mapping.get("source_mapping")
+    if isinstance(source_mapping, dict) and isinstance(source_mapping.get("tables"), list):
+        governed.update(
+            row.get("source") for row in source_mapping["tables"] if isinstance(row, dict)
+        )
+    affected = base is None or bool(governed.intersection(changed))
+    result = {
+        "schema_version": 1,
+        "affected": affected,
+        "changed_paths": changed,
+        "source_drift": drift,
+        "input_sha256": hashes,
+        "mapping_sha256": sha256(MAPPING_PATH),
+    }
+    print(json.dumps(result, sort_keys=True))
+    return 0 if not drift else 1
+
+
+def durable_output(path: Path) -> Path:
+    output = path.expanduser().resolve()
+    forbidden = [Path("/tmp").resolve(), Path("/var/tmp").resolve()]
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        forbidden.append(Path(tmpdir).expanduser().resolve())
+    if any(output == item or item in output.parents for item in forbidden):
+        raise RunnerError(f"output directory must be durable: {output}")
+    if path.is_symlink():
+        raise RunnerError(f"output directory must not be a symlink: {path}")
+    return output
+
+
+def resolve_toolchain(cache: Path) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BOOTSTRAP), "resolve", "--cache-dir", str(cache)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(f"pinned toolchain resolve failed: {exc}") from exc
+    if result.returncode:
+        raise RunnerError(f"pinned toolchain resolve failed: {result.stderr[-1200:]}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RunnerError("toolchain resolver returned invalid JSON") from exc
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise RunnerError("toolchain resolver returned unsupported data")
+    if data.get("manifest_sha256") != sha256(TOOLCHAIN_MANIFEST):
+        raise RunnerError("resolved toolchain manifest hash differs from repository pin")
+    for key in ("java", "tlc"):
+        record = data.get(key)
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            raise RunnerError(f"toolchain resolver omitted {key} identity")
+        path = Path(record["path"])
+        if path.is_symlink() or not path.is_file() or sha256(path) != record.get("sha256"):
+            raise RunnerError(f"resolved {key} executable/artifact changed after verification")
+    return data
+
+
+def _rss_bytes(pid: int) -> int | None:
+    try:
+        if platform.system() == "Linux":
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode == 0 and value.isdigit():
+            return int(value) * 1024
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return None
+
+
+def execute(argv: list[str], cwd: Path, log_path: Path, timeout: int) -> dict[str, Any]:
+    start = time.monotonic()
+    peak_rss: int | None = None
+    timed_out = False
+    with log_path.open("xb") as log:
+        try:
+            process = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            return {
+                "returncode": None,
+                "elapsed_seconds": round(time.monotonic() - start, 3),
+                "peak_rss_bytes": None,
+                "timed_out": False,
+                "output": "",
+                "log_problem": f"TLC process launch failed: {exc}",
+            }
+        while process.poll() is None:
+            sample = _rss_bytes(process.pid)
+            if sample is not None:
+                peak_rss = max(peak_rss or 0, sample)
+            if log_path.stat().st_size > MAX_LOG_BYTES:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                break
+            if time.monotonic() - start > timeout:
+                timed_out = True
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(POLL_SECONDS)
+        try:
+            returncode = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait(timeout=10)
+    elapsed = time.monotonic() - start
+    size = log_path.stat().st_size if log_path.exists() else 0
+    if size > MAX_LOG_BYTES:
+        output = ""
+        log_problem = f"TLC log exceeds {MAX_LOG_BYTES} byte limit"
+    else:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        log_problem = None
+    return {
+        "returncode": returncode,
+        "elapsed_seconds": round(elapsed, 3),
+        "peak_rss_bytes": peak_rss,
+        "timed_out": timed_out,
+        "output": output,
+        "log_problem": log_problem,
+    }
+
+
+STATE_RE = re.compile(
+    r"(?P<generated>\d+) states? generated,\s+(?P<distinct>\d+) distinct states? found,\s+(?P<queued>\d+) states? left on queue",
+    re.IGNORECASE,
+)
+DEPTH_RE = re.compile(r"depth of the complete state graph search is\s+(\d+)", re.IGNORECASE)
+COMPLETE_RE = re.compile(r"Model checking completed\. No error has been found\.", re.IGNORECASE)
+ERROR_RE = re.compile(r"^Error:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+FATAL_RE = re.compile(
+    r"(?:Parsing Error|Semantic Error|OutOfMemoryError|Exception in thread|TLC encountered an error|No such file|cannot find module)",
+    re.IGNORECASE,
+)
+
+
+def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: bool, log_problem: str | None) -> dict[str, Any]:
+    state_match = STATE_RE.search(output)
+    depth_match = DEPTH_RE.search(output)
+    errors = ERROR_RE.findall(output)
+    states = (
+        {key: int(value) for key, value in state_match.groupdict().items()}
+        if state_match
+        else None
+    )
+    depth = int(depth_match.group(1)) if depth_match else None
+    reason = None
+    actual = "incomplete"
+    complete = False
+    if timed_out:
+        reason = "TLC timed out"
+    elif log_problem:
+        reason = log_problem
+    elif FATAL_RE.search(output):
+        reason = "TLC reported a parse, runtime, or fatal error"
+    elif states is None or depth is None:
+        reason = "TLC output lacks completed state counts or graph depth"
+    elif expected["verdict"] == "pass":
+        if returncode != 0:
+            reason = f"expected successful TLC exit 0, got {returncode}"
+        elif errors:
+            reason = "unexpected TLC error marker in positive configuration"
+        elif not COMPLETE_RE.search(output):
+            reason = "TLC completion marker is missing"
+        else:
+            actual = "pass"
+            complete = True
+    else:
+        wanted = expected["expected_error"]
+        named_error = any(wanted in line for line in errors)
+        if returncode != 12:
+            reason = f"expected TLC violation exit 12, got {returncode}"
+        elif not named_error:
+            reason = f"expected named TLC error {wanted} was not reported"
+        elif not re.search(r"^State\s+1:", output, re.MULTILINE):
+            reason = "expected counterexample state trace is missing"
+        else:
+            actual = "violation"
+            complete = True
+    return {
+        "actual_verdict": actual,
+        "complete": complete,
+        "reason": reason,
+        "exit_code": returncode,
+        "state_counts": states,
+        "depth": depth,
+    }
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+
+def run(args: argparse.Namespace) -> int:
+    mapping = read_json(MAPPING_PATH, "runner mapping")
+    drift, input_hashes = mapping_inputs(mapping)
+    if drift:
+        raise RunnerError("mapping check failed: " + "; ".join(drift))
+    selected = [args.config] if args.config else (
+        ["smoke.cfg"] if args.mode == "smoke" else list(CONFIG_ORDER)
+    )
+    if any(name not in CONFIG_ORDER for name in selected):
+        raise RunnerError(f"unknown config {args.config!r}; known configs: {', '.join(CONFIG_ORDER)}")
+
+    output_root = durable_output(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    cache = args.cache_dir.expanduser().resolve()
+    toolchain = resolve_toolchain(cache)
+    java = toolchain["java"]["path"]
+    jar = toolchain["tlc"]["path"]
+    model_file = mapping["model_file"]
+    model_path = repo_file(model_file, "model")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    run_dir = output_root / run_id
+    run_dir.mkdir(mode=0o700)
+    runner_hash = sha256(Path(__file__))
+    aggregate: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "mode": args.mode,
+        "status": "in_progress",
+        "mapping_sha256": sha256(MAPPING_PATH),
+        "model_sha256": input_hashes[model_file],
+        "toolchain": {
+            "manifest_sha256": toolchain["manifest_sha256"],
+            "java": toolchain["java"],
+            "tlc": toolchain["tlc"],
+        },
+        "runner_sha256": runner_hash,
+        "configs": [],
+    }
+    receipt_path = run_dir / "receipt.json"
+    write_json(receipt_path, aggregate)
+    config_dir = ROOT / "verification/durable-jobs"
+    for name in selected:
+        record = mapping["configs"][name]
+        cfg = repo_file(f"verification/durable-jobs/{name}", "TLC config")
+        out_dir = run_dir / name.removesuffix(".cfg")
+        out_dir.mkdir(mode=0o700)
+        metadir = out_dir / "metadir"
+        metadir.mkdir(mode=0o700)
+        raw_log = out_dir / "tlc.log"
+        argv = [
+            java,
+            "-Xmx4g",
+            "-XX:+UseParallelGC",
+            "-cp",
+            jar,
+            "tlc2.TLC",
+            "-config",
+            name,
+            "-workers",
+            "auto",
+            "-deadlock",
+            "-metadir",
+            str(metadir),
+            "-cleanup",
+            model_path.name,
+        ]
+        execution = execute(argv, config_dir, raw_log, record["timeout_seconds"])
+        verdict = classify(
+            execution["output"],
+            execution["returncode"],
+            record,
+            execution["timed_out"],
+            execution["log_problem"],
+        )
+        config_receipt = {
+            "config": name,
+            "expected_verdict": record["verdict"],
+            "expected_error": record["expected_error"],
+            **verdict,
+            "config_sha256": input_hashes[f"verification/durable-jobs/{name}"],
+            "source_hashes": {k: v for k, v in input_hashes.items() if k != model_file and not k.endswith(".cfg")},
+            "argv": argv,
+            "elapsed_seconds": execution["elapsed_seconds"],
+            "peak_rss_bytes": execution["peak_rss_bytes"],
+            "raw_log": {"path": str(raw_log), "sha256": sha256(raw_log)},
+        }
+        aggregate["configs"].append(config_receipt)
+        if not verdict["complete"]:
+            aggregate["status"] = "failed"
+            aggregate["failure"] = verdict["reason"]
+            write_json(receipt_path, aggregate)
+            print(json.dumps({"receipt": str(receipt_path), "status": "failed", "config": name, "reason": verdict["reason"]}, sort_keys=True))
+            return 1
+        write_json(receipt_path, aggregate)
+    aggregate["status"] = "complete"
+    aggregate["qualification"] = "full" if not args.config and args.mode == "full" else "smoke_or_single_config"
+    write_json(receipt_path, aggregate)
+    print(json.dumps({"receipt": str(receipt_path), "status": "complete", "qualification": aggregate["qualification"]}, sort_keys=True))
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    commands = result.add_subparsers(dest="command", required=True)
+    check = commands.add_parser("check-mapping", help="offline source and input drift check")
+    check.add_argument("--affected-base", help="base commit for changed-path impact reporting")
+    smoke = commands.add_parser("smoke", help="run only smoke.cfg")
+    full = commands.add_parser("full", help="run all seven mapped TLC configurations")
+    for command, mode in ((smoke, "smoke"), (full, "full")):
+        command.add_argument("--cache-dir", type=Path, default=ROOT / "target/formal-toolchain")
+        command.add_argument("--output-dir", type=Path, default=ROOT / "target/verification/durable-jobs")
+        command.add_argument("--config", help="run only one mapped config (for targeted reruns)")
+        command.set_defaults(mode=mode)
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "check-mapping":
+            return mapping_check(args.affected_base)
+        return run(args)
+    except RunnerError as exc:
+        print(f"check-formal: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

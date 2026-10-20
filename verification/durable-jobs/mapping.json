@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "model_file": "verification/durable-jobs/DurableJobs.tla",
+  "model_sha256": null,
+  "source_mapping": {
+    "status": "pending_fable_authority",
+    "tables": []
+  },
+  "configs": {
+    "smoke.cfg": {
+      "sha256": null,
+      "verdict": "pass",
+      "expected_error": null,
+      "timeout_seconds": 60
+    },
+    "baseline.cfg": {
+      "sha256": null,
+      "verdict": "pass",
+      "expected_error": null,
+      "timeout_seconds": 900
+    },
+    "control-binding-ignored.cfg": {
+      "sha256": null,
+      "verdict": "violation",
+      "expected_error": "S2_PublicationAuthority",
+      "timeout_seconds": 900
+    },
+    "control-replay-fresh-fence.cfg": {
+      "sha256": null,
+      "verdict": "violation",
+      "expected_error": "S4_ReplayStability",
+      "timeout_seconds": 900
+    },
+    "control-renewal-revives-cancel.cfg": {
+      "sha256": null,
+      "verdict": "violation",
+      "expected_error": "S5_CancellationPrecedence",
+      "timeout_seconds": 900
+    },
+    "recovery.cfg": {
+      "sha256": null,
+      "verdict": "pass",
+      "expected_error": null,
+      "timeout_seconds": 900
+    },
+    "control-retry-stalls.cfg": {
+      "sha256": null,
+      "verdict": "violation",
+      "expected_error": "L1_FreshClaimEventually",
+      "timeout_seconds": 900
+    }
+  }
+}
