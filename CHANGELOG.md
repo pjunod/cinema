@@ -19,6 +19,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Fresh macOS source installs build Automake without creating a circular
+  GNUmakefile symlink when the temporary directory uses a symlinked path.
+
 - Web prepared quality switches reattach selected subtitles without cancelling
   the pending quality request or sending a contradictory commit to the server.
   Visible successors retain HLS failure recovery; established retries and
