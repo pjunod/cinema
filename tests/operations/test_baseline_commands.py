@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -150,6 +151,175 @@ class BaselineCommandsCase(unittest.TestCase):
             self.assertFalse((root / "results/after.log").exists())
             self.assertTrue(result["errors"])
             self.assertFalse(result["success"])
+
+    def test_linux_membership_distinguishes_zombies_and_preserves_start_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid, state, start in ((41, "Z", 100), (42, "X", 101)):
+                entry = root / str(pid)
+                entry.mkdir()
+                fields = [state] + ["0"] * 19
+                fields[1], fields[2], fields[19] = "1", "40", str(start)
+                (entry / "stat").write_text(str(pid) + " (worker with (parentheses)) " + " ".join(fields))
+            with mock.patch.object(commands.sys, "platform", "linux"), mock.patch.object(commands.os, "killpg"):
+                observed = commands.observe_group(40, root)
+            self.assertEqual(observed["status"], "nonexecuting")
+            self.assertEqual([(m["pid"], m["pgid"], m["state"], m["start_ticks"]) for m in observed["members"]],
+                             [(41, 40, "Z", 100), (42, 40, "X", 101)])
+            self.assertEqual(observed["errors"], [])
+
+    def test_zombie_only_group_preserves_exit_zero_and_original_failure_separately(self):
+        for returncode in (0, 7):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                def zombie(pgid):
+                    return dict(pgid=pgid, status="nonexecuting", backend="proc", errors=[],
+                                members=[dict(pid=pgid + 1, ppid=1, pgid=pgid, state="Z", start_ticks=100)])
+                with mock.patch.object(commands, "observe_group", side_effect=zombie), mock.patch.object(commands.os, "killpg") as signal_group:
+                    result = self.execute(root, [self.cell("zombie", f"raise SystemExit({returncode})"),
+                                                 self.cell("after", "print('independent ran')")])
+                signal_group.assert_not_called()
+                self.assertEqual(len(result["cells"]), 2)
+                outcome = result["cells"][0]
+                self.assertEqual(outcome["returncode"], returncode)
+                self.assertEqual(outcome["success"], returncode == 0)
+                self.assertFalse(outcome["leaked_process_group"])
+                self.assertTrue(outcome["cleanup_complete"])
+                self.assertEqual(outcome["group_observations"][0]["members"][0]["state"], "Z")
+                self.assertTrue(result["cells"][1]["success"])
+
+    def test_unreadable_linux_identity_cannot_certify_group_absence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "41").mkdir()
+            (root / "41/stat").write_text("truncated identity")
+            with mock.patch.object(commands.sys, "platform", "linux"), mock.patch.object(commands.os, "killpg"):
+                observed = commands.observe_group(40, root)
+            self.assertEqual(observed["status"], "unknown")
+            self.assertTrue(observed["errors"])
+
+    def test_macos_state_probe_refusal_remains_unknown_with_actual_errno(self):
+        with mock.patch.object(commands.sys, "platform", "darwin"), mock.patch.object(commands.os, "killpg"), mock.patch.object(commands.subprocess, "run", side_effect=PermissionError(errno.EPERM, "ps denied")):
+            observed = commands.observe_group(40)
+        self.assertEqual(observed["status"], "unknown")
+        self.assertEqual(observed["error_errno"], errno.EPERM)
+        self.assertEqual(observed["backend"], "ps")
+
+    def test_live_or_unknown_group_surviving_cleanup_blocks_followup(self):
+        for status in ("live", "unknown"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                def surviving(pgid):
+                    return dict(pgid=pgid, status=status, backend="proc", errors=[],
+                                members=[dict(pid=pgid + 1, ppid=1, pgid=pgid, state="S", start_ticks=100)])
+                with mock.patch.object(commands, "observe_group", side_effect=surviving), mock.patch.object(commands.os, "killpg"):
+                    result = self.execute(root, [self.cell("survivor", "print('original exit zero')"),
+                                                 self.cell("after", "print('must not run')")])
+                self.assertEqual(len(result["cells"]), 1)
+                outcome = result["cells"][0]
+                self.assertEqual(outcome["returncode"], 0)
+                self.assertFalse(outcome["success"])
+                self.assertFalse(outcome["cleanup_complete"])
+                self.assertIn("SIGTERM", outcome["cleanup_signals"])
+                self.assertIn("SIGKILL", outcome["cleanup_signals"])
+                self.assertEqual(outcome["group_observations"][-1]["status"], status)
+                self.assertEqual(result["blocked_cells"], ["after"])
+                self.assertFalse((root / "results/after.log").exists())
+                self.assertTrue(result["errors"])
+
+    def test_reaped_leader_and_reused_numeric_group_are_never_signalled(self):
+        original_wait = commands.wait_owned_leader
+        for returncode in (0, 7):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                def reused_group(pgid):
+                    return dict(pgid=pgid, status="live", backend="proc", errors=[],
+                                members=[dict(pid=pgid, ppid=1, pgid=pgid, state="S", start_ticks=999999)])
+                def fallback(process, timeout):
+                    return original_wait(process, timeout, use_waitid=False)
+                with mock.patch.object(commands, "wait_owned_leader", side_effect=fallback), mock.patch.object(commands, "observe_group", side_effect=reused_group), mock.patch.object(commands.os, "killpg") as signal_group:
+                    result = self.execute(root, [self.cell("old-leader", f"raise SystemExit({returncode})"),
+                                                 self.cell("after", "raise RuntimeError('must not run')")])
+                signal_group.assert_not_called()
+                self.assertEqual(len(result["cells"]), 1)
+                outcome = result["cells"][0]
+                self.assertEqual(outcome["returncode"], returncode)
+                self.assertFalse(outcome["leader_anchor"]["held"])
+                self.assertEqual(outcome["leader_anchor"]["mechanism"], "reaped-fallback")
+                self.assertFalse(outcome["leaked_process_group"])
+                self.assertTrue(outcome["cleanup_observation_unknown"])
+                self.assertFalse(outcome["cleanup_complete"])
+                self.assertEqual(outcome["cleanup_signals"], [])
+                self.assertIn("refusing numeric PGID signal", outcome["cleanup_error"])
+                self.assertEqual(result["blocked_cells"], ["after"])
+
+    def test_waitid_anchor_is_not_reaped_until_after_last_cleanup_observation(self):
+        events = []
+        state = {"value": "live"}
+        class OwnedProcess:
+            pid = 40
+            returncode = None
+            def poll(self):
+                raise AssertionError("poll would release the owned leader anchor")
+            def wait(self, timeout):
+                events.append("reap")
+                self.returncode = 7
+                return 7
+        process = OwnedProcess()
+        def observation(pgid):
+            events.append("observe:" + state["value"])
+            return dict(pgid=pgid, status=state["value"], errors=[], members=[])
+        def signal_group(_pgid, number):
+            self.assertIsNone(process.returncode)
+            events.append(signal.Signals(number).name)
+            if number == signal.SIGKILL:
+                state["value"] = "nonexecuting"
+        exit_info = SimpleNamespace(si_pid=40, si_code=os.CLD_EXITED, si_status=7)
+        with mock.patch.object(commands.os, "waitid", return_value=exit_info) as waitid, mock.patch.object(commands, "observe_group", side_effect=observation), mock.patch.object(commands.os, "killpg", side_effect=signal_group):
+            anchor = commands.wait_owned_leader(process, 1)
+            self.assertEqual(anchor["mechanism"], "waitid-WNOWAIT")
+            self.assertEqual(anchor["returncode"], 7)
+            self.assertIsNone(process.returncode)
+            cleanup = commands.terminate_group(process, 0, anchor)
+            self.assertTrue(cleanup["complete"])
+            self.assertIsNone(process.returncode)
+            self.assertNotIn("reap", events)
+            for call in waitid.call_args_list:
+                self.assertTrue(call.args[2] & os.WNOWAIT)
+            result = {"cleanup_complete": True}
+            commands.reap_owned_leader(process, result)
+        self.assertEqual(events[-1], "reap")
+        self.assertEqual(events[-2], "observe:nonexecuting")
+        self.assertEqual(result["returncode"], 7)
+        self.assertTrue(result["leader_reaped_after_cleanup"])
+
+    def test_lost_waitid_child_anchor_refuses_every_destructive_signal(self):
+        process = SimpleNamespace(pid=40, returncode=None)
+        group = dict(pgid=40, status="live", errors=[], members=[])
+        anchor = dict(held=True, mechanism="waitid-WNOWAIT")
+        with mock.patch.object(commands, "observe_group", return_value=group), mock.patch.object(commands.os, "waitid", side_effect=ChildProcessError(errno.ECHILD, "not our child")), mock.patch.object(commands.os, "killpg") as signal_group:
+            result = commands.terminate_group(process, 0, anchor)
+        signal_group.assert_not_called()
+        self.assertFalse(result["complete"])
+        self.assertIn("refusing numeric PGID signal", result["error"])
+
+    def test_timeout_without_wnowait_keeps_unreaped_owned_leader_anchor(self):
+        process = SimpleNamespace(pid=40, returncode=None,
+                                  wait=mock.Mock(side_effect=subprocess.TimeoutExpired("owned", 0.1)))
+        anchor = commands.wait_owned_leader(process, 0.1, use_waitid=False)
+        self.assertTrue(anchor["held"])
+        self.assertTrue(anchor["timed_out"])
+        self.assertEqual(anchor["mechanism"], "unreaped-timeout-fallback")
+        self.assertTrue(commands.anchor_still_owned(process, anchor))
+        process.wait.assert_called_once()
+
+    def test_interrupted_waitid_still_obeys_completion_deadline(self):
+        process = SimpleNamespace(pid=40, returncode=None)
+        with mock.patch.object(commands.os, "waitid", side_effect=InterruptedError(errno.EINTR, "interrupted")), mock.patch.object(commands.time, "monotonic", side_effect=[0, 2]):
+            anchor = commands.wait_owned_leader(process, 1)
+        self.assertTrue(anchor["held"])
+        self.assertTrue(anchor["timed_out"])
+        self.assertEqual(anchor["mechanism"], "waitid-WNOWAIT")
 
     def test_spawn_failure_is_preserved_and_remaining_commands_run(self):
         with tempfile.TemporaryDirectory() as directory:
