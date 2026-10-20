@@ -1,10 +1,11 @@
-"""Private primary groups do not create another desktop-code writer."""
+"""Group-editable source inputs are distinct from private desktop authority."""
 import contextlib
-import errno
 import importlib.machinery
 import importlib.util
+import json
 import os
 from pathlib import Path
+import pwd
 import stat
 import tempfile
 import types
@@ -12,28 +13,20 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-loader = importlib.machinery.SourceFileLoader('compose_private_group_installer', str(ROOT / 'scripts/install-compose-tray'))
+loader = importlib.machinery.SourceFileLoader('compose_group_write_installer', str(ROOT / 'scripts/install-compose-tray'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 installer = importlib.util.module_from_spec(spec)
 loader.exec_module(installer)
 control = installer.permission_policy()
-UID, GID = 1000, 1000
-USER = types.SimpleNamespace(pw_uid=UID, pw_gid=GID, pw_name='operator')
+UID = os.getuid()
+BASE = 'name: selected\nservices:\n  plurxd:\n    restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"\n  plurx-discovery:\n    restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"\n'
 
 
-def meta(mode, uid=UID, gid=GID):
+def meta(mode, uid=UID, gid=2000):
     return types.SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid, st_gid=gid)
 
 
-class ComposePrivateGroupTests(unittest.TestCase):
-    @contextlib.contextmanager
-    def accounts(self, *, members=(), extra=(), acl=False):
-        group = types.SimpleNamespace(gr_name='operator', gr_mem=list(members))
-        accounts = [USER, *extra]
-        by_name = {account.pw_name: account for account in accounts}
-        with mock.patch.object(control.os, 'getuid', return_value=UID), mock.patch.object(control.pwd, 'getpwuid', return_value=USER), mock.patch.object(control.grp, 'getgrgid', return_value=group), mock.patch.object(control.pwd, 'getpwnam', side_effect=by_name.__getitem__), mock.patch.object(control.pwd, 'getpwall', return_value=accounts), mock.patch.object(control.os, 'getxattr', create=True, **({'return_value': b'extended-access-acl'} if acl else {'side_effect': OSError(errno.ENODATA, 'no ACL')})):
-            yield
-
+class ComposeGroupWriteTests(unittest.TestCase):
     @contextlib.contextmanager
     def tree(self, changed=None):
         paths = {Path('/'): meta(0o755, 0, 0), Path('/home'): meta(0o755, 0, 0),
@@ -43,83 +36,138 @@ class ComposePrivateGroupTests(unittest.TestCase):
         with mock.patch.object(Path, 'is_symlink', return_value=False), mock.patch.object(Path, 'exists', autospec=True, side_effect=lambda path: path in paths), mock.patch.object(Path, 'stat', autospec=True, side_effect=paths.__getitem__):
             yield Path('/home/operator/cinema/deploy')
 
-    def test_private_primary_group_accepts_group_writable_checkout_and_parent(self):
-        with self.accounts(), self.tree() as path:
-            self.assertEqual(installer.safe_path(path), path)
+    @contextlib.contextmanager
+    def inputs(self):
+        with tempfile.TemporaryDirectory() as work:
+            checkout = Path(work).resolve()
+            deploy = checkout / 'deploy'
+            deploy.mkdir()
+            (deploy / 'docker-compose.yml').write_text(BASE)
+            (deploy / 'docker-compose.override.yml').write_text('services:\n  plurxd:\n    volumes: []\n')
+            (deploy / '.env').write_text('SECRET=fixture\n')
+            checkout.chmod(0o775)
+            deploy.chmod(0o775)
+            for path in deploy.iterdir():
+                path.chmod(0o664)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                yield checkout, deploy
 
-    def test_supplementary_foreign_group_member_still_refuses(self):
-        other = types.SimpleNamespace(pw_uid=2000, pw_gid=2000, pw_name='guest')
-        with self.accounts(members=['guest'], extra=[other]), self.tree() as path:
+    def test_explicit_owned_source_accepts_group_write_without_membership_guessing(self):
+        # Incomplete NSS enumeration is immaterial: this is explicitly selected
+        # source, not a claim that a shared group has no other members.
+        with self.tree() as path, mock.patch.object(pwd, 'getpwall', side_effect=OSError('NSS enumeration disabled')) as lookup:
+            self.assertEqual(installer.safe_path(path, source=True), path)
+            lookup.assert_not_called()
+
+    def test_desktop_destinations_keep_group_write_protection(self):
+        with self.tree() as path:
             with self.assertRaisesRegex(ValueError, '/home/operator/cinema/deploy.*mode=0775'):
                 installer.safe_path(path)
 
-    def test_foreign_primary_group_member_still_refuses(self):
-        other = types.SimpleNamespace(pw_uid=2000, pw_gid=GID, pw_name='guest')
-        with self.accounts(extra=[other]), self.tree() as path:
-            with self.assertRaisesRegex(ValueError, 'shared group'):
-                installer.safe_path(path)
-
-    def test_world_writable_checkout_still_refuses_with_exact_path(self):
-        with self.accounts(), self.tree({Path('/home/operator/cinema'): meta(0o777)}) as path:
+    def test_world_writable_source_names_the_offending_parent(self):
+        with self.tree({Path('/home/operator/cinema'): meta(0o777)}) as path:
             with self.assertRaisesRegex(ValueError, '/home/operator/cinema .*mode=0777'):
-                installer.safe_path(path)
+                installer.safe_path(path, source=True)
 
-    def test_foreign_owned_checkout_is_distinct_from_write_permissions(self):
-        with self.accounts(), self.tree({Path('/home/operator/cinema'): meta(0o755, 2000)}) as path:
-            with self.assertRaisesRegex(ValueError, 'belongs to another user: /home/operator/cinema .*uid=2000'):
-                installer.safe_path(path)
+    def test_foreign_source_ownership_names_the_offending_parent(self):
+        with self.tree({Path('/home/operator/cinema'): meta(0o755, UID + 1)}) as path:
+            with self.assertRaisesRegex(ValueError, 'belongs to another user: /home/operator/cinema '):
+                installer.safe_path(path, source=True)
 
-    def test_rejected_ancestor_is_named_instead_of_reporting_leaf(self):
-        with self.accounts(), self.tree({Path('/home/operator'): meta(0o770, UID, 2000)}) as path:
-            with self.assertRaisesRegex(ValueError, 'shared group: /home/operator .*gid=2000'):
-                installer.safe_path(path)
+    def test_group_writable_base_override_and_environment_are_accepted_unchanged(self):
+        with self.inputs() as (checkout, deploy):
+            before = {path: (path.stat().st_mode, path.read_bytes()) for path in deploy.iterdir()}
+            self.assertEqual(installer.safe_path(deploy, source=True), deploy)
+            environment, _, _ = control.compose_environment(str(checkout), 'selected')
+            self.assertEqual(environment, deploy / '.env')
+            self.assertEqual(before, {path: (path.stat().st_mode, path.read_bytes()) for path in deploy.iterdir()})
+            self.assertEqual(stat.S_IMODE(checkout.stat().st_mode), 0o775)
 
-    def test_unknown_group_database_fails_conservatively(self):
-        with self.accounts(), self.tree() as path, mock.patch.object(control.pwd, 'getpwall', side_effect=OSError('NSS unavailable')):
-            with self.assertRaisesRegex(ValueError, 'shared group'):
-                installer.safe_path(path)
+    def test_world_writable_yaml_names_each_selected_file(self):
+        with self.inputs() as (checkout, deploy):
+            for name in ('docker-compose.yml', 'docker-compose.override.yml'):
+                with self.subTest(name=name):
+                    path = deploy / name
+                    path.chmod(0o666)
+                    with self.assertRaisesRegex(control.ControlError, name + r'.*mode=0666'):
+                        control.compose_environment(str(checkout), 'selected')
+                    path.chmod(0o664)
 
-    def test_extended_access_acl_does_not_get_private_group_exception(self):
-        with self.accounts(acl=True), self.tree() as path:
-            with self.assertRaisesRegex(ValueError, 'shared group'):
-                installer.safe_path(path)
+    def test_world_writable_environment_names_the_file(self):
+        with self.inputs() as (checkout, deploy):
+            (deploy / '.env').chmod(0o666)
+            with self.assertRaisesRegex(control.ControlError, r'\.env .*mode=0666'):
+                control.compose_environment(str(checkout), 'selected')
 
-    def test_root_sticky_shared_parent_remains_supported(self):
-        with self.accounts(), self.tree({Path('/home'): meta(0o1777, 0, 0)}) as path:
-            self.assertEqual(installer.safe_path(path), path)
+    def test_symlinked_compose_input_is_still_refused(self):
+        with self.inputs() as (checkout, deploy):
+            path = deploy / 'docker-compose.override.yml'
+            path.rename(deploy / 'target.yml')
+            path.symlink_to('target.yml')
+            with self.assertRaises(OSError):
+                control.compose_environment(str(checkout), 'selected')
 
-    def environment(self, shared=False):
+    def test_group_writable_executable_symlink_is_refused_without_acl_exception(self):
         with tempfile.TemporaryDirectory() as work:
-            path = Path(work) / '.env'
-            path.write_bytes(b'PLURX_DATA=/media/state\n')
-            info = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o664, st_uid=UID,
-                                         st_gid=GID, st_nlink=1, st_size=path.stat().st_size)
-            other = types.SimpleNamespace(pw_uid=2000, pw_gid=GID, pw_name='guest')
-            with self.accounts(extra=[other] if shared else []), mock.patch.object(control.os, 'fstat', return_value=info):
-                return control.read_environment(path)
+            target = Path(work) / 'target'
+            target.write_text('#!/bin/sh\n')
+            target.chmod(0o775)
+            link = Path(work) / 'docker'
+            link.symlink_to(target)
+            with self.assertRaises(control.ControlError):
+                control.trusted_executable(str(link))
 
-    def test_private_group_writable_compose_environment_is_read_without_mutation(self):
-        content, info = self.environment()
-        self.assertEqual(content, b'PLURX_DATA=/media/state\n')
-        self.assertEqual(stat.S_IMODE(info.st_mode), 0o664)
-
-    def test_shared_group_writable_environment_still_refuses_with_path(self):
-        with self.assertRaisesRegex(control.ControlError, r'\.env .*mode=0664'):
-            self.environment(shared=True)
-
-    def test_private_installation_state_still_requires_private_mode(self):
+    def test_non_group_writable_executable_symlink_remains_supported(self):
         with tempfile.TemporaryDirectory() as work:
-            path = Path(work)
-            with self.accounts(), mock.patch.object(installer, 'safe_path', side_effect=lambda value: value), mock.patch.object(Path, 'stat', return_value=meta(0o775)):
+            target = Path(work) / 'target'
+            target.write_text('#!/bin/sh\n')
+            target.chmod(0o755)
+            link = Path(work) / 'docker'
+            link.symlink_to(target)
+            self.assertEqual(control.trusted_executable(str(link)), link)
+
+    def test_private_state_is_not_relaxed_for_group_editable_source(self):
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work).resolve()
+            path.chmod(0o775)
+            with mock.patch.object(installer, 'safe_path', side_effect=lambda value: value):
                 with self.assertRaisesRegex(ValueError, 'private user-owned directory'):
                     installer.private_dir(path)
-
-    def test_current_users_private_group_executable_is_trusted(self):
-        with self.accounts(), mock.patch.object(Path, 'stat', return_value=types.SimpleNamespace(st_mode=stat.S_IFREG | 0o775, st_uid=UID, st_gid=GID)), mock.patch.object(control.os, 'access', return_value=True):
-            self.assertEqual(control.trusted_executable('/home/operator/bin/docker'), Path('/home/operator/bin/docker'))
-
-    def test_shared_group_executable_remains_untrusted(self):
-        other = types.SimpleNamespace(pw_uid=2000, pw_gid=GID, pw_name='guest')
-        with self.accounts(extra=[other]), mock.patch.object(Path, 'stat', return_value=types.SimpleNamespace(st_mode=stat.S_IFREG | 0o775, st_uid=UID, st_gid=GID)), mock.patch.object(control.os, 'access', return_value=True):
             with self.assertRaises(control.ControlError):
-                control.trusted_executable('/home/operator/bin/docker')
+                control.private_directory(path)
+
+    def test_root_owned_group_editable_source_does_not_gain_owner_exception(self):
+        with mock.patch.object(control.os, 'getuid', return_value=1000):
+            self.assertTrue(control.unsafe_source_mode(meta(0o775, uid=0)))
+            self.assertFalse(control.unsafe_source_mode(meta(0o775, uid=1000)))
+
+    def test_source_preflight_refuses_bad_yaml_before_build_or_installation(self):
+        with self.inputs() as (checkout, deploy):
+            (deploy / 'docker-compose.yml').chmod(0o666)
+            server, discovery = 'a' * 64, 'b' * 64
+            def output(argv, **kwargs):
+                if 'ps' in argv:
+                    return server if argv[-1] == 'plurxd' else discovery
+                return json.dumps({'project': 'selected', 'service': 'plurxd' if argv[-1] == server else 'plurx-discovery',
+                                   'working_dir': str(deploy), 'ports': [{'HostIp': '127.0.0.1', 'HostPort': '32400'}]})
+            args = types.SimpleNamespace(checkout=checkout)
+            helper = types.SimpleNamespace(eligible_session=lambda: None)
+            with mock.patch.object(installer.sys, 'platform', 'linux'), mock.patch.object(installer, 'native_helper', return_value=helper), mock.patch.object(installer.shutil, 'which', return_value='/usr/bin/docker'), mock.patch.dict(os.environ, {'DOCKER_HOST': 'unix:///run/docker.sock'}), mock.patch.object(installer, 'output', side_effect=output), mock.patch.object(installer, 'build_stage') as build, mock.patch.object(installer, 'private_dir') as state:
+                with self.assertRaisesRegex(ValueError, 'docker-compose.yml.*mode=0666'):
+                    installer.install(args)
+                build.assert_not_called()
+                state.assert_not_called()
+
+    def test_startup_policy_update_preserves_group_write_despite_umask(self):
+        with self.inputs() as (checkout, deploy):
+            record = {'checkout': str(checkout), 'project': 'selected', 'docker': '/usr/bin/docker', 'endpoint': 'unix:///run/docker.sock'}
+            _, record['environment_sha256'], record['compose_sha256'] = control.compose_environment(str(checkout), 'selected')
+            backend = types.SimpleNamespace(record=record, path=checkout / 'unused-record')
+            previous = os.umask(0o077)
+            try:
+                with mock.patch.object(control, 'verify_effective_restart'), mock.patch.object(control, 'save'):
+                    control.update_environment(backend, 'no')
+            finally:
+                os.umask(previous)
+            self.assertEqual(stat.S_IMODE((deploy / '.env').stat().st_mode), 0o664)
+            self.assertEqual((deploy / '.env').read_text(), 'SECRET=fixture\nPLURX_CONTAINER_RESTART_POLICY=no\n')

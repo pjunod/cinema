@@ -158,7 +158,9 @@ def permission_policy():
     return _PERMISSION_POLICY
 
 
-def safe_path(path):
+def safe_path(path, *, source=False):
+    # Source is explicitly selected and may be collaboratively group editable.
+    # Desktop destinations retain the stricter installed-code policy.
     if not path.is_absolute() or ".." in path.parts or any(character in str(path) for character in ["\n", "\r", "\x00"]):
         raise ValueError("desktop paths must be normalized absolute paths")
     for candidate in [path, *path.parents]:
@@ -168,7 +170,8 @@ def safe_path(path):
             info = candidate.stat()
             if info.st_uid not in (0, os.getuid()):
                 raise ValueError(f"desktop path belongs to another user: {candidate} (uid={info.st_uid}, expected={os.getuid()} or root)")
-            if permission_policy().untrusted_write(candidate, info) and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
+            unsafe_write = permission_policy().unsafe_source_mode(info) if source else info.st_mode & 0o022
+            if unsafe_write and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
                 raise ValueError(f"desktop path is writable by another user or shared group: {candidate} (uid={info.st_uid}, gid={info.st_gid}, mode={stat.S_IMODE(info.st_mode):04o})")
     return path
 
@@ -239,7 +242,7 @@ def loopback_origin(bindings):
 
 
 def select_deployment(checkout):
-    project_dir = safe_path(checkout / "deploy")
+    project_dir = safe_path(checkout / "deploy", source=True)
     base = project_dir / "docker-compose.yml"
     if base.read_text().count("${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}") != 2:
         raise ValueError("this Compose file does not support durable tray startup preferences; update the checkout")
@@ -254,7 +257,7 @@ def select_deployment(checkout):
     compose = [*engine, "compose", "--project-directory", project_dir, "-f", base]
     override = project_dir / "docker-compose.override.yml"
     if override.exists():
-        safe_path(override)
+        safe_path(override, source=True)
         compose.extend(["-f", override])
     server = selected_id(compose, "plurxd", project_dir)
     discovery = selected_id(compose, "plurx-discovery", project_dir)
@@ -268,6 +271,12 @@ def select_deployment(checkout):
         facts.append(fact)
     if facts[0]["project"] != facts[1]["project"]:
         raise ValueError("selected server and discovery containers belong to different projects")
+    # Reject unsupported/unsafe Compose inputs before compiling or replacing the tray.
+    policy = permission_policy()
+    try:
+        policy.compose_environment(str(checkout), facts[0]["project"])
+    except policy.ControlError as error:
+        raise ValueError(error.message) from error
     return {"docker": str(docker), "endpoint": endpoint, "project": facts[0]["project"],
             "server_id": server, "discovery_id": discovery, "browser_origin": loopback_origin(facts[0].get("ports")),
             "checkout": str(checkout)}
@@ -278,7 +287,7 @@ def install(args):
         raise ValueError("run scripts/install-compose-tray as the ordinary Linux graphical login user")
     helper = native_helper()
     helper.eligible_session()  # strict logind/socket/bus/container policy, before builds or writes
-    checkout = safe_path(args.checkout.absolute())
+    checkout = safe_path(args.checkout.absolute(), source=True)
     identity = select_deployment(checkout)
     key = hashlib.sha256((identity["endpoint"] + "\n" + identity["project"] + "\n" + str(checkout)).encode()).hexdigest()[:20]
     home = Path.home()

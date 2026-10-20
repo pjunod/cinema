@@ -7,9 +7,6 @@ registration is an installer operation, never deployment discovery by name.
 from __future__ import annotations
 
 import argparse
-import errno
-import grp
-import pwd
 import contextlib
 import fcntl
 import hashlib
@@ -93,48 +90,21 @@ def normalized(value):
     return path
 
 
-def private_user_group_write(path, meta):
-    """A local private user group is not an additional writer.
+def unsafe_source_mode(meta):
+    """The selected, owned checkout may intentionally be group editable.
 
-    Keep shared groups, unknown accounts and extended ACLs conservative. This
-    exception never applies to world-write or the private record/state modes.
+    Installing from this checkout already trusts its source and collaborators.
+    Do not infer private group membership from incomplete NSS enumeration.
+    Installed executables and private state have separate, stricter checks.
     """
-    try:
-        user = pwd.getpwuid(os.getuid())
-        group = grp.getgrgid(meta.st_gid)
-        if meta.st_uid != user.pw_uid or meta.st_gid != user.pw_gid or group.gr_name != user.pw_name:
-            return False
-        trusted = {0, user.pw_uid}
-        if any(pwd.getpwnam(name).pw_uid not in trusted for name in group.gr_mem):
-            return False
-        accounts = pwd.getpwall()
-        if not any(account.pw_uid == user.pw_uid and account.pw_gid == meta.st_gid for account in accounts):
-            return False
-        if any(account.pw_gid == meta.st_gid and account.pw_uid not in trusted for account in accounts):
-            return False
-        try:
-            # An extended access ACL can add writers beyond the owning group.
-            os.getxattr(path, "system.posix_acl_access", follow_symlinks=False)
-        except OSError as error:
-            absent = {errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA)}
-            if error.errno not in absent:
-                return False
-        else:
-            return False
-        return True
-    except (KeyError, OSError, AttributeError):
-        return False
-
-
-def untrusted_write(path, meta):
     return bool(meta.st_mode & 0o002 or
-                (meta.st_mode & 0o020 and not private_user_group_write(path, meta)))
+                (meta.st_uid != os.getuid() and meta.st_mode & 0o020))
 
 
 def trusted_executable(value):
     path = normalized(value)
     meta = path.stat()
-    if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or untrusted_write(path, meta) or not os.access(path, os.X_OK):
+    if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or meta.st_mode & 0o022 or not os.access(path, os.X_OK):
         fail("invalid_installation", "Docker/tray executable must be trusted and non-writable by other users")
     return path
 
@@ -201,8 +171,8 @@ def read_environment(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as stream:
         meta = os.fstat(stream.fileno())
-        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or untrusted_write(path, meta) or meta.st_nlink != 1 or meta.st_size > LIMIT:
-            fail("policy_conflict", f"Compose environment must be an owned, unshared regular file: {path} (uid={meta.st_uid}, gid={meta.st_gid}, mode={stat.S_IMODE(meta.st_mode):04o})")
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or unsafe_source_mode(meta) or meta.st_nlink != 1 or meta.st_size > LIMIT:
+            fail("policy_conflict", f"Compose environment must be an owned regular file without world-write: {path} (uid={meta.st_uid}, gid={meta.st_gid}, mode={stat.S_IMODE(meta.st_mode):04o})")
         content = stream.read(LIMIT + 1)
     if len(content) > LIMIT:
         fail("policy_conflict", "Compose environment exceeds its bounded size limit")
@@ -230,8 +200,8 @@ def compose_environment(checkout, project):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             meta = os.fstat(stream.fileno())
-            if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or meta.st_mode & 0o022 or meta.st_size > LIMIT:
-                fail("invalid_installation", "Compose inputs must be bounded protected regular files")
+            if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or unsafe_source_mode(meta) or meta.st_size > LIMIT:
+                fail("invalid_installation", f"Compose input must be an owned/root-owned bounded regular file without untrusted write permissions: {path} (uid={meta.st_uid}, gid={meta.st_gid}, mode={stat.S_IMODE(meta.st_mode):04o})")
             content = stream.read(LIMIT + 1)
         if len(content) > LIMIT:
             fail("invalid_installation", "Compose input exceeds its bounded size limit")
@@ -332,6 +302,8 @@ def update_environment(backend, policy, intent=None, plan_only=False):
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IMODE(meta.st_mode))
         with os.fdopen(fd, "wb") as stream:
+            # Creation umask must not strip intentional group-write on .env.
+            os.fchmod(stream.fileno(), stat.S_IMODE(meta.st_mode))
             stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())
