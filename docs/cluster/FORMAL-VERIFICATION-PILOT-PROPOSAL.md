@@ -1,12 +1,13 @@
 # Formal verification pilot — check durable-job authority before expanding proofs
 
-**Status:** implementation started; M0 in progress; no formal result · **Revised:** 2026-10-20 ·
+**Status:** implementation active; M0 interface frozen; no formal result · **Revised:** 2026-10-20 ·
 **Owner:** Codex coordinator (this chat); Fable 5.1 contracts/model ·
 **Executes:** Paul's request to turn the formal-methods exploration into a
 reviewable project · **Source inspected:** `9ab523c32e00e5b56c15bbc7a71ac2d3d48c0d5e`.
 
 This proposal owns scope and acceptance; discovery status is in the
-[backlog](../features/PROJECT-BACKLOG.md). Revalidate anchors against the
+[backlog](../features/PROJECT-BACKLOG.md); current ownership and evidence are in the
+[status page](FORMAL-VERIFICATION-PILOT-STATUS.md). Revalidate anchors against the
 implementation source.
 
 If matching the model requires changing production semantics, record the
@@ -88,8 +89,6 @@ records their roles, primary references and design-review answers.
 |---|---|
 | [Queue protocol](../../crates/plurx-core/src/store/background_jobs.rs) | `JobState`, `JobToken`, `ClaimJob`, `ResolveClaim`, `RenewJobs`, cancellation, claim SQL and shared Store implementation |
 | [Domain binding](../../crates/plurx-core/src/store/background_jobs_domain.rs) | `BindLibraryJob`, `BIND_SQL`, stable queue/domain fence association and initial exact-token checks |
-| [Binding lifetime](../../crates/plurx-core/src/store/background_jobs_domain.sql) | Retained binding survives queue expiry/compaction; deleting the domain lease removes it |
-| [Library worker](../../crates/plurxd/src/library_work.rs) and [runtime fence](../../crates/plurxd/src/background_jobs.rs) | Successful `JobFence::bind_library` precedes `process_library_requests`; bind failure releases/yields rather than starting work |
 | [Binding lifetime](../../crates/plurx-core/src/store/background_jobs_domain.sql) | Retained binding survives queue expiry/compaction; deleting the domain lease removes it |
 | [Library worker](../../crates/plurxd/src/library_work.rs) and [runtime fence](../../crates/plurxd/src/background_jobs.rs) | Successful `JobFence::bind_library` precedes `process_library_requests`; bind failure releases/yields rather than starting work |
 | [Publication facade](../../crates/plurx-core/src/store/publication.rs) | `PublicationStore::insert_item`, lease succession and the branch that permits an unfenced call |
