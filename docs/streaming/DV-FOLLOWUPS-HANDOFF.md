@@ -169,10 +169,12 @@ PRs B–F (MDCV/CLL writer reusing `crates/plurx-core/src/fmp4/hdr10_index.rs`; 
   E-AC3/Profile 5, but its delivered AAC makes it neither a passing direct-E-AC3
   control nor proof of corrupt packets. No decoder source change is justified
   by this comparison; broader direct-audio diagnosis remains separate.
-- **Apple TV UI test overruns:** `testLiveFullscreenRevealMoreReportAndBackRetainSession` goes past its 3 minutes. It predates #1197; rerun it on the Mac simulator.
-- **A second processed session is refused** while the first holds the processing slot ("DV processing needs a GPU slot and 15 CPU threads that other work holds"). After an Auto replacement the successor may lose HDR10-E. Check whether successors should reuse the prepared processed root (`capture_processed_root`).
+- **Apple TV simulator closure:** PR #1215 merged as `7a7d04c6` after full lane 5601 passed. The focused Live journey passed in 152.421 seconds under its original 180-second limit; four affected native cases passed. No physical Apple TV acceptance is claimed.
+- **Processed successor reservation:** the exact-root repair in PR #1225 has independent review and local contract qualification below. It reuses an eligible prepared graph without borrowing another reservation; a different recipe or independent job still requires normal admission. Paul owns deployment and live verification.
 
-### Processed-root repair in progress (owner: Sol; native/publication: coordinator)
+### Processed-root repair
+
+Owner: Sol (source), coordinator (native compilation, publication and merge).
 
 `codex/cinema-processed-successor-reuse` removes the leftover throughput-only
 refresh/readers from exact-root reuse, retaining source/executable, full recipe,
@@ -201,42 +203,32 @@ owner: no HDR10-E is reported from descriptor selection alone; reconstructed P81
 retains its distinct carrier/FEL semantics. These controls do not run the renderer
 or establish Dolby pixel accuracy. Ordinary serialized recovery stays refused.
 
-Candidate `03cbfe62c` passed pinned Rust 1.97.1 fmt/all-target Clippy and test
-linking. Independent Astra complete review required F1 exact-owner race,
-F2 cleanup-settlement and F3 real AAC controls; bounded closure approved the
-repairs. The first fifteen-case affected batch has six genuine passes and nine
-fixture setup failures, not nine demonstrated production failures. Eight staged
-controls supplied an invalid coarse source tick; the other omitted its admitted
-incarnation. Repairs probe actual source packet timing, retain the 24000/1001
-cadence and 1/24000 source tick through the checked output, and supply real
-incumbent/successor request incarnations. No production validator is relaxed.
-Candidate `7cd6b015` passed pinned compilation/linking and bounded same-reviewer
-closure, but its nine-case retry had no passes. Eight controls reached the next
-sample-entry guard: SPS PQ flags do not supply the required MP4 nclx record.
-Synthetic frame color properties plus explicit `write_colr` now generate that
-record locally; a native standalone production-validator diagnostic is pending,
-not a unit pass. Failure paths retain actual bytes, source probe and encoder argv.
-The ninth reaches final predecessor revalidation; its external worker claim
-conflicts with the automatic driver's empty slot. Coordinator-approved test-only
-driver coordination now keys a scoped guard to the exact physical encoding before
-the first wake. Captured tasks exit on cancellation, never resume into a generation;
-normal owner cleanup still settles before explicit task exit and capacity assertions.
-Assertions check absent slot, zero epoch/child pid and the real exclusive worker.
-This isolates driver scheduling; it does not qualify normal driver execution/reap.
-Production source/window/attachment validators are unchanged. Candidate `748761ed`
-passed pinned compilation/linking and same-Astra bounded closure. Its nine-case
-retry added the genuine no-speed root-reuse pass; seven positives are retained.
-Eight staged controls then failed incomplete request JSON (`audio_offset_ms`).
-The fixture now constructs complete typed session/remote requests and verifies
-real serialization/deserialization preserves canonical audio and destination while
-dropping private context. Current main is incorporated through `196cabc19`, with
-D-domain bytes unchanged before this fixture repair. Current-base compilation,
-bounded delta closure and only eight failed retries remain; do not repeat the
-seven valid positives. Actual B landing `9753284e` is incorporated. Fast lane and API merge
-remain. The historical live request path remains unknown; this is no deployment
-or general Dolby rendering-accuracy claim.
+**Local qualification complete:** exact current-base source `a857f488b` passed
+pinned Rust 1.97.1 formatting, daemon all-target Clippy with `-D warnings`, and
+fresh Cargo JSON-selected test linkage. All fifteen focused contracts have a
+valid source-bound pass: eight staged cases on `a857f488b`, the no-speed reuse
+case on `748761ed`, and six unchanged positives on `03cbfe62c`. Each executed
+case matched exactly once, returned actual exit 0 and counted 1 passed / 0 failed /
+0 ignored; raw logs and stable executable hashes are retained. Independent Astra
+complete review and bounded owner/audio/cleanup/fixture closures are approved.
 
-Regression anchors for the eventual PR and merge message:
+The controls use real source packet timing and checked HDR10/P81 output. A small
+native public-core diagnostic separately passed source mapping, RPU parsing,
+HDR10 validation and P81 authoring/validation for silent and AAC windows. It is
+fixture evidence, not a replacement for the fifteen unit contracts. Earlier
+setup failures remain recorded; only failed or genuinely invalidated cases were
+retried. No separate old-code execution was required by the accepted plan.
+
+These custody controls deliberately hold the exclusive worker and coordinate
+only their registered test driver. They prove actual admission, graph ownership,
+cleanup settlement and seal/CAS contracts, not ordinary driver execution/reap,
+renderer throughput, audible offset or Dolby pixel accuracy. Production validators
+are unchanged; serialized descriptions still grant no local processing authority.
+See [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225) for the required main
+fast-lane and API landing records. Paul owns the server-image deployment and live
+incident verification; no service deployment or physical acceptance is claimed here.
+
+Regression anchors retained in the PR and landing message:
 - `Regression-Test: crates/plurxd/src/vodencode_tests.rs::processed_root_reuse_needs_no_speed_or_missing_qualification_window`
 - `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed`
 - `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_root_refuses_current_input_and_owner_drift_without_spending_capacity`
@@ -244,3 +236,5 @@ Regression anchors for the eventual PR and merge message:
 - `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_second_successor_survives_normal_commit_and_parent_retirement`
 - `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_cancellation_at_attachment_facts_and_seal_releases_only_successor`
 - `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_epoch_motion_after_attachment_refuses_frozen_seal`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_replacement_never_inherits_preparation_or_cleanup_authority`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_audio_canonicalization_reuses_default_and_alternate_aac_exactly`
