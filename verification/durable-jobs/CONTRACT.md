@@ -47,6 +47,21 @@ A newly acquired higher domain fence may temporarily have no matching binding.
 | Reply / facade state | `PublicationStore::fenced_call` | Backend error clears local lease; success records successor; local revocation after commit can return FenceRejected while insertion remains | Commit and acknowledgement are separate transitions; S7 is not a claim that every facade error means no item |
 | Crash / reboot / removal | `plurxd/background_jobs.rs::JobFence`; `plurxd/job_lease.rs`; `membership.rs` owner removal | Crash discards locals and can leave requests in flight; reboot gets a distinct boot identity; removal marker rejects bound authority and renames/expires owned domain rows | Monotonic local deadlines may revoke authority independently of wall-clock expiry; transport and consensus internals omitted |
 
+The shared queue operations are carried by the
+[replicated `QueueSql` adapter](../../crates/plurx-core/src/store/hiqlite_background_jobs.rs#L206)
+(`impl QueueSql for HiqliteAuthStore`) and the
+[SQLite `QueueSql` adapter](../../crates/plurx-core/src/store/sqlite/background_jobs.rs#L10)
+(`impl QueueSql for SqliteStore`). `queue_sql` forwards encoded caller
+`now_ms` unchanged: Hiqlite uses `execute_returning_map` for mutations and
+`query_consistent_map` for authoritative reads; SQLite executes the prepared
+statement through `with_conn`. Claim reconciliation read and later claim CAS
+are separate calls, not one transaction. `queue_transaction` groups its
+provided statements in a Hiqlite transaction or SQLite connection transaction.
+The shared `claim_job` / `resolve_claim` / renewal / settlement methods and
+installed SQL triggers supply their guards; the bridges do not replace those
+caller timestamps with backend publication time. These adapters are reviewed
+mapping dependencies, not extra modeled consensus algorithms.
+
 Paths in this table are relative to `crates/plurx-core/src/` except explicitly
 prefixed `plurxd/`, which means `crates/plurxd/src/`. The dependency inventory
 must include shared queue validation, schema/resource triggers, binding schema,
@@ -189,5 +204,5 @@ Every authority operation uses the same shared safety relation from all seeds.
 Only retention preparation is selected by its maintenance seed. Publication
 records its entire relevant pre-state for S2/S3; later cancellation never
 retroactively invalidates a committed event. Exact event horizons and the
-proof obligation for the diagnostic-only view are in README. These limits
+proof obligation for the state view are in README. These limits
 are part of every result, including a completed baseline.

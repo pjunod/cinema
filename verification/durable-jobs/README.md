@@ -138,7 +138,8 @@ flag and originating boot remain in the view. Any two states equal under the
 view enable the same projected successors: successor construction uses the
 retained computed tuple, retries use retained `left`, and appending a sample
 changes only the omitted history. S0–S7 depend only on projected state,
-including complete accepted-event snapshots. The quotient therefore preserves
+including accepted events' property truth and count; full snapshots remain
+in raw state. The quotient therefore preserves
 these finite safety checks. The view additionally quotients old **observed**
 local/request token revision and expiry to stable identity plus an `Exact`
 flag and a well-typed flag. Current tokens are fully determined by the
