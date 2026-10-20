@@ -28,7 +28,7 @@ CID = re.compile(r"[0-9a-f]{64}\Z")
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
 ENTRY = "tv.plurx.Server-autostart.desktop"
 FINAL = {"complete", "failed", "recovery_required", "cancelled"}
-INSPECT = '''{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"restart":{{json .HostConfig.RestartPolicy.Name}},"stop_timeout":{{json .Config.StopTimeout}}}'''
+INSPECT = '''{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},"status":{{json .State.Status}},"health":{{if index .State "Health"}}{{json (index .State "Health" "Status")}}{{else}}null{{end}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"restart":{{json .HostConfig.RestartPolicy.Name}},"stop_timeout":{{json (index .Config "StopTimeout")}}}'''
 
 
 class ControlError(Exception):
@@ -154,7 +154,8 @@ def run(argv, timeout=12, limit=LIMIT, merge_stderr=False):
                             fail("unavailable", "Docker response exceeded its bounded output limit")
             result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
         if result:
-            fail("unavailable", "The registered Docker command failed; inspect Docker locally", True)
+            operation = next((str(arg) for arg in argv if str(arg) in {"info", "inspect", "compose", "logs", "start", "kill", "update"}), "operation")
+            fail("unavailable", f"The registered Docker {operation} command failed (exit {result}); inspect Docker locally", True)
         return output.decode("utf-8", errors="replace")
     finally:
         if process.poll() is None:

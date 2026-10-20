@@ -21,6 +21,10 @@ bump may break compatibility and a **patch** bump never does.
   Existing empty-root installations need one trusted manual reinstall; signed
   release publication still requires protected GitHub signing configuration.
 
+- Compose tray registration accepts discovery containers without Docker
+  healthchecks and absent optional stop timeouts. Docker failures identify the
+  command and exit code without exposing container configuration or diagnostics.
+
 - Linux installers use verified prebuilt GitHub tray artifacts by default and
   reserve GTK development packages/local tray compilation for `--build-tray`.
   Compose installs select the host architecture and stable release independently
