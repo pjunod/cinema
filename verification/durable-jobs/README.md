@@ -171,10 +171,15 @@ these finite safety checks. The view additionally quotients old **observed**
 local/request token revision and expiry to stable identity plus an `Exact`
 flag and a well-typed flag. Current tokens are fully determined by the
 retained job row. Every observed revision was current or older when received;
-job revisions strictly increase, identities never recycle, and deleted jobs
-never re-admit in this model. A stale token therefore cannot become exact
-later. In the positive unmutated relation, its numeric revision/expiry are
-read only through `Exact`; stable identity remains for S4, and the explicit
+job revisions never decrease, identities never recycle, and deleted jobs
+never re-admit in this model. The revision writers `Cancel`, `Takeover`,
+`ApplyRenew`, `ApplyClaim` and `RefusalSettle` each increment the retained
+revision; all other positive safety actions preserve it. `RecoveryApply`
+also increments it in the separate recovery relation. The defect-only
+`ReplayClaim` writer increments it as well, although controls do not use
+the view. There is no reset or wrap transition. A stale token therefore
+cannot become exact later. In the positive unmutated relation, its numeric
+revision/expiry are read only through `Exact`; stable identity remains for S4, and the explicit
 type bit preserves S0. Failed reply tokens are unused and omitted. A claim
 request's observed expected revision is similarly current or permanently
 stale. Claim-context expected/sample fields are never read after dispatch;
@@ -204,7 +209,14 @@ irrelevant receipt-history combinations.
 Safety symmetry permutes only the independent Worker, ResourceKey and Job
 model-value sets. Numeric boots, claims, fences and revisions are never
 permuted: arithmetic and ordered freshness would invalidate that reduction.
-No symmetry or view is used for liveness.
+The S5–S7 `PROPERTY` declarations are action safety formulas: consistently
+permuting these model values in both states preserves their truth, just as
+it preserves the actions and S0–S4. S5 quantifies over jobs and compares
+state labels; S6 compares binding records and the unpermuted numeric domain
+fence; S7 quantifies over workers and compares outcomes, catalogue sets and
+domain records. None selects a distinguished model value. This argument
+applies to those action safety properties, not arbitrary temporal formulas.
+No symmetry or view is used for L1 or any liveness check.
 
 ## Witnesses demonstrate reachable transitions
 
@@ -236,27 +248,41 @@ binding-guard control.
 S5's composite mutation permits cancelling state and ignores predecessor
 revision while retaining stable identity, expiry, reservations and removed-
 owner checks. Cancellation changes both revision and state in production;
-dropping only one guard would not produce this control. S4's mutation is an
-intentional wrong replay result that advances the fence; it is not a claim
+dropping only one guard would not produce this control. In the unmutated
+model, `cancelling` is absorbing: no modeled completion or settlement action
+moves it onward. S5 therefore checks that modeled actions cannot revive a
+cancelling job; it is not a general cancellation-versus-completion theorem.
+The mutant trace supplies the reachable revival counterexample. S4's
+mutation is an intentional wrong replay result that advances the fence; it is not a claim
 that removing one SQL clause alone causes that behavior.
 
 ## L1 uses a stable recovery suffix
 
-Recovery starts with old claim1, retained binding/reservations, surviving
-boot2 and a delayed old-boot reply. Demand stays valid, no new cancellation,
-removal, compaction or outage occurs, resources are available and quorum is
-reachable. Initial not-before is either the yield delay2 or failure delay3;
-time must advance through both old expiry and that delay. A concrete polling,
-retry, sending, applying, acknowledgement and old-reply action has weak
-fairness, as does finite time advancement. Fairness does not assume eventual
-claim success. Claim2 is reserved and cannot be exhausted before success.
+Recovery uses a constructed running-job seed with old claim1, retained
+binding/reservations and surviving boot2. At Init, time is0, old expiry is2,
+and not-before is either the yield delay2 or failure delay3. This combines
+the expiry and backoff barriers in one seed; it does not directly model a
+queued yielded/failed-retry row. Fair time advancement must reach the
+applicable barriers: the delay2 case may claim at time2, while delay3 needs
+time3. Time advancement stops once the fresh claim is held. Demand stays
+valid, no new cancellation, removal, compaction or outage occurs, resources
+are available and quorum is reachable. Concrete polling, retry, sending,
+applying and acknowledgement actions have weak fairness, as does finite
+time advancement. Fairness does not assume eventual claim success. Claim2
+is reserved and cannot be exhausted before success.
 
-The model checks eventual first fresh **current claim**, not completed work,
-publication, useful throughput or bounded response time. Its success state
-is absorbing except acknowledgement/late old reply; an old reply cannot
-replace boot2 authority. The `retry_stalls` mutation lets a poll before
-eligibility disable every later poll. The resulting fair stuttering suffix
-violates L1 despite time reaching3; it demonstrates why poll/retry scheduling
-is a real premise. Production plausibility comes from the library worker
-poll/backoff loop and functioning authority operations, not a theorem about
-runtime scheduler fairness.
+`DeliverOldReply` is only a fair scheduling placeholder: it toggles a flag,
+has no reply payload or boot comparison, and leaves authority unchanged.
+L1 makes no old-reply nonadoption claim. Payload boot checks exist in the
+fresh safety relation's `DeliverClaim` and `DeliverRenew`; those checks are
+outside `RecoveryNext`.
+
+The model checks eventual first fresh **current claim** in that constructed
+suffix, not completed work, publication, useful throughput, bounded response
+time or arbitrary production backoff deadlines. Its success state is
+absorbing except acknowledgement/the scheduling placeholder. The
+`retry_stalls` mutation lets a poll before eligibility disable every later
+poll. The resulting fair stuttering suffix violates L1 despite time reaching3;
+it demonstrates why poll/retry scheduling is a real premise. Production
+plausibility comes from the library worker poll/backoff loop and functioning
+authority operations, not a theorem about runtime scheduler fairness.

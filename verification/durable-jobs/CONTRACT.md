@@ -35,7 +35,7 @@ A newly acquired higher domain fence may temporarily have no matching binding.
 | Claim eligibility | `CLAIM_SQL` and resource triggers in `background_jobs_resources.sql` | Valid demand, not-before reached, retry budget, owner not removed, dispatch window, fresh identity, reservation slots available; live reservations of other jobs compete | Finite identities never recycle; counter exhaustion is an exploration boundary, not a production terminal state |
 | Replay / resolution | `background_jobs.rs::claim_job` and `resolve_claim` | Same identity returns existing current token only with matching node/boot, running state, live expiry and resource coverage; absent history gives expired/pruned, never a new attempt | Resolve without fence additionally checks dispatch window; per-operation caller `now_ms` is retained |
 | Queue renewal | `RENEW_SQL`, `background_jobs_schema.sql::background_job_renew_command` | Exact predecessor, running state, live lease, no removed owner, complete reservations; increments revision and updates reservation expiry | Cancellation changes revision as well as state; replay is not a new renewal |
-| Cancellation / settlement | `cancel_job`, `SETTLE_SQL`, cancellation/settlement triggers | Queued→cancelled, running→cancelling; exact live settlement clears owner and reservations; yield preserves demand and installs not-before; failure consumes retry budget | S5 applies to cancellation of existing interest; a separately audited new request is outside that monotone fragment |
+| Cancellation / settlement | `cancel_job`, `SETTLE_SQL`, cancellation/settlement triggers | Queued→cancelled, running→cancelling; exact live settlement clears owner and reservations; yield preserves demand and installs not-before; failure consumes retry budget | S5 checks no revival of cancelling by modeled actions; cancelling is absorbing here, with no modeled completion/settlement from that state. New requests and general cancellation/completion precedence are outside this fragment |
 | Domain acquire / renew / release | `store/sqlite/coordination.rs`; `store/hiqlite_coordination.rs`; `cluster/coordination.rs::Lease` | Acquire expired row with higher fence/revision; exact renew; release clamps expiry and advances revision without deleting row | SQLite acquire/renew do not have Hiqlite's explicit removed-owner filter; publication still checks its bound job |
 | Bind | `background_jobs_domain.rs::BIND_SQL` | Selected kind and scan resource; exact live queue/domain tuples; reservations; owner not removed; stable tuple installed | Same domain fence accepts only identical stable tuple; different attempt needs a higher domain fence |
 | Bind refusal | `plurxd/library_work.rs` around `bind_library` | Release domain lease, yield job until `now+5000`; work never starts | Poll/backoff runtime scheduling is a recovery fairness premise |
@@ -171,7 +171,7 @@ in README and the model; finite safety exhaustion is never liveness evidence.
 | Model operators | Source correspondence / class |
 |---|---|
 | `InitFresh`, `InitRecovery`, `Next`, `ModelView`, `Symm` | Constructed reachable-shape seeds and explicit finite exploration machinery; not production operations |
-| `Cancel`, `Remove`, `LoseResource`, `Takeover`, `Outage`, `Restart` | Queue cancellation; membership removal; reservation loss; expired `CLAIM_SQL` plus triggers; unreachable authority; crash/reboot transport abstraction |
+| `Cancel`, `Remove`, `LoseResource`, `Takeover`, `Outage`, `Restart` | Queue cancellation; membership removal; reservation loss; environment takeover abstraction of expired `CLAIM_SQL` plus triggers; unreachable authority; crash/reboot transport abstraction |
 | `SendRenew`, `ApplyRenew`, `DeliverRenew` | Caller queue heartbeat; atomic `RENEW_SQL`/renew trigger; worker adoption of returned exact token |
 | `DomainChange`, `AcquireDomain` | Exact domain renewal/release and expired-lease acquisition in both coordination backends |
 | `BindAttempt`, `RefusalRelease`, `RefusalSettle` | Binding transaction followed by distinct domain release and exact queue yield; caller not-before is now+5000 (model2) |
@@ -182,7 +182,8 @@ in README and the model; finite safety exhaustion is never liveness evidence.
 | `ReplayClaim`, `ResolveClaim` | Same dispatch/claim identity, local window checks, current stable tuple and retained-attempt lookup; current token revision can advance independently |
 | `PrepareRetention` | Abstract maintenance-input classes and terminal settlement seed; flags explicitly summarize age, global pressure, demand, retain-identity, user scope and legacy pin |
 | `PruneAttempts`, `CompactInternalReceipts`, `RetireTerminalJob` | Installed receipt-pressure maintenance statements and before-delete detail trigger |
-| `RecoveryTick`, `RecoveryPoll`, `RecoveryRetry`, `RecoverySend`, `RecoveryApply`, `RecoveryAck`, `DeliverOldReply` | Stable suffix of worker polling/backoff, authority dispatch/application/reply and boot-mismatched delayed reply; concrete fairness premises, not a scheduler theorem |
+| `RecoveryTick`, `RecoveryPoll`, `RecoveryRetry`, `RecoverySend`, `RecoveryApply`, `RecoveryAck` | Constructed running-job suffix combining expiry and not-before barriers, then worker polling/backoff and fresh authority dispatch/application/acknowledgement; concrete fairness premises, not a scheduler theorem |
+| `DeliverOldReply` | Fair scheduling placeholder toggling only a flag; no reply payload or boot check, and no L1 old-reply nonadoption claim |
 
 The selected model fixes installed allocator mode for the identity-conflict
 branch. It does not model every input-validation failure, UUID syntax,
@@ -195,10 +196,24 @@ identity-conflict submissions; generic lost replies never enter that branch.
 
 `Restart` intentionally over-approximates pending old-boot continuations:
 local held authority is cleared but an old request stage can still complete.
-Adoption checks boot identity, and the Store rechecks durable authority. This
-is not a statement that a reboot preserves runtime Rust futures. A delayed
+The fresh safety relation's `DeliverClaim` and `DeliverRenew` check payload
+boot identity before adoption, and the Store rechecks durable authority. These
+checks are not part of the recovery placeholder. This is not a statement that a reboot preserves runtime Rust futures. A delayed
 backend request may commit after its initiating process has gone away; an
 old facade result is not new-boot authority.
+
+`Takeover` is an environment overapproximation for safety: unlike
+`ApplyClaim`, it does not recheck demand or not-before before installing a
+successor attempt. It can invalidate old authority more broadly than the
+source claim path; it is not an exact claim-eligibility implementation or a
+recovery action. The normal dispatch/CAS path retains those predicates.
+
+Recovery Init has time0, a running old-boot claim expiring at2 and not-before2
+or3. Fair time reaches the applicable barriers; a delay2 claim may occur at2,
+whereas delay3 requires3. This constructed joint-barrier seed does not prove
+the queued yielded/failed-retry state shapes or arbitrary larger deadlines.
+`DeliverOldReply` has no payload, so the recovery result establishes only
+eventual first fresh current claim under the declared fairness assumptions.
 
 The integer queue duration1 cannot produce a forward expiry extension under
 its strict live-renewal guard: sample+1 is at most the old expiry. Queue
