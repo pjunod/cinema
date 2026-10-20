@@ -148,6 +148,8 @@ class RegistryProfileTests(unittest.TestCase):
         self.assertNotIn("lifecycle.cfg", formal.select_configs("smoke", None))
         self.assertEqual(formal.select_configs("smoke", "control-bind-before-work.cfg"), ["control-bind-before-work.cfg"])
         self.assertEqual(formal.config_timeout("smoke", "smoke.cfg", 60, 170), 60)
+        self.assertEqual(formal.config_timeout("smoke", "smoke.cfg", 12, None), 12)
+        self.assertEqual(formal.config_timeout("smoke", "smoke.cfg", 12, 8), 8)
         self.assertEqual(formal.config_timeout("smoke", "recovery.cfg", 900, 170), 30)
         self.assertEqual(formal.config_timeout("smoke", "witness-displacement.cfg", 30, 10), 10)
         with self.assertRaises(formal.RunnerError):

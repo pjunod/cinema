@@ -1064,9 +1064,9 @@
           "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
           "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
           "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "stable demand, capable surviving boot2, reachable quorum and available resources",
-          "no new cancellation/removal/compaction/outage; initial not_before yield2 or failure3",
-          "WF on concrete tick/poll/retry/send/apply/ack/old reply; fresh claim2 reserved; no event horizon, view or symmetry"
+          "InitRecovery starts at now=0 with old claim1 expiry2, boot2, next claim2 and notBefore in {yield2,failure3}; polling is eligible only after both expiry and notBefore, so the claim may occur at sample2 or3; tick stops at current claim2 and need not reach3 on every path",
+          "no new cancellation/removal/compaction/outage; the stable suffix retains demand, quorum, resources, and the surviving worker",
+          "weak fairness covers tick/poll/retry/send/apply/ack and a Boolean old-reply scheduling placeholder with no reply payload or boot-adoption check; the retry_stalls mutation suppresses every later poll after the first early poll, so L1 current-owner claim2 can remain false even after now reaches3"
         ]
       },
       "purpose": "defect_control",
@@ -1218,9 +1218,9 @@
           "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
           "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
           "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "stable demand, capable surviving boot2, reachable quorum and available resources",
-          "no new cancellation/removal/compaction/outage; initial not_before yield2 or failure3",
-          "WF on concrete tick/poll/retry/send/apply/ack/old reply; fresh claim2 reserved; no event horizon, view or symmetry"
+          "InitRecovery starts at now=0 with old claim1 expiry2, boot2, next claim2 and notBefore in {yield2,failure3}; polling is eligible only after both expiry and notBefore, so the claim may occur at sample2 or3; tick stops at current claim2 and need not reach3 on every path",
+          "no new cancellation/removal/compaction/outage; the stable suffix retains demand, quorum, resources, and the surviving worker",
+          "weak fairness covers tick/poll/retry/send/apply/ack and a Boolean old-reply scheduling placeholder; it has no reply payload or boot-adoption check; L1 is only eventual current job owner claim2, not acknowledgement or completed work"
         ]
       },
       "purpose": "liveness",

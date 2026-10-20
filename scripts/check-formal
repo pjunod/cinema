@@ -765,6 +765,7 @@ def select_configs(mode: str, config: str | None) -> list[str]:
 
 def config_timeout(mode: str, name: str, configured: int, remaining: float | None) -> float:
     profile_limit = SMOKE_CONFIG_TIMEOUTS.get(name, configured) if mode == "smoke" else configured
+    profile_limit = min(configured, profile_limit)
     return float(profile_limit if remaining is None else min(profile_limit, max(0.01, remaining)))
 
 
