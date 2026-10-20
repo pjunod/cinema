@@ -442,6 +442,66 @@ test("the startup watchdog yields the shared 20-second boundary to the VOD fallb
   assert.equal(diagnosed,0,"the watchdog must not stop the attachment first");
 });
 
+function stallDiagnosisHarness() {
+  const player={started:false,mediaAttachment:{id:1},method:"transcode",probeUrl:"/playlist.m3u8"};
+  const surfaces=[],logs=[];
+  let answerProbe,probes=0,stops=0;
+  const probe=new Promise(resolve=>{answerProbe=resolve;});
+  const api=new Function("player","surfaces","logs","probe","onProbe","onStop",[
+    "const PLAYER=player,TOKEN=null,document={getElementById:()=>({currentTime:0})};",
+    "const performance={now:()=>20000},console={warn(){}};",
+    "function playbackOwnsAttachedMedia(p){return p===PLAYER;}",
+    "function playbackSeekBufferCovers(){return false;}function pbPosSec(){return 0;}",
+    "function hasPendingPlaybackOpen(){return false;}",
+    "function notifyPlaybackControl(){return null;}function currentStreamFailureOverlay(){return null;}",
+    "function diagnoseHlsStartup(){return {title:'The video playlist could not be loaded.',detail:'No level playlist.'};}",
+    "function probePlaybackSource(){onProbe();return probe;}",
+    "function abortHlsStartupLoaders(){}function clearEffectiveProcessing(){}",
+    "function finishPlaybackSeekTelemetry(){}function pausePlaybackInternally(){}",
+    "function stopPlayerTimers(){onStop();}function finishStallRecovery(){}",
+    "function clientLog(row){logs.push(row);}function toast(){}",
+    "function playbackStallActions(){return ['retry','close'];}",
+    "function raisePlaybackSurface(kind,row){surfaces.push({kind,...row});}",
+    source("hlsStartupIncomplete"),source("playbackAttemptTerminallyStopped"),
+    source("retireHlsTerminalAttempt"),source("stopPlayerForExhaustion"),source("stallDiagnose"),
+    "return {diagnose:stallDiagnose};",
+  ].join("\n"))(player,surfaces,logs,probe,()=>{probes++;},()=>{stops++;});
+  const startup=()=>{
+    const hls={stopLoad(){}};
+    player.hls=hls;
+    player.hlsStartup={hls,attachment:{current:()=>true},state:"exhausted",
+      retry:{timer:null},startedAt:0,deadlineMs:20000};
+  };
+  return {player,surfaces,logs,startup,diagnose:api.diagnose,
+    answer:()=>answerProbe({status:200,segState:200}),probes:()=>probes,stops:()=>stops};
+}
+
+test("a queued stall watchdog preserves the terminal HLS startup diagnosis", async () => {
+  const h=stallDiagnosisHarness();h.startup();
+  await h.diagnose();
+  assert.equal(h.player.hlsStartup.state,"cancelled");
+  h.answer();
+  await h.diagnose();
+  assert.equal(h.probes(),0,"a retired startup must not become a fresh generic source probe");
+  assert.equal(h.stops(),1);
+  assert.equal(h.logs.length,1);
+  assert.equal(h.surfaces.length,1);
+  assert.equal(h.surfaces[0].title,"The video playlist could not be loaded.");
+});
+
+test("a pending source probe cannot overwrite a later terminal startup diagnosis", async () => {
+  const h=stallDiagnosisHarness();
+  const pending=h.diagnose();
+  assert.equal(h.probes(),1);
+  h.startup();
+  await h.diagnose();
+  h.answer();await pending;
+  assert.equal(h.stops(),1,"the old probe must not stop the exhausted owner again");
+  assert.equal(h.logs.length,1);
+  assert.equal(h.surfaces.length,1);
+  assert.equal(h.surfaces[0].title,"The video playlist could not be loaded.");
+});
+
 // ---- R1: a pending or refused replacement is not the incumbent's seek -----
 
 const SNAPSHOT_FIXTURES = JSON.parse(
