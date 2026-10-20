@@ -1402,6 +1402,7 @@ paths = [
   "scripts/build-macos-video-ffmpeg",
   "scripts/build-macos-source-parser",
   "scripts/build-macos-source-runtime",
+  "scripts/install-linux-source-runtime",
   "scripts/package-macos",
   "scripts/build-subtitle-engine",
   "scripts/subtitle-engine-manifest.json",

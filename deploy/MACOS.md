@@ -162,8 +162,10 @@ files with permission errors (see
 [reading library scan status](../docs/OPERATIONS.md#reading-library-scan-status)).
 
 Fix it once in **System Settings → Privacy & Security → Full Disk Access**:
-press **+**, press **⌘⇧G**, enter the path the installer printed
-(`/opt/homebrew/bin/plurxd` on Apple Silicon), add it, then restart the agent:
+press **+**, press **⌘⇧G**, enter the installed daemon path under
+`~/Library/Application Support/plurx/runtime/current/runtime/plurxd`
+(or the custom prefix for a server-only install), add it, then use **Restart**
+in the tray. The legacy server-only command is:
 
 ```sh
 launchctl kickstart -k gui/$(id -u)/com.plurx.plurxd
@@ -180,18 +182,19 @@ or a plain folder elsewhere on the internal disk does not need it.
 | Is it running? | `launchctl print gui/$(id -u)/com.plurx.plurxd \| grep -E 'state\|pid'` |
 | Follow the log | `tail -f ~/Library/Logs/plurxd.log` |
 | Health | `curl -fsS http://127.0.0.1:32400/readyz` |
-| Restart | `launchctl kickstart -k gui/$(id -u)/com.plurx.plurxd` |
-| Stop until next login | `launchctl bootout gui/$(id -u)/com.plurx.plurxd` |
+| Restart | **Restart** in the tray (confirmed, drained shutdown) |
+| Stop | **Stop** in the tray; **Start server automatically** controls future logins separately |
 | Upgrade | `git pull && make install-macos` |
-| Uninstall | `make uninstall` |
+| Uninstall a legacy server-only install | `make uninstall` (native runtime removal is a separate operation) |
 
 **Upgrading** prepares the complete new runtime first, then uses the native
 controller to drain and replace a managed service. It preserves stopped/running
 and startup choices. A source install is distinct from a signed GitHub release;
 release checks retain their signature and complete-artifact requirements.
 
-**Uninstalling** removes the agent, the binary and its Jellyfin FFmpeg, and
-keeps your data.
+**Legacy server-only uninstalling** removes that prefix installation while
+keeping data. The legacy uninstall command does not remove the native runtime
+or companion app.
 
 Data — accounts, keys, library metadata, watch state — lives in
 `~/Library/Application Support/plurx`. Back that folder up; nothing else is

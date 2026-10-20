@@ -127,8 +127,11 @@ control.chmod(0o755)
         path.write_text(text)
         path.chmod(0o755)
 
+    def run_mode(self, mode, *arguments):
+        return subprocess.run(["bash", self.root / "deploy/install", mode, *arguments], env=self.env, capture_output=True, text=True)
+
     def install(self, *arguments):
-        return subprocess.run(["bash", self.root / "deploy/install", "macos", *arguments], env=self.env, capture_output=True, text=True)
+        return self.run_mode("macos", *arguments)
 
     def calls(self):
         return self.log.read_text() if self.log.exists() else ""
@@ -195,6 +198,106 @@ exit 113
         self.assertIn("bootstrap macos-source", result.stdout)
         self.assertEqual(self.calls(), "")
         self.assertFalse((self.root / "target").exists())
+
+    def mock_gui(self):
+        self.executable("uname", '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo arm64;; esac\n')
+        self.executable("launchctl", '#!/bin/sh\necho "launchctl $*" >> "$SOURCE_TEST_LOG"\n[ "$2" = gui/501 ] && exit 0\nexit 113\n')
+        self.executable("open", '#!/bin/sh\necho "open $*" >> "$SOURCE_TEST_LOG"\n')
+
+    def test_gui_binary_install_adds_companion_without_starting_fresh_server(self):
+        self.mock_gui()
+        result = self.run_mode("binary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertIn("build-complete", calls)
+        self.assertRegex(calls, r"bootstrap bootstrap macos-source --package .* --no-start")
+        self.assertNotIn("bootstrap start", calls)
+        self.assertIn("open " + str(self.root / "home/Applications/Plurx Server.app"), calls)
+
+    def test_gui_binary_install_preserves_existing_managed_running_policy(self):
+        self.mock_gui()
+        record = self.root / "home/Library/Application Support/plurx/installation.json"
+        record.parent.mkdir(parents=True)
+        record.write_text('{"browser_origin":"http://127.0.0.1:32400"}')
+        self.executable("launchctl", '#!/bin/sh\necho "launchctl $*" >> "$SOURCE_TEST_LOG"\ncase "$2" in gui/501) exit 0;; gui/501/com.plurx.plurxd) echo "pid = 4242"; exit 0;; esac\nexit 113\n')
+        result = self.run_mode("binary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--no-start", self.calls())
+        self.assertNotIn("kill SIGTERM", self.calls())
+        self.assertNotIn("startup set", self.calls())
+
+    def test_native_macos_uninstall_refuses_before_touching_legacy_prefix_binary(self):
+        record = self.root / "home/Library/Application Support/plurx/installation.json"
+        record.parent.mkdir(parents=True)
+        record.write_text("{}")
+        prefix = self.root / "other-prefix"
+        daemon = prefix / "bin/plurxd"
+        daemon.parent.mkdir(parents=True)
+        daemon.write_text("unrelated-prefix-daemon")
+        result = self.install("--uninstall", "--prefix", str(prefix))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no files changed", result.stderr)
+        self.assertEqual(daemon.read_text(), "unrelated-prefix-daemon")
+        self.assertEqual(self.calls(), "")
+
+    def test_native_linux_uninstall_refuses_before_service_or_prefix_mutation(self):
+        destination = self.root / "linux-root"
+        record = destination / "etc/plurx/installation.json"
+        record.parent.mkdir(parents=True)
+        record.write_text("{}")
+        daemon = self.root / "unrelated-prefix/bin/plurxd"
+        daemon.parent.mkdir(parents=True)
+        daemon.write_text("unrelated-prefix-daemon")
+        self.env["DESTDIR"] = str(destination)
+        result = self.run_mode("linux", "--uninstall", "--prefix", str(daemon.parent.parent))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("apt or dnf", result.stderr)
+        self.assertIn("no files or services changed", result.stderr)
+        self.assertEqual(daemon.read_text(), "unrelated-prefix-daemon")
+        self.assertTrue(record.exists())
+        self.assertEqual(self.calls(), "")
+
+    def test_verified_linux_gui_install_routes_to_complete_native_helper(self):
+        helper = self.root / "scripts/install-linux-source-runtime"
+        helper.write_text('''import os, sys
+with open(os.environ["SOURCE_TEST_LOG"], "a") as stream:
+    stream.write("linux-helper " + " ".join(sys.argv[1:]) + "\\n")
+''')
+        result = self.run_mode("linux", "--binary", "/fixture/plurxd")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertIn("linux-helper --eligible-session", calls)
+        self.assertIn("linux-helper --binary /fixture/plurxd", calls)
+        self.assertNotIn("launchctl", calls)
+
+    def test_verified_linux_gui_binary_install_requests_fresh_server_stopped(self):
+        self.executable("uname", '#!/bin/sh\necho Linux\n')
+        helper = self.root / "scripts/install-linux-source-runtime"
+        helper.write_text('''import os, sys
+with open(os.environ["SOURCE_TEST_LOG"], "a") as stream:
+    stream.write("linux-helper " + " ".join(sys.argv[1:]) + "\\n")
+''')
+        result = self.run_mode("binary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("linux-helper --no-start", self.calls())
+
+    def test_headless_linux_keeps_daemon_only_install_and_never_builds_gui(self):
+        helper = self.root / "scripts/install-linux-source-runtime"
+        helper.write_text('''import os, sys
+with open(os.environ["SOURCE_TEST_LOG"], "a") as stream:
+    stream.write("linux-helper " + " ".join(sys.argv[1:]) + "\\n")
+raise SystemExit(1)
+''')
+        for tool in ["ffmpeg", "ffprobe"]:
+            self.executable(tool, "#!/bin/sh\nexit 0\n")
+        daemon = self.root / "plurxd"
+        daemon.write_text("#!/bin/sh\nexit 0\n")
+        daemon.chmod(0o755)
+        result = self.run_mode("linux", "--binary", str(daemon), "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would wait for http://127.0.0.1:32400/readyz", result.stdout)
+        self.assertEqual(self.calls().strip(), "linux-helper --eligible-session")
+        self.assertNotIn("build-complete", self.calls())
 
     def test_explicit_server_only_route_keeps_custom_prefix_without_companion(self):
         daemon = self.root / "plurxd"

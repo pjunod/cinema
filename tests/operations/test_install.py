@@ -184,8 +184,8 @@ class Host:
         }
         merged.update(env or {})
         # These legacy service/media fixtures intentionally cover the explicit
-        # daemon-only route; default tray installation is exercised separately.
-        if not any(mode in args for mode in ("linux", "docker", "binary", "windows", "--uninstall")) and not (installer.parent / "runtime-closure-v1.json").exists():
+        # daemon-only route on macOS/Linux; default GUI installation is exercised separately.
+        if not any(mode in args for mode in ("docker", "windows", "--uninstall")) and not (installer.parent / "runtime-closure-v1.json").exists():
             args = (*args, "--server-only")
         if subtitle_fixture and not any(mode in args for mode in ["linux", "docker", "binary", "windows", "--uninstall"]):
             args = (*args, "--subtitle-engine-package", str(self.subtitle_engine))

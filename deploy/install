@@ -4,7 +4,7 @@
 #   make install            # this OS: systemd on Linux, launchd on macOS,
 #                           # the native service on Windows
 #   make install-docker     # Compose stack, built from this checkout
-#   make install-binary     # just the binary on PATH, no service
+#   make install-binary     # core plus tray in GUI sessions; fresh server stopped
 #   make uninstall          # stop and remove the service; data stays
 #
 # The Makefile targets call this script; it can also be run directly:
@@ -26,7 +26,7 @@
 #   --subtitle-engine-package DIR
 #                   macOS: verified pinned whisper.cpp bundle; release archives
 #                   supply it, and source installs build it automatically
-#   --server-only   macOS: legacy daemon-only install, without the tray app
+#   --server-only   explicit legacy daemon-only install, without the tray app
 #   --uninstall     remove the service and the binary; keep data and config
 #   --dry-run       print every command instead of running it
 #
@@ -376,7 +376,33 @@ install_binary_to() {
 
 # ---- linux: systemd ----------------------------------------------------------
 
+# The graphical eligibility probe is read-only and runs before GTK/package
+# dependencies. Headless and container installs retain the daemon-only path.
+linux_has_local_gui() {
+  [ -f "$root/scripts/install-linux-source-runtime" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 "$root/scripts/install-linux-source-runtime" --eligible-session
+}
+
+linux_native_source_install() {
+  local no_start=${1:-0}
+  [ -z "$prefix" ] || die 'Linux tray installs use the native package layout; use --server-only for custom service prefixes'
+  set --
+  [ -z "$binary" ] || set -- "$@" --binary "$binary"
+  [ "$dry_run" != 1 ] || set -- "$@" --dry-run
+  [ "$no_start" != 1 ] || set -- "$@" --no-start
+  python3 "$root/scripts/install-linux-source-runtime" "$@"
+}
+
 linux_install() {
+  if [ "$server_only" != 1 ] && linux_has_local_gui; then
+    linux_native_source_install
+  else
+    linux_server_only_install
+  fi
+}
+
+linux_server_only_install() {
   [ "$dry_run" = 1 ] || command -v systemctl >/dev/null 2>&1 \
     || die "no systemctl on this host; use 'make install-binary' and run plurxd under your own supervisor"
   local dir unit_src unit_dst data was_active=0 was_installed=0
@@ -439,6 +465,11 @@ linux_install() {
 }
 
 linux_uninstall() {
+  # Managed source GUI installs use native packages. The legacy prefix remover
+  # cannot remove their ownership record or companion safely.
+  [ ! -e "${DESTDIR:-}/etc/plurx/installation.json" ] \
+    && [ ! -L "${DESTDIR:-}/etc/plurx/installation.json" ] \
+    || die 'native Linux package installation detected; remove plurx-desktop and plurxd with apt or dnf; no files or services changed'
   local dir unit_dst installed
   unit_dst=${DESTDIR:-}/etc/systemd/system/plurxd.service
   # The binary is wherever the unit (or its prefix drop-in) says it is, not
@@ -849,7 +880,8 @@ VERIFY_LEGACY
 }
 
 macos_native_source_install() {
-  local package uid app port
+  local package uid app port fresh_no_start=0
+  local request_no_start=${1:-0}
   macos_refuse_root
   [ -z "$prefix" ] || die "macOS tray installs use the fixed per-user runtime and ~/Applications/Plurx Server.app; use --server-only for custom service prefixes"
   command -v python3 >/dev/null 2>&1 || die 'source tray installation requires Python 3, Rust and Swift; use a complete release archive without developer tools'
@@ -867,13 +899,21 @@ macos_native_source_install() {
     python3 "$root/scripts/build-macos-source-runtime" "$@"
   fi
   if [ "$dry_run" != 1 ]; then macos_stop_legacy_for_native; fi
-  run "$package/control/plurx-control" bootstrap macos-source --package "$package"
+  set -- bootstrap macos-source --package "$package"
+  if [ "$request_no_start" = 1 ] \
+      && [ ! -e "$HOME/Library/Application Support/plurx/installation.json" ] \
+      && [ ! -e "$HOME/Library/LaunchAgents/$macos_agent_label.plist" ] \
+      && [ "${macos_legacy_was_running:-0}" != 1 ]; then
+    fresh_no_start=1
+    set -- "$@" --no-start
+  fi
+  run "$package/control/plurx-control" "$@"
   if [ "$dry_run" != 1 ] && [ "${macos_legacy_was_running:-0}" = 1 ]; then
     # Bootstrap succeeded. A previously stopped legacy daemon stays stopped;
     # only the daemon which was running before migration is started again.
     run "$package/control/plurx-control" start
   fi
-  if [ "$dry_run" != 1 ] && [ "${macos_native_expect_ready:-0}" = 1 ]; then
+  if [ "$dry_run" != 1 ] && [ "${macos_native_expect_ready:-0}" = 1 ] && [ "$fresh_no_start" != 1 ]; then
     port=$(python3 - "$HOME/Library/Application Support/plurx/installation.json" <<'READ_PORT'
 import json, sys, urllib.parse
 with open(sys.argv[1]) as stream:
@@ -967,6 +1007,11 @@ macos_install() {
 }
 
 macos_uninstall() {
+  # A native runtime has different ownership and paths from the legacy prefix
+  # install. Refuse before touching either tree until native removal is explicit.
+  [ ! -e "$HOME/Library/Application Support/plurx/installation.json" ] \
+    && [ ! -L "$HOME/Library/Application Support/plurx/installation.json" ] \
+    || die 'native macOS installation detected; legacy uninstall cannot safely remove its app/runtime; no files changed'
   local dir plist uid installed
   plist=$HOME/Library/LaunchAgents/$macos_agent_label.plist
   installed=$({ sed -n 's|.*<string>\(.*\)/plurxd</string>.*|\1|p' "$plist" 2>/dev/null || true; } | head -1 | sed -e 's/&amp;/\&/g' -e 's/&lt;/</g' -e 's/&gt;/>/g')
@@ -1051,9 +1096,26 @@ docker_uninstall() {
   say "stack is down; kept deploy/.env, the override file, and the data directory"
 }
 
-# ---- binary: on PATH, no service ----------------------------------------------
+# ---- binary: core plus eligible desktop; fresh servers stay stopped ------------
 
 binary_install() {
+  local platform
+  platform=$(detect_platform)
+  if [ "$server_only" != 1 ]; then
+    case "$platform" in
+      macos)
+        if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+          macos_native_source_install 1
+          return
+        fi ;;
+      linux)
+        if linux_has_local_gui; then
+          linux_native_source_install 1
+          return
+        fi ;;
+    esac
+  fi
+  say 'installing core binaries only: the tray applies to a native local GUI session'
   local dir
   dir=$(bin_dir)
   resolve_binary
