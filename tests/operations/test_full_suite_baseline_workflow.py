@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import json
+import sys
 from pathlib import Path
 import re
 import subprocess
@@ -105,6 +107,54 @@ class FullSuiteBaselineWorkflowCase(unittest.TestCase):
         cinema = step(web, "Test Cinema remote browser contracts")
         for block in (provision, cinema):
             self.assertIn("!cancelled() && (inputs.diagnostic_baseline == 'true' || success())", block)
+
+    def test_rust_runtime_refuses_unqualified_cleanup_and_requires_discovery(self):
+        job = jobs()["check"]
+        safe = step(job, "Require safe process cleanup before Rust runtime collection")
+        verdict = step(job, "Require complete diagnostic Rust discovery")
+        self.assertIn("if: inputs.diagnostic_baseline == 'true'", safe)
+        self.assertIn("!cancelled() && inputs.diagnostic_baseline == 'true'", verdict)
+        runtime = step(job, "Run format, Clippy, unit, and SQLite contracts")
+        self.assertNotIn("if:", runtime.split("        run:", 1)[0])
+        def program(block, marker):
+            body = textwrap.dedent(block.split("        run: |\n", 1)[1])
+            return body.split("python3 - <<'" + marker + "'\n", 1)[1].split("\n" + marker, 1)[0]
+        for complete, cleanup, listing, source, stage in (
+                (True, True, True, True, "finished"),
+                (False, True, True, True, "finished"),
+                (False, False, True, True, "finished"),
+                (False, True, False, True, "finished"),
+                (True, True, True, False, "finished"),
+                (True, True, True, True, "compiling")):
+            with self.subTest(complete=complete, cleanup=cleanup, listing=listing, source=source, stage=stage), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / "rust-inventory"
+                target.mkdir()
+                document = dict(stage=stage, source=dict(commit="a" * 40 if source else "c" * 40, tree="b" * 40),
+                                discovery_complete=complete, compile=dict(cleanup_complete=cleanup),
+                                binaries=[dict(listing=dict(all=dict(cleanup_complete=listing)))])
+                (target / "inventory.json").write_text(json.dumps(document))
+                env = os.environ | dict(PLURX_BASELINE_DIR=str(root), PLURX_TEST_CANDIDATE_SHA="a" * 40,
+                                        PLURX_TEST_CANDIDATE_TREE="b" * 40)
+                results = [subprocess.run([sys.executable, "-c", program(block, marker)], env=env,
+                                          capture_output=True).returncode == 0
+                           for block, marker in ((safe, "PYCLEAN"), (verdict, "PYDISCOVERY"))]
+                self.assertEqual(results, [cleanup and listing and source and stage == "finished", complete and source])
+        with tempfile.TemporaryDirectory() as directory:
+            env = os.environ | dict(PLURX_BASELINE_DIR=directory)
+            for block, marker in ((safe, "PYCLEAN"), (verdict, "PYDISCOVERY")):
+                missing = subprocess.run([sys.executable, "-c", program(block, marker)], env=env, capture_output=True)
+                self.assertNotEqual(missing.returncode, 0)
+
+    def test_recovery_validator_build_is_instrumented_as_executor_work(self):
+        aggregate = jobs()["cluster_transport_recovery"]
+        begin = step(aggregate, "Begin candidate-bound diagnostic resource recording")
+        self.assertIn("if: inputs.diagnostic_baseline == 'true'", begin)
+        self.assertLess(aggregate.index("Begin candidate-bound diagnostic resource recording"),
+                        aggregate.index("Build the exact evidence validator"))
+        for name in ("Finish diagnostic resource recording", "Preserve diagnostic inventory and resource evidence"):
+            block = step(aggregate, name)
+            self.assertIn("always() && inputs.diagnostic_baseline == 'true'", block)
 
     def binding(self, **overrides):
         sha = "a" * 40

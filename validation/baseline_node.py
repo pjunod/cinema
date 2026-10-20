@@ -4,7 +4,9 @@ Node does not provide independent non-executing discovery of dynamically created
 node:test cases. This artifact therefore counts recipe commands, not individual
 JavaScript test cases. Transitive require() tests retain their existing parent
 command; globbing the files would execute them twice. Every selected command is
-attempted even when an earlier command fails, with raw output preserved per row.
+attempted after ordinary failures when process cleanup is qualified. Unqualified
+cleanup blocks remaining commands with explicit outcomes instead of overlapping
+unknown descendants. Raw output is preserved per executed row.
 """
 from __future__ import annotations
 
@@ -16,8 +18,8 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
-import time
 
+from validation.baseline_commands import run_process
 from validation.baseline_python import verify_source
 from validation.test_cell_manifest import ManifestError, assess_cell, canonical_context, require
 
@@ -70,27 +72,31 @@ def collect(context, root, output_directory, *, environment=None, source_receipt
             'Context desktop-remote selection differs')
     output_directory = Path(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
-    outcomes, command_rows = [], []
+    outcomes, command_rows, scope_errors, blocked = [], [], [], []
     for index, (identity, command) in enumerate(selected, 1):
         log = output_directory / f'node-{index:03d}.log'
-        started = time.monotonic()
-        timed_out = False
         with log.open('wb') as stream:
-            try:
-                result = subprocess.run(command, cwd=root, stdout=stream, stderr=subprocess.STDOUT,
-                                        timeout=command_timeout, check=False)
-                returncode = result.returncode
-            except subprocess.TimeoutExpired:
-                returncode, timed_out = 124, True
-            except OSError as error:
-                stream.write((str(error) + '\n').encode())
-                returncode = 127
-        outcomes.append({'id': identity, 'status': 'passed' if returncode == 0 else 'failed'})
-        command_rows.append({'id': identity, 'command': command, 'returncode': returncode,
-                             'timed_out': timed_out, 'duration_seconds': time.monotonic() - started,
+            execution = run_process(command, stream, subprocess.STDOUT, command_timeout, cwd=root)
+        clean = execution.get('cleanup_complete') is True and not execution.get('cleanup_error')
+        passed = execution.get('success') is True and clean
+        outcomes.append({'id': identity, 'status': 'passed' if passed else 'failed'})
+        command_rows.append({**execution, 'id': identity, 'command': command,
+                             'execution_status': 'executed',
+                             'duration_seconds': execution.get('seconds'),
                              'log': str(log), 'log_sha256': hashlib.sha256(log.read_bytes()).hexdigest()})
-        print(f'{identity}: exit={returncode} log={log}', flush=True)
-    scope_errors = []
+        print(f"{identity}: exit={execution.get('returncode')} cleanup_complete={clean} log={log}", flush=True)
+        if not clean:
+            reason = f'{identity}: process cleanup unqualified; remaining Node commands blocked'
+            scope_errors.append(reason)
+            for remaining, remaining_command in selected[index:]:
+                blocked.append(remaining)
+                outcomes.append({'id': remaining, 'status': 'error'})
+                command_rows.append({'id': remaining, 'command': remaining_command,
+                                     'execution_status': 'blocked', 'blocked_by': identity,
+                                     'reason': reason, 'returncode': None, 'timed_out': False,
+                                     'success': False, 'duration_seconds': None,
+                                     'log': None, 'log_sha256': None})
+            break
     try:
         require(verify_source(context, root, os.environ if environment is None else environment,
                               source_receipt) == provenance,
@@ -98,11 +104,11 @@ def collect(context, root, output_directory, *, environment=None, source_receipt
     except ManifestError as error:
         scope_errors.append(f'Source changed during Node execution: {error}')
     report = assess_cell(context, [identity for identity, _ in selected], outcomes,
-                         execution_returncode=0 if all(row['returncode'] == 0 for row in command_rows) else 1,
+                         execution_returncode=0 if all(row['status'] == 'passed' for row in outcomes) else 1,
                          scope_errors=scope_errors)
     report.update({'source_provenance': provenance, 'granularity': 'recipe-command',
                    'makefile_sha256': hashlib.sha256(text.encode()).hexdigest(),
-                   'commands': command_rows,
+                   'commands': command_rows, 'blocked_identities': blocked,
                    'limitation': 'Script/recipe inventory only; does not claim independent node:test case discovery.'})
     return report
 

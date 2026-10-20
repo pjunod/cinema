@@ -719,6 +719,20 @@ jobs:
         run: |
           python3 -m validation.baseline_rust_inventory --output "$PLURX_BASELINE_DIR/rust-inventory" -- \
             cargo test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
+      - name: Require safe process cleanup before Rust runtime collection
+        if: inputs.diagnostic_baseline == 'true'
+        run: |
+          python3 - <<'PYCLEAN'
+          import json, os, pathlib
+          inventory = json.loads((pathlib.Path(os.environ['PLURX_BASELINE_DIR']) / 'rust-inventory/inventory.json').read_text())
+          assert inventory.get('stage') == 'finished', 'Inventory process did not finish; runtime collection blocked'
+          assert inventory.get('source', {}).get('commit') == os.environ['PLURX_TEST_CANDIDATE_SHA']
+          assert inventory.get('source', {}).get('tree') == os.environ['PLURX_TEST_CANDIDATE_TREE']
+          assert inventory.get('compile', {}).get('cleanup_complete') is True, 'Compiler cleanup unqualified; runtime collection blocked'
+          for binary in inventory.get('binaries', []):
+              for listing in binary.get('listing', {}).values():
+                  assert listing.get('cleanup_complete') is True, 'Listing cleanup unqualified; runtime collection blocked'
+          PYCLEAN
       - name: Run format, Clippy, unit, and SQLite contracts
         run: |
           if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
@@ -734,6 +748,16 @@ jobs:
           else
             make ci-rust-gate
           fi
+      - name: Require complete diagnostic Rust discovery
+        if: ${{ !cancelled() && inputs.diagnostic_baseline == 'true' }}
+        run: |
+          python3 - <<'PYDISCOVERY'
+          import json, os, pathlib
+          inventory = json.loads((pathlib.Path(os.environ['PLURX_BASELINE_DIR']) / 'rust-inventory/inventory.json').read_text())
+          assert inventory.get('source', {}).get('commit') == os.environ['PLURX_TEST_CANDIDATE_SHA']
+          assert inventory.get('source', {}).get('tree') == os.environ['PLURX_TEST_CANDIDATE_TREE']
+          assert inventory.get('discovery_complete') is True, 'Rust discovery incomplete; diagnostic lane cannot pass'
+          PYDISCOVERY
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -1387,6 +1411,21 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -1488,6 +1527,19 @@ jobs:
       - name: Propagate the transport recovery result
         if: always() && steps.transport_recovery.outcome != 'success'
         run: exit 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_wal:
     name: replicated WAL recovery contracts
