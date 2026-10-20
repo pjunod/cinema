@@ -5,6 +5,13 @@
 
 ## PR A implementation checkpoint
 
+- The first full-helper attempt refused the synthetic scan before any required
+  case passed: the control muxer omitted the encoder's declared frame rate,
+  losing Matroska DefaultDuration and demuxed packet durations. The control-only
+  repair validates matching positive BL/EL rates and preserves them in the mux
+  header; packet timestamps/durations and the strict production scanner are
+  unchanged. Mux-only native compilation, demux timing audit and targeted review
+  precede retrying Stage2. No production helper/shader-bundle rebuild is needed.
 - Actual immutable43 Rust batch completed: 98 selected, 94 passed, four fixture
   failures retained. Repairs are test-only: wall-clock-relative lease expiry,
   distinct offline sources rather than deduplicated requests, owner-node versus
