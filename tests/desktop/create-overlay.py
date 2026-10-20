@@ -5,6 +5,7 @@ The private fixture key stays outside both git trees and source archives. This d
 not add a production runtime trust override or alter the candidate checkout.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,35 @@ import shutil
 import subprocess
 import tarfile
 from common import git_environment, hosted_guard, run, sha256, write_json
+
+
+def fixture_root_overlay(raw, public_hex):
+    """Validate candidate roots before replacing them only in a disposable tree."""
+    if len(raw) > 65536:
+        raise ValueError("candidate trust roots exceed the size bound")
+    def pairs(items):
+        result = {}
+        for name, value in items:
+            if name in result:
+                raise ValueError("duplicate candidate trust-root field")
+            result[name] = value
+        return result
+    original = json.loads(raw, object_pairs_hook=pairs)
+    if not isinstance(original, dict) or set(original) != {"schema_version", "repository", "keys"} or type(original["schema_version"]) is not int or original["schema_version"] != 1 or original["repository"] != "pjunod/cinema" or not isinstance(original["keys"], list) or len(original["keys"]) > 16:
+        raise ValueError("invalid candidate trust-root document")
+    ids, keys = set(), set()
+    for key in original["keys"]:
+        if not isinstance(key, dict) or set(key) != {"id", "public_key_hex"} or not isinstance(key["id"], str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", key["id"]) or not isinstance(key["public_key_hex"], str) or not re.fullmatch(r"[0-9a-f]{64}", key["public_key_hex"]) or key["public_key_hex"] == "00" * 32 or key["id"] in ids or key["public_key_hex"] in keys:
+            raise ValueError("invalid or duplicate candidate trust key")
+        ids.add(key["id"])
+        keys.add(key["public_key_hex"])
+    if not isinstance(public_hex, str) or not re.fullmatch(r"[0-9a-f]{64}", public_hex) or public_hex == "00" * 32 or public_hex in keys:
+        raise ValueError("qualification needs a distinct disposable public key")
+    fixture = {"schema_version": 1, "repository": "pjunod/cinema",
+               "keys": [{"id": "qualification-local-only", "public_key_hex": public_hex}]}
+    provenance = {"candidate_trust_roots": original,
+                  "candidate_trust_roots_sha256": hashlib.sha256(raw).hexdigest()}
+    return fixture, provenance
 
 
 def build_overlay(source, candidate, destination, version, public_hex, cargo):
@@ -35,11 +65,8 @@ def build_overlay(source, candidate, destination, version, public_hex, cargo):
     if run(["git", "-C", tree, "rev-parse", "HEAD^{tree}"]).stdout.strip() != original_tree:
         raise RuntimeError("archived fixture snapshot does not preserve the exact committed candidate tree")
     root_file = tree / "crates/plurx-desktop-control/production-trust-roots.json"
-    original_roots = json.loads(root_file.read_bytes())
-    if original_roots != {"schema_version": 1, "repository": "pjunod/cinema", "keys": []}:
-        raise RuntimeError("fixture overlay currently requires the untouched empty-root candidate; review root transitions separately")
-    root_file.write_text(json.dumps({"schema_version": 1, "repository": "pjunod/cinema",
-        "keys": [{"id": "qualification-local-only", "public_key_hex": public_hex}]}, indent=2) + "\n")
+    fixture_roots, root_provenance = fixture_root_overlay(root_file.read_bytes(), public_hex)
+    root_file.write_text(json.dumps(fixture_roots, indent=2) + "\n")
     manifest = tree / "Cargo.toml"
     text = manifest.read_text()
     text, count = re.subn(r'(\[workspace\.package\]\n(?:[^\[]*?))version = "[0-9]+\.[0-9]+\.[0-9]+"',
@@ -73,7 +100,7 @@ def build_overlay(source, candidate, destination, version, public_hex, cargo):
                "version": version, "committed_overlay_sha": commit, "committed_overlay_tree": tree_hash,
                "diff_sha256": sha256(diff), "source_archive_sha256": sha256(source_archive),
                "public_key_hex": public_hex, "fixture_root_id": "qualification-local-only",
-               "never_publish_or_merge": True, "build_source": str(build)}
+               "never_publish_or_merge": True, "build_source": str(build), **root_provenance}
     write_json(destination / "overlay.json", receipt)
     return receipt
 

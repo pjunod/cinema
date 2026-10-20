@@ -181,7 +181,10 @@ fn signed_manifest_requires_real_signature_and_provisioned_roots() {
     assert!(
         production_keys()
             .expect("valid production root source")
-            .is_empty(),
+            .iter()
+            .all(|production| keys
+                .iter()
+                .all(|fixture| production.public_key != fixture.public_key)),
         "fixture keys must never become production roots"
     );
     assert!(verify_manifest(
