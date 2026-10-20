@@ -1,0 +1,499 @@
+name: diagnostic frozen Rust continuation
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact frozen source commit; continuation evidence only
+        required: true
+        type: string
+        default: "86f1385005b27122e8a8d3a3d5bd9501eb2fdb16"
+      cell:
+        description: Fixed continuation cell (rust or store-lineage)
+        required: true
+        type: string
+        default: "rust"
+      diagnostic_baseline:
+        description: Must remain true; never promotion or reusable results
+        required: true
+        type: string
+        default: "true"
+
+jobs:
+  rust_continuation:
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, baremetal]
+    # Phase step bounds 151+11+21+91+11+11=296m, setup<=37m,
+    # seven uploads<=7m, finish/cache/restore/verdict<=6m: 346m; reserve14m.
+    # Native command budgets total290m. Ordinary CI's 120m cap is unchanged.
+    timeout-minutes: 360
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TERM_COLOR: always
+      CONTINUATION_CELL: ${{ inputs.cell }}
+    steps:
+      - name: Capture mounted runner workspace owner
+        timeout-minutes: 1
+        run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
+        with:
+          persist-credentials: false
+          clean: true
+          ref: ${{ github.sha }}
+      - name: Preserve exact committed safe observer outside tested checkout
+        timeout-minutes: 1
+        env:
+          WORKFLOW_TRANSPORT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          python3 - <<'PYCOPY'
+          import ast, hashlib, json, os, pathlib, re, subprocess, sys, tempfile
+          transport = os.environ['WORKFLOW_TRANSPORT_SHA']
+          assert re.fullmatch('[0-9a-f]{40}', transport)
+          actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert actual == transport, 'Observer checkout differs from workflow transport'
+          temporary = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
+          checkout = pathlib.Path.cwd().resolve()
+          assert temporary.is_dir() and not temporary.is_relative_to(checkout), 'Observer must be outside tested checkout'
+          source = 'validation/baseline_commands.py'
+          spec = transport + ':' + source
+          payload = subprocess.check_output(['git', 'show', spec])
+          blob = subprocess.check_output(['git', 'rev-parse', spec], text=True).strip()
+          assert subprocess.check_output(['git', 'hash-object', '--stdin'], input=payload).decode().strip() == blob
+          for node in ast.walk(ast.parse(payload, filename=source)):
+              if isinstance(node, ast.ImportFrom):
+                  assert node.level == 0 and node.module, 'Standalone observer cannot use relative imports'
+              imports = ([alias.name.split('.')[0] for alias in node.names] if isinstance(node, ast.Import) else [node.module.split('.')[0]] if isinstance(node, ast.ImportFrom) and node.module else [])
+              assert all(name in sys.stdlib_module_names for name in imports), 'Standalone observer must use only the standard library'
+          owned = pathlib.Path(tempfile.mkdtemp(prefix='plurx-rust-observer-', dir=temporary))
+          observer = owned / 'baseline_commands.py'
+          observer.write_bytes(payload)
+          digest = hashlib.sha256(observer.read_bytes()).hexdigest()
+          assert observer.read_bytes() == payload
+          receipt = owned / 'observer-provenance.json'
+          receipt.write_text(json.dumps(dict(workflow_transport_sha=transport, source_path=source, git_blob=blob, blob_sha256=digest, external_path=str(observer), standard_library_only=True), indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('PLURX_BASELINE_COMMANDS=' + str(observer) + '\n')
+              environment.write('PLURX_BASELINE_OBSERVER_RECEIPT=' + str(receipt) + '\n')
+          PYCOPY
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
+        with:
+          persist-credentials: false
+          clean: true
+          ref: ${{ inputs.expected_sha }}
+      - name: Bind frozen source and continuation provenance
+        id: bind
+        timeout-minutes: 2
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          WORKFLOW_TRANSPORT_SHA: ${{ github.sha }}
+          DIAGNOSTIC_BASELINE: ${{ inputs.diagnostic_baseline }}
+        run: |
+          python3 - <<'PYBIND'
+          import hashlib, json, os, pathlib, re, subprocess, tempfile
+          assert os.environ['DIAGNOSTIC_BASELINE'] == 'true', 'Diagnostic only'
+          expected, transport = os.environ['EXPECTED_SHA'], os.environ['WORKFLOW_TRANSPORT_SHA']
+          assert all(re.fullmatch('[0-9a-f]{40}', value) for value in [expected, transport])
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          actual, tree = git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD^{tree}')
+          assert actual == expected and not git('status', '--porcelain', '--untracked-files=all')
+          temporary, checkout = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(), pathlib.Path.cwd().resolve()
+          assert temporary.is_dir() and not temporary.is_relative_to(checkout)
+          cell = os.environ['CONTINUATION_CELL']
+          assert cell in ['rust', 'store-lineage'], 'Unknown fixed continuation cell'
+          output = temporary / ('rust-continuation-' + cell)
+          output.mkdir(exist_ok=False)
+          observer = pathlib.Path(os.environ['PLURX_BASELINE_COMMANDS']).resolve()
+          receipt = json.loads(pathlib.Path(os.environ['PLURX_BASELINE_OBSERVER_RECEIPT']).read_text())
+          assert not observer.is_relative_to(checkout) and receipt['external_path'] == str(observer)
+          assert receipt['workflow_transport_sha'] == transport and receipt['standard_library_only'] is True
+          assert receipt['source_path'] == 'validation/baseline_commands.py'
+          assert receipt['blob_sha256'] == hashlib.sha256(observer.read_bytes()).hexdigest()
+          (output / 'observer-provenance.json').write_text(json.dumps(receipt, indent=2))
+          (output / 'baseline_commands.py').write_bytes(observer.read_bytes())
+          context = dict(candidate_sha=actual, candidate_tree=tree, workflow_transport_sha=transport,
+              observation_kind='separate-frozen-Rust-continuation', primary_run_id=5620, cell=cell,
+              limitation='Fresh execution; retain primary timeout and all first outcomes. No promotion, publishing or result reuse. Doctests require runtime evidence.')
+          (output / 'source-context.json').write_text(json.dumps(context, indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('PLURX_BASELINE_DIR=' + str(output) + '\n')
+          PYBIND
+          cat > "$RUNNER_TEMP/rust-continuation-$CONTINUATION_CELL/phase.py" <<'PYPHASE'
+          import hashlib, json, os, pathlib, runpy, shlex, sys
+
+          CELL = os.environ.get('CONTINUATION_CELL', 'rust')
+          assert CELL in ['rust', 'store-lineage'], 'Unknown fixed continuation cell'
+          ALL_PHASES = ['compile', 'inventory', 'static', 'units', 'serial-vfr', 'serial-bitmap']
+          PHASES = ALL_PHASES if CELL == 'rust' else ['compile', 'inventory', 'units']
+          BUDGETS = dict(zip(ALL_PHASES, [9000, 600, 1200, 5400, 600, 600]))
+          NATIVE = ['cargo', 'test', '--workspace', '--locked', '--exclude', 'plurx-cluster-check', '--no-fail-fast']
+          LINEAGE = ['cargo', 'test', '--locked', '-p', 'plurx-core', '--features', 'cluster-read-cost-validation,hiqlite-contract-tests', '--test', 'schema_lineage_upgrade']
+          if CELL == 'store-lineage':
+              NATIVE, BUDGETS['units'] = LINEAGE, 600
+          SERIAL = ['cargo', 'test', '--locked', '--workspace', '--exclude', 'plurx-cluster-check']
+          CASES = {'serial-vfr': 'vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid',
+                   'serial-bitmap': 'vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing'}
+
+          def read(path):
+              return json.loads(path.read_text())
+
+          def safe(report):
+              return (not report.get('errors') and not report.get('blocked_cells') and len(report.get('cells', [])) == 1
+                      and report['cells'][0].get('cleanup_complete') is True and not report['cells'][0].get('cleanup_error'))
+
+          def expected_runtime(phase, inventory):
+              if phase == 'units' and CELL == 'rust':
+                  assert inventory['binaries'] and any(binary['cases'] for binary in inventory['binaries']), 'Empty native case inventory'
+                  return [(binary, binary['cases']) for binary in inventory['binaries']]
+              name = 'schema_lineage_upgrade' if CELL == 'store-lineage' else 'plurxd'
+              kind = 'test' if CELL == 'store-lineage' else 'bin'
+              relative = 'crates/plurx-core/tests/schema_lineage_upgrade.rs' if CELL == 'store-lineage' else 'crates/plurxd/src/main.rs'
+              case = 'narrow_schema_lineage_bridge_preserves_and_refuses' if CELL == 'store-lineage' else CASES[phase]
+              binaries = [binary for binary in inventory['binaries'] if binary['target']['name'] == name
+                          and kind in binary['target']['kind'] and pathlib.Path(binary['target']['src_path']).resolve() == pathlib.Path(relative).resolve()]
+              assert len(binaries) == 1, 'Intended native test binary is not uniquely inventoried'
+              matches = [item for item in binaries[0]['cases'] if item['name'] == case and item['ignored'] is (CELL == 'rust')]
+              assert len(matches) == 1, 'Exact native case/ignored identity missing from intended binary'
+              if CELL == 'store-lineage':
+                  assert len(binaries[0]['cases']) == 1, 'Frozen lineage binary must contain exactly one case'
+              return [(binaries[0], [dict(name=case, ignored=False)])]
+
+          def runtime_evidence(phase, inventory, log):
+              # Frozen parser only observes logs; executable basename retains the Cargo hash.
+              parsed = runpy.run_path(str(pathlib.Path('validation/baseline_timing.py')))['parse'](log.read_text(errors='replace').splitlines())
+              gaps = list(parsed['parser_issues'])
+              observed = []
+              for binary, cases in expected_runtime(phase, inventory):
+                  path = pathlib.Path(binary['executable'])
+                  with path.open('rb') as stream:
+                      if hashlib.file_digest(stream, 'sha256').hexdigest() != binary['sha256']:
+                          gaps.append(dict(binary=path.name, reason='Inventoried binary changed during execution'))
+                  suites = [suite for suite in parsed['suites'] if suite['binary'] == path.name]
+                  if len(suites) != 1 or suites[0]['result'] is None:
+                      gaps.append(dict(binary=path.name, reason='Missing, duplicate or incomplete native binary result'))
+                      continue
+                  suite = suites[0]
+                  names = {case['name'] for case in cases}
+                  for case in cases:
+                      matches = [item for item in suite['outcomes'] if item['name'] == case['name']]
+                      allowed = ['ignored'] if case['ignored'] else ['ok', 'FAILED']
+                      if len(matches) != 1 or matches[0]['status'] not in allowed:
+                          gaps.append(dict(binary=path.name, case=case['name'], reason='Expected native body/ignored outcome not observed'))
+                  if any(item['name'] not in names for item in suite['outcomes']) or len(suite['outcomes']) != len(cases):
+                      gaps.append(dict(binary=path.name, reason='Unexpected/missing native outcomes'))
+                  if suite['declared_tests'] != len(cases):
+                      gaps.append(dict(binary=path.name, reason='Native selected case count differs'))
+                  observed.append(suite)
+              if phase == 'units' and CELL == 'rust':
+                  for target in inventory.get('doctests', {}).get('targets', []):
+                      name = 'doctest:' + target['target'].replace('-', '_')
+                      suites = [suite for suite in parsed['suites'] if suite['binary'] == name]
+                      if len(suites) != 1 or suites[0]['result'] is None:
+                          gaps.append(dict(binary=name, reason='Doctest target lacks native completed summary'))
+              native_passed = all(suite['status'] == 'passed' for suite in parsed['suites']) and not parsed['failures']
+              return dict(qualification_complete=not gaps, native_passed=native_passed, gaps=gaps, observed_suites=observed,
+                          doctest_limitation='Native summary observed only; compile-only discovery does not enumerate doctest case identities')
+
+          def permitted(phase, previous, output):
+              if any(not item.get('safe_to_continue', False) for item in previous.values()):
+                  return 'Prior phase missing or cleanup unqualified'
+              compiled = previous.get('compile', {}).get('cells', [])
+              if phase != 'compile' and phase != 'static':
+                  if not compiled or not (output / 'compiler.jsonl').is_file():
+                      return 'Native compiler result or artifacts missing'
+                  if phase != 'inventory' and not compiled[0].get('success', False):
+                      return 'Native compilation did not succeed; dependent test bodies blocked'
+              if phase in ['units', 'serial-vfr', 'serial-bitmap']:
+                  inventory = output / 'inventory' / 'inventory.json'
+                  if not previous.get('inventory', {}).get('success') or not inventory.is_file() or not read(inventory).get('discovery_complete'):
+                      return 'Native pre-execution inventory incomplete; dependent test bodies blocked'
+                  try:
+                      expected_runtime(phase, read(inventory))
+                  except (AssertionError, KeyError) as error:
+                      return str(error)
+                  for binary in read(inventory)['binaries']:
+                      executable = pathlib.Path(binary['executable'])
+                      with executable.open('rb') as stream:
+                          digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                      if digest != binary['sha256']:
+                          return 'Inventoried native binary changed before test bodies'
+              return None
+
+          def command(phase, output, previous):
+              if phase == 'compile':
+                  # Redirection stays inside the owned process group; bash preserves cargo's native exit.
+                  prefix = ['env', 'RUST_MIN_STACK=8388608'] if CELL == 'store-lineage' else []
+                  return ['bash', '-e', '-o', 'pipefail', '-c', shlex.join([*prefix, *NATIVE, '--no-run', '--message-format=json']) + ' > "$1/compiler.jsonl" 2> "$1/compiler.log"', 'compile', str(output)]
+              if phase == 'inventory':
+                  prefix = ['env', 'RUST_MIN_STACK=8388608'] if CELL == 'store-lineage' else []
+                  return [*prefix, 'python3', '-m', 'validation.baseline_rust_inventory', '--output', str(output / 'inventory'),
+                          '--artifacts', str(output / 'compiler.jsonl'), '--compiler-exit-code', str(previous['compile']['cells'][0]['returncode']),
+                          '--list-timeout', '10', '--', *NATIVE]
+              if phase == 'static':
+                  return ['make', 'fmt-check', 'spike-lock-check', 'lint', 'test-socket-permission-check']
+              if phase == 'units':
+                  return ['env', 'RUST_MIN_STACK=8388608', *LINEAGE, '--', '--test-threads=1'] if CELL == 'store-lineage' else NATIVE
+              return [*SERIAL, CASES[phase], '--', '--exact', '--ignored', '--test-threads=1']
+
+          def main(phase):
+              output = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+              context = read(output / 'source-context.json')
+              assert context['cell'] == CELL, 'Continuation cell differs from bound context'
+              observer = pathlib.Path(os.environ['PLURX_BASELINE_COMMANDS']).resolve()
+              provenance = read(output / 'observer-provenance.json')
+              assert not observer.is_relative_to(pathlib.Path.cwd().resolve())
+              assert hashlib.sha256(observer.read_bytes()).hexdigest() == provenance['blob_sha256']
+              api = runpy.run_path(str(observer))
+              actual = api['source_identity'](pathlib.Path.cwd())
+              assert all(actual[key] == context[key] for key in ['candidate_sha', 'candidate_tree'])
+              (output / ('source-' + phase + '.json')).write_text(json.dumps(actual, indent=2))
+              if phase == 'verdict':
+                  reports = [read(output / item / 'results.json') if (output / item / 'results.json').is_file() else {} for item in PHASES]
+                  return 0 if all(report.get('success') and report.get('safe_to_continue') for report in reports) else 1
+              assert phase in ALL_PHASES
+              destination = output / phase
+              destination.mkdir(exist_ok=True)
+              if phase not in PHASES:
+                  (destination / 'results.json').write_text(json.dumps(dict(selected=False, status='not_selected', success=False, safe_to_continue=True, cell=CELL)))
+                  return 0
+              previous = {item: read(output / item / 'results.json') if (output / item / 'results.json').is_file() else {}
+                          for item in PHASES[:PHASES.index(phase)]}
+              reason = permitted(phase, previous, output) if (output / 'toolchain-ready').is_file() else 'Original toolchain/setup not qualified'
+              if reason:
+                  unsafe = any(not item.get('safe_to_continue', False) for item in previous.values())
+                  report = dict(success=False, safe_to_continue=not unsafe, blocked_cells=[phase], cells=[], errors=[reason], source=actual)
+              else:
+                  manifest = dict(candidate_sha=context['candidate_sha'], candidate_tree=context['candidate_tree'],
+                                  cells=[dict(id=phase, argv=command(phase, output, previous), timeout_seconds=BUDGETS[phase])])
+                  path = destination / 'manifest.json'
+                  path.write_text(json.dumps(manifest, indent=2))
+                  report = api['run_manifest'](path, destination)
+                  report['safe_to_continue'] = safe(report)
+                  if phase in ['units', 'serial-vfr', 'serial-bitmap'] and report.get('cells'):
+                      try:
+                          evidence = runtime_evidence(phase, read(output / 'inventory' / 'inventory.json'), destination / report['cells'][0]['log'])
+                      except (OSError, ValueError, KeyError, AssertionError) as error:
+                          evidence = dict(qualification_complete=False, gaps=[str(error)])
+                      (destination / 'native-evidence.json').write_text(json.dumps(evidence, indent=2))
+                      report['qualification_complete'] = evidence['qualification_complete']
+                      report['qualification_gaps'] = evidence['gaps']
+                      report['success'] = report['success'] and evidence['qualification_complete'] and evidence['native_passed']
+              (destination / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
+              print(json.dumps(dict(phase=phase, success=report['success'], safe_to_continue=report['safe_to_continue'], errors=report['errors'])))
+              return 0 if report['success'] else 1
+
+          if __name__ == '__main__':
+              sys.exit(main(sys.argv[1]))
+          PYPHASE
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        timeout-minutes: 5
+        with:
+          components: rustfmt, clippy
+      - uses: ./.github/actions/rust-native-deps
+        timeout-minutes: 10
+        with:
+          desktop: "true"
+      - uses: ./.github/actions/ffmpeg
+        timeout-minutes: 5
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        timeout-minutes: 5
+        with:
+          lane: rust-gate
+      - name: Record pinned toolchain and runtime environment
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version | tee "$PLURX_BASELINE_DIR/rustc-version.txt" | grep -E '^rustc 1\.97\.1( |$)'
+          rustc -vV > "$PLURX_BASELINE_DIR/rustc-verbose.txt"
+          cargo --version > "$PLURX_BASELINE_DIR/cargo-version.txt"
+          ffmpeg -version > "$PLURX_BASELINE_DIR/ffmpeg-version.txt"
+          grep -E '^ffmpeg version (n)?8([. -]|$)' "$PLURX_BASELINE_DIR/ffmpeg-version.txt"
+          python3 --version > "$PLURX_BASELINE_DIR/python-version.txt"
+          uname -srm > "$PLURX_BASELINE_DIR/kernel.txt"
+          touch "$PLURX_BASELINE_DIR/toolchain-ready"
+      - name: Begin candidate-bound resource recording
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 -m validation.baseline_resources start --output "$PLURX_BASELINE_DIR/resources" --cell "rust-continuation-$CONTINUATION_CELL"
+      - name: Execute compile phase retaining original exit
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 151
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" compile
+      - name: Preserve compile evidence immediately
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-compile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute inventory phase retaining original exit
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 11
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" inventory
+      - name: Preserve inventory evidence immediately
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute static phase retaining original exit
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 21
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" static
+      - name: Preserve static evidence immediately
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-static-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute units phase retaining original exit
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 91
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" units
+      - name: Preserve units evidence immediately
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-units-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute serial-vfr phase retaining original exit
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 11
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" serial-vfr
+      - name: Preserve serial-vfr evidence immediately
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-serial-vfr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute serial-bitmap phase retaining original exit
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 11
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" serial-bitmap
+      - name: Preserve serial-bitmap evidence immediately
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-serial-bitmap-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve all original outcomes in final verdict
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        run: python3 "$PLURX_BASELINE_DIR/phase.py" verdict
+      - name: Finish candidate-bound resource recording
+        if: always() && steps.bind.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 -m validation.baseline_resources finish --output "$PLURX_BASELINE_DIR/resources"
+      - name: Preserve final continuation evidence
+        if: always() && steps.bind.outcome == 'success'
+        timeout-minutes: 1
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: rust-continuation-${{ inputs.cell }}-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-continuation-${{ inputs.cell }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        timeout-minutes: 2
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        timeout-minutes: 2
+        run: |
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
