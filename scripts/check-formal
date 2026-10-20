@@ -26,6 +26,7 @@ BOOTSTRAP = ROOT / "scripts/bootstrap-formal-toolchain"
 CONFIG_ORDER = (
     "smoke.cfg",
     "baseline.cfg",
+    "lifecycle.cfg",
     "control-binding-ignored.cfg",
     "control-replay-fresh-fence.cfg",
     "control-renewal-revives-cancel.cfg",
@@ -188,7 +189,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
 
     configs = mapping.get("configs")
     if not isinstance(configs, dict) or set(configs) != set(CONFIG_ORDER):
-        drift.append("mapping config set differs from the reviewed 15-config registry")
+        drift.append("mapping config set differs from the reviewed 16-config registry")
         configs = configs if isinstance(configs, dict) else {}
     for name in CONFIG_ORDER:
         record = configs.get(name)
@@ -902,7 +903,7 @@ def parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check-mapping", help="offline source and input drift check")
     check.add_argument("--affected-base", help="base commit for changed-path impact reporting")
     smoke = commands.add_parser("smoke", help="run the bounded smoke, recovery, and witness profile")
-    full = commands.add_parser("full", help="run all 15 mapped TLC configurations")
+    full = commands.add_parser("full", help="run all 16 mapped TLC configurations")
     for command, mode in ((smoke, "smoke"), (full, "full")):
         command.add_argument("--cache-dir", type=Path, default=ROOT / "target/formal-toolchain")
         command.add_argument("--output-dir", type=Path, default=ROOT / "target/verification/durable-jobs")

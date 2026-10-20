@@ -140,10 +140,12 @@ class TLCOutputClassificationTests(unittest.TestCase):
 
 class RegistryProfileTests(unittest.TestCase):
     def test_registry_profiles_are_explicit_and_bounded(self) -> None:
-        self.assertEqual(len(formal.CONFIG_ORDER), 15)
+        self.assertEqual(len(formal.CONFIG_ORDER), 16)
         self.assertEqual(len(formal.SMOKE_CONFIGS), 9)
         self.assertEqual(formal.select_configs("smoke", None), list(formal.SMOKE_CONFIGS))
         self.assertEqual(formal.select_configs("full", None), list(formal.CONFIG_ORDER))
+        self.assertIn("lifecycle.cfg", formal.select_configs("full", None))
+        self.assertNotIn("lifecycle.cfg", formal.select_configs("smoke", None))
         self.assertEqual(formal.select_configs("smoke", "control-bind-before-work.cfg"), ["control-bind-before-work.cfg"])
         self.assertEqual(formal.config_timeout("smoke", "smoke.cfg", 60, 170), 60)
         self.assertEqual(formal.config_timeout("smoke", "recovery.cfg", 900, 170), 30)
