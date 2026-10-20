@@ -16,10 +16,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- macOS source installation now installs and opens the complete menu-bar companion,
-  including its local controller, instead of updating only the daemon. Existing
-  server running and startup choices are preserved.
+- Native GUI source and binary installation now installs and opens the complete
+  tray companion and local controller instead of updating only the daemon.
+  Existing server running and startup choices are preserved.
 
+- Converted Profile 7 catalog starts can qualify reconstructed Profile 8.1 under FEL re-encode independently of the HDR-processing switch. The service carries an explicit processed destination on a finite PQ transcode, resolves its own encoded AAC audio, and checks the completed stream against one matching Main10/Profile 8 client capability entry. Native Dolby Vision copying is unchanged; refusals retain their reason and only the saved ordinary request can be a fallback. Remote descriptors retain the destination but do not acquire local execution authority.
 - Browser startup keeps the requested transport intent when a decoder emits an unexplained pause before the current attachment presents. The original startup deadline remains active, and rejected Play calls retain their cause in diagnostics. Closing during a prepared quality switch drains both session handles through rollback and pending commit acceptance, including after the old decoder retires.
 - Closing an HDR10-E session preserves intentional cancellation through the processing helper and generation owner, so normal cleanup cannot blacklist the backend for the next play. Failed web session releases and failed quality recovery now retain diagnostics under the originating session without marking a replacement playback failed.
 - Web Auto keeps the current HDR10-E recipe through a matching quality-catalog refresh instead of requesting an ordinary HDR10 replacement. Leaving or reloading the page also releases its playback sessions immediately, so abandoned sessions do not hold processing capacity until the idle timeout.

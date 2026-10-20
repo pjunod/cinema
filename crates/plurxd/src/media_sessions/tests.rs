@@ -315,6 +315,7 @@ pub(super) fn valid_start_request() -> RemoteStartRequest {
         typeless_playlist: true,
         library_channel: None,
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -1619,6 +1620,7 @@ fn a_route_the_takeover_path_can_never_accept_is_unrecoverable() {
     let mut vod = base.clone();
     vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
@@ -1775,6 +1777,7 @@ fn the_takeover_recipe_validator_refuses_vod() {
 
     let vod = RemoteStartRequest {
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,

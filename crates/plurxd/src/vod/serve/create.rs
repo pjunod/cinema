@@ -2999,6 +2999,7 @@ mod principal_demand_tests {
             finite_bitrate_limit_bps: None,
             audio_claim: None,
             audio_delivery: None,
+            dv_processing_destination: None,
             sdr_master_codecs: None,
         };
         let initial_cap = serve.shared.pool.global_cap();

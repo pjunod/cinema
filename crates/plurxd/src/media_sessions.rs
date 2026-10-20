@@ -1447,7 +1447,7 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 }
 
 fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
-    request
+    request.dv_processing_route().is_ok() && request
         .continuous_media
         .as_ref()
         .is_none_or(|media| media.valid_for(request))
@@ -1477,7 +1477,8 @@ fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) 
         && (-15_000..=15_000).contains(&request.audio_offset_ms)
         && match &request.kind {
             SessionKind::Transcode { height } => {
-                (crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(height)
+                let minimum = if request.dv_processing_destination.is_some() { 32 } else { crate::transcode::MIN_HEIGHT };
+                (minimum..=crate::transcode::MAX_HEIGHT).contains(height)
             }
             SessionKind::Copy { .. } => true,
         }
@@ -6368,6 +6369,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         },
         typeless_playlist: true,
         request: SessionRequest {
+            dv_processing_destination: None,
             sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
