@@ -153,6 +153,26 @@ class RegistryProfileTests(unittest.TestCase):
         with self.assertRaises(formal.RunnerError):
             formal.select_configs("smoke", "witness-time-advance.cfg")
 
+    def test_abandoned_feasibility_attempt_stays_non_qualifying(self) -> None:
+        attempt = {
+            "config_file": "baseline-abandoned10.cfg",
+            "config_sha256": "a" * 64,
+            "model_sha256": "b" * 64,
+            "status": "incomplete",
+            "qualifying": False,
+            "wall_seconds": 647.03,
+            "metrics": {
+                "generated": 97_640_975,
+                "distinct": 12_616_232,
+                "queued": 7_137_143,
+                "depth": 9,
+                "child_maxrss_bytes": 4_514_365_440,
+            },
+        }
+        self.assertEqual(formal.validate_feasibility_attempts([attempt]), [])
+        attempt["qualifying"] = True
+        self.assertTrue(formal.validate_feasibility_attempts([attempt]))
+
 
 class ConfigContractParsingTests(unittest.TestCase):
     def test_bounds_accept_homogeneous_string_and_numeric_sets(self) -> None:

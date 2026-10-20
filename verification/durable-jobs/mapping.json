@@ -591,90 +591,8 @@
     "review_basis": "author source correspondence confirmed against CONTRACT at 85895bb46; independent adversarial review pending"
   },
   "configs": {
-    "smoke.cfg": {
-      "sha256": "ef4b435de5a589799a6e8a21d1541fa4674be6a91e2bba3f3c74e48a4c650c6e",
-      "verdict": "pass",
-      "expected_error": null,
-      "expected_exit": 0,
-      "expected_error_match": null,
-      "timeout_seconds": 60,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "Jobs": [
-            "j1"
-          ],
-          "Workers": [
-            "w1",
-            "w2"
-          ],
-          "ResourceKeys": [
-            "r1",
-            "r2"
-          ],
-          "MaxEvents": 6,
-          "MaxBoots": 2,
-          "MaxClaims": 2,
-          "Backend": [
-            "hiqlite"
-          ],
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "fresh"
-          ],
-          "Fragment": [
-            "all"
-          ],
-          "sample_values": [
-            0,
-            1,
-            2,
-            3
-          ],
-          "queue_lease_ms": 1,
-          "domain_ttl_ms": 2,
-          "publication_ttl_ms": 3,
-          "resolution_window_ms": 2,
-          "yield_delay_ms": 2,
-          "failure_delay_ms": 3,
-          "resource_slots_per_key": 2,
-          "max_submissions": 4,
-          "max_fence": 5,
-          "max_revision": 8,
-          "max_expiry": 8,
-          "reduced_prune_newer_finished_threshold": 1,
-          "reduced_attempt_pressure": 2
-        },
-        "properties": [
-          "S0_TypeAndIdentity",
-          "S1_ExclusiveCurrentAttempt",
-          "S2_PublicationAuthority",
-          "S3_Displacement",
-          "S4_ReplayStability",
-          "S5_CancellationPrecedence",
-          "S6_BindingContinuity",
-          "S7_RejectionPreservesCatalogue"
-        ],
-        "reductions": [
-          "SYMMETRY Symm",
-          "VIEW ModelView"
-        ],
-        "assumptions": [
-          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
-          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
-          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
-          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
-          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
-        ]
-      },
-      "purpose": "safety",
-      "minimum_trace_states": null
-    },
     "baseline.cfg": {
-      "sha256": "cf479cb7a8f05e979d29da13cf17c94e31bce504841fef89b37f5a00ed38d882",
+      "sha256": "1d8bfbc36ba3f14f6ac0c333e5c425db456afaeaeddeca8f0faaf52a6ff17320",
       "verdict": "pass",
       "expected_error": null,
       "expected_exit": 0,
@@ -695,7 +613,7 @@
             "r1",
             "r2"
           ],
-          "MaxEvents": 10,
+          "MaxEvents": 8,
           "MaxBoots": 2,
           "MaxClaims": 3,
           "Backend": [
@@ -755,6 +673,86 @@
       },
       "purpose": "safety",
       "minimum_trace_states": null
+    },
+    "control-bind-before-work.cfg": {
+      "sha256": "3613c439ec663e732715e3c209f1294ecea26b5f96d1523bd492921cf840cc03",
+      "verdict": "violation",
+      "expected_error": "S2_PublicationAuthority",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant S2_PublicationAuthority is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "binding_ignored"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "binding"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S2_PublicationAuthority"
+        ],
+        "reductions": [
+          "SYMMETRY Symm"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
     },
     "control-binding-ignored.cfg": {
       "sha256": "768b6aee82088dc09133f141b1fcd755288d3966a9063d08641560b5a49755ea",
@@ -820,86 +818,6 @@
         },
         "properties": [
           "S2_PublicationAuthority"
-        ],
-        "reductions": [
-          "SYMMETRY Symm"
-        ],
-        "assumptions": [
-          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
-          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
-          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
-          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
-          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
-        ]
-      },
-      "purpose": "defect_control",
-      "minimum_trace_states": 2
-    },
-    "control-replay-fresh-fence.cfg": {
-      "sha256": "24ff90e7697e591b34a80f00144519dbee98d16a1cad170638af75a48fc85ce3",
-      "verdict": "violation",
-      "expected_error": "S4_ReplayStability",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant S4_ReplayStability is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "timeout_seconds": 900,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "Jobs": [
-            "j1"
-          ],
-          "Workers": [
-            "w1",
-            "w2"
-          ],
-          "ResourceKeys": [
-            "r1",
-            "r2"
-          ],
-          "MaxEvents": 6,
-          "MaxBoots": 2,
-          "MaxClaims": 2,
-          "Backend": [
-            "hiqlite"
-          ],
-          "Mutation": [
-            "replay_fresh_fence"
-          ],
-          "Scenario": [
-            "fresh"
-          ],
-          "Fragment": [
-            "claim"
-          ],
-          "sample_values": [
-            0,
-            1,
-            2,
-            3
-          ],
-          "queue_lease_ms": 1,
-          "domain_ttl_ms": 2,
-          "publication_ttl_ms": 3,
-          "resolution_window_ms": 2,
-          "yield_delay_ms": 2,
-          "failure_delay_ms": 3,
-          "resource_slots_per_key": 2,
-          "max_submissions": 4,
-          "max_fence": 5,
-          "max_revision": 8,
-          "max_expiry": 8,
-          "reduced_prune_newer_finished_threshold": 1,
-          "reduced_attempt_pressure": 2
-        },
-        "properties": [
-          "S4_ReplayStability"
         ],
         "reductions": [
           "SYMMETRY Symm"
@@ -996,12 +914,18 @@
       "purpose": "defect_control",
       "minimum_trace_states": 2
     },
-    "recovery.cfg": {
-      "sha256": "a5c659bc058f88f55239737b31266de9adada3abf445a1bfbbff5ed31b5b4ebb",
-      "verdict": "pass",
-      "expected_error": null,
-      "expected_exit": 0,
-      "expected_error_match": null,
+    "control-replay-fresh-fence.cfg": {
+      "sha256": "24ff90e7697e591b34a80f00144519dbee98d16a1cad170638af75a48fc85ce3",
+      "verdict": "violation",
+      "expected_error": "S4_ReplayStability",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant S4_ReplayStability is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
       "timeout_seconds": 900,
       "analysis": {
         "status": "reviewed",
@@ -1017,20 +941,20 @@
             "r1",
             "r2"
           ],
-          "MaxEvents": 0,
+          "MaxEvents": 6,
           "MaxBoots": 2,
           "MaxClaims": 2,
           "Backend": [
             "hiqlite"
           ],
           "Mutation": [
-            "none"
+            "replay_fresh_fence"
           ],
           "Scenario": [
-            "recovery"
+            "fresh"
           ],
           "Fragment": [
-            "all"
+            "claim"
           ],
           "sample_values": [
             0,
@@ -1053,20 +977,22 @@
           "reduced_attempt_pressure": 2
         },
         "properties": [
-          "L1_FreshClaimEventually"
+          "S4_ReplayStability"
         ],
-        "reductions": [],
+        "reductions": [
+          "SYMMETRY Symm"
+        ],
         "assumptions": [
           "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
           "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
           "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "stable demand, capable surviving boot2, reachable quorum and available resources",
-          "no new cancellation/removal/compaction/outage; initial not_before yield2 or failure3",
-          "WF on concrete tick/poll/retry/send/apply/ack/old reply; fresh claim2 reserved; no event horizon, view or symmetry"
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
         ]
       },
-      "purpose": "liveness",
-      "minimum_trace_states": null
+      "purpose": "defect_control",
+      "minimum_trace_states": 2
     },
     "control-retry-stalls.cfg": {
       "sha256": "cf1806db353558b1a27fb4266806ce6c2d542a0d7a71c894f46f9b3e92222531",
@@ -1146,20 +1072,410 @@
       "purpose": "defect_control",
       "minimum_trace_states": 2
     },
-    "witness-three-samples.cfg": {
-      "sha256": "fa4d0a9e4802e1ed82a71e6794e53dc1489a2f4e2d639acb5b6ed7b07d60192e",
+    "lifecycle.cfg": {
+      "sha256": "68af204cc5337a6c2d0352f8c8fe248f26d7e83e0be9d01bab11205066369dd9",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 11,
+          "MaxBoots": 2,
+          "MaxClaims": 3,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "claim"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S0_TypeAndIdentity",
+          "S1_ExclusiveCurrentAttempt",
+          "S2_PublicationAuthority",
+          "S3_Displacement",
+          "S4_ReplayStability",
+          "S5_CancellationPrecedence",
+          "S6_BindingContinuity",
+          "S7_RejectionPreservesCatalogue"
+        ],
+        "reductions": [
+          "SYMMETRY Symm",
+          "VIEW ModelView"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "safety",
+      "minimum_trace_states": null
+    },
+    "recovery.cfg": {
+      "sha256": "a5c659bc058f88f55239737b31266de9adada3abf445a1bfbbff5ed31b5b4ebb",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 900,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 0,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "recovery"
+          ],
+          "Fragment": [
+            "all"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "L1_FreshClaimEventually"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "stable demand, capable surviving boot2, reachable quorum and available resources",
+          "no new cancellation/removal/compaction/outage; initial not_before yield2 or failure3",
+          "WF on concrete tick/poll/retry/send/apply/ack/old reply; fresh claim2 reserved; no event horizon, view or symmetry"
+        ]
+      },
+      "purpose": "liveness",
+      "minimum_trace_states": null
+    },
+    "smoke.cfg": {
+      "sha256": "ef4b435de5a589799a6e8a21d1541fa4674be6a91e2bba3f3c74e48a4c650c6e",
+      "verdict": "pass",
+      "expected_error": null,
+      "expected_exit": 0,
+      "expected_error_match": null,
+      "timeout_seconds": 60,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 6,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "all"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "S0_TypeAndIdentity",
+          "S1_ExclusiveCurrentAttempt",
+          "S2_PublicationAuthority",
+          "S3_Displacement",
+          "S4_ReplayStability",
+          "S5_CancellationPrecedence",
+          "S6_BindingContinuity",
+          "S7_RejectionPreservesCatalogue"
+        ],
+        "reductions": [
+          "SYMMETRY Symm",
+          "VIEW ModelView"
+        ],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "safety",
+      "minimum_trace_states": null
+    },
+    "witness-bind-refusal.cfg": {
+      "sha256": "e6cad2d04b786a0a213705aa9bba1545c858ac1fc95bbcfb4f1e36b26d7ec57f",
       "verdict": "witness",
-      "purpose": "reachability_witness",
-      "expected_error": "Witness_ThreeSamples",
+      "expected_error": "Witness_BindRefusal",
       "expected_exit": 12,
       "expected_error_match": {
-        "line": "Invariant Witness_ThreeSamples is violated.",
+        "line": "Invariant Witness_BindRefusal is violated.",
         "attribution": "named_property",
         "allowed_error_lines": [
           "The behavior up to this point is:"
         ]
       },
-      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "binding"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_BindRefusal"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-cancelled-renewal.cfg": {
+      "sha256": "426c141c0a352aa8ec1dfc75613a3431ea3a912d2707db3e468e6c06fdafda5a",
+      "verdict": "witness",
+      "expected_error": "Witness_CancelledRenewal",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_CancelledRenewal is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "renewal"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_CancelledRenewal"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-displacement.cfg": {
+      "sha256": "0b34cffea44b81d33a2f32f6b1fde52eb74324ae5e6c4844ffb92396abe56979",
+      "verdict": "witness",
+      "expected_error": "Witness_Displacement",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_Displacement is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
       "timeout_seconds": 30,
       "analysis": {
         "status": "reviewed",
@@ -1211,11 +1527,9 @@
           "reduced_attempt_pressure": 2
         },
         "properties": [
-          "Witness_ThreeSamples"
+          "Witness_Displacement"
         ],
-        "reductions": [
-          "CONSTRAINT PublicationWitnessBound"
-        ],
+        "reductions": [],
         "assumptions": [
           "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
           "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
@@ -1224,12 +1538,13 @@
           "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
           "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
         ]
-      }
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
     },
     "witness-four-submissions.cfg": {
       "sha256": "08cb8ef8f691bb78bbb6b8682bf457f1f8999e097d0ae0ce08ab7dd7ae2db382",
       "verdict": "witness",
-      "purpose": "reachability_witness",
       "expected_error": "Witness_FourSubmissions",
       "expected_exit": 12,
       "expected_error_match": {
@@ -1239,7 +1554,6 @@
           "The behavior up to this point is:"
         ]
       },
-      "minimum_trace_states": 2,
       "timeout_seconds": 30,
       "analysis": {
         "status": "reviewed",
@@ -1304,246 +1618,13 @@
           "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
           "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
         ]
-      }
-    },
-    "witness-cancelled-renewal.cfg": {
-      "sha256": "426c141c0a352aa8ec1dfc75613a3431ea3a912d2707db3e468e6c06fdafda5a",
-      "verdict": "witness",
-      "purpose": "reachability_witness",
-      "expected_error": "Witness_CancelledRenewal",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant Witness_CancelledRenewal is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
       },
-      "minimum_trace_states": 2,
-      "timeout_seconds": 30,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "Jobs": [
-            "j1"
-          ],
-          "Workers": [
-            "w1",
-            "w2"
-          ],
-          "ResourceKeys": [
-            "r1",
-            "r2"
-          ],
-          "MaxEvents": 16,
-          "MaxBoots": 2,
-          "MaxClaims": 2,
-          "Backend": [
-            "hiqlite"
-          ],
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "fresh"
-          ],
-          "Fragment": [
-            "renewal"
-          ],
-          "sample_values": [
-            0,
-            1,
-            2,
-            3
-          ],
-          "queue_lease_ms": 1,
-          "domain_ttl_ms": 2,
-          "publication_ttl_ms": 3,
-          "resolution_window_ms": 2,
-          "yield_delay_ms": 2,
-          "failure_delay_ms": 3,
-          "resource_slots_per_key": 2,
-          "max_submissions": 4,
-          "max_fence": 5,
-          "max_revision": 8,
-          "max_expiry": 8,
-          "reduced_prune_newer_finished_threshold": 1,
-          "reduced_attempt_pressure": 2
-        },
-        "properties": [
-          "Witness_CancelledRenewal"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
-          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
-          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
-          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
-          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
-        ]
-      }
-    },
-    "witness-replay.cfg": {
-      "sha256": "a393ca62a38e9c24ba51d459d32bd5de99b36f2d3d030e4930628eaebefc3c8e",
-      "verdict": "witness",
       "purpose": "reachability_witness",
-      "expected_error": "Witness_Replay",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant Witness_Replay is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "minimum_trace_states": 2,
-      "timeout_seconds": 30,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "Jobs": [
-            "j1"
-          ],
-          "Workers": [
-            "w1",
-            "w2"
-          ],
-          "ResourceKeys": [
-            "r1",
-            "r2"
-          ],
-          "MaxEvents": 16,
-          "MaxBoots": 2,
-          "MaxClaims": 2,
-          "Backend": [
-            "hiqlite"
-          ],
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "fresh"
-          ],
-          "Fragment": [
-            "claim"
-          ],
-          "sample_values": [
-            0,
-            1,
-            2,
-            3
-          ],
-          "queue_lease_ms": 1,
-          "domain_ttl_ms": 2,
-          "publication_ttl_ms": 3,
-          "resolution_window_ms": 2,
-          "yield_delay_ms": 2,
-          "failure_delay_ms": 3,
-          "resource_slots_per_key": 2,
-          "max_submissions": 4,
-          "max_fence": 5,
-          "max_revision": 8,
-          "max_expiry": 8,
-          "reduced_prune_newer_finished_threshold": 1,
-          "reduced_attempt_pressure": 2
-        },
-        "properties": [
-          "Witness_Replay"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
-          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
-          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
-          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
-          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
-        ]
-      }
-    },
-    "witness-bind-refusal.cfg": {
-      "sha256": "e6cad2d04b786a0a213705aa9bba1545c858ac1fc95bbcfb4f1e36b26d7ec57f",
-      "verdict": "witness",
-      "purpose": "reachability_witness",
-      "expected_error": "Witness_BindRefusal",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant Witness_BindRefusal is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "minimum_trace_states": 2,
-      "timeout_seconds": 30,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "Jobs": [
-            "j1"
-          ],
-          "Workers": [
-            "w1",
-            "w2"
-          ],
-          "ResourceKeys": [
-            "r1",
-            "r2"
-          ],
-          "MaxEvents": 16,
-          "MaxBoots": 2,
-          "MaxClaims": 2,
-          "Backend": [
-            "hiqlite"
-          ],
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "fresh"
-          ],
-          "Fragment": [
-            "binding"
-          ],
-          "sample_values": [
-            0,
-            1,
-            2,
-            3
-          ],
-          "queue_lease_ms": 1,
-          "domain_ttl_ms": 2,
-          "publication_ttl_ms": 3,
-          "resolution_window_ms": 2,
-          "yield_delay_ms": 2,
-          "failure_delay_ms": 3,
-          "resource_slots_per_key": 2,
-          "max_submissions": 4,
-          "max_fence": 5,
-          "max_revision": 8,
-          "max_expiry": 8,
-          "reduced_prune_newer_finished_threshold": 1,
-          "reduced_attempt_pressure": 2
-        },
-        "properties": [
-          "Witness_BindRefusal"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
-          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
-          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
-          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
-          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
-        ]
-      }
+      "minimum_trace_states": 2
     },
     "witness-precommit-rollback.cfg": {
       "sha256": "f85c45f98cc6531954ba27073c5587acbac0a0cdbc38c8677571abf1da3b65c3",
       "verdict": "witness",
-      "purpose": "reachability_witness",
       "expected_error": "Witness_PrecommitRollback",
       "expected_exit": 12,
       "expected_error_match": {
@@ -1553,7 +1634,6 @@
           "The behavior up to this point is:"
         ]
       },
-      "minimum_trace_states": 2,
       "timeout_seconds": 30,
       "analysis": {
         "status": "reviewed",
@@ -1618,22 +1698,100 @@
           "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
           "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
         ]
-      }
-    },
-    "witness-displacement.cfg": {
-      "sha256": "0b34cffea44b81d33a2f32f6b1fde52eb74324ae5e6c4844ffb92396abe56979",
-      "verdict": "witness",
+      },
       "purpose": "reachability_witness",
-      "expected_error": "Witness_Displacement",
+      "minimum_trace_states": 2
+    },
+    "witness-replay.cfg": {
+      "sha256": "a393ca62a38e9c24ba51d459d32bd5de99b36f2d3d030e4930628eaebefc3c8e",
+      "verdict": "witness",
+      "expected_error": "Witness_Replay",
       "expected_exit": 12,
       "expected_error_match": {
-        "line": "Invariant Witness_Displacement is violated.",
+        "line": "Invariant Witness_Replay is violated.",
         "attribution": "named_property",
         "allowed_error_lines": [
           "The behavior up to this point is:"
         ]
       },
-      "minimum_trace_states": 2,
+      "timeout_seconds": 30,
+      "analysis": {
+        "status": "reviewed",
+        "bounds": {
+          "Jobs": [
+            "j1"
+          ],
+          "Workers": [
+            "w1",
+            "w2"
+          ],
+          "ResourceKeys": [
+            "r1",
+            "r2"
+          ],
+          "MaxEvents": 16,
+          "MaxBoots": 2,
+          "MaxClaims": 2,
+          "Backend": [
+            "hiqlite"
+          ],
+          "Mutation": [
+            "none"
+          ],
+          "Scenario": [
+            "fresh"
+          ],
+          "Fragment": [
+            "claim"
+          ],
+          "sample_values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "queue_lease_ms": 1,
+          "domain_ttl_ms": 2,
+          "publication_ttl_ms": 3,
+          "resolution_window_ms": 2,
+          "yield_delay_ms": 2,
+          "failure_delay_ms": 3,
+          "resource_slots_per_key": 2,
+          "max_submissions": 4,
+          "max_fence": 5,
+          "max_revision": 8,
+          "max_expiry": 8,
+          "reduced_prune_newer_finished_threshold": 1,
+          "reduced_attempt_pressure": 2
+        },
+        "properties": [
+          "Witness_Replay"
+        ],
+        "reductions": [],
+        "assumptions": [
+          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
+          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
+          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
+          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
+          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
+          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
+        ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    },
+    "witness-three-samples.cfg": {
+      "sha256": "fa4d0a9e4802e1ed82a71e6794e53dc1489a2f4e2d639acb5b6ed7b07d60192e",
+      "verdict": "witness",
+      "expected_error": "Witness_ThreeSamples",
+      "expected_exit": 12,
+      "expected_error_match": {
+        "line": "Invariant Witness_ThreeSamples is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": [
+          "The behavior up to this point is:"
+        ]
+      },
       "timeout_seconds": 30,
       "analysis": {
         "status": "reviewed",
@@ -1685,88 +1843,10 @@
           "reduced_attempt_pressure": 2
         },
         "properties": [
-          "Witness_Displacement"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
-          "valid selected library_scan/metadata_refresh payloads and sufficient remaining job-attempt budget",
-          "finite identities never recycle; revisions strictly increase; deleted jobs never re-admit",
-          "arbitrary independent absolute samples0..3; no fairness or monotonic-clock premise",
-          "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
-          "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
-        ]
-      }
-    },
-    "control-bind-before-work.cfg": {
-      "sha256": "3613c439ec663e732715e3c209f1294ecea26b5f96d1523bd492921cf840cc03",
-      "verdict": "violation",
-      "purpose": "defect_control",
-      "expected_error": "S2_PublicationAuthority",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant S2_PublicationAuthority is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "minimum_trace_states": 2,
-      "timeout_seconds": 900,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "Jobs": [
-            "j1"
-          ],
-          "Workers": [
-            "w1",
-            "w2"
-          ],
-          "ResourceKeys": [
-            "r1",
-            "r2"
-          ],
-          "MaxEvents": 6,
-          "MaxBoots": 2,
-          "MaxClaims": 2,
-          "Backend": [
-            "hiqlite"
-          ],
-          "Mutation": [
-            "binding_ignored"
-          ],
-          "Scenario": [
-            "fresh"
-          ],
-          "Fragment": [
-            "binding"
-          ],
-          "sample_values": [
-            0,
-            1,
-            2,
-            3
-          ],
-          "queue_lease_ms": 1,
-          "domain_ttl_ms": 2,
-          "publication_ttl_ms": 3,
-          "resolution_window_ms": 2,
-          "yield_delay_ms": 2,
-          "failure_delay_ms": 3,
-          "resource_slots_per_key": 2,
-          "max_submissions": 4,
-          "max_fence": 5,
-          "max_revision": 8,
-          "max_expiry": 8,
-          "reduced_prune_newer_finished_threshold": 1,
-          "reduced_attempt_pressure": 2
-        },
-        "properties": [
-          "S2_PublicationAuthority"
+          "Witness_ThreeSamples"
         ],
         "reductions": [
-          "SYMMETRY Symm"
+          "CONSTRAINT PublicationWitnessBound"
         ],
         "assumptions": [
           "one serialized durable authority; atomic transaction rollback and statement-zero output binding",
@@ -1776,7 +1856,28 @@
           "one queue renewal, one domain change, one environment displacement, one facade call with at most4 submissions",
           "finite top-level event horizon; all seeds share SafetyNext; -deadlock disables finite-boundary deadlock checking"
         ]
+      },
+      "purpose": "reachability_witness",
+      "minimum_trace_states": 2
+    }
+  },
+  "feasibility_attempts": [
+    {
+      "config_file": "baseline-abandoned10.cfg",
+      "config_sha256": "cf479cb7a8f05e979d29da13cf17c94e31bce504841fef89b37f5a00ed38d882",
+      "model_sha256": "96d4e49281e562d43b412acd7c307afa7202b11763c24e511ad90cc3fd99bbaa",
+      "status": "incomplete",
+      "qualifying": false,
+      "reason": "abandoned after finite coverage revision; incomplete development attempt is not safety evidence",
+      "wall_seconds": 647.03,
+      "exit": -9,
+      "metrics": {
+        "generated": 97640975,
+        "distinct": 12616232,
+        "queued": 7137143,
+        "depth": 9,
+        "child_maxrss_bytes": 4514365440
       }
     }
-  }
+  ]
 }

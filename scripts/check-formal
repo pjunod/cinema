@@ -90,6 +90,40 @@ def valid_bound(value: Any) -> bool:
     return valid_numbers and len(set(value)) == len(value)
 
 
+def validate_feasibility_attempts(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return ["non-qualifying feasibility attempts must be a list"]
+    problems: list[str] = []
+    for index, attempt in enumerate(value):
+        prefix = f"feasibility attempt {index}"
+        if not isinstance(attempt, dict):
+            problems.append(f"{prefix} must be an object")
+            continue
+        if attempt.get("status") != "incomplete" or attempt.get("qualifying") is not False:
+            problems.append(f"{prefix} must remain explicitly incomplete and non-qualifying")
+        if not all(
+            isinstance(attempt.get(field), str)
+            and re.fullmatch(r"[0-9a-f]{64}", attempt[field])
+            for field in ("model_sha256", "config_sha256")
+        ):
+            problems.append(f"{prefix} must identify exact model and archived config hashes")
+        artifact = attempt.get("config_file")
+        if not isinstance(artifact, str) or not artifact.endswith(".cfg") or Path(artifact).is_absolute():
+            problems.append(f"{prefix} must use a portable archived config filename")
+        metrics = attempt.get("metrics")
+        if not isinstance(metrics, dict) or any(
+            isinstance(metrics.get(field), bool)
+            or not isinstance(metrics.get(field), int)
+            or metrics[field] < 0
+            for field in ("generated", "distinct", "queued", "depth", "child_maxrss_bytes")
+        ):
+            problems.append(f"{prefix} must preserve nonnegative observed incomplete metrics")
+        elapsed = attempt.get("wall_seconds")
+        if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed <= 0:
+            problems.append(f"{prefix} must preserve its positive elapsed time")
+    return problems
+
+
 def parse_config_contract(config_text: str) -> tuple[set[str], list[str]]:
     """Read declared properties and explicit config-level reductions fail-closed."""
     properties: set[str] = set()
@@ -171,6 +205,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     """Return drift diagnostics and the exact reviewed hashes used by the check."""
     drift: list[str] = []
     hashes: dict[str, str] = {}
+    drift.extend(validate_feasibility_attempts(mapping.get("feasibility_attempts", [])))
     model = mapping.get("model_file")
     if not isinstance(model, str):
         drift.append("mapping has no model_file")
