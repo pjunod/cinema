@@ -12,19 +12,20 @@ stops when the Mac sleeps — are covered under [Keeping it up](#keeping-it-up).
 
 ## 1. Prerequisites
 
-Each of these is a one-time step. Skip any you already have.
+Install Apple's command line tools once. Skip this if you already have them.
 
 ```sh
 # Apple's compiler and git (the build compiles a little C)
 xcode-select --install
-
-# Homebrew — the installer puts plurxd in its prefix (no sudo on Apple Silicon)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Rust. rustup reads rust-toolchain.toml and fetches the pinned version itself
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
 ```
+
+`make install-macos` reuses an installed rustup and installs the exact Rust
+version in [`rust-toolchain.toml`](../rust-toolchain.toml) if it is missing.
+If rustup is missing, it installs rustup through Homebrew, installing Homebrew
+first if needed. Homebrew's installer may request your administrator password.
+Existing rustup and standard Homebrew installations are found even when absent
+from `PATH`; a separate Homebrew Rust compiler can remain installed.
+With the pinned toolchain already installed, this step needs no download.
 
 You do not install ffmpeg yourself. The installer fetches the exact build
 plurx needs — see [the media engine](#the-media-engine-jellyfin-ffmpeg-813-1).
@@ -39,8 +40,9 @@ make install-macos
 
 That one command:
 
-1. builds `plurxd`, the local controller helpers and the native Swift menu-bar
-   app with the pinned Rust toolchain and Xcode command line tools;
+1. prepares the pinned Rust toolchain, then builds `plurxd`, the local
+   controller helpers and the native Swift menu-bar app with Xcode command
+   line tools;
 2. verifies the pinned Jellyfin FFmpeg, WebAssembly source parser and subtitle
    engine, and stages their complete runtime before changing the service;
 3. installs the per-user native runtime under
