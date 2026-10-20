@@ -1574,6 +1574,30 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--dry-run", result.stdout)
         self.assertIn("--allow-unknown", result.stdout)
 
+    def test_ship_physical_preserves_adb_serials_with_spaces(self):
+        script = read("scripts/ship-physical")
+        parser = re.search(r'SERIALS="\$\("\$ADB" devices \| (awk [^\n]+)\)"', script)
+        self.assertIsNotNone(parser)
+        self.assertIn("while IFS= read -r serial", script)
+
+        devices = (
+            "List of devices attached\n"
+            "adb-device (2)._adb-tls-connect._tcp\tdevice\n"
+            "offline-device\toffline\n"
+            "plain-device\tdevice\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", parser.group(1)],
+            input=devices,
+            text=True,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["adb-device (2)._adb-tls-connect._tcp", "plain-device"],
+        )
+
     def test_apple_developer_team_is_injected_instead_of_tracked(self):
         script = read("scripts/ship-physical")
         project = read("clients/apple/project.yml")
