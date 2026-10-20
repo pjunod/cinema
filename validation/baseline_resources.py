@@ -19,6 +19,7 @@ import uuid
 
 INTERVAL = 5.0
 MAX_PIDS = 8192
+UNSUPPORTED_PLATFORM_REASON = 'Linux cgroup sampler unavailable on this platform'
 ALLOWED_ENV = (
     'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB',
     'GITHUB_EVENT_NAME', 'FORGEJO_SHA', 'FORGEJO_RUN_ID', 'FORGEJO_JOB',
@@ -293,7 +294,7 @@ def start(output, cell, execution_scope='current-job'):
         return
     if sys.platform != 'linux':
         write_json(output / 'metadata.json', metadata(cell, execution_scope))
-        incomplete(output, 'Linux cgroup sampler unavailable on this platform')
+        incomplete(output, UNSUPPORTED_PLATFORM_REASON)
         return
     token = uuid.uuid4().hex
     write_json(output / 'metadata.json', metadata(cell, execution_scope))
@@ -375,6 +376,7 @@ def sample(output, token):
 def finish(output):
     output.mkdir(parents=True, exist_ok=True)
     raw_metadata = read(output / 'metadata.json')
+    final_metadata = {}
     if raw_metadata is not None:
         final_metadata = json.loads(raw_metadata)
         final_metadata['finished_at'] = now()
@@ -385,6 +387,14 @@ def finish(output):
         write_json(output / 'metadata.json', final_metadata)
     raw = read(output / 'state.json')
     if raw is None:
+        # Non-Linux start intentionally creates no sampler state. Preserve its
+        # original unavailable receipt, including its timestamp, rather than
+        # relabeling that expected platform limitation as a startup failure.
+        marker = read(output / 'telemetry-incomplete.json')
+        if (final_metadata.get('platform') not in (None, 'linux') and marker is not None
+                and final_metadata.get('actual_test_resources', {}).get('available') is False
+                and json.loads(marker).get('reason') == UNSUPPORTED_PLATFORM_REASON):
+            return
         incomplete(output, 'sampler state missing; start did not complete')
         return
     state = json.loads(raw)

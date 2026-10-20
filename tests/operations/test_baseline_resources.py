@@ -133,9 +133,18 @@ class BaselineResourceTests(unittest.TestCase):
     def test_unsupported_platform_preserves_wall_window_and_explicit_unavailable_resources(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.object(resources, 'command_value', return_value='version-or-sha'):
+            with patch.object(resources, 'command_value', return_value='version-or-sha'), \
+                 patch.object(resources.subprocess, 'Popen') as spawn, patch.object(resources.os, 'kill') as signal_process:
                 resources.start(root, 'apple-unit')
+                original = (root / 'telemetry-incomplete.json').read_bytes()
                 resources.finish(root)
+                resources.finish(root)
+            self.assertEqual((root / 'telemetry-incomplete.json').read_bytes(), original)
+            self.assertEqual(json.loads(original)['reason'], resources.UNSUPPORTED_PLATFORM_REASON)
+            spawn.assert_not_called()
+            signal_process.assert_not_called()
+            for filename in ('state.json', 'samples.jsonl', 'summary.json'):
+                self.assertFalse((root / filename).exists())
             result = json.loads((root / 'metadata.json').read_text())
             self.assertFalse(result['actual_test_resources']['available'])
             self.assertGreaterEqual(result['observed_telemetry_window_s'], 0)
@@ -147,6 +156,26 @@ class BaselineResourceTests(unittest.TestCase):
             resources.finish(root)
             self.assertEqual(json.loads((root / 'telemetry-incomplete.json').read_text())['status'], 'incomplete')
             self.assertFalse((root / 'summary.json').exists())
+
+    @patch.object(resources.sys, 'platform', 'linux')
+    def test_linux_missing_state_still_reports_start_failure_when_metrics_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resources.write_json(root / 'metadata.json', dict(platform='linux',
+                actual_test_resources=dict(available=False, reason='external containers')))
+            resources.incomplete(root, resources.UNSUPPORTED_PLATFORM_REASON)
+            resources.finish(root)
+            receipt = json.loads((root / 'telemetry-incomplete.json').read_text())
+            self.assertEqual(receipt['reason'], 'sampler state missing; start did not complete')
+            self.assertFalse((root / 'summary.json').exists())
+
+    @patch.object(resources.sys, 'platform', 'darwin')
+    def test_unsupported_platform_without_start_still_reports_missing_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            resources.finish(root)
+            receipt = json.loads((root / 'telemetry-incomplete.json').read_text())
+            self.assertEqual(receipt['reason'], 'sampler state missing; start did not complete')
 
     @patch.object(resources, 'metadata', return_value={'schema_version': 1})
     @patch.object(resources.sys, 'platform', 'darwin')
