@@ -98,7 +98,7 @@ class MacosSourceInstallerRoutingTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "deploy").mkdir()
         (self.root / "scripts").mkdir()
         (self.root / "bin").mkdir()
@@ -118,7 +118,7 @@ with open(os.environ["SOURCE_TEST_LOG"], "a") as stream: stream.write("build-com
 package = pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
 (package / "control").mkdir(parents=True)
 control = package / "control/plurx-control"
-control.write_text('#!/bin/sh\\necho "bootstrap $*" >> "$SOURCE_TEST_LOG"\\nmkdir -p "$HOME/Library/Application Support/plurx"\\necho \\'{"browser_origin":"http://127.0.0.1:32400"}\\' > "$HOME/Library/Application Support/plurx/installation.json"\\n')
+control.write_text('#!/bin/sh\\ncase "$*" in *--preflight*) echo "preflight $*" >> "$SOURCE_TEST_LOG"; [ ! -e "$HOME/Applications/Plurx Server.app" ]; exit $?;; esac\\necho "bootstrap $*" >> "$SOURCE_TEST_LOG"\\nif [ "${SOURCE_TEST_BOOTSTRAP_FAIL:-0}" = 1 ]; then [ "${SOURCE_TEST_PARTIAL:-0}" != 1 ] || mkdir -p "$HOME/Library/Application Support/plurx/runtime"; exit 1; fi\\nmkdir -p "$HOME/Library/Application Support/plurx"\\necho \\'{"browser_origin":"http://127.0.0.1:32400"}\\' > "$HOME/Library/Application Support/plurx/installation.json"\\n')
 control.chmod(0o755)
 ''')
 
@@ -161,29 +161,76 @@ control.chmod(0o755)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls(), "")
 
-    def test_running_legacy_exits_before_bootstrap_and_starts_only_after_success(self):
+    def legacy_running_fixture(self):
         agents = self.root / "home/Library/LaunchAgents"
         agents.mkdir(parents=True)
+        binary = self.root / "legacy-bin/plurxd"
+        binary.parent.mkdir()
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
         with (agents / "com.plurx.plurxd.plist").open("wb") as stream:
-            plistlib.dump({"Label": "com.plurx.plurxd", "ProgramArguments": ["/custom/bin/plurxd", "run"]}, stream)
+            plistlib.dump({"Label": "com.plurx.plurxd", "ProgramArguments": [str(binary), "run"]}, stream)
         self.executable("launchctl", '''#!/bin/sh
 echo "launchctl $*" >> "$SOURCE_TEST_LOG"
 case "$1 $2" in
+  "print-disabled gui/501") echo '{}'; exit 0 ;;
   "kill SIGTERM") touch "$HOME/stopped"; exit 0 ;;
+  "kickstart gui/501/com.plurx.plurxd") rm -f "$HOME/stopped"; exit 0 ;;
   "print gui/501/com.plurx.plurxd")
+    echo "program = ''' + str(binary) + '''"
     [ -f "$HOME/stopped" ] || { echo 'pid = 4242'; exit 0; }
     echo 'state = not running'; exit 0 ;;
 esac
 exit 113
 ''')
+        return binary
+
+    def test_running_legacy_exits_before_bootstrap_and_starts_only_after_success(self):
+        self.legacy_running_fixture()
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
+        self.assertLess(calls.index("preflight"), calls.index("kill SIGTERM"))
         self.assertLess(calls.index("build-complete"), calls.index("kill SIGTERM"))
         self.assertLess(calls.index("kill SIGTERM"), calls.index("bootstrap bootstrap"))
         self.assertLess(calls.index("bootstrap bootstrap"), calls.index("bootstrap start"))
         self.assertNotIn("bootout", calls)
         self.assertNotIn("SIGKILL", calls)
+        intent = next((self.root / "target").glob("*-migration/intent.json"))
+        self.assertEqual(json.loads(intent.read_text())["phase"], "complete")
+
+    def test_existing_stable_app_refuses_before_legacy_signal_or_bootout(self):
+        self.legacy_running_fixture()
+        app = self.root / "home/Applications/Plurx Server.app"
+        app.mkdir(parents=True)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("kill SIGTERM", self.calls())
+        self.assertNotIn("bootout", self.calls())
+        self.assertFalse((self.root / "home/stopped").exists())
+
+    def test_pre_promotion_failure_recovers_unchanged_legacy_running_policy(self):
+        self.legacy_running_fixture()
+        self.env["SOURCE_TEST_BOOTSTRAP_FAIL"] = "1"
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls()
+        self.assertLess(calls.index("kill SIGTERM"), calls.index("kickstart"))
+        self.assertFalse((self.root / "home/stopped").exists())
+        self.assertIn("verified unchanged legacy installation recovered", result.stdout)
+        intent = next((self.root / "target").glob("*-migration/intent.json"))
+        self.assertEqual(json.loads(intent.read_text())["phase"], "recovered")
+
+    def test_partial_native_promotion_holds_instead_of_restarting_legacy(self):
+        self.legacy_running_fixture()
+        self.env.update({"SOURCE_TEST_BOOTSTRAP_FAIL": "1", "SOURCE_TEST_PARTIAL": "1"})
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("kickstart", self.calls())
+        self.assertIn("Recovery required", result.stdout)
+        self.assertTrue((self.root / "home/stopped").exists())
+        intent = next((self.root / "target").glob("*-migration/intent.json"))
+        self.assertEqual(json.loads(intent.read_text())["phase"], "recovery_required")
 
     def test_default_custom_prefix_refuses_before_build_or_service_mutation(self):
         result = self.install("--prefix", str(self.root / "prefix"))
