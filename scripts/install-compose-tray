@@ -144,16 +144,32 @@ def deployment_mode(args, record):
     return mode, reference
 
 
+_PERMISSION_POLICY = None
+
+
+def permission_policy():
+    global _PERMISSION_POLICY
+    if _PERMISSION_POLICY is None:
+        loader = importlib.machinery.SourceFileLoader("compose_permission_policy", str(ROOT / "scripts/plurx-compose-control"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        _PERMISSION_POLICY = module
+    return _PERMISSION_POLICY
+
+
 def safe_path(path):
     if not path.is_absolute() or ".." in path.parts or any(character in str(path) for character in ["\n", "\r", "\x00"]):
         raise ValueError("desktop paths must be normalized absolute paths")
     for candidate in [path, *path.parents]:
         if candidate.is_symlink():
-            raise ValueError("desktop paths must not contain symlinks")
+            raise ValueError(f"desktop paths must not contain symlinks: {candidate}")
         if candidate.exists():
             info = candidate.stat()
-            if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX)):
-                raise ValueError("desktop path is writable by another user")
+            if info.st_uid not in (0, os.getuid()):
+                raise ValueError(f"desktop path belongs to another user: {candidate} (uid={info.st_uid}, expected={os.getuid()} or root)")
+            if permission_policy().untrusted_write(candidate, info) and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
+                raise ValueError(f"desktop path is writable by another user or shared group: {candidate} (uid={info.st_uid}, gid={info.st_gid}, mode={stat.S_IMODE(info.st_mode):04o})")
     return path
 
 
