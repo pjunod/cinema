@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
+
 import json
 import errno
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -14,6 +17,30 @@ import unittest
 from unittest import mock
 
 from validation import baseline_commands as commands
+
+
+@contextmanager
+def mocked_waitid_capability(**options):
+    """Unit-contract capability, including Python builds that omit waitid."""
+    defaults = dict(P_PID=1, WEXITED=4, WNOWAIT=0x01000000, WNOHANG=1,
+                    CLD_EXITED=1, CLD_KILLED=2, CLD_DUMPED=3)
+    with ExitStack() as stack:
+        for name, default in defaults.items():
+            stack.enter_context(mock.patch.object(commands.os, name, getattr(commands.os, name, default), create=True))
+        yield stack.enter_context(mock.patch.object(commands.os, "waitid", create=True, **options))
+
+
+@contextmanager
+def mocked_anchored_process(returncode=0):
+    """Signal/error unit tests do not rely on the interpreter's waitid build."""
+    process = SimpleNamespace(pid=400, returncode=None)
+    def reap(timeout):
+        process.returncode = returncode
+        return returncode
+    process.wait = mock.Mock(side_effect=reap)
+    observed = SimpleNamespace(si_pid=400, si_code=getattr(os, "CLD_EXITED", 1), si_status=returncode)
+    with mocked_waitid_capability(return_value=observed), mock.patch.object(commands.subprocess, "Popen", return_value=process):
+        yield process
 
 
 class BaselineCommandsCase(unittest.TestCase):
@@ -92,9 +119,12 @@ class BaselineCommandsCase(unittest.TestCase):
         for returncode in (0, 7):
             with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                child = ("import pathlib,signal,time;"
+                child = ("import pathlib,signal,socket;"
                          "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
-                         "pathlib.Path('child.ready').touch();time.sleep(30)")
+                         "control=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);"
+                         "control.bind('child.control');control.listen(1);control.settimeout(30);"
+                         "pathlib.Path('child.ready').touch();"
+                         "connection,_=control.accept();connection.recv(16);connection.close();control.close()")
                 code = ("import subprocess,sys,time,pathlib;"
                         f"p=subprocess.Popen([sys.executable,'-c',{child!r}]);"
                         "pathlib.Path('child.pid').write_text(str(p.pid));"
@@ -115,6 +145,19 @@ class BaselineCommandsCase(unittest.TestCase):
                         self.assertEqual(len(result["cells"]), 1)
                         self.skipTest("macOS denied signalling the reparented fixture process group; "
                                       "real orphan-group cleanup capability is unavailable in this sandbox")
+                    if outcome["leader_anchor"]["mechanism"] == "reaped-fallback":
+                        # Python3.12 on macOS lacks waitid. Once the leader is
+                        # reaped, a remaining group has no safe signal anchor.
+                        self.assertEqual(outcome["returncode"], returncode)
+                        self.assertFalse(outcome["timed_out"])
+                        self.assertTrue(outcome["cleanup_observation_unknown"])
+                        self.assertFalse(outcome["cleanup_complete"])
+                        self.assertFalse(outcome["success"])
+                        self.assertEqual(outcome["cleanup_signals"], [])
+                        self.assertIn("refusing numeric PGID signal", outcome["cleanup_error"])
+                        self.assertEqual(result["blocked_cells"], ["after"])
+                        self.assertEqual(len(result["cells"]), 1)
+                        continue
                     self.assertEqual(len(result["cells"]), 2, result.get("errors"))
                     self.assertEqual(outcome["returncode"], returncode)
                     self.assertFalse(outcome["timed_out"])
@@ -130,17 +173,23 @@ class BaselineCommandsCase(unittest.TestCase):
                     self.assertTrue(state.returncode != 0 or "Z" in state.stdout,
                                     f"child still executing after cleanup: {state.stdout}")
                 finally:
-                    pid_path = root / "child.pid"
-                    if pid_path.exists():
+                    # Address only this fixture's private endpoint, rather
+                    # than risk targeting a reused PID after leader reaping.
+                    endpoint = root / "child.control"
+                    if endpoint.exists():
                         try:
-                            os.kill(int(pid_path.read_text()), signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control:
+                                control.settimeout(1)
+                                control.connect(str(endpoint))
+                                control.sendall(b"stop")
+                        except (ConnectionRefusedError, FileNotFoundError):
+                            pass  # Collector already killed/reaped the worker.
+
 
     def test_cleanup_refusal_preserves_original_cell_and_blocks_contaminated_followups(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with mock.patch.object(commands.os, "killpg", side_effect=PermissionError("group signal refused")):
+            with mocked_anchored_process(), mock.patch.object(commands.os, "killpg", side_effect=PermissionError("group signal refused")):
                 result = self.execute(root, [self.cell("unclean", "print('original exit zero')"),
                                              self.cell("after", "print('must not run')")])
             self.assertEqual(len(result["cells"]), 1, result.get("errors"))
@@ -212,7 +261,7 @@ class BaselineCommandsCase(unittest.TestCase):
                 def surviving(pgid):
                     return dict(pgid=pgid, status=status, backend="proc", errors=[],
                                 members=[dict(pid=pgid + 1, ppid=1, pgid=pgid, state="S", start_ticks=100)])
-                with mock.patch.object(commands, "observe_group", side_effect=surviving), mock.patch.object(commands.os, "killpg"):
+                with mocked_anchored_process(), mock.patch.object(commands, "observe_group", side_effect=surviving), mock.patch.object(commands.os, "killpg"):
                     result = self.execute(root, [self.cell("survivor", "print('original exit zero')"),
                                                  self.cell("after", "print('must not run')")])
                 self.assertEqual(len(result["cells"]), 1)
@@ -274,8 +323,8 @@ class BaselineCommandsCase(unittest.TestCase):
             events.append(signal.Signals(number).name)
             if number == signal.SIGKILL:
                 state["value"] = "nonexecuting"
-        exit_info = SimpleNamespace(si_pid=40, si_code=os.CLD_EXITED, si_status=7)
-        with mock.patch.object(commands.os, "waitid", return_value=exit_info) as waitid, mock.patch.object(commands, "observe_group", side_effect=observation), mock.patch.object(commands.os, "killpg", side_effect=signal_group):
+        exit_info = SimpleNamespace(si_pid=40, si_code=getattr(os, "CLD_EXITED", 1), si_status=7)
+        with mocked_waitid_capability(return_value=exit_info) as waitid, mock.patch.object(commands, "observe_group", side_effect=observation), mock.patch.object(commands.os, "killpg", side_effect=signal_group):
             anchor = commands.wait_owned_leader(process, 1)
             self.assertEqual(anchor["mechanism"], "waitid-WNOWAIT")
             self.assertEqual(anchor["returncode"], 7)
@@ -297,7 +346,7 @@ class BaselineCommandsCase(unittest.TestCase):
         process = SimpleNamespace(pid=40, returncode=None)
         group = dict(pgid=40, status="live", errors=[], members=[])
         anchor = dict(held=True, mechanism="waitid-WNOWAIT")
-        with mock.patch.object(commands, "observe_group", return_value=group), mock.patch.object(commands.os, "waitid", side_effect=ChildProcessError(errno.ECHILD, "not our child")), mock.patch.object(commands.os, "killpg") as signal_group:
+        with mock.patch.object(commands, "observe_group", return_value=group), mocked_waitid_capability(side_effect=ChildProcessError(errno.ECHILD, "not our child")), mock.patch.object(commands.os, "killpg") as signal_group:
             result = commands.terminate_group(process, 0, anchor)
         signal_group.assert_not_called()
         self.assertFalse(result["complete"])
@@ -315,7 +364,7 @@ class BaselineCommandsCase(unittest.TestCase):
 
     def test_interrupted_waitid_still_obeys_completion_deadline(self):
         process = SimpleNamespace(pid=40, returncode=None)
-        with mock.patch.object(commands.os, "waitid", side_effect=InterruptedError(errno.EINTR, "interrupted")), mock.patch.object(commands.time, "monotonic", side_effect=[0, 2]):
+        with mocked_waitid_capability(side_effect=InterruptedError(errno.EINTR, "interrupted")), mock.patch.object(commands.time, "monotonic", side_effect=[0, 2]):
             anchor = commands.wait_owned_leader(process, 1)
         self.assertTrue(anchor["held"])
         self.assertTrue(anchor["timed_out"])
