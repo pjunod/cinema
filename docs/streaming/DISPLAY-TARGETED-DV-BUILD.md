@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A post-review qualification and landed-B integration; not fully qualified · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (publication) ·
+**Status:** PR A software controls passed; real-input qualification pending · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
@@ -12,17 +12,16 @@
   The coordinator reports the corrected Stage2 control passed 97 commands and
   70 results, worst independent-oracle error one code. This is synthetic helper
   acceptance, not real-title or device accuracy; the original refusal is retained.
-- Actual immutable43 Rust batch completed: 98 selected, 94 passed, four fixture
-  failures retained. The first test-only repairs compiled natively at350 and
-  received independent targeted approval atf361. Failed-only plus new-case retry
-  passed the historical subtitle, F1 provenance and partial-schema refusal cases:
-  97 Rust passes are retained. Two fixtures still failed, with no production defect
-  established: one tried to claim a second background reader while the title
-  held the only background slot; the other exceeded the 128-probe per-coordinator
-  cap. Repairs use a production-attested live fragment reader and two valid
-  producer leases respectively, preserving resource, paging and preemption
-  assertions. Their native compile, targeted closure and only-two-case retry
-  remain. No retained Rust, shader or helper passes are repeated.
+- Rust qualification retains 99 distinct passes: the original 98 selected cases
+  plus one partial-schema control. Initial four fixture failures and intermediate
+  retries remain distinguishable from passing evidence. Final fixture repairs at
+  `c93b3de50814` use a production-attested live fragment reader and two valid
+  producer leases, respecting background-reader reservations and the 128-probe
+  per-coordinator cap. Independent Astra targeted closure found no blockers;
+  exact-source native formatting, all-target Clippy and contract/daemon compilation
+  passed, followed by only the two remaining failed cases, each exactly matched
+  and nonignored. Compiler, binary, list, log and true-exit receipts are verified.
+  No retained Rust, shader or helper passes are repeated.
 - The actual380a B/interface integration is independently approved and compiled
   natively with350. Production Rust/helper inputs are unchanged by fixture-only
   follow-ups; the coordinator owns the four final-daemon real-source cells.
@@ -42,11 +41,26 @@
   unwraps `WindowOutcome::Completed` and still checks every target/L1/operation.
   Ordinary production entrypoints remain master-only. Main still ends at schema
   113, so this additive title migration remains 114 without renumbering.
-- Remaining: two failed Rust fixture cases, their pinned compilation and targeted
-  independent closure, real-source P7 FEL/P8 1000/1600 harness matrix, fast lane
-  and API merge.
-  Preserve unchanged passing shader, policy/store and prior B evidence; check
-  only actual changed surfaces, not whole suites or reviews for base motion.
+- Actual first 750-second real-source matrix failed input prerequisites, with
+  zero mapped-window passes. Both P7 target cells reached eligible complete stats
+  but selected `TitleFits` (observed peak at most 1000 nits). P8 returned a scanner
+  failure; its redundant second cell was stopped, not passed. The scanner's exact
+  stderr is being captured once as failed-prerequisite diagnosis. No production
+  defect is established, and neither buckets nor completeness rules are weakened.
+- Cheap original/excerpt headers and one-second decoded witnesses were inspected.
+  The current ffprobe exposes source PQ endpoints, not the L1 min/average/max
+  triplet; absent fields do not establish a dark title. Short existing-tool RPU
+  inspection must establish actual L1 and P7 FEL before selecting new excerpts.
+- Current main `52e66778e7ce` is integrated at `1d2ec2967532`, resolving only
+  changelog prose and preserving both topics. Core/helper/C-runtime and regression
+  bodies are byte-identical to c93. Main's separate `--source-commit` CLI early exit
+  does not run in the physical-probe entrypoint; no passing C case is invalidated.
+  Exact integrated-source compilation remains coordinator-owned.
+- Remaining: eligible genuine P7 FEL/P8 excerpts with observed L1 above 1600 nits
+  and complete timing, the four 1000/1600 mapped runtime cells, exact-source
+  integration compilation, fast lane and API merge. Preserve unchanged passing
+  shader, policy/store/helper and prior B evidence; check only genuinely changed
+  surfaces, not whole suites or reviews for base motion. No display/deploy claim.
 
 ### Historical source checkpoints (not current acceptance)
 

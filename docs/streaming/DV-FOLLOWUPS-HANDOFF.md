@@ -134,39 +134,33 @@ incident and general remote processed requalification remain out of B scope.
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
 **Implementation update (2026-10-19):** Sol 6.1 owns current source on
-`codex/cinema-display-target-a`; coordinator owns publication. The build plan's
-checkpoint preserves the initial full-helper timing refusal and its control-only
-mux repair. Native compilation and independent targeted closure passed; the
-coordinator reports corrected Stage2 acceptance (97 commands, 70 results, worst
-one code). Rust350 compilation and f361 targeted closure passed. Failed-only
-retry retained three more passes, for 97 valid Rust passes and 141 shader cases
-without repetition. Two fixtures still failed: another background reader cannot
-claim alongside title work, and a single coordinator cannot enqueue129probes.
-Fixture-only repairs use attested live fragment demand and two valid producer
-leases, preserving the resource/paging assertions; native compilation, targeted
-closure and only those two retries remain. Four real-source cells, fast lane
-and API merge remain coordinator-owned. The
-current checkpoint and accepted explicit Annex B.2/B.3 RGB shader supersede the
-original built-in-libplacebo recipe below. API 374 inspection proved modified
-knee/adaptive/LMS behavior; no built-in ST2094-10 execution is claimed. Clip is
-explicit, without perceptual-equivalence claims. Scanner/policy/report/runtime
-and controls are authored, not qualified. Durable title jobs now retain monotonic
-source/scanner generations, manual-cancel suppression and bounded ordinary-probe
-priority handoff; lifecycle/backend/reap regressions are authored, not executed.
-Prior Astra authorship is retained. Full independent Astra review of `0d47bc6ac`
-found one blocking F1: ordinary probe publication must be distinguished from
-chapters/HEVC/content-encoding grafts. The authored repair uses explicit
-`scanned_at` publication intent with order-independent source invalidation;
-identical facts rotate, decorations preserve current/terminal title state.
-Native repair compilation passed and independent Astra closed F1 with APPROVE
-at `43cce364a9e8`. Its immutable post-review Rust batch is in progress. The actual
-Intel shader control passed 141 cases / 866,304 YUV samples, worst one code against
-the independent oracle, with exact analytical L1 witnesses. This is synthetic
-shader evidence only; full-helper and real-source controls remain. Actual landed
-B merge `9753284ef7dd` is being integrated, preserving typed cancellation plus
-explicit target forwarding; only changed interfaces need new evidence/review.
-B landing was not a review/test prerequisite. Metadata/settings/client
-selection stay later PRs.
+`codex/cinema-display-target-a`; coordinator owns native/media/publication.
+Full independent Astra review, F1 publication-intent closure, landed-B integration
+review and fixture-repair closures are retained. Native c93 compilation and only
+the two final failed-fixture retries passed with verified source/binary/count/exit
+receipts: 99 distinct Rust passes, 141 Intel shader cases / 866,304 samples, and
+70 full-helper results from 97 commands, worst independent-oracle error one code.
+The initial helper timing refusal and all failed fixtures remain historical
+failures, not passing evidence. No successful unchanged case is repeated.
+
+Actual first real-source matrix failed prerequisites: eligible P7 stats selected
+`TitleFits` at both targets, P8 scanning failed, and its redundant second attempt
+was stopped. Zero mapped-window passes. Exact P8 stderr capture is coordinator-owned.
+Header/short ffprobe diagnostics do not expose actual L1 min/average/max; source
+PQ endpoints must not be substituted for L1. Existing-tool RPU inspection and
+eligible genuine P7 FEL/P8 excerpts above 1600 nits are needed before mapped cells.
+Neither scanner completeness nor target buckets are relaxed. Current main
+`52e66778e7ce` is merged at `1d2ec2967532` with both changelog topics preserved;
+C core/helper/runtime/regression bodies are unchanged. Exact integrated-source
+compilation, four eligible runtime cells, fast lane and API merge remain.
+
+The accepted explicit Annex B.2/B.3 RGB shader supersedes the original built-in
+libplacebo recipe below: API 374 inspection proved modified knee/adaptive/LMS
+behavior. No built-in ST2094-10, perceptual-equivalence, proprietary Dolby or
+display-accuracy claim. Durable title jobs retain source/scanner generations,
+manual-cancel suppression and bounded ordinary-probe priority handoff. Ordinary
+production entrypoints remain master-only; metadata/settings/client selection
+stay later PRs. Paul deploys; agents do not.
 
 1. **Title L1 scan,** stored with the DV facts:
    - L1-max maximum;
