@@ -218,7 +218,34 @@ jobs:
                   assert len(binaries[0]['cases']) == 1, 'Frozen lineage binary must contain exactly one case'
               return [(binaries[0], [dict(name=case, ignored=False)])]
 
-          def runtime_evidence(phase, inventory, log):
+          def doctest_selection(metadata, inventory):
+              assert metadata['version'] == 1, 'Unsupported Cargo metadata format'
+              members = set(metadata['workspace_members'])
+              packages = {package['id']: package for package in metadata['packages']}
+              assert members and members <= packages.keys(), 'Incomplete workspace package metadata'
+              selected = {identity for identity in members if packages[identity]['name'] != 'plurx-cluster-check'}
+              required = []
+              if CELL == 'rust':
+                  for identity in sorted(selected):
+                      for target in packages[identity]['targets']:
+                          # Cargo's default doctests are library targets; bins/dependencies are not selected.
+                          if target.get('doctest') is True and set(target['kind']) & {'lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro'}:
+                              required.append(dict(package_id=identity, target=target['name'], src_path=target['src_path']))
+              keys = {(item['package_id'], item['target']) for item in required}
+              not_selected = []
+              for item in inventory.get('doctests', {}).get('targets', []):
+                  if (item['package_id'], item['target']) not in keys:
+                      reason = ('explicit integration --test selection' if CELL == 'store-lineage' else
+                                'dependency outside workspace' if item['package_id'] not in members else
+                                'excluded workspace package' if item['package_id'] not in selected else 'target not selected for doctests')
+                      not_selected.append(dict(item, reason=reason))
+              names = [item['target'].replace('-', '_') for item in required]
+              assert len(names) == len(set(names)), 'Doctest banners cannot disambiguate duplicate selected crate names'
+              return dict(metadata_command=['cargo', 'metadata', '--format-version=1', '--locked', '--offline', '--no-deps'],
+                          selected_workspace_packages=sorted(selected) if CELL == 'rust' else [], required=required, not_selected=not_selected,
+                          selection='workspace minus plurx-cluster-check' if CELL == 'rust' else 'schema_lineage_upgrade integration target only')
+
+          def runtime_evidence(phase, inventory, log, metadata):
               # Frozen parser only observes logs; executable basename retains the Cargo hash.
               parsed = runpy.run_path(str(pathlib.Path('validation/baseline_timing.py')))['parse'](log.read_text(errors='replace').splitlines())
               gaps = list(parsed['parser_issues'])
@@ -245,7 +272,7 @@ jobs:
                       gaps.append(dict(binary=path.name, reason='Native selected case count differs'))
                   observed.append(suite)
               if phase == 'units' and CELL == 'rust':
-                  for target in inventory.get('doctests', {}).get('targets', []):
+                  for target in doctest_selection(metadata, inventory)['required']:
                       name = 'doctest:' + target['target'].replace('-', '_')
                       suites = [suite for suite in parsed['suites'] if suite['binary'] == name]
                       if len(suites) != 1 or suites[0]['result'] is None:
@@ -267,7 +294,10 @@ jobs:
                   inventory = output / 'inventory' / 'inventory.json'
                   if not previous.get('inventory', {}).get('success') or not inventory.is_file() or not read(inventory).get('discovery_complete'):
                       return 'Native pre-execution inventory incomplete; dependent test bodies blocked'
+                  if not (output / 'workspace-metadata.json').is_file():
+                      return 'Selected workspace metadata missing before native test bodies'
                   try:
+                      doctest_selection(read(output / 'workspace-metadata.json'), read(inventory))
                       expected_runtime(phase, read(inventory))
                   except (AssertionError, KeyError) as error:
                       return str(error)
@@ -286,9 +316,11 @@ jobs:
                   return ['bash', '-e', '-o', 'pipefail', '-c', shlex.join([*prefix, *NATIVE, '--no-run', '--message-format=json']) + ' > "$1/compiler.jsonl" 2> "$1/compiler.log"', 'compile', str(output)]
               if phase == 'inventory':
                   prefix = ['env', 'RUST_MIN_STACK=8388608'] if CELL == 'store-lineage' else []
-                  return [*prefix, 'python3', '-m', 'validation.baseline_rust_inventory', '--output', str(output / 'inventory'),
-                          '--artifacts', str(output / 'compiler.jsonl'), '--compiler-exit-code', str(previous['compile']['cells'][0]['returncode']),
-                          '--list-timeout', '10', '--', *NATIVE]
+                  listing = [*prefix, 'python3', '-m', 'validation.baseline_rust_inventory', '--output', str(output / 'inventory'),
+                             '--artifacts', str(output / 'compiler.jsonl'), '--compiler-exit-code', str(previous['compile']['cells'][0]['returncode']),
+                             '--list-timeout', '10', '--', *NATIVE]
+                  # Metadata and old listing children remain inside the same bounded, owned observer group.
+                  return ['bash', '-e', '-o', 'pipefail', '-c', 'cargo metadata --format-version=1 --locked --offline --no-deps > "$1/workspace-metadata.json"; shift; exec "$@"', 'inventory', str(output), *listing]
               if phase == 'static':
                   return ['make', 'fmt-check', 'spike-lock-check', 'lint', 'test-socket-permission-check']
               if phase == 'units':
@@ -329,9 +361,15 @@ jobs:
                   path.write_text(json.dumps(manifest, indent=2))
                   report = api['run_manifest'](path, destination)
                   report['safe_to_continue'] = safe(report)
+                  if phase == 'inventory':
+                      try:
+                          selection = doctest_selection(read(output / 'workspace-metadata.json'), read(output / 'inventory' / 'inventory.json'))
+                          (output / 'doctest-selection.json').write_text(json.dumps(selection, indent=2))
+                      except (OSError, ValueError, KeyError, AssertionError) as error:
+                          report.update(success=False, qualification_complete=False, qualification_gaps=[str(error)])
                   if phase in ['units', 'serial-vfr', 'serial-bitmap'] and report.get('cells'):
                       try:
-                          evidence = runtime_evidence(phase, read(output / 'inventory' / 'inventory.json'), destination / report['cells'][0]['log'])
+                          evidence = runtime_evidence(phase, read(output / 'inventory' / 'inventory.json'), destination / report['cells'][0]['log'], read(output / 'workspace-metadata.json'))
                       except (OSError, ValueError, KeyError, AssertionError) as error:
                           evidence = dict(qualification_complete=False, gaps=[str(error)])
                       (destination / 'native-evidence.json').write_text(json.dumps(evidence, indent=2))

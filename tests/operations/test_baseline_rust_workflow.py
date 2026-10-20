@@ -115,7 +115,10 @@ class RustContinuationWorkflowTests(unittest.TestCase):
         compile_command = api['command']('compile', output, {})
         self.assertEqual(compile_command[:5], ['bash', '-e', '-o', 'pipefail', '-c'])
         self.assertEqual(compile_command[5], 'cargo test --workspace --locked --exclude plurx-cluster-check --no-fail-fast --no-run --message-format=json > "$1/compiler.jsonl" 2> "$1/compiler.log"')
-        listing = api['command']('inventory', output, prior)
+        wrapped_listing = api['command']('inventory', output, prior)
+        self.assertEqual(wrapped_listing[:5], ['bash', '-e', '-o', 'pipefail', '-c'])
+        self.assertEqual(wrapped_listing[5], 'cargo metadata --format-version=1 --locked --offline --no-deps > "$1/workspace-metadata.json"; shift; exec "$@"')
+        listing = wrapped_listing[8:]
         self.assertEqual(listing[:3], ['python3', '-m', 'validation.baseline_rust_inventory'])
         self.assertEqual(listing[listing.index('--compiler-exit-code') + 1], '7')
         self.assertEqual(listing[listing.index('--list-timeout') + 1], '10')
@@ -138,7 +141,7 @@ class RustContinuationWorkflowTests(unittest.TestCase):
             self.assertEqual((output / 'compiler.jsonl').read_text(), 'compiler-json\n')
             self.assertEqual((output / 'compiler.log').read_text(), 'compiler-error\n')
 
-    def exercise(self, prior, phase, result=None, inventory=True, changed=False, cell='rust', log_kind=None, inventory_kind=None):
+    def exercise(self, prior, phase, result=None, inventory=True, changed=False, cell='rust', log_kind=None, inventory_kind=None, doctest=None):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             observer = output / 'observer.py'
@@ -148,6 +151,17 @@ class RustContinuationWorkflowTests(unittest.TestCase):
             (output / 'source-context.json').write_text(json.dumps(dict(source, cell=cell)))
             (output / 'toolchain-ready').touch()
             (output / 'compiler.jsonl').write_text('{}\n')
+            package_id = 'path+file:///frozen/crates/plurxd#plurxd@1.0.0'
+            excluded_id = 'path+file:///frozen/crates/plurx-cluster-check#plurx-cluster-check@1.0.0'
+            dependency_id = 'registry+https://github.com/rust-lang/crates.io-index#cfg-if@1.0.4'
+            library = dict(name='workspace_lib', kind=['lib'], doctest=True, src_path='/frozen/crates/plurxd/src/lib.rs')
+            targets = [dict(name='plurxd', kind=['bin'], doctest=True, src_path='/frozen/crates/plurxd/src/main.rs')]
+            if doctest in ['workspace', 'both']:
+                targets.append(library)
+            metadata = dict(version=1, workspace_members=[package_id, excluded_id], packages=[
+                dict(id=package_id, name='plurxd', targets=targets),
+                dict(id=excluded_id, name='plurx-cluster-check', targets=[dict(name='plurx_cluster_check', kind=['lib'], doctest=True, src_path='/frozen/excluded.rs')])])
+            (output / 'workspace-metadata.json').write_text(json.dumps(metadata))
             for key, value in prior.items():
                 (output / key).mkdir()
                 (output / key / 'results.json').write_text(json.dumps(value))
@@ -164,7 +178,12 @@ class RustContinuationWorkflowTests(unittest.TestCase):
                 relative = 'crates/plurx-core/tests/schema_lineage_upgrade.rs' if cell == 'store-lineage' else 'crates/plurxd/src/main.rs'
                 item = dict(executable=str(binary), sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), cases=cases,
                             target=dict(name=name, kind=['test' if cell == 'store-lineage' else 'bin'], src_path=str(ROOT / relative)))
-                receipt = dict(discovery_complete=True, binaries=[item])
+                candidates = [dict(package_id=excluded_id, target='plurx_cluster_check')]
+                if doctest in ['dependency', 'both']:
+                    candidates.append(dict(package_id=dependency_id, target='cfg_if'))
+                if doctest in ['workspace', 'both']:
+                    candidates.append(dict(package_id=package_id, target='workspace_lib'))
+                receipt = dict(discovery_complete=True, binaries=[item], doctests=dict(targets=candidates))
                 if inventory_kind == 'serial-not-ignored':
                     next(case for case in item['cases'] if case['name'] == api['CASES']['serial-vfr'])['ignored'] = False
                 elif inventory_kind == 'wrong-target':
@@ -186,6 +205,8 @@ class RustContinuationWorkflowTests(unittest.TestCase):
                 elif log_kind == 'ignored-body':
                     rows = [(name, 'ignored') for name, _ in rows]
                 log = cargo_log('other_binary-0123456789abcdef' if log_kind == 'wrong-binary' else binary.name, rows)
+                if doctest in ['workspace', 'both'] and log_kind != 'missing-doctest' and cell == 'rust':
+                    log += '\n   Doc-tests workspace_lib\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
                 (destination / (phase + '.log')).write_text(log)
                 report['cells'][0]['log'] = phase + '.log'
                 return report
@@ -302,6 +323,67 @@ class RustContinuationWorkflowTests(unittest.TestCase):
         self.assertIn("assert cell in ['rust', 'store-lineage']", heredoc('PYBIND'))
         with self.assertRaises(AssertionError):
             controller('arbitrary-shell')
+
+    def test_dependency_doctest_candidates_do_not_require_native_dependency_doctests(self):
+        prior = {key: dict(outcome(), safe_to_continue=True) for key in ['compile', 'inventory', 'static']}
+        code, report = self.exercise(prior, 'units', doctest='dependency')
+        self.assertEqual(code, 0)
+        self.assertTrue(report['qualification_complete'])
+        # The selected workspace library must still produce a native summary.
+        code, report = self.exercise(prior, 'units', doctest='both', log_kind='missing-doctest')
+        self.assertEqual(code, 1)
+        self.assertFalse(report['qualification_complete'])
+        self.assertTrue(any(gap.get('binary') == 'doctest:workspace_lib' for gap in report['qualification_gaps']))
+        code, report = self.exercise(prior, 'units', doctest='both')
+        self.assertEqual(code, 0)
+        self.assertTrue(report['qualification_complete'])
+
+    def test_doctest_scope_uses_metadata_workspace_ids_and_records_unselected_candidates(self):
+        workspace = 'path+file:///frozen/core#plurx-core@1.0.0'
+        excluded = 'path+file:///frozen/cluster#plurx-cluster-check@1.0.0'
+        dependency = 'registry+https://github.com/rust-lang/crates.io-index#cfg-if@1.0.4'
+        metadata = dict(version=1, workspace_members=[workspace, excluded], packages=[
+            dict(id=workspace, name='plurx-core', targets=[
+                dict(name='plurx_core', kind=['lib'], doctest=True, src_path='/frozen/core/src/lib.rs'),
+                dict(name='bin_target', kind=['bin'], doctest=True, src_path='/frozen/core/src/main.rs'),
+                dict(name='disabled_doc', kind=['lib'], doctest=False, src_path='/frozen/core/disabled.rs')]),
+            dict(id=excluded, name='plurx-cluster-check', targets=[
+                dict(name='plurx_cluster_check', kind=['lib'], doctest=True, src_path='/frozen/cluster/src/lib.rs')])])
+        inventory = dict(doctests=dict(targets=[dict(package_id=workspace, target='plurx_core'),
+            dict(package_id=workspace, target='bin_target'), dict(package_id=excluded, target='plurx_cluster_check'),
+            dict(package_id=dependency, target='cfg_if')]))
+        scope = controller()['doctest_selection'](metadata, inventory)
+        self.assertEqual([(item['package_id'], item['target']) for item in scope['required']], [(workspace, 'plurx_core')])
+        self.assertEqual({item['target']: item['reason'] for item in scope['not_selected']},
+                         dict(bin_target='target not selected for doctests', plurx_cluster_check='excluded workspace package', cfg_if='dependency outside workspace'))
+        lineage = controller('store-lineage')['doctest_selection'](metadata, inventory)
+        self.assertEqual(lineage['required'], [])
+        self.assertEqual(len(lineage['not_selected']), 4)
+        self.assertTrue(all(item['reason'] == 'explicit integration --test selection' for item in lineage['not_selected']))
+        prior = {key: dict(outcome(), safe_to_continue=True) for key in ['compile', 'inventory']}
+        code, report = self.exercise(prior, 'units', cell='store-lineage', doctest='both')
+        self.assertEqual(code, 0)
+        self.assertTrue(report['qualification_complete'])
+
+    def test_owned_inventory_recipe_preserves_listing_exit_after_bounded_metadata_capture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / 'cargo').write_text("""#!/bin/sh
+[ "$1" = metadata ] || exit 99
+printf '%s\\n' '{"version":1,"workspace_members":["fixture"],"packages":[]}'
+""")
+            (output / 'python3').write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FIXTURE_ARGS"\nexit 7\n')
+            (output / 'cargo').chmod(0o700)
+            (output / 'python3').chmod(0o700)
+            command = controller()['command']('inventory', output, {'compile': {'cells': [{'returncode': 17}]}})
+            environment = dict(os.environ, PATH=str(output) + os.pathsep + os.environ['PATH'], FIXTURE_ARGS=str(output / 'listing-args'))
+            result = subprocess.run(command, env=environment, capture_output=True, timeout=5, check=False)
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(json.loads((output / 'workspace-metadata.json').read_text())['version'], 1)
+            args = (output / 'listing-args').read_text().splitlines()
+            self.assertEqual(args[args.index('--compiler-exit-code') + 1], '17')
+            self.assertEqual(args[args.index('--list-timeout') + 1], '10')
+            self.assertIn('--artifacts', args)
 
     def test_embedded_python_and_all_shell_recipes_parse(self):
         for marker in ['PYCOPY', 'PYBIND', 'PYPHASE']:
