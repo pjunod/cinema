@@ -7,6 +7,13 @@ F-hist-7 from
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
 `882862e8`
 
+**2026-10-20 target update:**
+[Full suite on every PR](FULL-SUITE-EVERY-PR-PLAN.md) records the audit and
+planned replacement of compile-only ordinary PR validation. This policy's
+prior closure is historical; the new execution/cutover is pending. Coverage
+became manual-only on October 11, so older coverage-on-push statements below
+do not describe the current trigger.
+
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (the

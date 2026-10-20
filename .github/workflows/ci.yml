@@ -8,6 +8,16 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      diagnostic_baseline:
+        description: "Set true for fresh off-main diagnostic execution without publication"
+        required: false
+        type: string
+        default: ""
+      expected_sha:
+        description: "Exact frozen forty-character commit required by diagnostic execution"
+        required: false
+        type: string
+        default: ""
       retained_units_sha256:
         description: "Authenticated digest-addressed retained unit proof; no suite replay"
         required: false
@@ -59,8 +69,6 @@ concurrency:
     }}
 
 jobs:
-  # Resolve the PR diff once. Expensive jobs consume these outputs in parallel;
-  # pushes and tags deliberately enable every surface.
   scope:
     name: validation scope
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -103,6 +111,39 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Bind diagnostic execution to a frozen non-main commit
+        env:
+          DIAGNOSTIC_BASELINE: ${{ inputs.diagnostic_baseline }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          RETAINED_DIGEST: ${{ inputs.retained_units_sha256 }}
+          RETAINED_ATTACHMENT_ID: ${{ inputs.retained_units_attachment_id }}
+          RETAINED_ATTACHMENT_UUID: ${{ inputs.retained_units_attachment_uuid }}
+          PROMOTION_PR: ${{ inputs.promotion_pr }}
+          PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
+          PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$DIAGNOSTIC_BASELINE" in
+            '') test -z "$EXPECTED_SHA"; exit 0 ;;
+            true) ;;
+            *) echo 'Unknown diagnostic mode'; exit 1 ;;
+          esac
+          test "$EVENT_NAME" = workflow_dispatch
+          case "$EVENT_REF" in
+            refs/heads/main) echo 'Diagnostic execution must use a frozen non-main branch'; exit 1 ;;
+            refs/heads/*) ;;
+            *) echo 'Diagnostic execution requires a branch'; exit 1 ;;
+          esac
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"
+          for field in RETAINED_DIGEST RETAINED_ATTACHMENT_ID RETAINED_ATTACHMENT_UUID \
+            PROMOTION_PR PROMOTION_HEAD_SHA PROMOTION_BASE_SHA; do
+            test -z "${!field}" || { echo "Diagnostic execution forbids $field"; exit 1; }
+          done
       - name: Bind the manual qualification to its actual promotion PR
         id: promotion
         if: >-
@@ -160,10 +201,15 @@ jobs:
       - name: Resolve the fail-safe execution rollout mode
         id: execution_mode
         env:
+          DIAGNOSTIC_BASELINE: ${{ inputs.diagnostic_baseline }}
           REQUESTED_MODE: ${{ vars.CI_EXECUTION_MODE || 'legacy' }}
           RETAIN_STORE_UNITS: ${{ steps.retention.outputs.retain_store_contract_units }}
         run: |
           set -euo pipefail
+          if [ "$DIAGNOSTIC_BASELINE" = true ]; then
+            echo 'mode=legacy' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mode="$(scripts/ci-execution-mode resolve "$REQUESTED_MODE")"
           if [ "$RETAIN_STORE_UNITS" = true ] && [ "$mode" != legacy ]; then
             echo "Retained Store units require legacy mode; shards would replay them" >&2
@@ -192,6 +238,22 @@ jobs:
       # the target here so the counter is compared against what the target
       # actually ships, while the recorded base still scopes which release
       # inputs this branch touched.
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - name: Resolve the current merge target
         if: github.event_name == 'pull_request' || needs.scope.outputs.qualification == 'true'
         env:
@@ -228,6 +290,20 @@ jobs:
   # detect. Run the structural contracts before provisioning Rust, browsers,
   # simulators, emulators, cross compilers, or Docker builds, and make every
   # expensive fan-out job in this workflow depend on this result.
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
+
   preflight:
     name: fast policy and contract preflight
     needs: scope
@@ -240,17 +316,72 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
+          python3 - <<'PYCONTEXT'
+          import json, pathlib, platform, subprocess
+          root = pathlib.Path('target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}')
+          sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          for suite in ['validation', 'operations']:
+              context = dict(candidate_sha=sha, candidate_tree=tree, cell_id='python:' + suite, framework='unittest', target=platform.system() + '-' + platform.machine(), profile='baseline', features=[], toolchain='Python ' + platform.python_version(), suite_dir='tests/' + suite)
+              (root / ('context-' + suite + '.json')).write_text(json.dumps(context))
+          PYCONTEXT
       - name: Audit corrective-history evidence
+        id: baseline_history
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
           PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
           PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
-        run: make history-check
+        run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            mkdir -p target/validation/baseline-preflight
+            diagnostic_log="target/validation/baseline-preflight/history.log"
+            exec 3>&1
+            exec > "$diagnostic_log" 2>&1
+            trap 'diagnostic_result=$?; cat "$diagnostic_log" >&3 || true; exit "$diagnostic_result"' EXIT
+          fi
+          make history-check
       - name: Check validation catalog and contract unit tests
+        id: baseline_validation
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        shell: bash
         env:
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
         run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            mkdir -p target/validation/baseline-preflight
+            diagnostic_log="target/validation/baseline-preflight/validation.log"
+            exec 3>&1
+            exec > "$diagnostic_log" 2>&1
+            trap 'diagnostic_result=$?; cat "$diagnostic_log" >&3 || true; exit "$diagnostic_result"' EXIT
+          fi
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            set +e
+            make validation-lint
+            lint_result=$?
+            python3 -m validation.baseline_python --context "$PLURX_BASELINE_DIR/context-validation.json" --suite-dir tests/validation --output "$PLURX_BASELINE_DIR/python-validation.json"
+            units_result=$?
+            test "$lint_result" -eq 0 && test "$units_result" -eq 0
+            exit $?
+          fi
           make validation-lint
           if [ "$RETAIN_VALIDATION_UNITS" = true ]; then
             echo "Adopted authenticated complete validation unit discovery"
@@ -258,27 +389,69 @@ jobs:
             python3 -m unittest discover -s tests/validation -p 'test_*.py'
           fi
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: baseline_node_setup
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
         with:
           node-version: "22"
       - name: Provision checksummed public K08 oracle sources
+        id: baseline_oracle
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        shell: bash
         run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            mkdir -p target/validation/baseline-preflight
+            diagnostic_log="target/validation/baseline-preflight/oracle.log"
+            exec 3>&1
+            exec > "$diagnostic_log" 2>&1
+            trap 'diagnostic_result=$?; cat "$diagnostic_log" >&3 || true; exit "$diagnostic_result"' EXIT
+          fi
           set -eu
           fixture="$RUNNER_TEMP/hiqlite-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
           printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
       - name: Check CI, deploy, and shipping contracts
+        id: baseline_operations
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        shell: bash
         env:
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
         run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            mkdir -p target/validation/baseline-preflight
+            diagnostic_log="target/validation/baseline-preflight/operations.log"
+            exec 3>&1
+            exec > "$diagnostic_log" 2>&1
+            trap 'diagnostic_result=$?; cat "$diagnostic_log" >&3 || true; exit "$diagnostic_result"' EXIT
+          fi
           if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then
             echo "Adopted authenticated complete operations unit discovery"
+          elif [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            python3 -m validation.baseline_python --context "$PLURX_BASELINE_DIR/context-operations.json" --suite-dir tests/operations --output "$PLURX_BASELINE_DIR/python-operations.json"
           else
             make operations-check
           fi
       - name: Check the shared player input contract
+        id: baseline_node
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        shell: bash
         env:
           RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
         run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            mkdir -p target/validation/baseline-preflight
+            diagnostic_log="target/validation/baseline-preflight/node.log"
+            exec 3>&1
+            exec > "$diagnostic_log" 2>&1
+            trap 'diagnostic_result=$?; cat "$diagnostic_log" >&3 || true; exit "$diagnostic_result"' EXIT
+          fi
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            set +e
+            node_result=0
+            for script in tests/playback/player-input-contract.test.js tests/web/player-dom.test.js; do
+              node "$script" || node_result=$?
+            done
+            exit "$node_result"
+          fi
           if [ "$RETAIN_WEB_PREFLIGHT" = true ]; then
             echo "Adopted authenticated complete two-script Node preflight"
           else
@@ -288,6 +461,40 @@ jobs:
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
+      - name: Preserve diagnostic preflight logs including failures
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: baseline-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/validation/baseline-preflight
+          if-no-files-found: error
+          retention-days: 14
+      - name: Require original diagnostic preflight outcomes
+        if: always() && inputs.diagnostic_baseline == 'true'
+        env:
+          RESULTS: >-
+            ${{ steps.baseline_history.outcome }} ${{ steps.baseline_validation.outcome }}
+            ${{ steps.baseline_node_setup.outcome }} ${{ steps.baseline_oracle.outcome }}
+            ${{ steps.baseline_operations.outcome }} ${{ steps.baseline_node.outcome }}
+        run: |
+          set -- $RESULTS
+          test "$#" -eq 6 || { echo 'Diagnostic preflight outcomes are incomplete'; exit 1; }
+          for result in "$@"; do
+            test "$result" = success || { echo "Diagnostic preflight command ended with $result"; exit 1; }
+          done
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   rust_compile:
     name: fast Rust gate
@@ -295,7 +502,11 @@ jobs:
     # Give main-bound pull requests an early, independent compiler verdict.
     # The full unit and SQLite suite continues below; contributors may merge
     # after this compile gate and policy pass, then watch that suite on main.
-    if: needs.scope.outputs.rust == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.rust == 'true')
     # General executors also reclaim above 4 GiB during the large Rust check.
     # Share the existing larger-memory topology queue; keep its host bounds.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
@@ -315,6 +526,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
@@ -342,6 +569,19 @@ jobs:
         run: |
           owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
           chown -R "$owner" "$GITHUB_WORKSPACE"
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   check:
     name: Rust unit and SQLite contracts
@@ -349,7 +589,11 @@ jobs:
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
-    if: needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.rust == 'true' && needs.scope.outputs.retain_rust != 'true')
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
@@ -420,6 +664,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: rustfmt, clippy
@@ -434,8 +694,28 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: rust-gate
+      - name: Discover the exact ordinary Rust binary inventory
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 -m validation.baseline_rust_inventory --output "$PLURX_BASELINE_DIR/rust-inventory" -- \
+            cargo test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
       - name: Run format, Clippy, unit, and SQLite contracts
-        run: make ci-rust-gate
+        run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            python3 - <<'PYRUST'
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+          commands = [('rust-static', ['make', 'fmt-check', 'spike-lock-check', 'lint', 'test-socket-permission-check'], 1200), ('rust-units', ['cargo', 'test', '--workspace', '--locked', '--exclude', 'plurx-cluster-check', '--no-fail-fast'], 5400), ('rust-serial-vfr', ['cargo', 'test', '--locked', '--workspace', '--exclude', 'plurx-cluster-check', 'vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid', '--', '--exact', '--ignored', '--test-threads=1'], 600), ('rust-serial-bitmap', ['cargo', 'test', '--locked', '--workspace', '--exclude', 'plurx-cluster-check', 'vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing', '--', '--exact', '--ignored', '--test-threads=1'], 600)]
+          manifest = dict(candidate_sha=os.environ['PLURX_TEST_CANDIDATE_SHA'], candidate_tree=os.environ['PLURX_TEST_CANDIDATE_TREE'], cells=[dict(id=name, argv=argv, timeout_seconds=timeout) for name, argv, timeout in commands])
+          path = root / 'rust-commands.json'
+          path.write_text(json.dumps(manifest))
+          raise SystemExit(subprocess.call([sys.executable, '-m', 'validation.baseline_commands', '--manifest', str(path), '--output', str(root / 'rust-commands')]))
+          PYRUST
+          else
+            make ci-rust-gate
+          fi
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -450,13 +730,28 @@ jobs:
           if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_store_legacy:
     name: replicated Store contracts (legacy)
     needs: [scope, preflight]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode != 'accelerated'
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true' && needs.scope.outputs.execution_mode != 'accelerated')
     runs-on: [self-hosted, Linux, X64, lab, ci-store]
     # Run 5228 completed 188 of 367 serial controls before the 40m cutoff.
     # Preserve the full inventory with a finite budget for its measured runtime.
@@ -465,6 +760,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -519,13 +830,28 @@ jobs:
       - name: Propagate the Store contract result
         if: always() && steps.store_contracts.outcome != 'success'
         run: exit 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_store_shards:
     name: required replicated Store shard graph
     needs: [scope, preflight]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode == 'accelerated'
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true' && needs.scope.outputs.execution_mode == 'accelerated')
     uses: ./.github/workflows/store-shards.yml
     with:
       execution-mode: accelerated
@@ -537,8 +863,10 @@ jobs:
     name: non-blocking replicated Store shard shadow
     needs: [scope, preflight]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' &&
-      needs.scope.outputs.execution_mode == 'shadow'
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true' && needs.scope.outputs.execution_mode == 'shadow')
     uses: ./.github/workflows/store-shards.yml
     with:
       execution-mode: shadow
@@ -589,8 +917,10 @@ jobs:
     name: replicated topology contracts
     needs: [scope, preflight]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' ||
-      needs.scope.outputs.hiqlite_spike == 'true'
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true' || needs.scope.outputs.hiqlite_spike == 'true')
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     # A cold runner builds the command-profile dependency graph before the
     # three-voter proof. Persistent non-voter caches shorten later runs.
@@ -599,6 +929,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
           components: clippy
@@ -710,17 +1056,50 @@ jobs:
       - name: Propagate the topology contract result
         if: always() && steps.topology_contracts.outcome != 'success'
         run: exit 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_transport_recovery_contracts:
     name: cluster transport recovery contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true')
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -762,13 +1141,28 @@ jobs:
       - name: Propagate the recovery contract result
         if: always() && steps.recovery_contracts.outcome != 'success'
         run: exit 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_transport_recovery_voter:
     name: cluster transport recovery voter role
     needs: [scope, preflight, cluster_transport_recovery_contracts]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' &&
-      needs.cluster_transport_recovery_contracts.result == 'success'
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true' && needs.cluster_transport_recovery_contracts.result == 'success')
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     timeout-minutes: 240
     steps:
@@ -777,6 +1171,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -830,13 +1240,28 @@ jobs:
       - name: Propagate the voter role result
         if: always() && steps.voter_recovery.outcome != 'success'
         run: exit 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_transport_recovery_learner:
     name: cluster transport recovery learner role
     needs: [scope, preflight, cluster_transport_recovery_contracts]
     if: >-
-      needs.scope.outputs.cluster_auth == 'true' &&
-      needs.cluster_transport_recovery_contracts.result == 'success'
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true' && needs.cluster_transport_recovery_contracts.result == 'success')
     runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     timeout-minutes: 240
     steps:
@@ -845,6 +1270,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -898,6 +1339,19 @@ jobs:
       - name: Propagate the learner role result
         if: always() && steps.learner_recovery.outcome != 'success'
         run: exit 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_transport_recovery:
     name: cluster transport recovery campaign
@@ -1020,7 +1474,11 @@ jobs:
   cluster_wal:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true')
     # Retained outcomes still require compiling the large current native targets.
     runs-on: [self-hosted, Linux, X64, lab, baremetal, ci-topology]
     # Run 5447 passed 213 commands; the next feature target was still compiling
@@ -1032,6 +1490,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -1054,11 +1528,28 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   cluster_daemon:
     name: cluster daemon contracts
     needs: [scope, preflight]
-    if: needs.scope.outputs.cluster_auth == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.cluster_auth == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -1124,6 +1615,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -1154,11 +1661,28 @@ jobs:
           if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   web_layout:
     name: web layout and accessibility
     needs: [scope, preflight]
-    if: needs.scope.outputs.web_layout == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.web_layout == 'true')
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: [self-hosted, Linux, X64, lab, general]
@@ -1226,6 +1750,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -1246,12 +1786,23 @@ jobs:
       - uses: ./.github/actions/playwright
         with:
           version: "1.62.0"
+      - name: Run standalone seek-control browser unit discovery
+        if: ${{ !cancelled() && inputs.diagnostic_baseline == 'true' }}
+        run: |
+          python3 - <<'PYCONTEXT'
+          import json, os, pathlib, platform
+          context = dict(candidate_sha=os.environ['PLURX_TEST_CANDIDATE_SHA'], candidate_tree=os.environ['PLURX_TEST_CANDIDATE_TREE'], cell_id='python:seek-layout', framework='unittest', target=platform.system() + '-' + platform.machine(), profile='baseline', features=[], toolchain='Python ' + platform.python_version(), suite_dir='tests/web', test_files=['test_seek_controls_layout.py'])
+          (pathlib.Path(os.environ['PLURX_BASELINE_DIR']) / 'context-seek-layout.json').write_text(json.dumps(context))
+          PYCONTEXT
+          python3 -m validation.baseline_python --context "$PLURX_BASELINE_DIR/context-seek-layout.json" --suite-dir tests/web --output "$PLURX_BASELINE_DIR/python-seek-layout.json"
       - name: Check every affected web layout
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make ui-check
       # Cheap (one page, no server, no media) and it covers the one thing the
       # Node web tests structurally cannot: that the shipped reporter actually
       # runs in a browser.
       - name: Run the playback-control reporter in a real browser
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make control-browser-check
       - name: Provision headed Cinema browser dependencies
         run: |
@@ -1263,10 +1814,13 @@ jobs:
           command -v xvfb-run
           command -v xauth
       - name: Test Cinema remote browser contracts
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make cinema-remote-browser-check
       - name: Test grouped library rows in a real browser
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make library-rows-browser-check
       - name: Test subtitle model setup and generated-caption completion in a real browser
+        if: ${{ !cancelled() && (inputs.diagnostic_baseline == 'true' || success()) }}
         run: make subtitle-generation-browser-check
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
@@ -1282,6 +1836,19 @@ jobs:
           if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   vod_web:
     name: film-addressed VOD browser acceptance
@@ -1291,7 +1858,11 @@ jobs:
     # A dependency is deliberate: Forgejo 16 accepted the same job-level
     # concurrency group on both siblings but still executed them together.
     needs: [scope, preflight, web_layout]
-    if: needs.scope.outputs.web_layout == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success' && needs.web_layout.result == 'success')) &&
+      (needs.scope.outputs.web_layout == 'true')
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -1357,6 +1928,22 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
@@ -1388,9 +1975,20 @@ jobs:
         run: |
           mkdir -p target/playback-lab/acceptance
           chrome="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
-          scripts/playback-lab run --suite vod --case suspend-resume --browser chrome \
-            --chrome "$chrome" --json target/playback-lab/acceptance/vod.json
-          # Steady, seek-storm, and stall-recovery are intentionally out of CI.
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            python3 - "$chrome" <<'PYVOD'
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+          manifest = dict(candidate_sha=os.environ['PLURX_TEST_CANDIDATE_SHA'], candidate_tree=os.environ['PLURX_TEST_CANDIDATE_TREE'], cells=[dict(id='vod-' + case, argv=['scripts/playback-lab', 'run', '--suite', 'vod', '--case', case, '--browser', 'chrome', '--chrome', sys.argv[1], '--json', str(root / ('vod-' + case + '.json'))], timeout_seconds=360) for case in ['steady', 'seek-storm', 'suspend-resume']])
+          path = root / 'vod-commands.json'
+          path.write_text(json.dumps(manifest))
+          raise SystemExit(subprocess.call([sys.executable, '-m', 'validation.baseline_commands', '--manifest', str(path), '--output', str(root / 'vod-commands')]))
+          PYVOD
+          else
+            scripts/playback-lab run --suite vod --case suspend-resume --browser chrome \
+              --chrome "$chrome" --json target/playback-lab/acceptance/vod.json
+          fi
+          # Outside diagnostics, steady, seek-storm, and stall-recovery remain out of CI.
           # See docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md,
           # docs/streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md, and
           # docs/streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
@@ -1408,11 +2006,28 @@ jobs:
           if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
             chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
           fi
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   android_jvm:
     name: Android JVM tests and lint
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_jvm == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.android_jvm == 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     steps:
@@ -1423,6 +2038,22 @@ jobs:
       # Android jobs used to rebuild it from scratch — cmdline-tools plus four
       # sdkmanager downloads — on every run. Keyed on the Dockerfile hash, a
       # pull replaces the rebuild; any failure falls back to the local build.
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}' --execution-scope external-containers
       - name: Reuse the pinned Android toolchain image from Forgejo
         env:
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
@@ -1433,9 +2064,13 @@ jobs:
             docker tag "$tag" plurx-android-build
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           else
-            make android-image \
-              && docker tag plurx-android-build "$tag" \
-              && docker push "$tag" || true
+            if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+              make android-image
+            else
+              make android-image \
+                && docker tag plurx-android-build "$tag" \
+                && docker push "$tag" || true
+            fi
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
@@ -1458,11 +2093,28 @@ jobs:
           else
             BUILDX_CONFIG=target/validation/buildx make android-test
           fi
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   apple:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
-    if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      ((needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true')
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
     concurrency:
       group: plurx-apple-silicon-heavy
@@ -1478,6 +2130,21 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}'
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -1485,14 +2152,29 @@ jobs:
           grep -Fxq "Build version 27A266a" <<< "$xcode_version"
           xcrun --find swift
       - name: Build and test native macOS server tray
+        id: baseline_desktop
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
         if: needs.scope.outputs.desktop_macos == 'true'
         # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
         # The complete native output is preserved independently, including failures.
         run: |
           mkdir -p target/validation
-          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            python3 - <<'PYDESKTOP' > target/validation/desktop-macos-check.log 2>&1
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+          manifest = dict(candidate_sha=os.environ['PLURX_TEST_CANDIDATE_SHA'], candidate_tree=os.environ['PLURX_TEST_CANDIDATE_TREE'], cells=[dict(id=name, argv=['make', name], timeout_seconds=1200) for name in ['desktop-macos-build', 'desktop-macos-test']])
+          path = root / 'desktop-commands.json'
+          path.write_text(json.dumps(manifest))
+          raise SystemExit(subprocess.call([sys.executable, '-m', 'validation.baseline_commands', '--manifest', str(path), '--output', str(root / 'desktop-commands')]))
+          PYDESKTOP
+          else
+            make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
+          fi
           echo "Native macOS server tray build and unit checks passed."
       - name: Preserve native macOS server tray check output
+        id: baseline_desktop_artifact
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
         if: always() && needs.scope.outputs.desktop_macos == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
@@ -1561,9 +2243,54 @@ jobs:
             xcrun simctl bootstatus "$simulator_id" -b
           done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
+        id: baseline_apple
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
-        run: make apple-test
+        run: |
+          if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+            python3 - <<'PYAPPLE'
+          import json, os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['PLURX_BASELINE_DIR'])
+          for name in ['APPLE_IOS_SIM', 'APPLE_IPAD_SIM', 'APPLE_TVOS_SIM']:
+              assert os.environ.get(name), 'Missing isolated destination ' + name
+          dry = subprocess.check_output(['make', '--no-print-directory', '-n', 'apple-test'], text=True)
+          commands, pending = [], []
+          for raw in dry.splitlines():
+              line = raw.strip()
+              if not line or line.startswith('#'):
+                  continue
+              if line.endswith('\\'):
+                  pending.append(line[:-1].rstrip())
+              else:
+                  commands.append(' '.join(pending + [line]))
+                  pending = []
+          assert not pending and len(commands) == 6, 'Apple recipe inventory changed'
+          assert 'xcodegen generate' in commands[0]
+          assert all('plurx-iOS' in commands[index] for index in [1, 2, 3])
+          assert all('plurx-tvOS' in commands[index] for index in [4, 5])
+          binding = dict(candidate_sha=os.environ['PLURX_TEST_CANDIDATE_SHA'], candidate_tree=os.environ['PLURX_TEST_CANDIDATE_TREE'])
+          def run(name, cells):
+              path = root / (name + '.json')
+              path.write_text(json.dumps(dict(binding, cells=cells)))
+              return subprocess.call([sys.executable, '-m', 'validation.baseline_commands', '--manifest', str(path), '--output', str(root / name)])
+          def cell(name, command, timeout=1200):
+              return dict(id=name, argv=['bash', '-e', '-o', 'pipefail', '-c', command], timeout_seconds=timeout)
+          if run('apple-project', [cell('xcodegen', commands[0], 120)]) != 0:
+              raise SystemExit(1)
+          # A failed phone assertion cannot hide iPad or TV tests. Building the
+          # same iOS scheme again reuses DerivedData while preserving its flags.
+          raise SystemExit(run('apple-commands', [
+              cell('iphone', '(' + commands[1] + ') && (' + commands[2] + ')'),
+              cell('ipad', '(' + commands[1] + ') && (' + commands[3] + ')'),
+              cell('tvos', '(' + commands[4] + ') && (' + commands[5] + ')'),
+          ]))
+          PYAPPLE
+          else
+            make apple-test
+          fi
       - name: Require native TV navigation journeys
+        id: baseline_tv_navigation
+        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1585,17 +2312,61 @@ jobs:
               xcrun simctl delete "$udid" || true
             fi
           done
+      - name: Require original diagnostic Apple outcomes
+        if: always() && inputs.diagnostic_baseline == 'true'
+        env:
+          RESULTS: >-
+            ${{ steps.baseline_desktop.outcome }} ${{ steps.baseline_desktop_artifact.outcome }}
+            ${{ steps.baseline_apple.outcome }} ${{ steps.baseline_tv_navigation.outcome }}
+        run: |
+          set -- $RESULTS
+          test "$#" -eq 4 || { echo 'Diagnostic Apple outcomes are incomplete'; exit 1; }
+          for result in "$@"; do
+            test "$result" = success || { echo "Diagnostic Apple command ended with $result"; exit 1; }
+          done
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   android_device:
     name: Android instrumented UI tests
     needs: [scope, preflight]
-    if: needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.android_device == 'true' && needs.scope.outputs.retain_android_device != 'true')
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 35
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}' --execution-scope external-containers
       - name: Isolate the Android SDK from the repository checkout
         run: |
           echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
@@ -1621,9 +2392,13 @@ jobs:
             docker tag "$tag" plurx-android-build
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           else
-            make android-image \
-              && docker tag plurx-android-build "$tag" \
-              && docker push "$tag" || true
+            if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
+              make android-image
+            else
+              make android-image \
+                && docker tag plurx-android-build "$tag" \
+                && docker push "$tag" || true
+            fi
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
@@ -1702,6 +2477,19 @@ jobs:
             target/validation/android-instrumentation.txt
           if-no-files-found: warn
           retention-days: 1
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
 
   package_smoke:
     name: package and smoke (${{ matrix.arch }})
@@ -1710,7 +2498,11 @@ jobs:
       group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
       cancel-in-progress: false
     needs: [scope, preflight]
-    if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
+    if: >-
+      always() && needs.scope.result == 'success' &&
+      (inputs.diagnostic_baseline == 'true' ||
+       (needs.preflight.result == 'success')) &&
+      (needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true')
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -1731,6 +2523,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Begin candidate-bound diagnostic resource recording
+        if: inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          baseline_dir="target/full-suite-baseline/${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ matrix.arch }}"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_BASELINE_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_SHA=$EXPECTED_SHA" >> "$GITHUB_ENV"
+          echo "PLURX_TEST_CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_ENV"
+          python3 -m validation.baseline_resources start --output "$baseline_dir/resources" --cell '${{ github.job }}-${{ matrix.arch }}' --execution-scope external-containers
       - name: Prove the package runner and Docker engine are native
         env:
           ARCH: ${{ matrix.arch }}
@@ -1873,10 +2681,34 @@ jobs:
   # CD validates the tag in this workflow, then delegates artifact construction,
   # per-platform smoke, and alias publication to the manually recoverable release
   # workflow. A cancelled tag run can therefore be recovered without moving it.
+      - name: Finish diagnostic resource recording
+        if: always() && inputs.diagnostic_baseline == 'true'
+        continue-on-error: true
+        shell: bash
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_BASELINE_DIR:-target/full-suite-baseline/missing}/resources"
+      - name: Preserve diagnostic inventory and resource evidence
+        if: always() && inputs.diagnostic_baseline == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: full-suite-baseline-${{ github.job }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/full-suite-baseline
+          if-no-files-found: error
+          retention-days: 14
+
+  baseline_supplements:
+    name: diagnostic supplemental software unit cells
+    needs: scope
+    if: always() && inputs.diagnostic_baseline == 'true' && needs.scope.result == 'success'
+    uses: ./.github/workflows/baseline-supplements.yml
+    secrets: inherit
+    with:
+      expected_sha: ${{ inputs.expected_sha }}
+
   publish:
     name: publish image (local registry)
     needs: [scope, check, package_smoke]
     if: >-
+      inputs.diagnostic_baseline == '' &&
       startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
       inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
       needs.scope.outputs.qualification != 'true'
@@ -1908,6 +2740,7 @@ jobs:
       - android_device
       - package_smoke
     if: >-
+      inputs.diagnostic_baseline == '' &&
       always() && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' && inputs.promotion_pr == '' &&
       inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
@@ -2096,7 +2929,7 @@ jobs:
 
   badge:
     name: publish CI badge
-    if: always()
+    if: always() && inputs.diagnostic_baseline == ''
     needs:
       - scope
       - mobile_version

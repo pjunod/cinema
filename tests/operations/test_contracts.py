@@ -75,6 +75,18 @@ def workflow_job_blocks(path: str) -> dict[str, str]:
     }
 
 
+def workflow_job_condition(job: str) -> str:
+    match = re.search(r"(?m)^    if: ([^\n]+)$", job)
+    if match is None:
+        raise AssertionError("job has no condition")
+    if match[1] != ">-":
+        return match[1]
+    following = job[match.end():].splitlines()[1:]
+    return " ".join(line.strip() for line in following[:next(
+        (i for i, line in enumerate(following) if not line.startswith("      ")),
+        len(following))])
+
+
 def workflow_step_blocks(job: str) -> dict[str, str]:
     starts = list(re.finditer(r"(?m)^      - name: (.+)\n", job))
     return {
@@ -1660,12 +1672,12 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn('xcrun simctl boot "$simulator_id"', workflow)
         self.assertIn('xcrun simctl bootstatus "$simulator_id" -b', workflow)
         self.assertLess(workflow.index("stale_ids="), workflow.index("xcrun simctl create"))
-        self.assertLess(workflow.index("xcrun simctl bootstatus"), workflow.index("run: make apple-test"))
+        self.assertLess(workflow.index("xcrun simctl bootstatus"), workflow.index("make apple-test"))
         self.assertIn("name: Delete the run's simulators", workflow)
         self.assertIn("if: always()", workflow)
         self.assertIn('xcrun simctl delete "$udid"', workflow)
         self.assertIn('$${APPLE_IPAD_SIM:-}', makefile)
-        self.assertLess(workflow.index("xcrun simctl create"), workflow.index("run: make apple-test"))
+        self.assertLess(workflow.index("xcrun simctl create"), workflow.index("make apple-test"))
 
         # Each platform compiles once and every destination replays those
         # products: one iOS build-for-testing feeds the iPhone AND iPad
@@ -1761,7 +1773,7 @@ assert.equal(context.ACT_TIMER, null);
         )[1]
         self.assertIn("continue-on-error: true", fast_finalize)
         self.assertIn("name: Rust unit and SQLite contracts", unit_rust)
-        self.assertIn("run: make ci-rust-gate", unit_rust)
+        self.assertIn("make ci-rust-gate", unit_rust)
         self.assertNotIn("scripts/validate run", fast_rust)
         self.assertNotIn("actions/setup-node", fast_rust)
         self.assertNotIn("./.github/actions/playwright", fast_rust)
@@ -1779,7 +1791,7 @@ assert.equal(context.ACT_TIMER, null);
         # it provisions, which is exactly the failure this contract records.
         self.assertLess(
             unit_rust.index("uses: ./.github/actions/ffmpeg"),
-            unit_rust.index("run: make ci-rust-gate"),
+            unit_rust.index("make ci-rust-gate"),
         )
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
         web_layout = workflow.split("\n  web_layout:", 1)[1].split(
@@ -1788,8 +1800,8 @@ assert.equal(context.ACT_TIMER, null);
         android_device = workflow.split("\n  android_device:", 1)[1].split(
             "\n  package_smoke:", 1
         )[0]
-        self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
-        self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
+        self.assertIn("needs.scope.outputs.web_layout == 'true'", workflow_job_condition(workflow_job_blocks(".github/workflows/ci.yml")["web_layout"]))
+        self.assertIn("needs.scope.outputs.android_device == 'true'", workflow_job_condition(workflow_job_blocks(".github/workflows/ci.yml")["android_device"]))
         vod_web = workflow.split("\n  vod_web:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
@@ -1799,9 +1811,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("--case suspend-resume", vod_web)
         self.assertIn("docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn(
-            "if: needs.scope.outputs.release_build == 'true' || "
-            "needs.scope.outputs.container == 'true'",
-            workflow,
+            "needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'",
+            workflow_job_condition(workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]),
         )
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
@@ -1809,7 +1820,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("name: replicated topology contracts", workflow)
         self.assertIn("name: replicated WAL recovery contracts", workflow)
         self.assertIn("name: cluster daemon contracts", workflow)
-        self.assertIn("if: needs.scope.outputs.rust == 'true'", workflow)
+        self.assertIn("needs.scope.outputs.rust == 'true'", workflow_job_condition(workflow_job_blocks(".github/workflows/ci.yml")["check"]))
         self.assertIn("needs: [scope, preflight]", workflow)
         windows_action = read(".github/actions/windows-cross/action.yml")
         self.assertIn("cargo-xwin --version", windows_action)
@@ -2002,11 +2013,11 @@ assert.equal(context.ACT_TIMER, null);
 
         preflight = workflow_job_blocks(".github/workflows/ci.yml")["preflight"]
         operations_run = workflow_step_blocks(preflight)["Check CI, deploy, and shipping contracts"]
-        self.assertEqual(workflow_step_literal(operations_run, "run"), [
-            'if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then',
-            '  echo "Adopted authenticated complete operations unit discovery"',
-            "else", "  make operations-check", "fi",
-        ])
+        operations_lines = workflow_step_literal(operations_run, "run")
+        self.assertEqual(operations_lines[-3:], ["else", "  make operations-check", "fi"])
+        self.assertIn('if [ "$RETAIN_OPERATIONS_UNITS" = true ]; then', operations_lines)
+        self.assertIn('  echo "Adopted authenticated complete operations unit discovery"', operations_lines)
+        self.assertIn('elif [ "${{ inputs.diagnostic_baseline }}" = true ]; then', operations_lines)
         self.assertIn("RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}", operations_run)
         effort_preflight = workflow_job_blocks(".github/workflows/effort-ci.yml")[
             "preflight"
@@ -2215,6 +2226,9 @@ assert.equal(context.ACT_TIMER, null);
                 r"needs\.scope\.outputs\.(apple|desktop_macos|retain_apple) (==|!=) 'true'",
                 lambda match: str(values[match[1]] if match[2] == "==" else not values[match[1]]),
                 expression)
+            expression = expression.replace("needs.scope.result == 'success'", "True")
+            expression = expression.replace("needs.preflight.result == 'success'", "True")
+            expression = expression.replace("inputs.diagnostic_baseline == 'true'", "False")
             expression = expression.replace("always()", "True").replace("&&", " and ").replace("||", " or ")
             self.assertRegex(expression, r"^[ ()TrueFalsandor]+$")
             return eval(expression, {"__builtins__": {}}, {})
@@ -2228,7 +2242,7 @@ assert.equal(context.ACT_TIMER, null);
                 jobs = workflow_job_blocks(path)
                 self.assertIn("desktop_macos: ${{ steps.scope.outputs.desktop_macos }}", jobs["scope"])
                 job = jobs[job_name]
-                condition = re.search(r"(?m)^    if: (.+)$", job)[1]
+                condition = workflow_job_condition(job)
                 steps = workflow_step_blocks(job)
                 desktop_name = ("Compile native macOS server tray" if "effort-ci" in path
                                 else "Build and test native macOS server tray")
@@ -2251,6 +2265,9 @@ assert.equal(context.ACT_TIMER, null);
                         continue
                     if name in {"Verify the pinned Apple toolchain", desktop_name}:
                         continue
+                    if "diagnostic" in name:
+                        self.assertIn("inputs.diagnostic_baseline == 'true'", workflow_step_scalar(step, "if"))
+                        continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")
@@ -2265,7 +2282,7 @@ assert.equal(context.ACT_TIMER, null);
                            (".github/workflows/ci.yml", "apple")):
             step = workflow_step_blocks(workflow_job_blocks(path)[name])[
                 "Build and test native macOS server tray"]
-            commands = "\n".join(workflow_step_literal(step, "run"))
+            commands = "\n".join(workflow_step_literal(step, "run")).replace("${{ inputs.diagnostic_baseline }}", "")
             for status in (0, 7):
                 with self.subTest(path=path, status=status), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
@@ -2312,7 +2329,7 @@ assert.equal(context.ACT_TIMER, null);
                            (".github/workflows/ci.yml", "apple")):
             steps = workflow_step_blocks(workflow_job_blocks(path)[name])
             desktop = steps["Build and test native macOS server tray"]
-            commands = workflow_step_literal(desktop, "run")
+            commands = [line.strip() for line in workflow_step_literal(desktop, "run")]
             self.assertIn("make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1", commands)
             self.assertFalse(any("tee " in command or "cat " in command for command in commands),
                              "desktop XCTest records must not enter the mobile receipt log")
@@ -2587,7 +2604,7 @@ assert.equal(context.ACT_TIMER, null);
         # fails with the same message.
         self.assertIn("ci-rust-gate: fmt-check spike-lock-check lint", gate)
         self.assertIn("spike-lock-check", makefile.split("\nunit:", 1)[1].split("\n\n", 1)[0])
-        self.assertIn("run: make ci-rust-gate", workflow)
+        self.assertIn("make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         self.assertIn("make cluster-store-check", jobs["cluster_store_legacy"])
@@ -4000,7 +4017,7 @@ assert.equal(context.ACT_TIMER, null);
         condition = publish.split("    if: >-\n", 1)[1].split("\n    runs-on:", 1)[0]
         self.assertEqual(
             " ".join(condition.split()),
-            "always() && github.event_name == 'workflow_dispatch' && "
+            "inputs.diagnostic_baseline == '' && always() && github.event_name == 'workflow_dispatch' && "
             "github.ref == 'refs/heads/main' && inputs.promotion_pr == '' && "
             "inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' && "
             "needs.scope.outputs.qualification != 'true'",
@@ -4623,7 +4640,7 @@ assert.equal(context.ACT_TIMER, null);
         unit = workflow_job_blocks(".github/workflows/ci.yml")["check"]
         self.assertIn('desktop: "true"', unit)
         self.assertLess(unit.index("uses: ./.github/actions/rust-native-deps"),
-                        unit.index("run: make ci-rust-gate"))
+                        unit.index("make ci-rust-gate"))
         adapter = read(".github/actions/rust-native-deps/action.yml")
         self.assertIn("if: inputs.desktop == 'true'", adapter)
         self.assertIn("pkg-config --exists 'gtk4 >= 4.0' dbus-1", adapter)

@@ -4,6 +4,13 @@
 Fable · **Implementation started:** 2026-09-01 · **Baseline:** `main` at
 `950db83d`
 
+**2026-10-20 target update:**
+[Full suite on every PR](FULL-SUITE-EVERY-PR-PLAN.md) owns the new runtime
+placement, audit and implementation ledger. Its cutover is not implemented.
+Preserve this document's inventory, resource and cache safeguards; its
+GitHub-scheduler wording and final-effort-only test placement are historical,
+not a description of the new target. Forgejo is the current control plane.
+
 This is the complete implementation and operating contract for accelerating
 Plurx CI. It stands on its own: no earlier CI-overhaul document is required to
 interpret, implement, operate, or roll it back. The development/promotion

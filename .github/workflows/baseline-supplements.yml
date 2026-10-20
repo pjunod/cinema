@@ -1,0 +1,343 @@
+name: diagnostic baseline Python and Node supplements
+
+# Called only by explicit diagnostic full CI. These soft jobs collect missing
+# software-unit evidence; their reports explicitly leave manual/hardware cells
+# unresolved and never claim whole-repository qualification.
+on:
+  workflow_call:
+    inputs:
+      expected_sha:
+        description: Frozen candidate source required by this diagnostic sweep
+        required: true
+        type: string
+
+jobs:
+  python_supplements:
+    name: diagnostic supplemental Python units
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 30
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+      options: --cpus 2 --memory 4g
+    steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
+      - name: Verify the controlled Python unit environment
+        run: |
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected_sha }}
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - name: Discover and run every declared supplemental Python directory
+        env:
+          PLURX_BASELINE_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 - <<'PY'
+          import json, os, platform, subprocess, sys, time
+          from pathlib import Path
+          from validation.test_cell_manifest import canonical_context
+          candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          assert candidate == os.environ['PLURX_BASELINE_EXPECTED_SHA'], 'Frozen candidate differs'
+          environment = os.environ | {'PLURX_TEST_CANDIDATE_SHA': candidate, 'PLURX_TEST_CANDIDATE_TREE': tree}
+          output = Path(os.environ['RUNNER_TEMP']) / 'baseline-python'
+          output.mkdir(parents=True, exist_ok=True)
+          directories = [
+              'tests/benchmark', 'tests/sharing', 'tests/desktop', 'clients/desktop-remote/tests',
+              'tools/dv_processing',
+              'tools/dv_quality/backends/combined',
+              'tools/dv_quality/backends/libplacebo', 'tools/dv_quality/backends/nonidentity-authoring',
+              'tools/dv_quality/backends/p81-authoring', 'tools/dv_quality/backends/parsed-rpu',
+              'tools/dv_quality/backends/rpu-reuse',
+          ]
+          unpack_scratch = output / 'rpu-unpack-scratch'
+          unpack_scratch.mkdir()
+          conditional = [
+              {'id': 'decoded-layer-association-fixture', 'path': 'tools/dv_quality/backends/decoded-layers/test_association.py',
+               'status': 'unqualified', 'source_declared_test_methods': 17,
+               'owner': 'tools/dv_quality/backends/decoded-layers: retained decoder evidence owner (unassigned)',
+               'requires': 'Supported script requires replay scratch containing bl-b0.mkv, ffprobe JSON and b0-normal/frames; those native fixture paths are absent from this slim source bundle.'},
+              {'id': 'decoded-layer-prerequisite-fixture', 'path': 'tools/dv_quality/backends/decoded-layers/test_prerequisite.py',
+               'status': 'unqualified', 'source_declared_test_methods': 11,
+               'owner': 'tools/dv_quality/backends/decoded-layers: reviewed dependency fixture owner (unassigned)',
+               'requires': 'Supported script requires approved parsed-renderer prefix/include/lib and separate reviewed bundle; binary prerequisite trees are absent from this source bundle.'},
+              {'id': 'decoded-layer-rendered-fixture', 'path': 'tools/dv_quality/backends/decoded-layers/test_rendered.py',
+               'status': 'unqualified', 'source_declared_test_methods': 13,
+               'owner': 'tools/dv_quality/backends/decoded-layers: retained pixel fixture owner (unassigned)',
+               'requires': 'Supported script requires complete b0/b2-normal replay scratch with decoded source frames and rendered pixels; the required native fixture directories are absent.'},
+              {'id': 'parsed-rpu-output-fixture', 'path': 'tools/dv_quality/backends/parsed-rpu/test_check_parsed.py',
+               'status': 'unqualified', 'source_declared_test_methods': 5,
+               'owner': 'tools/dv_quality/backends/parsed-rpu: retained renderer output owner (unassigned)',
+               'requires': 'Supported script requires replay scratch outputs/ containing actual float/RGB48 renderer pixels; outputs/ is absent from the committed bundle.'},
+              {'id': 'parsed-rpu-chroma-fixture', 'path': 'tools/dv_quality/backends/parsed-rpu/test_chroma_control.py',
+               'status': 'unqualified', 'source_declared_test_methods': 3,
+               'owner': 'tools/dv_quality/backends/parsed-rpu: retained chroma fixture owner (unassigned)',
+               'requires': 'Supported script requires native444.yuv, rgb-edge.rgb48le and four center/left phase files; those six native files are absent from this source bundle.'},
+              {'id': 'timeline-evidence-checker', 'path': 'tools/dv_quality/backends/timeline/test_timeline.py',
+               'status': 'unqualified', 'source_declared_test_methods': 26,
+               'owner': 'tools/dv_quality/backends/timeline: retained timeline evidence owner (unassigned)',
+               'requires': 'Supported script requires complete normal-b0/normal-b2/seek-reset/epochs-reset and rpu-tags replay scratch; the source bundle retains slim traces rather than those runtime inputs.'},
+              {'id': 'timeline-real-driver', 'path': 'tools/dv_quality/backends/timeline/test_driver.py',
+               'status': 'unqualified', 'source_declared_test_methods': 4,
+               'owner': 'tools/dv_quality/backends/timeline: native decoder fixture owner (unassigned)',
+               'requires': 'Native decoder exit/crash controls require the reviewed replay image and decode_timeline executable; never imported or executed as portable unit discovery.'},
+              {'id': 'rpu-reuse-evidence-checker', 'path': 'tools/dv_quality/backends/rpu-reuse/test_reuse.py',
+               'status': 'unqualified',
+               'owner': 'tools/dv_quality/backends/rpu-reuse: prepared native evidence owner (unassigned)',
+               'requires': '27 checker cases require the retained runtime frame/container/tool evidence; no evidence/ fixture exists in this slim source bundle.'},
+              {'id': 'rpu-reuse-real-driver', 'path': 'tools/dv_quality/backends/rpu-reuse/test_driver.py',
+               'status': 'unqualified',
+               'owner': 'tools/dv_quality/backends/rpu-reuse: native decoder fixture owner (unassigned)',
+               'requires': 'Four real decoder exit/crash controls require prepared runtime binaries and source fixtures; this top-level campaign is never imported as a unit module.'},
+              {'id': 'manual-stream-controls', 'path': 'tools/dv_processing/test_stream.py',
+               'status': 'unqualified',
+               'owner': 'tools/dv_processing: renderer/media fixture owner (unassigned)',
+               'requires': 'Reviewed renderer helper, source media and fresh output; plain-function CLI is not a unittest case.'},
+              {'id': 'manual-processing-controls', 'path': 'tools/dv_processing/controls',
+               'status': 'unqualified',
+               'owner': 'tools/dv_processing/controls: renderer/media fixture owner (unassigned)',
+               'requires': 'The three test_*.py CLI controls require renderer binaries, source controls, libraries and fresh scratch.'},
+              {'id': 'browser-seek-layout', 'path': 'tests/web/test_seek_controls_layout.py',
+               'status': 'assigned-separate-cell',
+               'owner': 'ci.yml:web_layout / python:seek-layout',
+               'requires': 'Playwright and Chromium in the separate browser cell; excluded from this software-unit supplement.'},
+          ]
+          (output / 'conditional-cells.json').write_text(json.dumps(conditional, indent=2) + '\n')
+          rows = []
+          for index, directory in enumerate(directories, 1):
+              name = f'python-supplement-{index:02d}'
+              context = {'candidate_sha': candidate, 'candidate_tree': tree, 'cell_id': name,
+                         'framework': 'unittest', 'target': f'{platform.system()}-{platform.machine()}',
+                         'profile': 'unittest', 'features': [], 'toolchain': platform.python_version(),
+                         'suite_dir': directory}
+              if directory == 'tools/dv_processing':
+                  context.update(test_files=['test_author.py', 'test_metadata.py'])
+              elif directory == 'tools/dv_quality/backends/parsed-rpu':
+                  context.update(test_files=['test_image_identity.py', 'test_check_negatives.py'])
+              elif directory == 'tools/dv_quality/backends/combined':
+                  context.update(mode='entrypoint', entrypoint='test_combined.py', cwd=directory,
+                                 test_files=['test_combined.py'],
+                                 discovery_argv=[str((Path.cwd() / directory / 'evidence').resolve())])
+              elif directory == 'tools/dv_quality/backends/rpu-reuse':
+                  context.update(mode='entrypoint', entrypoint='test_unpack.py', cwd=directory,
+                                 test_files=['test_unpack.py'], discovery_argv=[str(unpack_scratch)])
+              canonical_context(context)
+              context_path = output / f'{name}-context.json'
+              context_path.write_text(json.dumps(context, indent=2) + '\n')
+              report = output / f'{name}.json'
+              command = [sys.executable, '-m', 'validation.baseline_python', '--context', str(context_path),
+                         '--suite-dir', directory, '--output', str(report)]
+              started = time.monotonic()
+              timed_out = False
+              with (output / f'{name}.log').open('wb') as log:
+                  try:
+                      result = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT,
+                                              timeout=90, check=False)
+                      returncode = result.returncode
+                  except subprocess.TimeoutExpired:
+                      returncode, timed_out = 124, True
+              rows.append({'cell_id': name, 'suite_dir': directory, 'command': command,
+                           'returncode': returncode, 'timed_out': timed_out,
+                           'duration_seconds': time.monotonic() - started, 'report_present': report.is_file()})
+              print(f'{name}: {directory}: exit={returncode}', flush=True)
+          passed = all(row['returncode'] == 0 and row['report_present'] for row in rows)
+          (output / 'summary.json').write_text(json.dumps({
+              'candidate_sha': candidate, 'candidate_tree': tree, 'cells': rows, 'units_passed': passed,
+              'full_repository_suite_complete': False, 'unresolved_conditional_cells': conditional,
+          }, indent=2) + '\n')
+          raise SystemExit(0 if passed else 1)
+          PY
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
+      - name: Preserve every supplemental Python report and import failure
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: baseline-python-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/baseline-python
+          if-no-files-found: error
+          retention-days: 14
+
+  node_supplements:
+    name: diagnostic exact Node unit recipe
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 30
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+      options: --cpus 2 --memory 4g
+    steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
+      - name: Verify the controlled Node unit environment
+        run: |
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected_sha }}
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.23.2"
+      - name: Execute every exact Make recipe command despite earlier failures
+        env:
+          PLURX_BASELINE_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 - <<'PY'
+          import json, os, platform, subprocess
+          from pathlib import Path
+          from validation.baseline_node import collect
+          candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          assert candidate == os.environ['PLURX_BASELINE_EXPECTED_SHA'], 'Frozen candidate differs'
+          environment = os.environ | {'PLURX_TEST_CANDIDATE_SHA': candidate, 'PLURX_TEST_CANDIDATE_TREE': tree}
+          output = Path(os.environ['RUNNER_TEMP']) / 'baseline-node'
+          output.mkdir(parents=True, exist_ok=True)
+          context = {'candidate_sha': candidate, 'candidate_tree': tree, 'cell_id': 'node-unit-recipe',
+                     'framework': 'node-script', 'target': f'{platform.system()}-{platform.machine()}',
+                     'profile': 'node', 'features': [],
+                     'toolchain': subprocess.check_output(['node', '--version'], text=True).strip(),
+                     'include_desktop_remote': True}
+          (output / 'context.json').write_text(json.dumps(context, indent=2) + '\n')
+          report = collect(context, Path.cwd(), output / 'logs', environment=environment)
+          (output / 'cell.json').write_text(json.dumps(report, indent=2) + '\n')
+          raise SystemExit(0 if report['passed'] else 1)
+          PY
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
+      - name: Preserve every exact Node command result and raw log
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: baseline-node-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/baseline-node
+          if-no-files-found: error
+          retention-days: 14

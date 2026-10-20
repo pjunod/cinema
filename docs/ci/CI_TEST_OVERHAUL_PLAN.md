@@ -4,6 +4,13 @@
 **Effort-train lifecycle:** added 2026-08-29 · **Written:** 2026-08-05 ·
 **Reviewed:** 2026-08-29
 
+**2026-10-20 target update:**
+[Full suite on every PR](FULL-SUITE-EVERY-PR-PLAN.md) owns the requested
+replacement of proportional runtime selection with fresh complete candidate
+execution. Its audit is complete; implementation/cutover remains pending.
+This document's historical results and valid evidence safeguards remain,
+but its ordinary-PR placement goal is not the new effort's target.
+
 Companion to [VALIDATION.md](../VALIDATION.md) (how changed paths select behavior
 contracts), [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how large
 projects use a compile-only integration lane), and
