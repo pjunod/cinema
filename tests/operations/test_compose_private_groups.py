@@ -56,28 +56,32 @@ class ComposeGroupWriteTests(unittest.TestCase):
         # Incomplete NSS enumeration is immaterial: this is explicitly selected
         # source, not a claim that a shared group has no other members.
         with self.tree() as path, mock.patch.object(pwd, 'getpwall', side_effect=OSError('NSS enumeration disabled')) as lookup:
-            self.assertEqual(installer.safe_path(path, source=True), path)
+            self.assertEqual(installer.safe_path(path), path)
             lookup.assert_not_called()
 
     def test_desktop_destinations_keep_group_write_protection(self):
+        # Historical regression name retained: owned desktop paths may now be
+        # group editable; foreign ownership remains a separate refusal.
         with self.tree() as path:
-            with self.assertRaisesRegex(ValueError, '/home/operator/cinema/deploy.*mode=0775'):
+            self.assertEqual(installer.safe_path(path), path)
+        with self.tree({Path('/home/operator/cinema'): meta(0o775, UID + 1)}) as path:
+            with self.assertRaisesRegex(ValueError, 'belongs to another user'):
                 installer.safe_path(path)
 
     def test_world_writable_source_names_the_offending_parent(self):
         with self.tree({Path('/home/operator/cinema'): meta(0o777)}) as path:
             with self.assertRaisesRegex(ValueError, '/home/operator/cinema .*mode=0777'):
-                installer.safe_path(path, source=True)
+                installer.safe_path(path)
 
     def test_foreign_source_ownership_names_the_offending_parent(self):
         with self.tree({Path('/home/operator/cinema'): meta(0o755, UID + 1)}) as path:
             with self.assertRaisesRegex(ValueError, 'belongs to another user: /home/operator/cinema '):
-                installer.safe_path(path, source=True)
+                installer.safe_path(path)
 
     def test_group_writable_base_override_and_environment_are_accepted_unchanged(self):
         with self.inputs() as (checkout, deploy):
             before = {path: (path.stat().st_mode, path.read_bytes()) for path in deploy.iterdir()}
-            self.assertEqual(installer.safe_path(deploy, source=True), deploy)
+            self.assertEqual(installer.safe_path(deploy), deploy)
             environment, _, _ = control.compose_environment(str(checkout), 'selected')
             self.assertEqual(environment, deploy / '.env')
             self.assertEqual(before, {path: (path.stat().st_mode, path.read_bytes()) for path in deploy.iterdir()})
