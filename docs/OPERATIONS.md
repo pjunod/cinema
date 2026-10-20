@@ -41,7 +41,7 @@ make docker-up               # detects Linux GPUs, builds + starts, and stamps t
 make install                 # builds, installs, starts, and waits for /readyz; `make uninstall` reverses it
 
 # Bare metal — one binary, needs ffmpeg/ffprobe on PATH (and the optional conversion tools below)
-make install-binary   # puts plurxd on PATH, no service
+make install-binary   # core binaries; also the tray in a GUI session (fresh server stays stopped)
 plurxd run            # serves :32400
 
 # Windows console mode (PowerShell)

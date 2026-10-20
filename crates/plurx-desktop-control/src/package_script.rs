@@ -295,7 +295,12 @@ pub fn run(package: &str, phase: &str, original_args: &[String]) -> Result<bool>
         Err(e) if e.os_error == Some(libc::ENOENT) => None,
         Err(e) => return Err(e),
     };
-    if let Some(i) = &existing {
+    let pending = if existing.is_none() {
+        crate::source_install::pending_installation()?
+    } else {
+        None
+    };
+    if let Some(i) = existing.as_ref().or(pending.as_ref()) {
         // Live root lineage + signed plan, not environment or untrusted script arguments.
         if package::hook_check(i, package, "", phase)? {
             return Ok(true);

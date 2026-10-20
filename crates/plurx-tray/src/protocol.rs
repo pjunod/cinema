@@ -278,6 +278,21 @@ pub struct UpdateV1 {
     pub detail: Option<String>,
 }
 
+impl UpdateV1 {
+    /// Lifecycle workers use the same progress envelope without a release version.
+    pub fn is_server_operation(&self) -> bool {
+        self.version.is_none() && self.transaction_id.is_some()
+    }
+
+    pub fn title(&self) -> &str {
+        if self.is_server_operation() {
+            self.detail.as_deref().unwrap_or("Server operation")
+        } else {
+            self.state.title()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogsV1 {

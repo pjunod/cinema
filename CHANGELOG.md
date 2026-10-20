@@ -31,6 +31,33 @@ bump may break compatibility and a **patch** bump never does.
   manually cancelled generations. Only actual source changes or fresh ordinary
   probe publication invalidate it; identical ordinary reprobes still rotate.
 
+- Native desktop controllers embed the approved production update verification
+  key instead of refusing all update checks with an empty trust-root list.
+  Existing empty-root installations need one trusted manual reinstall; signed
+  release publication still requires protected GitHub signing configuration.
+
+- Compose tray registration accepts discovery containers without Docker
+  healthchecks and absent optional stop timeouts. Docker failures identify the
+  command and exit code without exposing container configuration or diagnostics.
+
+- Linux installers use verified prebuilt GitHub tray artifacts by default and
+  reserve GTK development packages/local tray compilation for `--build-tray`.
+  Compose installs select the host architecture and stable release independently
+  of the container, while native source cohorts require an exact source match.
+
+- Linux Compose tray installation accepts the selected user-owned checkout and
+  Compose files with ordinary group-write permissions, without changing them.
+  Private tray state remains protected; permission errors name the exact path.
+
+- Linux GUI Compose installations can install a separate host tray for the
+  selected local deployment, including status, logs, graceful lifecycle controls
+  and separate container boot and tray login preferences. Headless hosts and
+  container images retain their GUI-free runtime.
+
+- Native GUI source and binary installation now installs and opens the complete
+  tray companion and local controller instead of updating only the daemon.
+  Existing server running and startup choices are preserved.
+
 - Converted Profile 7 catalog starts can qualify reconstructed Profile 8.1 under FEL re-encode independently of the HDR-processing switch. The service carries an explicit processed destination on a finite PQ transcode, resolves its own encoded AAC audio, and checks the completed stream against one matching Main10/Profile 8 client capability entry. Native Dolby Vision copying is unchanged; refusals retain their reason and only the saved ordinary request can be a fallback. Remote descriptors retain the destination but do not acquire local execution authority.
 - Browser startup keeps the requested transport intent when a decoder emits an unexplained pause before the current attachment presents. The original startup deadline remains active, and rejected Play calls retain their cause in diagnostics. Closing during a prepared quality switch drains both session handles through rollback and pending commit acceptance, including after the old decoder retires.
 - Closing an HDR10-E session preserves intentional cancellation through the processing helper and generation owner, so normal cleanup cannot blacklist the backend for the next play. Failed web session releases and failed quality recovery now retain diagnostics under the originating session without marking a replacement playback failed.

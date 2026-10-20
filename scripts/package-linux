@@ -4,6 +4,7 @@
 #   scripts/package-linux --arch amd64|arm64 --version X.Y.Z \
 #     --binary target/release/plurxd --control-dir target/release --out DIR
 #     [--desktop-binary target-desktop/release/plurx-tray]
+#     [--packager all|deb|rpm] [--service-policy maintainer|external]
 #
 # The paired split-debug file is read from beside the binary (BINARY.dwp, which
 # the release profile's packed split-debuginfo produces). The headless server
@@ -14,6 +15,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 arch= version= binary= out= control_dir= desktop_binary=
+packager_choice=all
+service_policy=maintainer
 while [ $# -gt 0 ]; do
   case $1 in
     --arch) arch=${2:?}; shift ;;
@@ -22,10 +25,14 @@ while [ $# -gt 0 ]; do
     --out) out=${2:?}; shift ;;
     --control-dir) control_dir=${2:?}; shift ;;
     --desktop-binary) desktop_binary=${2:?}; shift ;;
+    --packager) packager_choice=${2:?}; shift ;;
+    --service-policy) service_policy=${2:?}; shift ;;
     *) echo "package-linux: unknown argument $1" >&2; exit 2 ;;
   esac
   shift
 done
+case $packager_choice in all|deb|rpm) ;; *) echo "package-linux: --packager must be all, deb or rpm" >&2; exit 2 ;; esac
+case $service_policy in maintainer|external) ;; *) echo "package-linux: --service-policy must be maintainer or external" >&2; exit 2 ;; esac
 case $arch in amd64|arm64) ;; *) echo "package-linux: --arch must be amd64 or arm64" >&2; exit 2 ;; esac
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package-linux: --version must be X.Y.Z" >&2; exit 2; }
 [ -x "$binary" ] || { echo "package-linux: no executable at $binary" >&2; exit 1; }
@@ -73,6 +80,17 @@ for script in preinstall postinstall preremove postremove; do
   install -m 0755 "$root/deploy/packaging/$script" "$stage/$script"
   install -m 0755 "$root/deploy/packaging/desktop-$script" "$stage/desktop-$script"
 done
+if [ "$service_policy" = external ]; then
+  # A source installer snapshots/restores startup and running policy itself.
+  # The package still registers its real dpkg/rpm cohort before returning.
+  awk '{ print } /^systemctl daemon-reload >\/dev\/null 2>&1 \|\| true$/ { print "# Source installer restores the observed service policy."; print "exit 0" }' \
+    "$stage/postinstall" > "$stage/postinstall.external"
+  grep -q '^# Source installer restores the observed service policy.$' "$stage/postinstall.external" || {
+    echo "package-linux: service policy hook anchor changed" >&2; exit 1;
+  }
+  mv "$stage/postinstall.external" "$stage/postinstall"
+  chmod 0755 "$stage/postinstall"
+fi
 # The source unit stays suitable for source installs. Packages use the native
 # launcher and a mandatory root guard before every activation.
 grep -q '^ExecStart=/usr/local/bin/plurxd run$' "$root/deploy/plurxd.service" || {
@@ -99,7 +117,9 @@ export PLURX_PKG_ARCH=$arch PLURX_PKG_VERSION=$version
 export PLURX_PKG_HOMEPAGE=$repository
 export PLURX_PKG_MAINTAINER="noirr cinema <$owner@users.noreply.github.com>"
 
-for packager in deb rpm; do
+packagers="deb rpm"
+[ "$packager_choice" = all ] || packagers=$packager_choice
+for packager in $packagers; do
   # nfpm resolves the config's ./ sources against its working directory.
   (cd "$stage" && nfpm package --config "$root/deploy/packaging/nfpm.yaml" \
     --packager "$packager" --target "$out/" >&2)
@@ -107,10 +127,16 @@ done
 case $arch in amd64) rpm_arch=x86_64 ;; arm64) rpm_arch=aarch64 ;; esac
 deb="$out/plurxd_${version}-1_${arch}.deb"
 rpm="$out/plurxd-${version}-1.${rpm_arch}.rpm"
-for package in "$deb" "$rpm"; do
+server_packages=
+case $packager_choice in all|deb) server_packages="$deb" ;; esac
+case $packager_choice in all) server_packages="$server_packages
+$rpm" ;; rpm) server_packages="$rpm" ;; esac
+while IFS= read -r package; do
   [ -f "$package" ] || { echo "package-linux: nfpm did not write $package" >&2; ls -l "$out" >&2; exit 1; }
   printf '%s\n' "$package"
-done
+done <<EOF
+$server_packages
+EOF
 
 if [ -n "$desktop_binary" ]; then
   [ -x "$desktop_binary" ] || { echo "package-linux: missing desktop executable" >&2; exit 1; }
@@ -121,11 +147,15 @@ if [ -n "$desktop_binary" ]; then
   for state in running starting stopped unhealthy unknown; do
     install -m 0644 "$root/deploy/desktop/icons/tv.plurx.Server-$state-symbolic.svg" "$stage/"
   done
-  for packager in deb rpm; do
+  for packager in $packagers; do
     (cd "$stage" && nfpm package --config "$root/deploy/packaging/desktop-nfpm.yaml" \
       --packager "$packager" --target "$out/" >&2)
   done
-  for package in "$out/plurx-desktop_${version}-1_${arch}.deb" "$out/plurx-desktop-${version}-1.${rpm_arch}.rpm"; do
+  for packager in $packagers; do
+    case $packager in
+      deb) package="$out/plurx-desktop_${version}-1_${arch}.deb" ;;
+      rpm) package="$out/plurx-desktop-${version}-1.${rpm_arch}.rpm" ;;
+    esac
     [ -f "$package" ] || { echo "package-linux: nfpm did not write $package" >&2; exit 1; }
     printf '%s\n' "$package"
   done

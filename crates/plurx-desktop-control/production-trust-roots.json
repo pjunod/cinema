@@ -1,5 +1,10 @@
 {
   "schema_version": 1,
   "repository": "pjunod/cinema",
-  "keys": []
+  "keys": [
+    {
+      "id": "desktop-update-2026-10",
+      "public_key_hex": "4cf637a12d48c206ce891e9d549c333f1228a2b884a55e15700af93f304420c6"
+    }
+  ]
 }

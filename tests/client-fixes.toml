@@ -7423,3 +7423,12 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/AppViewModel.kt"
 source_anchor = "serverName = node?.display_name ?: info.name"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/ServerLabelTest.kt"
 test_anchor = "aChosenNameKeepsTheAnsweringNodeVisible"
+
+# PR #1215: focus assertions retain their coverage; success capture is optional.
+[[fixes]]
+id = "apple.tv-live-focus-stress-capture-budget"
+commits = ["ba9c5e535ce75d3adabc6203f963c5759a5a2f42", "52cb4a7b0e50c6a3c0d20c9b1489b09aff05b1e7"]
+source = "clients/apple/UITests/TVNavigationTestCase.swift"
+source_anchor = "if result != .completed || captureOnSuccess {"
+test = "clients/apple/UITests/TVLiveNavigationTests.swift"
+test_anchor = "func testLiveFullscreenRevealMoreReportAndBackRetainSession()"

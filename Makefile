@@ -1838,22 +1838,22 @@ pi-uninstall: ## Remove an owned Pi installation while retaining data and browse
 	@python3 deploy/pi-setup uninstall $(PI_SETUP_FLAGS)
 
 .PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
-install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)
+install: ## Install the native server and the applicable local GUI tray companion
 	@deploy/install auto $(INSTALL_FLAGS)
 
-install-linux: ## Install plurxd as a systemd service (dedicated plurx user, sandboxed unit)
+install-linux: ## Install the systemd server and, in GUI sessions, its tray companion
 	@deploy/install linux $(INSTALL_FLAGS)
 
-install-macos: ## Install plurxd as a launchd LaunchAgent (keeps VideoToolbox available)
+install-macos: ## Install the native macOS server and menu bar companion
 	@deploy/install macos $(INSTALL_FLAGS)
 
 install-windows: ## Install plurxd as the native Windows service (runs deploy/install.ps1)
 	@deploy/install windows $(INSTALL_FLAGS)
 
-install-docker: ## First-run Compose install: .env, override file, data dir, then docker-up
+install-docker: ## Install Compose server and, in Linux GUI sessions, its host tray
 	@deploy/install docker $(INSTALL_FLAGS)
 
-install-binary: ## Put plurxd on PATH with no service (run it with `plurxd run`)
+install-binary: ## Install core binaries and, in GUI sessions, system tray binaries
 	@deploy/install binary $(INSTALL_FLAGS)
 
 uninstall: ## Stop and remove the service installed by `make install`; data stays

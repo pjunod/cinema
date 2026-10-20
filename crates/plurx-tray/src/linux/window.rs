@@ -134,7 +134,7 @@ impl ControlWindow {
             .unwrap_or_default();
         title.set_markup(&format!(
             "<b>{}</b>",
-            glib::markup_escape_text(&format!("{}{version}", update.state.title()))
+            glib::markup_escape_text(&format!("{}{version}", update.title()))
         ));
         title.set_xalign(0.0);
         self.content.append(&title);

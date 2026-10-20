@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Package or stage the standalone prebuilt Linux tray from GitHub releases.
+
+Initial installation uses GitHub HTTPS plus the release's SHA256SUMS. This is
+separate from the native controller's signed, policy-checked upgrade protocol.
+"""
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import tarfile
+import urllib.error
+import urllib.parse
+import urllib.request
+
+REPOSITORY = 'pjunod/cinema'
+MAX_ARCHIVE = 128 * 1024 * 1024
+MAX_METADATA = 1024 * 1024
+TAG = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+\Z')
+ICONS = ('tv.plurx.Server.svg', *(f'tv.plurx.Server-{state}-symbolic.svg' for state in ('running', 'starting', 'stopped', 'unhealthy', 'unknown')))
+MEMBERS = {'plurx-tray', 'release.json', *('icons/' + name for name in ICONS)}
+HOSTS = {'api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'}
+
+
+def architecture():
+    try:
+        return {'x86_64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}[platform.machine()]
+    except KeyError:
+        raise ValueError('prebuilt Linux tray supports amd64 and arm64 hosts') from None
+
+
+def asset_name(version, arch):
+    if not TAG.fullmatch('v' + version) or arch not in ('amd64', 'arm64'):
+        raise ValueError('invalid tray version or architecture')
+    return f'plurx-tray-{version}-linux-{arch}.tar.gz'
+
+
+def public_url(url):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != 'https' or parsed.hostname not in HOSTS or parsed.username or parsed.password or parsed.port not in (None, 443):
+        raise ValueError('tray downloads require public GitHub HTTPS')
+    return url
+
+
+class PublicRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch(url, limit):
+    request = urllib.request.Request(public_url(url), headers={'User-Agent': 'plurx-tray-installer/1', 'Accept': 'application/octet-stream'})
+    with urllib.request.build_opener(PublicRedirect()).open(request, timeout=90) as response:
+        public_url(response.geturl())
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('tray release download exceeded its size bound')
+    return data
+
+
+def release_tag(tag=None):
+    if tag is not None:
+        if not isinstance(tag, str) or not TAG.fullmatch(tag):
+            raise ValueError('--tray-release must be a stable tag such as v0.7.1')
+        return tag
+    raw = fetch(f'https://api.github.com/repos/{REPOSITORY}/releases/latest', MAX_METADATA)
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError('GitHub did not return release metadata')
+    tag = value.get('tag_name', '')
+    if not isinstance(tag, str) or value.get('draft') is not False or value.get('prerelease') is not False or not TAG.fullmatch(tag):
+        raise ValueError('GitHub did not identify a stable tray release')
+    return tag
+
+
+def checksum(contents, name):
+    matches = []
+    for line in contents.decode('ascii').splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64}) [ *](\S+)', line)
+        if match and match[2] == name:
+            matches.append(match[1])
+    if len(matches) != 1:
+        raise ValueError(f'GitHub release does not contain a unique checksum for {name}; publish tray artifacts or explicitly use --build-tray for development')
+    return matches[0]
+
+
+def validate_binary(content, arch):
+    machine = bytes.fromhex('3e00' if arch == 'amd64' else 'b700')
+    if content[:6] != bytes.fromhex('7f454c460201') or content[18:20] != machine:
+        raise ValueError('released tray is not an ELF64 executable for this host architecture')
+
+
+def unpack(content, destination, version, arch):
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(content), mode='r:gz') as source:
+        for member in source:
+            if member.name not in MEMBERS or member.name in files or not member.isfile() or member.size < 0 or member.size > MAX_ARCHIVE:
+                raise ValueError('tray archive contains unexpected, duplicate or non-regular entries')
+            if sum(len(value) for value in files.values()) + member.size > MAX_ARCHIVE:
+                raise ValueError('expanded tray archive exceeds its size bound')
+            files[member.name] = source.extractfile(member).read(member.size + 1)
+    if set(files) != MEMBERS or len(files['release.json']) > MAX_METADATA:
+        raise ValueError('tray archive has an incomplete or oversized runtime closure')
+    metadata = json.loads(files['release.json'])
+    if not isinstance(metadata, dict) or set(metadata) != {'schema_version', 'version', 'source_commit', 'architecture', 'protocol_version'} or type(metadata['schema_version']) is not int or metadata['schema_version'] != 1 or type(metadata['protocol_version']) is not int or metadata['protocol_version'] != 1 or metadata['version'] != version or metadata['architecture'] != arch or not isinstance(metadata['source_commit'], str) or not re.fullmatch(r'[0-9a-f]{40}', metadata['source_commit']):
+        raise ValueError('tray release identity/protocol does not match the selected artifact')
+    validate_binary(files['plurx-tray'], arch)
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('tray staging destination must not already exist')
+    destination.mkdir(mode=0o700)
+    try:
+        (destination / 'icons').mkdir(mode=0o700)
+        for name, data in files.items():
+            path = destination / name
+            path.write_bytes(data)
+            path.chmod(0o755 if name == 'plurx-tray' else 0o644)
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+    return metadata
+
+
+def stage(destination, *, tag=None):
+    arch = architecture()
+    tag = release_tag(tag)
+    name = asset_name(tag[1:], arch)
+    base = f'https://github.com/{REPOSITORY}/releases/download/{tag}/'
+    try:
+        digest = checksum(fetch(base + 'SHA256SUMS', MAX_METADATA), name)
+        content = fetch(base + name, MAX_ARCHIVE)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise ValueError(f'{tag} has no published standalone Linux tray; publish tray release artifacts or explicitly use --build-tray for development') from error
+        raise
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError('tray archive does not match the GitHub release checksum')
+    receipt = unpack(content, destination, tag[1:], arch)
+    return {**receipt, 'tray': str(destination / 'plurx-tray'), 'release_tag': tag,
+            'artifact': name, 'sha256': digest, 'origin': 'github-release'}
+
+
+def package(binary, icons, output, version, commit, arch):
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise ValueError('tray packaging requires the exact source commit')
+    name = asset_name(version, arch)
+    content = binary.read_bytes()
+    validate_binary(content, arch)
+    metadata = {'schema_version': 1, 'protocol_version': 1, 'version': version, 'source_commit': commit, 'architecture': arch}
+    values = {'plurx-tray': content, 'release.json': (json.dumps(metadata, sort_keys=True) + '\n').encode()}
+    for icon in ICONS:
+        path = icons / icon
+        if not path.exists():
+            path = icons / 'icons' / icon
+        values['icons/' + icon] = path.read_bytes()
+    output.mkdir(parents=True, exist_ok=True)
+    archive = output / name
+    with tarfile.open(archive, 'w:gz') as target:
+        for member, content in values.items():
+            info = tarfile.TarInfo(member)
+            info.size = len(content)
+            info.mode = 0o755 if member == 'plurx-tray' else 0o644
+            target.addfile(info, io.BytesIO(content))
+    return archive
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, required=True)
+    parser.add_argument('--icons', type=Path, required=True)
+    parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--version', required=True)
+    parser.add_argument('--commit', required=True)
+    parser.add_argument('--arch', choices=('amd64', 'arm64'), required=True)
+    args = parser.parse_args()
+    print(package(args.binary, args.icons, args.out, args.version, args.commit, args.arch))
+
+
+if __name__ == '__main__':
+    main()
