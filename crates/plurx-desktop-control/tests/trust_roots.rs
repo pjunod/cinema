@@ -3,7 +3,8 @@ use plurx_desktop_control::update::{parse_trust_roots, production_keys, PRODUCTI
 use serde_json::json;
 
 #[test]
-fn production_signing_root_is_embedded_and_not_a_fixture() {
+// Retain the historical regression name used by landing-commit evidence.
+fn production_roots_are_embedded_and_fail_closed_until_provisioned() {
     let roots = parse_trust_roots(PRODUCTION_ROOTS_JSON.as_bytes()).expect("embedded roots schema");
     assert_eq!(roots.repository, "pjunod/cinema");
     assert!(

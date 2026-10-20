@@ -364,3 +364,11 @@ establish signing capability; they do not mean a signed release is published.
 Check that the released manifest/signature exist and verify against a pinned
 root before declaring in-app updates available. For rotation, ship old and new
 public roots together in an old-key-signed release before retiring the old key.
+
+**macOS publication has a separate Apple requirement:** the Ed25519 update key
+is not a code-signing certificate. An existing paid Apple Developer Program
+membership can create a Developer ID Application certificate for direct macOS
+distribution, but an iOS signing certificate cannot substitute for it. Configure
+Developer ID signing and notarization before the first official macOS desktop
+release; the release workflow rejects ad-hoc builds. Follow
+[Apple's Developer ID setup](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/).

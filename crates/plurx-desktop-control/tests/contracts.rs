@@ -163,7 +163,7 @@ fn journal() -> JournalV1 {
     }
 }
 #[test]
-fn production_signing_root_rejects_disposable_fixture_signatures() {
+fn signed_manifest_requires_real_signature_and_provisioned_roots() {
     let m = manifest();
     let i = installed();
     let (pair, keys) = signer();
