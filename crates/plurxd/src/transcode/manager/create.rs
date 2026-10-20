@@ -106,6 +106,12 @@ impl Drop for FirstPreparationCleanup {
             let session_id = self.session_id.clone();
             tokio::spawn(async move {
                 vod.end_for_owner(&session_id, &owner).await;
+                #[cfg(all(test, target_os = "linux"))]
+                TranscodeManager::processed_preparation_test_boundary(
+                    &session_id,
+                    "cleanup-complete",
+                )
+                .await;
             });
         }
     }
@@ -4091,7 +4097,8 @@ impl TranscodeManager {
                         )
                         .await;
                 }
-                if let Some(facts) = self.vod.hls_facts(session_id).await {
+                let existing_facts = self.vod.hls_facts(session_id).await;
+                if let Some(facts) = existing_facts.as_ref() {
                     if !self
                         .vod
                         .prepared_owner_matches(
@@ -4107,11 +4114,18 @@ impl TranscodeManager {
                 let cleanup = FirstPreparationCleanup {
                     vod: self.vod.clone(),
                     session_id: session_id.to_owned(),
-                    owner: Arc::new(std::sync::Mutex::new(None)),
+                    owner: Arc::new(std::sync::Mutex::new(
+                        existing_facts
+                            .as_ref()
+                            .filter(|_| pending)
+                            .map(|facts| facts.response_owner.clone()),
+                    )),
                 };
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "replay-owner").await;
                 // A retry after an interrupted first attempt seals the existing actual
                 // attachment, including None; it never upgrades/replaces that choice.
-                if self.vod.hls_facts(session_id).await.is_none()
+                if existing_facts.is_none()
                     && !self
                         .resurrect_vod_from_recipe_before(
                             &route.recipe_json,
@@ -4137,54 +4151,45 @@ impl TranscodeManager {
                 {
                     return false;
                 }
-                let Some(facts) = self.vod.hls_facts(session_id).await else {
+                let Some(facts) = (match existing_facts {
+                    Some(facts) => Some(facts),
+                    None => self.vod.hls_facts(session_id).await,
+                }) else {
                     return false;
                 };
                 #[cfg(all(test, target_os = "linux"))]
                 Self::processed_preparation_test_boundary(session_id, "facts").await;
-                // A replay did not attach anew; arm only the exact owner whose
-                // prepared-incarnation identity was checked above.
-                if pending
-                    && cleanup
-                        .owner
-                        .lock()
-                        .expect("first preparation owner")
-                        .is_none()
-                {
-                    *cleanup.owner.lock().expect("first preparation owner") =
-                        Some(facts.response_owner.clone());
-                }
+                // Replay retains the initially checked owner; a new attachment
+                // installs its exact owner synchronously at registry commit.
+                // Never acquire cleanup authority from a later by-id lookup.
                 let captured_owner = cleanup
                     .owner
                     .lock()
                     .expect("first preparation owner")
                     .clone();
-                if let Some(captured) = captured_owner.as_ref() {
-                    if !self.vod.response_owner_is_live(session_id, captured).await {
-                        return false;
-                    }
-                }
+                let preparation_owner = captured_owner.as_ref().unwrap_or(&facts.response_owner);
                 let Some(_owner_guard) = self
                     .vod
-                    .lock_preparation_owner(
-                        session_id,
-                        &facts.response_owner,
-                        &route.incarnation_id,
-                    )
+                    .lock_preparation_owner(session_id, preparation_owner, &route.incarnation_id)
                     .await
                 else {
                     return false;
                 };
                 // Replayed first primes can already own an attachment. Refresh
                 // its exact consumer purpose after checking the same owner.
-                self.vod
-                    .mark_prepared_incarnation_with_bootstrap(
+                if !self
+                    .vod
+                    .mark_prepared_incarnation_for_owner(
                         session_id,
+                        preparation_owner,
                         &route.incarnation_id,
                         bootstrap,
                     )
-                    .await;
-                let output = facts.response_owner.retained_output_facts();
+                    .await
+                {
+                    return false;
+                }
+                let output = preparation_owner.retained_output_facts();
                 #[cfg(all(test, target_os = "linux"))]
                 Self::processed_preparation_test_boundary(session_id, "before-seal").await;
                 let seal = plurx_core::store::PreparedOutputSeal {
@@ -4299,6 +4304,10 @@ impl TranscodeManager {
                 ),
             };
         let first_capture = first_owner.is_some();
+        // Recovery also needs an exact commit receipt: a by-id read after
+        // create can observe an unrelated replacement before marking/enqueue.
+        let attachment_owner =
+            attachment_owner.unwrap_or_else(|| Arc::new(std::sync::Mutex::new(None)));
         if Instant::now() >= deadline {
             return false;
         }
@@ -4503,32 +4512,44 @@ impl TranscodeManager {
                         Arc::clone(&release_gate.transition),
                         &release_gate.released,
                     )
-                    .with_attachment_owner(attachment_owner.as_deref()),
+                    .with_attachment_owner(Some(attachment_owner.as_ref())),
                 )
                 .await
             {
                 Ok(_) => {
                     #[cfg(all(test, target_os = "linux"))]
                     Self::processed_preparation_test_boundary(session_id, "attached").await;
-                    if let Some((work, owner)) = output_enqueue {
-                        if !release_gate.released.load(Acquire) {
-                            if let Some(facts) = self.vod.hls_facts(session_id).await {
-                                self.hand_off_prepared_output_enqueue(
-                                    work,
-                                    &owner,
-                                    &facts.response_owner,
-                                );
-                            }
-                        }
-                    }
+                    let Some(captured_owner) = attachment_owner
+                        .lock()
+                        .expect("first preparation owner")
+                        .clone()
+                    else {
+                        return false;
+                    };
                     if speculative {
-                        self.vod
-                            .mark_prepared_incarnation_with_bootstrap(
+                        if !self
+                            .vod
+                            .mark_prepared_incarnation_for_owner(
                                 session_id,
+                                &captured_owner,
                                 &remote.incarnation_id,
                                 bootstrap,
                             )
-                            .await;
+                            .await
+                        {
+                            return false;
+                        }
+                    } else if !self
+                        .vod
+                        .response_owner_is_live(session_id, &captured_owner)
+                        .await
+                    {
+                        return false;
+                    }
+                    if let Some((work, owner)) = output_enqueue {
+                        if !release_gate.released.load(Acquire) {
+                            self.hand_off_prepared_output_enqueue(work, &owner, &captured_owner);
+                        }
                     }
                     tracing::info!(
                         target: "plurxd::transcode",

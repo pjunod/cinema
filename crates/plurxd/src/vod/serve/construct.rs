@@ -10,22 +10,44 @@ impl VodServe {
             .await;
     }
 
-    /// The first-prime ledger authorizes this attachment's bounded manual to
-    /// Auto bootstrap. Cached encoder purpose remains immutable and other
-    /// readers retain their own nonpreemptive trial authority.
+    #[cfg(test)]
     pub(crate) async fn mark_prepared_incarnation_with_bootstrap(
         &self,
         session_id: &str,
         incarnation: &str,
         bootstrap: bool,
     ) {
+        let Some(facts) = self.hls_facts(session_id).await else {
+            return;
+        };
+        self.mark_prepared_incarnation_for_owner(
+            session_id,
+            &facts.response_owner,
+            incarnation,
+            bootstrap,
+        )
+        .await;
+    }
+
+    /// The first-prime ledger authorizes only the captured attachment's bounded
+    /// manual to Auto bootstrap. Check and mutate under the same registry lock;
+    /// a same-id replacement never acquires its incarnation or reader purpose.
+    pub(crate) async fn mark_prepared_incarnation_for_owner(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        incarnation: &str,
+        bootstrap: bool,
+    ) -> bool {
         let rendition = {
             let mut sessions = self.shared.sessions.lock().await;
-            let Some(session) = sessions
-                .get_mut(session_id)
-                .filter(|session| session.tombstone.is_none())
-            else {
-                return;
+            let Some(session) = sessions.get_mut(session_id).filter(|session| {
+                session.tombstone.is_none()
+                    && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+                    && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+                    && session.owns_response_media(owner)
+            }) else {
+                return false;
             };
             session.prepared_incarnation = Some(incarnation.to_owned());
             if bootstrap {
@@ -41,6 +63,29 @@ impl VodServe {
         if let Some(rendition) = rendition {
             rendition.kick();
         }
+        true
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn test_prepared_reader_state(
+        &self,
+        session_id: &str,
+    ) -> (Option<String>, crate::admission::Priority, bool) {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id).expect("attached session");
+        let readers = session
+            .rendition
+            .as_ref()
+            .expect("rendition")
+            .readers
+            .lock()
+            .await;
+        let reader = readers.get(session_id).expect("attached reader");
+        (
+            session.prepared_incarnation.clone(),
+            reader.admission_priority,
+            reader.nonpreemptive_trial,
+        )
     }
 
     /// Convert an attached prepared VOD rendition to ordinary foreground

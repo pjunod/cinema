@@ -82,14 +82,21 @@ fn spawn_prepare(f: &Fixture, session: &str, json: &str) -> tokio::task::JoinHan
     })
 }
 
-async fn wait_for_cleanup(f: &Fixture, session: &str, owner: &crate::vodserve::ResponseOwner) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while f.manager.vod.response_owner_is_live(session, owner).await {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("successor-only cleanup");
+async fn wait_for_cleanup(
+    f: &Fixture,
+    session: &str,
+    owner: &crate::vodserve::ResponseOwner,
+    completed: &PreparationPause,
+) {
+    tokio::time::timeout(Duration::from_secs(5), completed.entered.notified())
+        .await
+        .expect("successor-only cleanup");
+    completed.release.notify_one();
+    assert!(!f.manager.vod.response_owner_is_live(session, owner).await);
+    f.manager
+        .vod
+        .test_assert_prepared_owner_detached(session, owner)
+        .await;
     assert!(f.manager.vod.hls_facts(&f.session_id).await.is_some());
     assert_eq!(f.encoding.admissions.in_use(), 1);
     assert_eq!(f.encoding.admissions.software_in_use(), 15);
@@ -98,7 +105,7 @@ async fn wait_for_cleanup(f: &Fixture, session: &str, owner: &crate::vodserve::R
 #[tokio::test]
 async fn staged_processed_cancellation_at_attachment_facts_and_seal_releases_only_successor() {
     for boundary in ["attached", "facts", "before-seal", "sealed"] {
-        let f = fixture(DvDestination::Hdr10).await;
+        let mut f = fixture(DvDestination::Hdr10).await;
         let (_, session, json) = stage(&f).await;
         let pause = pause_at(&session, boundary);
         let work = spawn_prepare(&f, &session, &json);
@@ -112,19 +119,21 @@ async fn staged_processed_cancellation_at_attachment_facts_and_seal_releases_onl
             .await
             .expect("attached")
             .response_owner;
+        let completed = pause_at(&session, "cleanup-complete");
         work.abort();
         assert!(work.await.expect_err("cancelled").is_cancelled());
-        wait_for_cleanup(&f, &session, &owner).await;
+        wait_for_cleanup(&f, &session, &owner, &completed).await;
         f.manager
             .vod
             .end(&f.session_id, crate::vodserve::Terminal::Deleted)
             .await;
+        assert_reservation_released(&mut f);
     }
 }
 
 #[tokio::test]
 async fn staged_processed_epoch_motion_after_attachment_refuses_frozen_seal() {
-    let f = fixture(DvDestination::Profile81).await;
+    let mut f = fixture(DvDestination::Profile81).await;
     let (_, session, json) = stage(&f).await;
     let pause = pause_at(&session, "before-seal");
     let work = spawn_prepare(&f, &session, &json);
@@ -154,16 +163,153 @@ async fn staged_processed_epoch_motion_after_attachment_refuses_frozen_seal() {
         .expect("takeover")
         .expect("new epoch");
     assert_eq!(adopted.owner_epoch, 2);
+    let completed = pause_at(&session, "cleanup-complete");
     pause.release.notify_one();
     assert!(
         !work.await.expect("preparation"),
         "must not refresh the admitted epoch"
     );
-    wait_for_cleanup(&f, &session, &owner).await;
+    wait_for_cleanup(&f, &session, &owner, &completed).await;
     f.manager
         .vod
         .end(&f.session_id, crate::vodserve::Terminal::Deleted)
         .await;
+    assert_reservation_released(&mut f);
+}
+
+#[tokio::test]
+async fn staged_processed_replacement_never_inherits_preparation_or_cleanup_authority() {
+    for boundary in ["attached", "replay-owner"] {
+        let f = fixture(DvDestination::Hdr10).await;
+        let (incarnation, session, json) = stage(&f).await;
+        if boundary == "replay-owner" {
+            // Keep a real first attachment pending, as if the first caller
+            // stopped after attachment but before its durable seal.
+            assert!(
+                f.manager
+                    .resurrect_vod_from_recipe_before(
+                        &json,
+                        &session,
+                        f.user_id,
+                        f.manager
+                            .session_adoption_token(&session)
+                            .expect("adoption"),
+                        Instant::now() + Duration::from_secs(5),
+                        VodRecipeAttachment::FirstPreparation {
+                            owner: PreparedVodOwner {
+                                node_id: "node".into(),
+                                source_authority: None
+                            },
+                            bootstrap: false,
+                            processed_predecessor: Some(expectation(&f, &incarnation, &session)),
+                            attachment_owner: Arc::new(std::sync::Mutex::new(None)),
+                        },
+                    )
+                    .await
+            );
+        }
+        let pause = pause_at(&session, boundary);
+        let work = spawn_prepare(&f, &session, &json);
+        tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+            .await
+            .expect(boundary);
+        let previous = f
+            .manager
+            .vod
+            .hls_facts(&session)
+            .await
+            .expect("first owner")
+            .response_owner;
+        let replacement_incarnation = uuid::Uuid::new_v4().to_string();
+        let mut replacement_recipe: crate::media_sessions::RemoteStartRequest =
+            serde_json::from_str(&json).expect("wire");
+        replacement_recipe.incarnation_id = replacement_incarnation.clone();
+        replacement_recipe.request.request_id = Some(replacement_incarnation.clone());
+        let replacement_json =
+            serde_json::to_string(&replacement_recipe).expect("replacement wire");
+        assert!(
+            f.manager
+                .resurrect_vod_from_recipe_before(
+                    &replacement_json,
+                    &session,
+                    f.user_id,
+                    f.manager
+                        .session_adoption_token(&session)
+                        .expect("replacement adoption"),
+                    Instant::now() + Duration::from_secs(5),
+                    VodRecipeAttachment::FirstPreparation {
+                        owner: PreparedVodOwner {
+                            node_id: "node".into(),
+                            source_authority: None
+                        },
+                        bootstrap: false,
+                        processed_predecessor: Some(expectation(
+                            &f,
+                            &replacement_incarnation,
+                            &session
+                        )),
+                        attachment_owner: Arc::new(std::sync::Mutex::new(None)),
+                    },
+                )
+                .await,
+            "real common attachment installs replacement"
+        );
+        let replacement = f
+            .manager
+            .vod
+            .hls_facts(&session)
+            .await
+            .expect("replacement")
+            .response_owner;
+        let replacement_state = f.manager.vod.test_prepared_reader_state(&session).await;
+        assert!(
+            !f.manager
+                .vod
+                .response_owner_is_live(&session, &previous)
+                .await
+        );
+        let completed = pause_at(&session, "cleanup-complete");
+        pause.release.notify_one();
+        assert!(!work.await.expect("preparation"), "{boundary}");
+        wait_for_cleanup(&f, &session, &previous, &completed).await;
+        assert!(
+            f.manager
+                .vod
+                .response_owner_is_live(&session, &replacement)
+                .await,
+            "cleanup cannot end a same-id replacement at {boundary}"
+        );
+        assert!(
+            !f.manager
+                .vod
+                .prepared_owner_matches(&session, &replacement, &incarnation)
+                .await,
+            "mark cannot change a same-id replacement at {boundary}"
+        );
+        assert_eq!(
+            f.manager.vod.test_prepared_reader_state(&session).await,
+            replacement_state
+        );
+        let route = f
+            .manager
+            .store
+            .media_session_route_by_incarnation(&incarnation)
+            .await
+            .expect("route lookup")
+            .expect("pending route");
+        let response: serde_json::Value =
+            serde_json::from_str(&route.response_json).expect("response");
+        assert_eq!(response["prepared_output_capture_pending"], true);
+        assert_ne!(response["prepared_output_capture_complete"], true);
+        f.manager
+            .vod
+            .end(&session, crate::vodserve::Terminal::Deleted)
+            .await;
+        f.manager
+            .vod
+            .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+            .await;
+    }
 }
 
 // Byte-bound lifecycle controls, not Dolby pixel/reference-accuracy evidence.
@@ -359,7 +505,7 @@ async fn staged_processed_root_refuses_current_input_and_owner_drift_without_spe
 
 #[tokio::test]
 async fn first_processed_attachment_arms_exact_owner_cleanup_before_returning() {
-    let f = fixture(DvDestination::Hdr10).await;
+    let mut f = fixture(DvDestination::Hdr10).await;
     let (incarnation, session, json) = stage(&f).await;
     let cleanup = FirstPreparationCleanup {
         vod: Arc::clone(&f.manager.vod),
@@ -394,24 +540,34 @@ async fn first_processed_attachment_arms_exact_owner_cleanup_before_returning() 
         .expect("sink")
         .clone()
         .expect("armed by synchronous registry commit");
+    let completed = pause_at(&session, "cleanup-complete");
     drop(cleanup);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while f.manager.vod.response_owner_is_live(&session, &owner).await {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("cancelled successor cleaned up");
-    assert!(
-        f.manager.vod.hls_facts(&f.session_id).await.is_some(),
-        "cleanup never retires incumbent"
-    );
-    assert_eq!(f.encoding.admissions.in_use(), 1);
-    assert_eq!(f.encoding.admissions.software_in_use(), 15);
+    wait_for_cleanup(&f, &session, &owner, &completed).await;
     f.manager
         .vod
         .end(&f.session_id, crate::vodserve::Terminal::Deleted)
         .await;
+    assert_reservation_released(&mut f);
+}
+
+fn assert_reservation_released(f: &mut Fixture) {
+    assert_eq!(
+        f.encoding.admissions.in_use(),
+        1,
+        "held worker alone retains GPU credit"
+    );
+    assert_eq!(f.encoding.admissions.software_in_use(), 15);
+    drop(f.worker.take());
+    assert_eq!(f.encoding.admissions.in_use(), 0);
+    assert_eq!(f.encoding.admissions.software_in_use(), 0);
+    let fresh = f
+        .encoding
+        .admissions
+        .try_admit_bundle(1, 15, &f.encoding.resources, Priority::Live)
+        .expect("fresh mixed reservation after complete settlement");
+    drop(fresh);
+    assert_eq!(f.encoding.admissions.in_use(), 0);
+    assert_eq!(f.encoding.admissions.software_in_use(), 0);
 }
 
 fn digest(bytes: &[u8]) -> DvDigest {
