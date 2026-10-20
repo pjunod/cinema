@@ -159,3 +159,10 @@ frontend type baseline, 12 package-matrix checks and 11 license-notice checks.
 Paperwork passes all 15 rules with the PR's exact regression-anchor body.
 The macOS test linker reports its existing compact-unwind size warning;
 the focused suites pass and Clippy emits no warnings.
+
+CI registration preserves the reviewed ownership boundaries: the structural
+census records one additional owned child/wait/kill-on-drop and a net one
+timer (two comparison bounds replace the startup benchmark bound). Patterns
+and scan roots remain unchanged. The native comparison is registered as an
+exact opt-in hardware fixture, separate from known-red product debt; the
+unknown-ignore count is unchanged. Production and renderer code are untouched.
