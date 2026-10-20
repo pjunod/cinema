@@ -6,6 +6,7 @@ import importlib.util
 import copy
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +23,13 @@ PASS = {
 VIOLATION = {
     "verdict": "violation",
     "expected_error": "S2_PublicationAuthority",
+    "expected_exit": 23,
+    "expected_error_match": {
+        "line": "Invariant S2_PublicationAuthority is violated.",
+        "attribution": "named_property",
+        "allowed_error_lines": ["The behavior up to this point is:"],
+    },
+    "analysis": {"properties": ["S2_PublicationAuthority"]},
 }
 
 
@@ -61,6 +69,12 @@ class TLCOutputClassificationTests(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertIn("completion marker", result["reason"])
 
+    def test_positive_rejects_nonempty_state_queue(self) -> None:
+        output = complete_output().replace("0 states left on queue", "1 states left on queue")
+        result = formal.classify(output, 0, PASS, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("states still queued", result["reason"])
+
     def test_positive_rejects_error_even_if_success_marker_is_present(self) -> None:
         output = complete_output() + "Error: unrelated failure\n"
         result = formal.classify(output, 0, PASS, False, None)
@@ -68,20 +82,52 @@ class TLCOutputClassificationTests(unittest.TestCase):
         self.assertIn("unexpected TLC error", result["reason"])
 
     def test_violation_requires_expected_exit_named_error_and_trace(self) -> None:
-        result = formal.classify(violation_output(), 12, VIOLATION, False, None)
+        result = formal.classify(violation_output(), 23, VIOLATION, False, None)
         self.assertTrue(result["complete"])
         self.assertEqual(result["actual_verdict"], "violation")
         self.assertEqual(result["state_counts"]["generated"], 2)
+        self.assertFalse(result["exploration_complete"])
+        self.assertTrue(result["counterexample_found"])
+        self.assertEqual(result["completion_kind"], "expected_counterexample_detected")
 
     def test_violation_rejects_wrong_exit(self) -> None:
         result = formal.classify(violation_output(), 1, VIOLATION, False, None)
         self.assertFalse(result["complete"])
-        self.assertIn("exit 12", result["reason"])
+        self.assertIn("exit 23", result["reason"])
 
     def test_violation_rejects_wrong_named_error(self) -> None:
-        result = formal.classify(violation_output("DifferentInvariant"), 12, VIOLATION, False, None)
+        result = formal.classify(violation_output("DifferentInvariant"), 23, VIOLATION, False, None)
         self.assertFalse(result["complete"])
-        self.assertIn("S2_PublicationAuthority", result["reason"])
+        self.assertIn("exact TLC error line", result["reason"])
+
+    def test_violation_rejects_unreviewed_additional_error(self) -> None:
+        output = violation_output() + "Error: unrelated property failed\n"
+        result = formal.classify(output, 23, VIOLATION, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("additional error", result["reason"])
+
+    def test_generic_temporal_error_requires_single_configured_property(self) -> None:
+        expected = {
+            "verdict": "violation",
+            "expected_error": "L1_FreshClaimEventually",
+            "expected_exit": 37,
+            "expected_error_match": {
+                "line": "Temporal properties were violated.",
+                "attribution": "sole_property",
+                "allowed_error_lines": ["The behavior up to this point is:"],
+            },
+            "analysis": {"properties": ["L1_FreshClaimEventually"]},
+        }
+        output = violation_output().replace(
+            "Invariant S2_PublicationAuthority is violated.",
+            "Temporal properties were violated.",
+        )
+        result = formal.classify(output, 37, expected, False, None)
+        self.assertTrue(result["complete"])
+        expected["analysis"]["properties"].append("S2_PublicationAuthority")
+        result = formal.classify(output, 37, expected, False, None)
+        self.assertFalse(result["complete"])
+        self.assertIn("exactly property", result["reason"])
 
     def test_violation_rejects_missing_counterexample(self) -> None:
         output = violation_output().replace("State 1: <Initial predicate>\n", "")
@@ -113,6 +159,31 @@ class MappingFailClosedTests(unittest.TestCase):
         drift, _ = formal.mapping_inputs(mapping)
         self.assertTrue(any("pending review" in issue for issue in drift))
         self.assertTrue(any("missing or unsafe model" in issue for issue in drift))
+
+    def test_source_identity_records_commit_tree_and_untracked_governed_inputs(self) -> None:
+        def git_output(*args: str, nul: bool = False) -> list[str]:
+            if args == ("rev-parse", "--verify", "HEAD"):
+                return ["a" * 40]
+            if args == ("rev-parse", "--verify", "HEAD^{tree}"):
+                return ["b" * 40]
+            if args == ("diff", "--name-only", "-z", "HEAD", "--"):
+                return ["verification/durable-jobs/DurableJobs.tla"]
+            if args == ("ls-files", "--others", "--exclude-standard", "-z"):
+                return ["verification/durable-jobs/smoke.cfg"]
+            self.fail(f"unexpected git identity request: {args}")
+
+        mapping = {
+            "model_file": "verification/durable-jobs/DurableJobs.tla",
+            "configs": {"smoke.cfg": {}},
+            "source_mapping": {"tables": []},
+        }
+        with mock.patch.object(formal, "_git_output", side_effect=git_output):
+            result = formal.source_git_identity(mapping)
+        self.assertEqual(result["commit"], "a" * 40)
+        self.assertEqual(result["tree"], "b" * 40)
+        self.assertTrue(result["dirty"])
+        self.assertIn("verification/durable-jobs/smoke.cfg", result["untracked_paths"])
+        self.assertIn("verification/durable-jobs/smoke.cfg", result["governed_dirty_paths"])
 
 
 if __name__ == "__main__":

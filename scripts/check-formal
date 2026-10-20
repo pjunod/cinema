@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -31,6 +32,7 @@ CONFIG_ORDER = (
     "control-retry-stalls.cfg",
 )
 MAX_LOG_BYTES = 64 * 1024 * 1024
+MAX_HEAP_BYTES = 4 * 1024 * 1024 * 1024
 POLL_SECONDS = 0.2
 
 
@@ -97,6 +99,7 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
             continue
         try:
             path = repo_file(f"verification/durable-jobs/{name}", "TLC config")
+            config_text = path.read_text(encoding="utf-8")
             actual = sha256(path)
             hashes[f"verification/durable-jobs/{name}"] = actual
             expected = record.get("sha256")
@@ -110,8 +113,86 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                 drift.append(f"invalid expected verdict for {name}")
             if (verdict == "violation") != (isinstance(error, str) and bool(error)):
                 drift.append(f"expected error does not agree with verdict for {name}")
+            expected_exit = record.get("expected_exit")
+            if verdict == "pass":
+                if isinstance(expected_exit, bool) or expected_exit != 0:
+                    drift.append(f"positive configuration must pin successful exit 0: {name}")
+                if record.get("expected_error_match") is not None:
+                    drift.append(f"positive configuration cannot declare a violation error line: {name}")
+            elif verdict == "violation":
+                if not isinstance(expected_exit, int) or isinstance(expected_exit, bool) or not 1 <= expected_exit <= 255:
+                    drift.append(f"violation exit code is not reviewed: {name}")
+                if not isinstance(record.get("expected_error_match"), dict):
+                    drift.append(f"exact violation error mapping is pending observation: {name}")
             if not isinstance(record.get("timeout_seconds"), int) or record["timeout_seconds"] < 1:
                 drift.append(f"invalid timeout for {name}")
+            analysis = record.get("analysis")
+            if not isinstance(analysis, dict) or analysis.get("status") != "reviewed":
+                drift.append(f"configuration analysis metadata is pending review: {name}")
+            else:
+                bounds = analysis.get("bounds")
+                if not isinstance(bounds, dict) or not bounds:
+                    drift.append(f"configuration bounds must be a non-empty reviewed table: {name}")
+                else:
+                    for key, value in bounds.items():
+                        valid_number = (
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(value)
+                            and value > 0
+                        )
+                        valid_values = (
+                            isinstance(value, list)
+                            and bool(value)
+                            and all(isinstance(item, str) and item for item in value)
+                            and len(set(value)) == len(value)
+                        )
+                        if not isinstance(key, str) or not key or not (valid_number or valid_values):
+                            drift.append(f"invalid positive numeric/model-value bound in {name}: {key}")
+                properties = analysis.get("properties")
+                if (
+                    not isinstance(properties, list)
+                    or not properties
+                    or any(not isinstance(item, str) or not item for item in properties)
+                    or len(set(properties)) != len(properties)
+                ):
+                    drift.append(f"configuration properties must be a non-empty unique name list: {name}")
+                else:
+                    declared = {
+                        match.group(2)
+                        for match in re.finditer(
+                            r"^\s*(INVARIANT|PROPERTY)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\\\*.*)?$",
+                            config_text,
+                            re.MULTILINE,
+                        )
+                    }
+                    if set(properties) != declared:
+                        drift.append(f"reviewed properties differ from config declarations: {name}")
+                error_match = record.get("expected_error_match")
+                if record.get("verdict") == "violation":
+                    if isinstance(error_match, dict):
+                        line = error_match.get("line")
+                        attribution = error_match.get("attribution")
+                        allowed = error_match.get("allowed_error_lines")
+                        if not isinstance(line, str) or not line:
+                            drift.append(f"expected TLC error line must be exact and non-empty: {name}")
+                        if attribution not in ("named_property", "sole_property"):
+                            drift.append(f"expected TLC error attribution is not reviewed: {name}")
+                        if not isinstance(allowed, list) or any(not isinstance(item, str) or not item for item in allowed):
+                            drift.append(f"allowed TLC trace explanation lines must be listed: {name}")
+                        elif len(set(allowed)) != len(allowed) or line in allowed:
+                            drift.append(f"allowed TLC trace explanation lines are ambiguous: {name}")
+                        if isinstance(properties, list) and error not in properties:
+                            drift.append(f"expected control property is not declared by config: {name}")
+                        if isinstance(line, str) and isinstance(error, str):
+                            if attribution == "named_property" and error not in line:
+                                drift.append(f"named TLC error line does not identify expected property: {name}")
+                            if attribution == "sole_property" and properties != [error]:
+                                drift.append(f"generic TLC error needs exactly the configured property: {name}")
+                for field in ("reductions", "assumptions"):
+                    value = analysis.get(field)
+                    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+                        drift.append(f"{field} metadata must be a string list (possibly empty): {name}")
         except RunnerError as exc:
             drift.append(str(exc))
 
@@ -171,6 +252,77 @@ def changed_paths(base: str | None) -> list[str]:
     if result.returncode:
         raise RunnerError(f"cannot inspect changed paths against {base}: {result.stderr[-500:]}")
     return sorted({line.strip() for line in result.stdout.splitlines() if line.strip()})
+
+
+def _git_output(*arguments: str, nul: bool = False) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=ROOT,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RunnerError(f"cannot identify source tree: {exc}") from exc
+    if result.returncode:
+        detail = result.stderr.decode(errors="replace")[-500:]
+        raise RunnerError(f"cannot identify source tree: {detail}")
+    raw = result.stdout
+    if nul:
+        return [entry.decode("utf-8", errors="replace") for entry in raw.split(b"\0") if entry]
+    return [line for line in raw.decode("utf-8", errors="replace").splitlines() if line]
+
+
+def source_git_identity(mapping: dict[str, Any]) -> dict[str, Any]:
+    commit = _git_output("rev-parse", "--verify", "HEAD")[0]
+    tree = _git_output("rev-parse", "--verify", "HEAD^{tree}")[0]
+    tracked_changes = set(_git_output("diff", "--name-only", "-z", "HEAD", "--", nul=True))
+    untracked = set(_git_output("ls-files", "--others", "--exclude-standard", "-z", nul=True))
+    dirty_paths = sorted(tracked_changes | untracked)
+    governed = {
+        "verification/durable-jobs/mapping.json",
+        "verification/durable-jobs/toolchain.json",
+        "scripts/bootstrap-formal-toolchain",
+        "scripts/check-formal",
+        "tests/operations/test_formal_runner.py",
+        "tests/operations/test_formal_ci.py",
+        "tests/operations/test_formal_toolchain.py",
+        "validation/points.toml",
+    }
+    model = mapping.get("model_file")
+    if isinstance(model, str):
+        governed.add(model)
+    configs = mapping.get("configs")
+    if isinstance(configs, dict):
+        governed.update(f"verification/durable-jobs/{name}" for name in configs)
+    sources = mapping.get("source_mapping")
+    if isinstance(sources, dict) and isinstance(sources.get("tables"), list):
+        governed.update(
+            row["source"] for row in sources["tables"]
+            if isinstance(row, dict) and isinstance(row.get("source"), str)
+        )
+    durable_dir = ROOT / "verification/durable-jobs"
+    if durable_dir.is_dir():
+        governed.update(
+            path.relative_to(ROOT).as_posix()
+            for path in durable_dir.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
+    governed_dirty = sorted(governed.intersection(dirty_paths))
+    dirty_hashes: dict[str, str | None] = {}
+    for relative in governed_dirty:
+        path = ROOT / relative
+        dirty_hashes[relative] = sha256(path) if path.is_file() and not path.is_symlink() else None
+    return {
+        "commit": commit,
+        "tree": tree,
+        "dirty": bool(dirty_paths),
+        "dirty_paths": dirty_paths,
+        "untracked_paths": sorted(untracked),
+        "governed_dirty_paths": governed_dirty,
+        "governed_dirty_sha256": dirty_hashes,
+    }
 
 
 def mapping_check(base: str | None) -> int:
@@ -355,6 +507,9 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
     reason = None
     actual = "incomplete"
     complete = False
+    exploration_complete = False
+    counterexample_found = False
+    completion_kind = "incomplete"
     if timed_out:
         reason = "TLC timed out"
     elif log_problem:
@@ -370,24 +525,44 @@ def classify(output: str, returncode: int, expected: dict[str, Any], timed_out: 
             reason = "unexpected TLC error marker in positive configuration"
         elif not COMPLETE_RE.search(output):
             reason = "TLC completion marker is missing"
+        elif states["queued"] != 0:
+            reason = f"positive exploration ended with {states['queued']} states still queued"
         else:
             actual = "pass"
             complete = True
+            exploration_complete = True
+            completion_kind = "state_space_exhausted"
     else:
         wanted = expected["expected_error"]
-        named_error = any(wanted in line for line in errors)
-        if returncode != 12:
-            reason = f"expected TLC violation exit 12, got {returncode}"
-        elif not named_error:
-            reason = f"expected named TLC error {wanted} was not reported"
+        expected_exit = expected.get("expected_exit")
+        error_match = expected.get("expected_error_match")
+        if not isinstance(expected_exit, int) or isinstance(expected_exit, bool):
+            reason = "expected TLC violation exit code has not been reviewed"
+        elif not isinstance(error_match, dict):
+            reason = "exact TLC violation output mapping has not been reviewed"
+        elif returncode != expected_exit:
+            reason = f"expected reviewed TLC violation exit {expected_exit}, got {returncode}"
+        elif not errors or errors[0] != error_match.get("line"):
+            reason = f"expected exact TLC error line was not first: {error_match.get('line')}"
+        elif any(line not in error_match.get("allowed_error_lines", []) for line in errors[1:]):
+            reason = "TLC emitted an unreviewed additional error line"
+        elif error_match.get("attribution") == "named_property" and wanted not in errors[0]:
+            reason = f"TLC error line does not identify expected property {wanted}"
+        elif error_match.get("attribution") == "sole_property" and expected.get("analysis", {}).get("properties") != [wanted]:
+            reason = f"generic TLC error cannot be attributed to exactly property {wanted}"
         elif not re.search(r"^State\s+1:", output, re.MULTILINE):
             reason = "expected counterexample state trace is missing"
         else:
             actual = "violation"
             complete = True
+            counterexample_found = True
+            completion_kind = "expected_counterexample_detected"
     return {
         "actual_verdict": actual,
         "complete": complete,
+        "exploration_complete": exploration_complete,
+        "counterexample_found": counterexample_found,
+        "completion_kind": completion_kind,
         "reason": reason,
         "exit_code": returncode,
         "state_counts": states,
@@ -412,12 +587,9 @@ def run(args: argparse.Namespace) -> int:
 
     output_root = durable_output(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
-    cache = args.cache_dir.expanduser().resolve()
-    toolchain = resolve_toolchain(cache)
-    java = toolchain["java"]["path"]
-    jar = toolchain["tlc"]["path"]
     model_file = mapping["model_file"]
     model_path = repo_file(model_file, "model")
+    source_git = source_git_identity(mapping)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run_dir = output_root / run_id
     run_dir.mkdir(mode=0o700)
@@ -429,16 +601,46 @@ def run(args: argparse.Namespace) -> int:
         "status": "in_progress",
         "mapping_sha256": sha256(MAPPING_PATH),
         "model_sha256": input_hashes[model_file],
-        "toolchain": {
-            "manifest_sha256": toolchain["manifest_sha256"],
-            "java": toolchain["java"],
-            "tlc": toolchain["tlc"],
+        "source_git": source_git,
+        "input_sha256": input_hashes,
+        "resource_policy": {
+            "heap_bytes": MAX_HEAP_BYTES,
+            "heap_arg": "-Xmx4g",
+            "heap_scope": "Java heap; process RSS may exceed this bound",
+            "wall_timeout_seconds": {
+                name: mapping["configs"][name]["timeout_seconds"] for name in selected
+            },
         },
+        "toolchain": None,
         "runner_sha256": runner_hash,
         "configs": [],
     }
     receipt_path = run_dir / "receipt.json"
     write_json(receipt_path, aggregate)
+    full_qualification = args.mode == "full" and args.config is None
+    if full_qualification and source_git["governed_dirty_paths"]:
+        aggregate["status"] = "failed"
+        aggregate["failure"] = "full qualification requires clean governed inputs"
+        write_json(receipt_path, aggregate)
+        print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": aggregate["failure"]}, sort_keys=True))
+        return 1
+    cache = args.cache_dir.expanduser().resolve()
+    try:
+        toolchain = resolve_toolchain(cache)
+    except RunnerError as exc:
+        aggregate["status"] = "failed"
+        aggregate["failure"] = str(exc)
+        write_json(receipt_path, aggregate)
+        print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": str(exc)}, sort_keys=True))
+        return 1
+    aggregate["toolchain"] = {
+        "manifest_sha256": toolchain["manifest_sha256"],
+        "java": toolchain["java"],
+        "tlc": toolchain["tlc"],
+    }
+    write_json(receipt_path, aggregate)
+    java = toolchain["java"]["path"]
+    jar = toolchain["tlc"]["path"]
     config_dir = ROOT / "verification/durable-jobs"
     for name in selected:
         record = mapping["configs"][name]
@@ -450,7 +652,7 @@ def run(args: argparse.Namespace) -> int:
         raw_log = out_dir / "tlc.log"
         argv = [
             java,
-            "-Xmx4g",
+            aggregate["resource_policy"]["heap_arg"],
             "-XX:+UseParallelGC",
             "-cp",
             jar,
@@ -477,10 +679,13 @@ def run(args: argparse.Namespace) -> int:
             "config": name,
             "expected_verdict": record["verdict"],
             "expected_error": record["expected_error"],
+            "expected_exit": record["expected_exit"],
+            "analysis": record["analysis"],
             **verdict,
             "config_sha256": input_hashes[f"verification/durable-jobs/{name}"],
             "source_hashes": {k: v for k, v in input_hashes.items() if k != model_file and not k.endswith(".cfg")},
             "argv": argv,
+            "timeout_seconds": record["timeout_seconds"],
             "elapsed_seconds": execution["elapsed_seconds"],
             "peak_rss_bytes": execution["peak_rss_bytes"],
             "raw_log": {"path": str(raw_log), "sha256": sha256(raw_log)},
@@ -494,7 +699,7 @@ def run(args: argparse.Namespace) -> int:
             return 1
         write_json(receipt_path, aggregate)
     aggregate["status"] = "complete"
-    aggregate["qualification"] = "full" if not args.config and args.mode == "full" else "smoke_or_single_config"
+    aggregate["qualification"] = "full" if full_qualification else "smoke_or_single_config"
     write_json(receipt_path, aggregate)
     print(json.dumps({"receipt": str(receipt_path), "status": "complete", "qualification": aggregate["qualification"]}, sort_keys=True))
     return 0
