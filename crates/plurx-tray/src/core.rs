@@ -313,11 +313,14 @@ impl Core {
             }
             Purpose::PollUpdate(_) => {
                 if let Ok(ControlResult::Update(update)) = result {
-                    let terminal = update.state.is_terminal();
+                    let needs_attention = matches!(
+                        update.state,
+                        UpdateState::Failed | UpdateState::RecoveryRequired
+                    );
                     let changed =
                         self.snapshot.update.as_ref().map(|u| u.state) != Some(update.state);
                     self.snapshot.update = Some(update);
-                    if terminal && changed {
+                    if needs_attention && changed {
                         effects.push(Effect::ShowUpgrade);
                     }
                 }
@@ -386,8 +389,12 @@ impl Core {
                 }
             }
             (Purpose::Apply(_) | Purpose::Cancel(_), Ok(ControlResult::Update(u))) => {
+                if u.state.is_in_flight()
+                    || matches!(u.state, UpdateState::Failed | UpdateState::RecoveryRequired)
+                {
+                    effects.push(Effect::ShowUpgrade);
+                }
                 self.snapshot.update = Some(u);
-                effects.push(Effect::ShowUpgrade);
             }
             (p, Ok(other)) => effects.extend(self.unexpected(p, &other)),
             (_, Err(failure)) => effects.extend(self.fail(&failure)),
