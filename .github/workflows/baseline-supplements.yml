@@ -4,10 +4,32 @@ name: diagnostic baseline Python and Node supplements
 # software-unit evidence; their reports explicitly leave manual/hardware cells
 # unresolved and never claim whole-repository qualification.
 on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact frozen source commit to measure; workflow transport is recorded separately
+        required: true
+        type: string
+      diagnostic_baseline:
+        description: Explicit supplemental diagnostic execution
+        required: true
+        type: string
+        default: "true"
+      scope_result:
+        description: Standalone dispatch has no parent scope dependency
+        required: true
+        type: string
+        default: success
   workflow_call:
     inputs:
       expected_sha:
         description: Frozen candidate source required by this diagnostic sweep
+        required: true
+        type: string
+      diagnostic_baseline:
+        required: true
+        type: string
+      scope_result:
         required: true
         type: string
 
@@ -15,6 +37,7 @@ jobs:
   python_supplements:
     name: diagnostic supplemental Python units
     runs-on: [self-hosted, Linux, X64, lab, general]
+    if: inputs.diagnostic_baseline == 'true' && inputs.scope_result == 'success'
     timeout-minutes: 30
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -23,6 +46,12 @@ jobs:
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
       options: --cpus 2 --memory 4g
     steps:
+      - name: Require a frozen supplemental source
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        shell: bash
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
       - name: Capture mounted runner workspace owner
         run: |
           # Forgejo v13.1.0 provisions paired random job volumes and deletes
@@ -103,6 +132,7 @@ jobs:
           environment = os.environ | {'PLURX_TEST_CANDIDATE_SHA': candidate, 'PLURX_TEST_CANDIDATE_TREE': tree}
           output = Path(os.environ['RUNNER_TEMP']) / 'baseline-python'
           output.mkdir(parents=True, exist_ok=True)
+          (output / 'workflow-transport.json').write_text(json.dumps({'workflow_transport_sha': os.environ.get('GITHUB_SHA'), 'tested_source_sha': candidate, 'tested_source_tree': tree}, indent=2) + '\n')
           directories = [
               'tests/benchmark', 'tests/sharing', 'tests/desktop', 'clients/desktop-remote/tests',
               'tools/dv_processing',
@@ -167,7 +197,7 @@ jobs:
           rows = []
           for index, directory in enumerate(directories, 1):
               name = f'python-supplement-{index:02d}'
-              context = {'candidate_sha': candidate, 'candidate_tree': tree, 'cell_id': name,
+              context = {'candidate_sha': candidate, 'candidate_tree': tree, 'workflow_transport_sha': os.environ.get('GITHUB_SHA'), 'cell_id': name,
                          'framework': 'unittest', 'target': f'{platform.system()}-{platform.machine()}',
                          'profile': 'unittest', 'features': [], 'toolchain': platform.python_version(),
                          'suite_dir': directory}
@@ -203,7 +233,7 @@ jobs:
               print(f'{name}: {directory}: exit={returncode}', flush=True)
           passed = all(row['returncode'] == 0 and row['report_present'] for row in rows)
           (output / 'summary.json').write_text(json.dumps({
-              'candidate_sha': candidate, 'candidate_tree': tree, 'cells': rows, 'units_passed': passed,
+              'candidate_sha': candidate, 'candidate_tree': tree, 'workflow_transport_sha': os.environ.get('GITHUB_SHA'), 'cells': rows, 'units_passed': passed,
               'full_repository_suite_complete': False, 'unresolved_conditional_cells': conditional,
           }, indent=2) + '\n')
           raise SystemExit(0 if passed else 1)
@@ -226,6 +256,7 @@ jobs:
   node_supplements:
     name: diagnostic exact Node unit recipe
     runs-on: [self-hosted, Linux, X64, lab, general]
+    if: inputs.diagnostic_baseline == 'true' && inputs.scope_result == 'success'
     timeout-minutes: 30
     container:
       image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
@@ -234,6 +265,12 @@ jobs:
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
       options: --cpus 2 --memory 4g
     steps:
+      - name: Require a frozen supplemental source
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        shell: bash
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
       - name: Capture mounted runner workspace owner
         run: |
           # Forgejo v13.1.0 provisions paired random job volumes and deletes
@@ -317,7 +354,8 @@ jobs:
           environment = os.environ | {'PLURX_TEST_CANDIDATE_SHA': candidate, 'PLURX_TEST_CANDIDATE_TREE': tree}
           output = Path(os.environ['RUNNER_TEMP']) / 'baseline-node'
           output.mkdir(parents=True, exist_ok=True)
-          context = {'candidate_sha': candidate, 'candidate_tree': tree, 'cell_id': 'node-unit-recipe',
+          (output / 'workflow-transport.json').write_text(json.dumps({'workflow_transport_sha': os.environ.get('GITHUB_SHA'), 'tested_source_sha': candidate, 'tested_source_tree': tree}, indent=2) + '\n')
+          context = {'candidate_sha': candidate, 'candidate_tree': tree, 'workflow_transport_sha': os.environ.get('GITHUB_SHA'), 'cell_id': 'node-unit-recipe',
                      'framework': 'node-script', 'target': f'{platform.system()}-{platform.machine()}',
                      'profile': 'node', 'features': [],
                      'toolchain': subprocess.check_output(['node', '--version'], text=True).strip(),

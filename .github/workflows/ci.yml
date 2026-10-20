@@ -2728,11 +2728,13 @@ jobs:
   baseline_supplements:
     name: diagnostic supplemental software unit cells
     needs: scope
-    if: always() && inputs.diagnostic_baseline == 'true' && needs.scope.result == 'success'
+    if: always()
     uses: ./.github/workflows/baseline-supplements.yml
     secrets: inherit
     with:
       expected_sha: ${{ inputs.expected_sha }}
+      diagnostic_baseline: ${{ inputs.diagnostic_baseline }}
+      scope_result: ${{ needs.scope.result }}
 
   publish:
     name: publish image (local registry)

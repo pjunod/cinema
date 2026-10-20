@@ -105,6 +105,18 @@ class FullSuiteBaselineWorkflowCase(unittest.TestCase):
         body = script(step(jobs()["scope"], "Bind diagnostic execution to a frozen non-main commit"))
         return self.run_shell(body, env, {"git": 'printf "%s\\n" "$ACTUAL_SHA"'})[0]
 
+    def test_supplemental_workflow_gates_use_own_explicit_inputs(self):
+        caller = jobs()['baseline_supplements']
+        self.assertEqual(condition(caller), 'always()')
+        self.assertIn('diagnostic_baseline: ${{ inputs.diagnostic_baseline }}', caller)
+        self.assertIn('scope_result: ${{ needs.scope.result }}', caller)
+        supplement = (ROOT / '.github/workflows/baseline-supplements.yml').read_text()
+        self.assertIn('workflow_dispatch:', supplement)
+        self.assertEqual(supplement.count("if: inputs.diagnostic_baseline == 'true' && inputs.scope_result == 'success'"), 2)
+        self.assertNotIn('needs.scope', supplement)
+        self.assertEqual(supplement.count('ref: ${{ inputs.expected_sha }}'), 2)
+        self.assertEqual(supplement.count('workflow-transport.json'), 2)
+
     def test_deferred_failures_use_literal_boolean_and_strict_ordinary_verdict(self):
         text = WORKFLOW.read_text()
         self.assertNotRegex(text, r"continue-on-error:.*\$\{\{")
