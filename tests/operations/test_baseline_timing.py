@@ -112,8 +112,8 @@ class ParseRustJobTests(unittest.TestCase):
         report = parse(log('Running tests/x.rs (target/debug/deps/x-abcd)', 'running 3 tests',
                            'test fixed ... ok', 'test broken ... FAILED', 'test disabled ... ignored',
                            'test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s'))
-        prior = {'failures': [{'name': name} for name in ['fixed', 'broken', 'disabled', 'renamed']]}
-        reconcile(report, {'required_test_cases': ['disabled', 'absent']}, prior)
+        prior = {'failures': [{'name': name, 'binary_stem': 'x-abcd'} for name in ['fixed', 'broken', 'disabled', 'renamed']]}
+        reconcile(report, {'required_test_cases': [{'binary_stem': 'x-abcd', 'name': name} for name in ['disabled', 'absent']]}, prior)
         self.assertEqual([case['status'] for case in report['previous_failure_recheck']],
                          ['passed', 'failed', 'ignored', 'missing'])
         self.assertEqual(len(report['inventory_gaps']), 2)
@@ -145,6 +145,58 @@ class ParseRustJobTests(unittest.TestCase):
         banner_only = parse(log('Doc-tests plurx_pgs'))
         self.assertEqual(banner_only['suites'][0]['binary'], 'doctest:plurx_pgs')
         self.assertEqual(banner_only['incomplete_suite_count'], 1)
+
+    def test_same_case_in_other_binary_cannot_satisfy_previous_failure_or_requirement(self):
+        report = parse(log('Running unittests src/main.rs (target/debug/deps/plurxd-aaaaaaaaaaaaaaaa)',
+                           'running 1 test', 'test tests::same ... ok',
+                           'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'))
+        prior = {'failures': [{'name': 'tests::same', 'binary': 'plurx_core-bbbbbbbbbbbbbbbb'}]}
+        reconcile(report, {'required_test_cases': [{'binary_stem': 'plurx_core', 'name': 'tests::same'}]}, prior)
+        self.assertEqual(report['previous_failure_recheck'][0]['status'], 'missing')
+        self.assertEqual(report['previous_failure_recheck'][0]['binary_stem'], 'plurx_core')
+        self.assertEqual(report['inventory_gaps'][0]['status'], 'not passed')
+
+    def test_same_binary_across_hashes_retains_independent_case_outcomes(self):
+        report = parse(log('Running unittests src/lib.rs (target/debug/deps/plurx_core-aaaaaaaaaaaaaaaa)',
+                           'running 1 test', 'test tests::same ... ok',
+                           'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+                           'Running unittests src/main.rs (target/debug/deps/plurxd-bbbbbbbbbbbbbbbb)',
+                           'running 1 test', 'test tests::same ... FAILED',
+                           'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'))
+        prior = {'failures': [{'name': 'tests::same', 'binary': 'plurx_core-cccccccccccccccc'},
+                              {'name': 'tests::same', 'binary': 'plurxd-dddddddddddddddd'}]}
+        reconcile(report, previous=prior)
+        self.assertEqual([case['status'] for case in report['previous_failure_recheck']], ['passed', 'failed'])
+        self.assertEqual(report['totals']['failed'], 1)
+
+    def test_explicit_cell_qualification_cannot_borrow_same_binary_case(self):
+        report = parse(log('Running tests/x.rs (target/debug/deps/x-aaaaaaaaaaaaaaaa)',
+                           'running 1 test', 'test tests::same ... ok',
+                           'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'))
+        report['suites'][0]['cell_id'] = 'linux'
+        prior = {'failures': [{'name': 'tests::same', 'binary_stem': 'x', 'cell_id': cell} for cell in ['macos', 'linux']]}
+        reconcile(report, {'required_test_cases': [{'name': 'tests::same', 'binary_stem': 'x', 'cell_id': 'macos'}]}, prior)
+        self.assertEqual([case['status'] for case in report['previous_failure_recheck']], ['missing', 'passed'])
+        self.assertEqual(report['inventory_gaps'][0]['cell_id'], 'macos')
+
+    def test_name_only_failure_and_requirement_remain_unqualified(self):
+        report = parse(log('Running tests/x.rs (target/debug/deps/x-aaaaaaaaaaaaaaaa)',
+                           'running 1 test', 'test tests::same ... ok',
+                           'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'))
+        reconcile(report, {'required_test_cases': ['tests::same']}, {'failures': [{'name': 'tests::same'}]})
+        self.assertEqual(report['previous_failure_recheck'][0]['status'], 'unqualified')
+        self.assertEqual(report['inventory_gaps'][0]['status'], 'unqualified identity')
+
+    def test_explicit_native_binary_and_case_id_are_not_rewritten(self):
+        name = 'native suite::case/α (variant)'
+        binary = 'native-suite-deadbeef'
+        report = {'suites': [{'binary_stem': binary, 'result': {}, 'outcomes': [{'name': name, 'status': 'ok'}]}]}
+        prior = {'failures': [{'name': name, 'binary_stem': binary}]}
+        reconcile(report, previous=prior)
+        case = report['previous_failure_recheck'][0]
+        self.assertEqual(case['status'], 'passed')
+        self.assertEqual(case['name'], name)
+        self.assertEqual(case['binary_stem'], binary)
 
 
 if __name__ == '__main__':

@@ -263,36 +263,34 @@ def record_cleanup(result, cleanup):
         result["cleanup_error_errno"] = cleanup.get("error_errno")
 
 
-def run_cell(cell, root, output, grace):
-    result = dict(cell, started_utc=utc(), timed_out=False, returncode=None, success=False,
+def run_process(argv, stdout, stderr, timeout, *, cwd=None, grace=5.0):
+    """Run with bounded, anchored ownership while preserving separate streams."""
+    result = dict(started_utc=utc(), timed_out=False, returncode=None, success=False,
                   leaked_process_group=False, group_observations=[], cleanup_complete=False)
     started = time.monotonic()
-    log = output / (cell["id"] + ".log")
-    result["log"] = log.name
     process = None
     anchor = None
     try:
-        with log.open("wb") as stream:
-            process = subprocess.Popen(cell["argv"], cwd=root / cell["cwd"], stdout=stream,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
-            anchor = wait_owned_leader(process, cell["timeout_seconds"])
-            result["leader_anchor"] = dict(pid=process.pid, **anchor)
-            result["timed_out"] = anchor["timed_out"]
-            result["returncode"] = anchor["returncode"]
-            if anchor.get("error"):
-                result["leader_wait_error"] = anchor["error"]
-            current = observe_group(process.pid)
-            result["group_observations"].append(dict(stage="after-wait-before-reap", **current))
-            result["leaked_process_group"] = not result["timed_out"] and anchor["held"] and current["status"] == "live"
-            result["cleanup_observation_unknown"] = (current["status"] == "unknown"
-                                                     or (current["status"] == "live" and not anchor["held"]))
-            if result["timed_out"] or current["status"] in ("live", "unknown"):
-                record_cleanup(result, terminate_group(process, grace, anchor))
-            else:
-                result["cleanup_complete"] = True
-            # The anchor is released only after the final group observation and
-            # every signal. No further numeric process-group signal is issued.
-            reap_owned_leader(process, result)
+        process = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=stderr,
+                                   start_new_session=True)
+        anchor = wait_owned_leader(process, timeout)
+        result["leader_anchor"] = dict(pid=process.pid, **anchor)
+        result["timed_out"] = anchor["timed_out"]
+        result["returncode"] = anchor["returncode"]
+        if anchor.get("error"):
+            result["leader_wait_error"] = anchor["error"]
+        current = observe_group(process.pid)
+        result["group_observations"].append(dict(stage="after-wait-before-reap", **current))
+        result["leaked_process_group"] = not result["timed_out"] and anchor["held"] and current["status"] == "live"
+        result["cleanup_observation_unknown"] = (current["status"] == "unknown"
+                                                 or (current["status"] == "live" and not anchor["held"]))
+        if result["timed_out"] or current["status"] in ("live", "unknown"):
+            record_cleanup(result, terminate_group(process, grace, anchor))
+        else:
+            result["cleanup_complete"] = True
+        # The anchor is released only after the final group observation and
+        # every signal. No further numeric process-group signal is issued.
+        reap_owned_leader(process, result)
         result["success"] = (result["returncode"] == 0 and not result["timed_out"]
                              and not result["leaked_process_group"] and not result.get("leader_wait_error")
                              and not result["cleanup_observation_unknown"] and result["cleanup_complete"])
@@ -305,6 +303,20 @@ def run_cell(cell, root, output, grace):
         result["finished_utc"] = utc()
         result["seconds"] = round(time.monotonic() - started, 3)
     return result
+
+
+
+def run_cell(cell, root, output, grace):
+    log = output / (cell["id"] + ".log")
+    try:
+        with log.open("wb") as stream:
+            result = run_process(cell["argv"], stream, subprocess.STDOUT,
+                                 cell["timeout_seconds"], cwd=root / cell["cwd"], grace=grace)
+    except OSError as error:
+        result = dict(started_utc=utc(), finished_utc=utc(), seconds=0.0,
+                      timed_out=False, returncode=None, success=False,
+                      cleanup_complete=True, error=str(error))
+    return dict(cell, **result, log=log.name)
 
 
 def run_manifest(manifest_path, output, root=None, grace=5.0):

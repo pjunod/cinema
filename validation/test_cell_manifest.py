@@ -63,7 +63,27 @@ def libtest_inventory(text):
     A legitimate zero-test binary is permitted and remains visible as zero cases.
     """
     require(isinstance(text, str), 'libtest listing must be text')
-    return [identifier(line[:-6]) for line in text.splitlines() if line.endswith(': test')]
+    names = []
+    seen = set()
+    footer = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        require(footer is None, 'Unexpected libtest discovery row after summary')
+        summary = re.fullmatch(r'(\d+) tests?, (\d+) benchmarks?', line)
+        if summary:
+            footer = (int(summary[1]), int(summary[2]))
+            require(footer[1] == 0, 'Benchmark discovery requires a separately owned cell')
+            require(footer[0] == len(names), 'Libtest discovery summary count mismatch')
+            continue
+        match = re.fullmatch(r'(.+): (test|benchmark)', line)
+        require(match is not None, 'Unrecognized libtest discovery row')
+        require(match[2] == 'test', 'Benchmark discovery requires a separately owned cell')
+        name = identifier(match[1])
+        require(name not in seen, 'Duplicate libtest discovery identity')
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def libtest_outcomes(text):

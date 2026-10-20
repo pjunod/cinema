@@ -142,6 +142,30 @@ class RuntimeCellManifestTests(unittest.TestCase):
         with self.assertRaises(cells.ManifestError):
             self.assess(discovery_returncode=True)
 
+    def test_unknown_nonempty_discovery_output_cannot_become_passing_zero_cell(self):
+        for listing in ('unrecognized test runner output\n', 'running 0 tests\n',
+                        'a: test\nunsupported diagnostic\n', '0 tests, 0 bench\n'):
+            with self.subTest(listing=listing), self.assertRaises(cells.ManifestError):
+                cells.libtest_inventory(listing)
+
+    def test_legitimate_zero_listings_and_native_case_names_are_preserved(self):
+        for listing in ('', '\n', '0 tests, 0 benchmarks\n'):
+            with self.subTest(listing=listing):
+                inventory = cells.libtest_inventory(listing)
+                self.assertEqual(inventory, [])
+                self.assertTrue(self.assess(discovered=inventory, outcomes=[])['passed'])
+        name = 'module::case/α (variant)'
+        self.assertEqual(cells.libtest_inventory(name + ': test\n1 test, 0 benchmarks\n'), [name])
+
+    def test_corrupt_duplicate_or_benchmark_discovery_is_refused(self):
+        for listing in ('a: test\n2 tests, 0 benchmarks\n',
+                        'a: test\na: test\n2 tests, 0 benchmarks\n',
+                        '0 tests, 0 benchmarks\n0 tests, 0 benchmarks\n',
+                        '0 tests, 0 benchmarks\na: test\n',
+                        'bench: benchmark\n', '0 tests, 1 benchmark\n'):
+            with self.subTest(listing=listing), self.assertRaises(cells.ManifestError):
+                cells.libtest_inventory(listing)
+
 
 if __name__ == '__main__':
     unittest.main()

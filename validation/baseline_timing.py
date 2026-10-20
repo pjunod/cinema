@@ -222,32 +222,63 @@ def parse(lines):
     }
 
 
+def binary_binding(record):
+    """Keep explicit native identities; normalize only raw Cargo artifact names."""
+    cell = record.get('cell_id')
+    if cell is not None and (not isinstance(cell, str) or not cell):
+        return None
+    binary = record.get('binary_stem')
+    if binary is None:
+        binary = record.get('binary')
+        if isinstance(binary, str) and binary:
+            binary = binary if binary.startswith('doctest:') else re.sub(r'-[0-9a-f]{8,}$', '', Path(binary).name)
+    if not isinstance(binary, str) or not binary:
+        return None
+    return cell, binary
+
+
 def reconcile(report, expected=None, previous=None):
-    """Missing/renamed cases require explicit evidence; absence is not a pass."""
+    """Reconcile exact binary/cell + native case IDs; absence never proves a pass."""
     expected = expected or {}
     gaps = []
     for binary in expected.get('binaries', []):
-        observed = [suite for suite in report['suites'] if suite['binary_stem'] == binary]
+        requested = {'binary_stem': binary} if isinstance(binary, str) else binary
+        binding = binary_binding(requested) if isinstance(requested, dict) else None
+        observed = [suite for suite in report['suites'] if binding is not None and binary_binding(suite) == binding]
         if not observed:
             gaps.append({'binary': binary, 'status': 'not observed'})
         elif any(suite['result'] is None for suite in observed):
             gaps.append({'binary': binary, 'status': 'observed without complete result'})
     cases = {}
     for suite in report['suites']:
+        binding = binary_binding(suite)
+        if binding is None:
+            continue
         for outcome in suite['outcomes']:
-            cases.setdefault(outcome['name'], []).append(outcome['status'])
-    for name in expected.get('required_test_cases', []):
-        observed = cases.get(name, [])
+            cases.setdefault((*binding, outcome['name']), []).append(outcome['status'])
+    for requested in expected.get('required_test_cases', []):
+        requirement = requested if isinstance(requested, dict) else {'name': requested}
+        name = requirement.get('name')
+        binding = binary_binding(requirement)
+        if binding is None or not isinstance(name, str) or not name:
+            gaps.append({'test': name, 'status': 'unqualified identity',
+                         'reason': 'required case needs an explicit binary identity and native case name'})
+            continue
+        observed = cases.get((*binding, name), [])
         if 'ok' not in observed or 'FAILED' in observed:
-            gaps.append({'test': name, 'status': 'not passed', 'observed': observed})
+            gaps.append({'test': name, 'binary_stem': binding[1], 'cell_id': binding[0],
+                         'status': 'not passed', 'observed': observed})
     report['inventory_gaps'] = gaps
     checks = []
     for failure in (previous or {}).get('failures', []):
         name = failure['name']
-        observed = cases.get(name, [])
-        status = ('failed' if 'FAILED' in observed else 'passed' if 'ok' in observed
-                  else 'ignored' if 'ignored' in observed else 'missing')
-        checks.append({'name': name, 'status': status, 'observed': observed,
+        binding = binary_binding(failure)
+        observed = cases.get((*binding, name), []) if binding is not None else []
+        status = ('unqualified' if binding is None else 'failed' if 'FAILED' in observed
+                  else 'passed' if 'ok' in observed else 'ignored' if 'ignored' in observed else 'missing')
+        checks.append({'name': name, 'binary': failure.get('binary'),
+                       'binary_stem': binding[1] if binding else None, 'cell_id': binding[0] if binding else None,
+                       'status': status, 'observed': observed,
                        'repair_candidate': failure.get('repair_candidate')})
     report['previous_failure_recheck'] = checks
     report['previous_failure_recheck_counts'] = dict(Counter(check['status'] for check in checks))
@@ -259,7 +290,7 @@ def main():
     parser.add_argument('log', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--expected-inventory', type=Path,
-                        help='JSON with binaries (hash-free stems) and required_test_cases lists')
+                        help='JSON with binaries and required_test_cases records containing binary_stem/name and optional cell_id')
     parser.add_argument('--previous-report', type=Path,
                         help='Reconcile every previously failed test ID against this log')
     args = parser.parse_args()

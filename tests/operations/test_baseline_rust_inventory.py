@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -94,9 +96,102 @@ class BaselineRustInventoryCase(unittest.TestCase):
                 inventory.compile_command(bad)
 
     def test_unknown_or_duplicate_listing_output_never_silently_disappears(self):
-        for text in ("case: test\ncase: test\n", "starting test bodies\n", "case: benchmark\n"):
+        for text in ("case: test\ncase: test\n", "starting test bodies\n", "case: benchmark\n",
+                     "case: test\n2 tests, 0 benchmarks\n", "0 tests, 0 benchmarks\ncase: test\n"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 inventory.parse_listing(text)
+
+    def test_capture_keeps_json_and_diagnostics_separate_and_owns_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stdout, stderr = root / "out", root / "err"
+            result = inventory.run_capture([sys.executable, "-c",
+                'import sys; print("{}", flush=True); print("diagnostic", file=sys.stderr, flush=True)'],
+                stdout, stderr, 5)
+            self.assertTrue(result["success"], result)
+            self.assertEqual(json.loads(stdout.read_text()), {})
+            self.assertEqual(stderr.read_text().strip(), "diagnostic")
+            result = inventory.run_capture([sys.executable, "-c", "import time; time.sleep(60)"],
+                                           stdout, stderr, 0.1)
+            self.assertTrue(result["timed_out"])
+            self.assertFalse(result["success"])
+            self.assertTrue(result["cleanup_complete"], result)
+            self.assertTrue(result["leader_reaped_after_cleanup"])
+            self.assertIsNotNone(result["exit_code"])
+
+    def test_compile_cleanup_failure_retains_progress_and_blocks_all_listing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact, _ = self.artifacts(root)
+            def capture(command, stdout, stderr, timeout):
+                progress = json.loads((root / "result/inventory.json").read_text())
+                self.assertEqual(progress["stage"], "compiling")
+                self.assertFalse(progress["discovery_complete"])
+                self.assertEqual(progress["source"]["commit"], "a" * 40)
+                shutil.copyfile(artifact, stdout)
+                Path(stderr).write_text("cleanup refused")
+                return dict(exit_code=0, success=False, cleanup_complete=False,
+                            seconds=0.1, cleanup_error="group unqualified")
+            with mock.patch.object(inventory, "git_identity", return_value=dict(commit="a" * 40, tree="b" * 40, tracked_clean=True)), \
+                 mock.patch.object(inventory.subprocess, "check_output", side_effect=lambda args, **kw:
+                    "rustc 1.97.1\nhost: x86_64-unknown-linux-gnu\n"), \
+                 mock.patch.object(inventory, "run_capture", side_effect=capture) as launch:
+                result = inventory.discover(root / "result", ["cargo", "test", "--workspace"])
+            self.assertEqual(launch.call_count, 1)
+            self.assertFalse(result["discovery_complete"])
+            self.assertFalse(result["binaries"][0]["listing_complete"])
+            self.assertIn("blocked", result["binaries"][0]["error"])
+            self.assertEqual(result["stage"], "finished")
+
+    def test_listing_progress_is_persisted_before_each_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact, _ = self.artifacts(root)
+            original = inventory.run_capture
+            stages = []
+            def capture(*arguments):
+                progress = json.loads((root / "result/inventory.json").read_text())
+                stages.append(progress["stage"])
+                self.assertFalse(progress["discovery_complete"])
+                self.assertIn("sha256", progress["binaries"][0])
+                return original(*arguments)
+            with mock.patch.object(inventory, "run_capture", side_effect=capture):
+                result = self.discover(root, artifact)
+            self.assertTrue(result["discovery_complete"], result["errors"])
+            self.assertEqual(stages, ["listing:fixture:all", "listing:fixture:ignored"])
+
+    def test_listing_cleanup_failure_blocks_remaining_binary_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact, executable = self.artifacts(root)
+            second = root / "second"
+            shutil.copyfile(executable, second)
+            second.chmod(0o755)
+            row = json.loads(artifact.read_text())
+            row["executable"] = str(second)
+            row["target"]["name"] = "second"
+            with artifact.open("a") as stream:
+                stream.write(json.dumps(row) + "\n")
+            def capture(command, stdout, stderr, timeout):
+                Path(stdout).write_text("ordinary: test\n")
+                Path(stderr).write_text("")
+                return dict(exit_code=0, success=False, cleanup_complete=False, seconds=0.1)
+            with mock.patch.object(inventory, "run_capture", side_effect=capture) as launch:
+                result = self.discover(root, artifact)
+            self.assertEqual(launch.call_count, 1)
+            self.assertFalse(result["discovery_complete"])
+            self.assertEqual(len(result["binaries"]), 2)
+            self.assertIn("blocked", result["binaries"][1]["error"])
+            self.assertTrue((root / "result/inventory.json").is_file())
+
+    def test_nonfinite_timeouts_are_rejected_before_launch(self):
+        for timeout in (0, -1, float("inf"), float("nan"), True):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as directory:
+                with mock.patch.object(inventory, "run_capture") as launch:
+                    result = inventory.discover(Path(directory), ["cargo", "test"], compile_timeout=timeout)
+                self.assertFalse(result["discovery_complete"])
+                self.assertIn("positive and finite", result["errors"][0])
+                launch.assert_not_called()
 
     def test_ingested_artifacts_require_actual_compiler_status(self):
         with tempfile.TemporaryDirectory() as directory:
