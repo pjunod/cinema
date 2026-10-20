@@ -2,7 +2,7 @@
 
 **Status:** M0 in progress; no formal result or milestone accepted · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Base:** `3808640c79` · **PR:** [#1241](http://forge.lan:3000/noirr/plurx/pulls/1241) · **Merge readiness:** not ready
 
-The pilot is in an agent-owned clone. The stable TLC 1.7.4 artifact and Temurin JDK 21.0.12+8 pins are prepared and verified. TLC help runs on the local macOS ARM64 JDK. This is toolchain feasibility evidence only; no specification, model check, implementation or acceptance result is claimed.
+The pilot is in an agent-owned clone. The stable TLC 1.7.4 artifact and Temurin JDK 21.0.12+8 pins are prepared and verified. TLC help runs on the local macOS ARM64 JDK. This is toolchain feasibility evidence only; no protocol specification, model-check result or backend acceptance is claimed.
 
 Fable task `t_7622df11` is awaiting route recovery: its pinned Hermes invocation returned an API credits error before producing model work. The coordinator has requested the working route from the designated Fable control session; actual account balance is not inferred from that message. M0 remains open until source mapping, model boundary, tool behavior and feasibility are resolved. M1, M2 and M3 have not been accepted.
 
@@ -12,3 +12,20 @@ The pinned Rust 1.97.1 compile-only baseline is running in an agent-owned
 build directory. GPT-6 Luna is implementing the explicit checksummed
 toolchain bootstrap. The draft PR allocates bookkeeping checks only; no
 pre-review unit or conformance suites have been started.
+
+
+## Current implementation and acceptance
+
+| Scope | Owner/model | State | Evidence still owed |
+|---|---|---|---|
+| Toolchain pin/bootstrap | GPT-6 Luna | Committed `bf3c9c537`; fetch/resolve feasibility passed | Final synthetic tests and review |
+| Pinned compiler loop | Codex coordinator | Rust 1.97.1 core `hiqlite-store` all-target check completed | Changed-source checks if Rust tests are added |
+| Protocol/model | Fable 5.1 | API-route prerequisite unresolved; no model written | M0 freeze, M1 exploration/controls |
+| Runtime diagnosis | GPT-6 Luna and designated control session | Checking existing dependencies and committed route fix | Working pinned Fable invocation |
+| Backend/runner/CI | Fable contract plus bounded builder | Not started | M2/M3 implementation, final qualification |
+| Review/fast lane/merge | Coordinator and designated Fable reviewer | Not ready | Complete PR, review fixes, once-per-candidate evidence |
+
+The authoritative blocking workflow on this source is
+`main-fast-lane.yml`, whose preflight budget is 15 minutes. The older full
+`ci.yml` is manual. M3 must provision/run the tool in the actual affected
+fast-lane preflight rather than assuming manual full CI protects a merge.
