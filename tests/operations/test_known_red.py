@@ -208,6 +208,12 @@ class KnownRedContractTest(unittest.TestCase):
             additional_fixture_reasons[identity] = (
                 "needs a private FFmpeg dvh1 capture; PLURX_DVH1_CAPTURE"
             )
+        # Mac package repair (#1239) executes actual Metal/Vulkan graphs with
+        # an explicit complete package; ordinary Linux unit runners lack it.
+        additional_fixture_reasons[
+            "crates/plurxd/src/ffmpeg_support.rs::ffmpeg_support::tests::"
+            "complete_macos_package_runs_metal_and_vulkan"
+        ] = "requires PLURX_TEST_FFMPEG pointing at a complete native Mac package"
         additional_fixtures = tuple(
             item for item in ignored if item.identity in additional_fixture_reasons
         )
@@ -215,9 +221,9 @@ class KnownRedContractTest(unittest.TestCase):
             {item.identity: item.reason for item in additional_fixtures},
             additional_fixture_reasons,
         )
-        self.assertEqual(len(additional_fixtures), 12)
-        # HDR runtime and DV completeness add four private checks: 32 -> 36.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 36)
+        self.assertEqual(len(additional_fixtures), 13)
+        # HDR/DV and the explicit Mac graph check are operator-run fixtures.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 37)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
