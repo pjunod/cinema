@@ -503,7 +503,7 @@ Proposed commands after implementation:
 
 ```bash
 scripts/check-formal smoke  # safety, recovery and reachability witnesses
-scripts/check-formal full   # all 15 safety/recovery/control/witness configurations
+scripts/check-formal full   # all 16 safety/recovery/control/witness configurations
 ```
 
 The runner accepts an explicitly configured local TLC artifact/runtime and
@@ -514,7 +514,8 @@ exhaustion, source mismatch or incomplete exploration. A control finding its
 specific expected counterexample is an expected verdict, not a positive proof.
 
 The model uses seeded starting states with one shared safety transition
-relation. Smoke explores at most six modeled events and baseline ten; the
+relation. Smoke explores at most six modeled events and the two-job baseline eight;
+a supplementary single-job lifecycle configuration explores ten. The
 reachability configurations use at most sixteen. These finite schedules do not
 prove arbitrary-length protocol safety. Recovery uses a separate finite
 suffix with explicit fairness and time-advance premises. Seven normal-model
@@ -522,8 +523,7 @@ reachability witnesses complement five deliberately defective controls. A
 witness reaches a named state; it is not an exhaustive safety result.
 
 Smoke has a 180-second aggregate model budget after tool resolution, with a
-60-second safety cap and 30-second recovery/witness caps. Full baseline has a
-900-second cap. Timeout or nonempty state queue supplies no passing evidence.
+60-second safety cap and 30-second recovery/witness caps. Full baseline and lifecycle each have a 900-second cap. Timeout or nonempty state queue supplies no passing evidence.
 
 Write logs, traces and receipts beneath ignored `target/verification/`.
 Each receipt records source commit/tree and dirty state, hashes of relevant
@@ -652,3 +652,24 @@ implementation and Luna handles bounded tasks, with explicit file ownership. The
 PR and [status](FORMAL-VERIFICATION-PILOT-STATUS.md). M0 semantics/tool
 feasibility remains prerequisite to M1; implementation and acceptance are
 reported separately.
+
+### 12.1 M0 cost decision — separate short contention and full lifecycle
+
+The two-job ten-event exploration was stopped incomplete after sustained
+frontier growth. One positive-only state quotient reduced cost but did not
+make that horizon credible within the declared budget. Fable's second
+text-only design consultation recommended a two-job eight-event baseline
+and an additional single-job ten-event lifecycle check. Sol implements the
+configurations; Fable has not performed the final implementation review.
+
+The identity domains, shared safety transition relation and enabled faults
+stay explicit. The two-job baseline checks all seeds through eight events;
+publication from an already-bound seed can still overlap contention. The
+fresh-claim→acquire→bind→publication→reply composition is checked separately
+with one job and two workers. These checks do not establish the longer
+combined two-job lifecycle. Normal reachability witnesses and real Store
+examples support their own narrower claims. Neither new positive check is
+accepted until it completes. The original incomplete configuration and its
+metrics remain negative feasibility evidence, outside the qualifying full
+profile. If ten single-job events exceed budget, a predeclared nine-event
+fallback covers commit without delivery and must be reported accordingly.
