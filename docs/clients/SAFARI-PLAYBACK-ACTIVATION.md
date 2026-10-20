@@ -109,11 +109,13 @@ scripts/quiet node --test tests/playback/web-control.test.js
 scripts/quiet node --test tests/playback/web-policy.test.js
 scripts/quiet node --test tests/playback/seek-control.test.js
 scripts/quiet node --test tests/web/player-dom.test.js
+scripts/quiet node --test tests/web/cinema-remote.test.js
 ```
 
 `web-control.test.js` includes the native HLS startup cases. Its added
 regressions exercise the actual open/decision/attachment and retry functions
-with a per-element permission model. The native suite exercises real
+with a per-element permission model, including Pause while a retry is still
+preparing. The native suite exercises real
 readiness, transport rejection and terminal-owner cleanup, including late
 attachment, element, intent, source and owned-cancellation races. These
 models test lifecycle ownership; they do not impersonate Safari qualification.

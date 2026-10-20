@@ -581,7 +581,7 @@ async function resumeQualityBoundary(p){
 function setPlayerPlaying(playing){
   const v=document.getElementById("video");
   if(!v||typeof playing!=="boolean") return false;
-  if(PLAYER?.playPermissionDenied){
+  if(PLAYER?.playPermissionDenied&&!hasPendingPlaybackOpen(PLAYER)){
     PLAYER.wantsPlayback=playing;
     if(playing) togglePlay();
     return true;
@@ -591,7 +591,7 @@ function setPlayerPlaying(playing){
 }
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
-  if(PLAYER?.playPermissionDenied){
+  if(PLAYER?.playPermissionDenied&&!hasPendingPlaybackOpen(PLAYER)){
     PLAYER.wantsPlayback=true;
     return playbackSurfaceAction("retry");
   }

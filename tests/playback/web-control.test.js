@@ -8225,3 +8225,16 @@ test('permission retry loads the same element synchronously and retains destinat
  assert.equal(h.current().controlSeek.targetMs,84000);assert.equal(h.current().wantsPlayback,true);
  assert.equal(h.current().playPermissionDenied,null,'only the new attachment clears the refusal');
 });
+
+test('Pause during a pending permission retry belongs to that open and does not retry again',async()=>{
+ const h=fullOpenHarness(),media=activationVideo(h,{source:'/refused.mp4'});
+ const p={fileId:9,title:'Film',started:false,wantsPlayback:true,offset:0,knownDur:600000,
+  method:'direct_play',source:{},audio:[{index:1,default:true}],curAudio:0,curSub:-1,
+  preplay:{audio:1,subtitle:-1},aoffset:0,stallFrom:42,mediaAttachment:{}};
+ p.playPermissionDenied={element:media.v,attachment:p.mediaAttachment};h.attach(p);
+ const retry=h.retryPlayback();media.endGesture();h.togglePlay();
+ assert.equal(h.decisions.length,1,'Pause never opens another permission retry');
+ h.decisions[0].resolve(activationDecision);await retry;
+ assert.equal(h.current().wantsPlayback,false);assert.equal(h.video.paused,true);
+ assert.ok(!media.events.includes('authorized-play'));assert.ok(!media.events.includes('blocked-play'));
+});

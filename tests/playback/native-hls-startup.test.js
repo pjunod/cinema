@@ -627,3 +627,22 @@ test('explicit transport after permission refusal retries Play without turning P
  h.ctx.setPlayerPlaying(true);assert.equal(h.player.wantsPlayback,true);assert.deepEqual(actions,['retry']);
  h.stop();
 });
+
+test('presentation reevaluation permission rejection fences the already pending recovery ask',async()=>{
+ const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ h.player.started=true;h.player.waitAt=1;h.player.waitStartedRunway=5.5;h.video.paused=false;
+ h.ctx.performance.now=()=>8001;
+ let answer;
+ Object.assign(h.ctx,{SUPPLY_RUNWAY_SECS:1.5,CONTROL_STALL_DEFER_DEADLINE_MS:20000,
+  bufferRunway:()=>5.5,pbPosSec:()=>42,recordWaitStall(){},armedPlaybackControlVerdict:()=>null,
+  askPlaybackControl:()=>({trigger:'ask',action:new Promise(resolve=>{answer=resolve;})}),
+  endWait:()=>{h.player.waitAt=null;}});
+ vm.runInContext(shippedFunction('measurements.js','persistentWaitEvidence'),h.ctx);
+ vm.runInContext('async '+shippedFunction('measurements.js','persistentWait'),h.ctx);
+ h.video.play=()=>Promise.reject(Object.assign(new Error('denied'),{name:'NotAllowedError'}));
+ const pending=h.ctx.persistentWait(h.video,h.player,1,0,0);await flush();
+ assert.ok(h.player.playPermissionDenied,'reevaluation uses the central rejection owner');
+ answer(null);await pending;
+ assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
+ assert.equal(h.player.hlsStartup.state,'cancelled');assert.equal(h.stops.length,1);
+});
