@@ -37,24 +37,38 @@ def duration(value):
 
 
 def failure_mapping(name):
-    """Historical repair candidates; mapping never certifies a regression fixed."""
+    """Source-audited candidates, never proof that a historical failure passed."""
+    specific = 'candidate_specific_repair_pending_execution'
+    mitigation = 'candidate_fixture_mitigation_pending_execution'
+    unresolved = 'unresolved_pending_reproduction'
+    def mapped(commit, disposition, area, relation):
+        return {'commit': commit, 'disposition': disposition, 'area': area,
+                'relation': relation, 'fresh_outcome': 'pending'}
     if name == 'cluster::migration::tests::restore_archive_with_retired_purpose_keys_admits_new_node_before_key_census':
-        return {'commit': 'a0c2c6730', 'relation': 'direct repair candidate', 'area': 'restore endpoint acquisition'}
+        return mapped('a0c2c6730', specific, 'restore endpoint acquisition',
+                      'owned restore child and endpoint acquisition repair candidate; fresh outcome pending')
+    if name == 'provider::tests::durable_revoke_in_oauth_other_connection_fences_provider_effect':
+        return mapped('d282a429', specific, 'notification broker durable admission fixture',
+                      'single captured clock for ticket and delivery expiry; fresh outcome pending')
     if name.startswith('transcode::source_actor::tests::') or name.startswith('http::shared_source_playback::'):
-        return {'commit': '4eee020e4', 'relation': 'concurrency repair candidate; root cause and outcome unproven', 'area': 'Source fixture admission'}
+        return mapped('4eee020e4', mitigation, 'Source fixture admission',
+                      'shared fixture concurrency mitigation; individual root cause and fresh outcome unproven')
     direct = {
-        'http::hls::tests::cached_owner_delivery_tests::cached_caption_revision_reaches_real_remote_owner_without_ingress_cache': 'caption owner fixture',
-        'http::remote::tests::remote_poll_byte_budget_retains_oversized_command_overflow': 'poll overflow accounting',
+        'http::hls::tests::cached_owner_delivery_tests::cached_caption_revision_reaches_real_remote_owner_without_ingress_cache': 'caption owner learner-admission fixture',
+        'http::remote::tests::remote_poll_byte_budget_retains_oversized_command_overflow': 'deterministic poll queue-expiry clock',
         'http::tests::every_registered_literal_route_has_an_explicit_group': 'subtitle route classification',
-        'startup_tests::the_assembled_state_carries_the_configured_identity_and_directories': 'startup fixture Tokio runtime',
-        'store_result::tests::production_store_results_never_use_bare_let_underscore': 'cancel_job result handling',
-        'subtitle_translation::runtime::tests::actual_timeout_and_cancellation_reap_owned_child_group_before_return': 'owned child cleanup',
+        'startup_tests::the_assembled_state_carries_the_configured_identity_and_directories': 'startup Tokio runtime and telemetry drain',
+        'subtitle_translation::runtime::tests::actual_timeout_and_cancellation_reap_owned_child_group_before_return': 'isolated owned child cleanup',
     }
     if name in direct:
-        return {'commit': 'dbb6f27f9', 'relation': 'direct repair candidate', 'area': direct[name]}
+        return mapped('dbb6f27f9', specific, direct[name], 'specific source repair candidate; fresh outcome pending')
+    if name == 'store_result::tests::production_store_results_never_use_bare_let_underscore':
+        return mapped(None, unresolved, 'workspace Store-result discard census',
+                      'no specific repair identified; obtain current outcome and offending source location')
     if name == 'telemetry::tests::a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink':
-        return {'commit': 'dbb6f27f9', 'relation': 'possible fallout from repaired startup panic; outcome unproven', 'area': 'telemetry registry poison'}
-    return {'commit': None, 'relation': 'unmapped; reproduce and diagnose', 'area': 'unclassified'}
+        return mapped(None, unresolved, 'telemetry Store and sink registry lifetime',
+                      'startup drainage may reduce interference but is not a demonstrated sink-lifetime repair')
+    return mapped(None, 'unmapped_pending_reproduction', 'unclassified', 'unmapped; reproduce and diagnose')
 
 
 def parse(lines):

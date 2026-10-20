@@ -1,5 +1,8 @@
 import unittest
-from validation.baseline_timing import parse, reconcile
+import json
+from collections import Counter
+from pathlib import Path
+from validation.baseline_timing import failure_mapping, parse, reconcile
 
 
 def log(*lines):
@@ -76,6 +79,27 @@ class ParseRustJobTests(unittest.TestCase):
                            'running 1 test', 'test provider::tests::unknown ... FAILED',
                            'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'))
         self.assertIsNone(report['failures'][0]['repair_candidate']['commit'])
+
+    def test_historical_failure_mapping_matches_all_48_source_audited_dispositions(self):
+        audit = json.loads((Path(__file__).resolve().parents[2] /
+                            'docs/ci/FULL-SUITE-AUDIT-2026-10-20.json').read_text())
+        names = next(sample['failure_tests'] for sample in audit['log_samples']
+                     if sample.get('task') == 21274)
+        self.assertEqual(len(set(names)), 48)
+        mappings = {name: failure_mapping(name) for name in names}
+        self.assertEqual(Counter(row['disposition'] for row in mappings.values()), {
+            'candidate_specific_repair_pending_execution': 7,
+            'candidate_fixture_mitigation_pending_execution': 39,
+            'unresolved_pending_reproduction': 2,
+        })
+        for row in mappings.values():
+            self.assertEqual(row['fresh_outcome'], 'pending')
+        broker = mappings['provider::tests::durable_revoke_in_oauth_other_connection_fences_provider_effect']
+        self.assertEqual(broker['commit'], 'd282a429')
+        for name in ('store_result::tests::production_store_results_never_use_bare_let_underscore',
+                     'telemetry::tests::a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink'):
+            self.assertIsNone(mappings[name]['commit'])
+            self.assertEqual(mappings[name]['disposition'], 'unresolved_pending_reproduction')
 
     def test_required_binary_missing_or_incomplete_is_not_complete_evidence(self):
         report = parse(log('Running tests/x.rs (target/debug/deps/x-abc123abcd123abc)'))
