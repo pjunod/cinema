@@ -80,7 +80,8 @@ or automatically failed for age.
 | Configuration | Jobs / workers / boots per worker / claims / domains / resource keys | Event horizon | Properties / intended outcome |
 |---|---|---|---|
 | `smoke.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S0–S7; complete without violation |
-| `baseline.cfg` | 2 / 2 / 2 / 3 / 1 / 2 | 10 | S0–S7; complete without violation |
+| `baseline.cfg` | 2 / 2 / 2 / 3 / 1 / 2 | 8 | S0–S7; complete without violation |
+| `lifecycle.cfg` | 1 / 2 / 2 / 3 / 1 / 2 | 11 | S0–S7 from claim seeds through commit and facade delivery |
 | `control-binding-ignored.cfg` | 1 / 2 / 2 / 2 / 1 / 2 | 6 | S2 violation after removing the backend binding guard |
 | `control-replay-fresh-fence.cfg` | Same small domains | 6 | S4 violation after replay manufactures a new fence for the same identity |
 | `control-renewal-revives-cancel.cfg` | Same small domains | 6 | S5 action-property violation after relaxing both state and exact revision guards |
@@ -90,14 +91,33 @@ or automatically failed for age.
 `MaxEvents` bounds every safety transition at the top-level `Next`, rather
 than silently disabling a particular stale-message or cancellation action.
 At the horizon only specification stuttering remains. Six events cannot
-compose every lifecycle; ten permit claim→acquire→bind→publication application
-and seeded binding with independent renewals/publication, but do not cover
-all interleavings around a complete four-submission call. Supplemental
-reachability probes explicitly show the longer normal retry path. The
-horizon is an exploration limit, not a production terminal state or liveness
-premise. TLC is invoked with `-deadlock`, intentionally disabling ordinary
-deadlock checking at these finite boundaries. No deadlock-freedom or testing
-reduction claim follows.
+compose every lifecycle. Eight events at two jobs retain contention and
+seeded bound publication, independent renewals, binding/refusal and stale
+traffic; fresh-claim-through-publication composition at two jobs is outside
+that horizon. `lifecycle.cfg` checks that longer composition at one job only.
+Its exact path is send1→read2→CAS3→claim reply4→domain acquire5→bind6→facade
+precheck7→successor8→submit9→commit10→facade delivery11. It uses the same
+shared safety relation, failure actions, identity dimensions and view.
+
+The two-job ten-event calibration was explicitly abandoned as **incomplete**:
+at its last progress sample it had97,640,975 generated states,
+12,616,232 distinct states and7,137,143 queued states, depth9; the owned
+checker was stopped after647.03s (peak RSS4,514,365,440bytes). Its exact
+model/config hashes, raw log and stopped receipt remain durable development
+artifacts outside the required configuration registry. This cost result
+justifies the declared two-job8 / single-job11 coverage split, not a safety
+verdict or an equivalence to two-job long-run exploration. If the single-job11
+configuration proves infeasible at900s, the predeclared fallback is10 events,
+which reaches commit but excludes facade delivery; changing to that fallback
+requires a new config hash and explicit coverage disposition. Nine events
+would reach only pending submission and is not an accepted fallback.
+
+Supplemental reachability probes explicitly show the longer normal retry
+path; they do not prove exhaustive two-job long-run coverage. The horizon
+is an exploration limit, not a production terminal state or liveness premise.
+TLC is invoked with `-deadlock`, intentionally disabling ordinary deadlock
+checking at these finite boundaries. No deadlock-freedom or testing reduction
+claim follows.
 
 Counters use finite ranges (job/domain fence at most5, revision at most8,
 expiry at most8). These are checked type bounds, not modulo arithmetic or

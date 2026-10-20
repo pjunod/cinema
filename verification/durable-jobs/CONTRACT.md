@@ -212,3 +212,16 @@ records its entire relevant pre-state for S2/S3; later cancellation never
 retroactively invalidates a committed event. Exact event horizons and the
 proof obligation for the state view are in README. These limits
 are part of every result, including a completed baseline.
+
+## Measured coverage split preserves the shared action set
+
+The required safety checks now use two jobs/eight events (`baseline.cfg`)
+and one job/eleven events from claim seeds (`lifecycle.cfg`), both with two
+workers, two boot identities per worker and three claim identities. The
+shared relation and all failure actions are identical. The former covers
+seeded bound publication under contention; exhaustive fresh claim through
+commit/delivery composition is checked only in the latter single-job scope.
+The abandoned two-job ten-event run is incomplete cost evidence, kept outside
+the required registry. README gives its observed counts and the precise
+eleven-action path. A predeclared single-job ten-event fallback would cover
+commit only and must be labeled explicitly if used; it is not yet selected.
