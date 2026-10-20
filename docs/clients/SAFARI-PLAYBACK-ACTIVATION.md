@@ -1,6 +1,6 @@
 # Safari playback activation — permission belongs to the media element
 
-**Status:** open · repair built, independently reviewed and focused regression qualified; physical acceptance pending ·
+**Status:** open · repair reviewed and regression qualified; Safari activation mechanism verified; original HEVC acceptance pending ·
 **Written:** 2026-10-20 · **Initial base:** `4e049a4` · **Integrated main:** `2ae6675`
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (transport routing) and the
@@ -30,27 +30,32 @@ zero HTTP wait, and failed presentation. These facts distinguish permission
 refusal from missing media. They do not prove a decoder can present this
 particular HEVC stream after permission is granted.
 
-## The first media operation lost the gesture across asynchronous preparation
+## Preparation can outlast the media activation window
 
-The title buttons call [`play`](../../crates/plurxd/src/web/player/decode-tiers.js)
-from their click handler. Previously it awaited the decision before any
-explicit media load. Native HLS then awaited master and child playlist
+The catalog and theater title buttons call
+[`play`](../../crates/plurxd/src/web/player/decode-tiers.js) directly from their
+inline click handlers. `beginPlayAttempt` and `capturePlayInputs` run
+synchronously; wiring the player and preparing the watch layout do not await
+or replace its persistent video. Previously `play` awaited the decision before
+any explicit media load. Native HLS then awaited master and child playlist
 readiness in
 [`runNativeHlsReadiness`](../../crates/plurxd/src/web/player/player.js)
 before assigning the source and invoking the transport's first Play.
-Consequently neither operation was bound to the original click. The deployed
-functions `play` (line 732), `notePlaybackPlayRejection` (line 580),
+Neither operation synchronously prepared the element in the original click.
+The deployed functions `play` (line 732), `notePlaybackPlayRejection` (line 580),
 `runNativeHlsReadiness` (line 1764), and `persistentWait` (line 421 in
 [`measurements.js`](../../crates/plurxd/src/web/player/measurements.js)) were
 compared with pristine `4e049a4` and are identical. The source trace therefore
 applies to the incident build as well as this implementation base.
 
-WebKit documents both requirements:
-
-- [Playback authorization is per element](https://webkit.org/blog/7734/auto-play-policy-changes-for-macos/).
-  Keep that element when changing its source.
-- [The media operation must directly follow the gesture](https://webkit.org/blog/6784/new-video-policies-for-ios/).
-  A later readiness callback does not retain the click's authority.
+WebKit documents [per-element playback authorization](https://webkit.org/blog/7734/auto-play-policy-changes-for-macos/)
+and [gesture-bound media operations](https://webkit.org/blog/6784/new-video-policies-for-ios/).
+Current [Document::mediaUserGestureReason](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/dom/Document.cpp)
+also accepts the window's transient activation, alongside active gesture tokens
+and some grace/quirk paths. An await therefore does not invariably lose media
+authority: asynchronous preparation can outlast the transient activation window.
+The repair establishes the element's authorization synchronously, without relying
+on that window lasting until readiness finishes.
 
 The [WebKit implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/html/HTMLMediaElement.cpp)
 provides the precise preparation operation: `load()` calls `prepareForLoad`
@@ -68,11 +73,12 @@ not create a fresh video element at each session reopen. The separate
 prepared dual-player path can replace the authoritative element and remains
 subject to the same central rejection handler.
 
-**Evidence limit:** the logs record the browser's denial, not its internal
-policy settings. The missing gesture-bound element preparation is proven
-in the application lifecycle and is consistent with WebKit's policy. A
-real Safari check must still demonstrate that this client's version grants
-permission through the empty-element load and later source assignment.
+**Evidence limit:** the incident logs record browser denial, not its activation
+state or policy settings. Preparing-to-rejection spans about 2.4 seconds; those
+records cannot establish that a particular activation timeout expired. Missing
+synchronous element preparation and incorrect recovery ownership are proven in
+the application lifecycle. The Safari comparison below verifies the preparation
+mechanism, while the original HEVC title still needs deployment acceptance.
 
 ## A permission refusal stops the transport owner immediately
 
@@ -127,16 +133,21 @@ readiness, transport rejection and terminal-owner cleanup, including late
 attachment, element, intent, source and owned-cancellation races. These
 models test lifecycle ownership; they do not impersonate Safari qualification.
 
-The physical check must show an actual user click, an empty-element explicit
-load, asynchronous preparation, source assignment on that same element, an
-accepted Play promise, and advancing playback. Compare against the same
-flow without the gesture-bound load under a Safari policy requiring a
-user gesture. Then verify the original HEVC resume with sound at its saved
-position, and confirm a browser denial produces one immediate permission
-prompt with no automatic session reopen. Record the browser/build and exact
-source revision with the result; a synthetic H.264 pass alone does not
-qualify the original HEVC title.
+On 2026-10-20, real button clicks in Safari **27.0.1 (22625.1.29.11.28)**
+verified the mechanism using local native HLS with H.264/AAC, separate initially
+empty persistent video elements, and `muted=false`. Under **Never Auto-Play**,
+a 1.5-second delay allowed the control to play and was not a decisive comparison.
+With an **8-second** delay, the control rejected Play with `NotAllowedError` and
+`readyState=0`. The fixed case synchronously loaded its empty element in the
+click handler, then attached the source after the same delay: Play resolved and
+its clock advanced from 0.000003 to 0.771854 seconds over the next second, with
+`paused=false` and `muted=false`. The original local policy was restored after
+the check. This agrees with transient activation permitting a short delay and
+explicit element preparation surviving a longer one.
 
-The real Safari mechanism check was attempted after review, but computer
-control reported that the Mac was locked before any fixture action. No physical
-pass is claimed. The original HEVC title remains a separate acceptance item.
+This isolated fixture reproduces the preparation sequence, not the complete
+production app. Original HEVC acceptance remains: resume the title with sound
+at its saved position on the deployed repair and confirm a browser denial
+produces one immediate permission prompt without an automatic session reopen.
+Record the deployed source revision with that result. Synthetic H.264 mechanism
+qualification does not establish HEVC decoder or original-title acceptance.
