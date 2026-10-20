@@ -457,49 +457,49 @@
       },
       {
         "anchor": "async fn formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back"
       },
       {
         "anchor": "async fn formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit"
       },
       {
         "anchor": "async fn formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample"
       },
       {
         "anchor": "async fn formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics"
       },
       {
         "anchor": "async fn formal_publication_resolved_claim_keeps_attempt_identity_through_insertion",
-        "sha256": "517802ced036e688186a31b5a26f6be751d901bbfdd6648e98c7c4b45580d926",
+        "sha256": "3f35a01ff25d7213a1e4245b2bb40c586890a9b14ce425d0b6ac81078d519ab8",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_resolved_claim_keeps_attempt_identity_through_insertion"
       },
