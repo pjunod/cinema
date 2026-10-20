@@ -78,6 +78,21 @@ key to reading the code:
   will actually accept. This is the part ARCHITECTURE doesn't cover and the
   part that bites (see [the fallback](#the-error-fallback--and-the-stale-reason-trap)).
 
+## Browser permission — prepare the element during the viewer's gesture
+
+The web player explicitly loads its empty persistent video element before
+awaiting the decision, session, or native HLS readiness. Safari permission
+belongs to that element; assigning the eventual source must reuse it.
+Preparation leaves an existing source alone so a refused replacement keeps
+the incumbent picture.
+
+A current Play `NotAllowedError` stops automatic recovery immediately and
+asks the viewer to try again. Explicit retry loads the same element within
+the new gesture and preserves position and track choices. Permission denial
+is not decoder or network failure and does not trigger a transcode rescue.
+The [Safari activation note](clients/SAFARI-PLAYBACK-ACTIVATION.md) records the
+source evidence, regressions and remaining physical verification.
+
 ## Routing inventory — every fork has one owner and one regression pin
 
 This is the auditable map. A **routing decision** is any rule that changes the

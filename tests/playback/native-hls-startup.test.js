@@ -132,11 +132,11 @@ test('play rejection retains original invocation identity and does not invent vi
  h.player.attemptId='original';h.player.sessionId='original-session';
  let reject;h.video.play=()=>new Promise((_resolve,no)=>{reject=no;});
  h.ctx.applyPlaybackTransportIntent(h.video,h.player);
- reject(Object.assign(new Error('secret source URL'),{name:'NotAllowedError',code:0}));await flush();
+ reject(Object.assign(new Error('secret source URL'),{name:'NotSupportedError',code:0}));await flush();
  const failed=h.logs.find(row=>row.event==='transport_play_rejected');
  assert.equal(failed.level,'warn');assert.equal(failed.session_id,'original-session');
  assert.equal(h.player.wantsPlayback,true);
- assert.match(failed.detail,/^rejected:NotAllowedError:code=0:status=none$/,'the accepted persisted detail retains the cause');
+ assert.match(failed.detail,/^rejected:NotSupportedError:code=0:status=none$/,'the accepted persisted detail retains the cause');
  assert.equal(h.player.hlsStartup.state,'active');assert.equal(h.rescues.length,0);
  assert.ok(!JSON.stringify(failed).includes('secret source URL'));
  h.ctx.applyPlaybackTransportIntent(h.video,h.player);
@@ -564,4 +564,66 @@ test('native fixture keeps its 16 s sweep by default and serves a lab arm when g
  const timer=setTimeout(()=>refused.kill(),5000);
  const [code]=await new Promise(resolve=>refused.on('exit',(...args)=>resolve(args)));clearTimeout(timer);
  assert.equal(code,2,'an invalid arm must be refused, not served');
+});
+
+// These cases retain the real terminal owner, not just the logging seam above.
+function installPermissionOwner(h){
+ Object.assign(h.ctx,{clearEffectiveProcessing(){},finishPlaybackSeekTelemetry(){},
+  stopPlaybackControl(){h.stops.push('control');},clearPendingSeekTimer(){},clearInterval(){}});
+ for(const [file,names] of [
+  ['surface.js',['retireHlsTerminalAttempt','stopPlayerForExhaustion']],
+  ['decode-margin.js',['stopPlayerTimers']],
+ ])for(const name of names)vm.runInContext(shippedFunction(file,name),h.ctx);
+}
+test('native permission refusal stops recovery immediately and waits for a viewer gesture',async()=>{
+ const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ h.video.play=()=>Promise.reject(Object.assign(new Error('private URL'),{name:'NotAllowedError'}));
+ h.answers.push(h.response(master),h.response(media));h.advance(1000);await flush();
+ assert.equal(h.sources.length,1,'the actual readiness owner attached before Play was refused');
+ assert.equal(h.player.wantsPlayback,true,'browser policy never becomes a viewer Pause');
+ assert.equal(h.player.playPermissionDenied.element,h.video);
+ assert.equal(h.player.terminalStop.attachment,h.player.mediaAttachment);
+ assert.equal(h.player.hlsStartup.state,'cancelled');
+ assert.equal(h.player.hlsStartup.native.metadataListener,null);
+ assert.equal(h.player.samplingStopped,true);
+ assert.equal(h.stops.length,1,'the control owner stops exactly once');
+ const surface=h.surfaces.at(-1).surface;
+ assert.equal(surface.kind,'blocking');assert.equal(surface.fault.source,'owner_stopped');
+ assert.deepEqual(Array.from(surface.actions),['retry','close']);
+ assert.match(surface.title,/permission/);
+ assert.equal(h.ctx.playbackOwnsAttachedMedia(h.player),false);
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);await flush();
+ h.advance(90000);await flush();h.advance(0);await flush();
+ assert.equal(h.logs.filter(row=>row.event==='transport_play_rejected').length,1);
+ assert.equal(h.requests.length,3,'no permission retry is spent on playlist requests');
+ assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);assert.equal(h.diagnoses.length,0);
+});
+test('permission refusal is attachment fenced and also stops progressive playback',async()=>{
+ for(const change of ['attachment','element','intent','pause','source','cancelled','none']){
+  const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+  h.ctx.cancelHlsStartup(h.player,'progressive');h.player.hlsStartup=null;
+  let reject;h.video.play=()=>new Promise((_yes,no)=>{reject=no;});
+  h.ctx.applyPlaybackTransportIntent(h.video,h.player);
+  if(change==='attachment')h.player.mediaAttachment={};
+  if(change==='element')h.ctx.document.getElementById=()=>({});
+  if(change==='intent')h.player.controlIntentGeneration++;
+  if(change==='pause')h.player.wantsPlayback=false;
+  if(change==='source')h.video.getAttribute=()=>'/different.mp4';
+  if(change==='cancelled')h.ctx.cancelPlaybackPlayInvocation(h.video,'source_teardown');
+  reject(Object.assign(new Error('refused'),{name:'NotAllowedError'}));await flush();
+  assert.equal(!!h.player.playPermissionDenied,change==='none',change);
+  assert.equal(h.stops.length,change==='none'?1:0,change);
+  assert.equal(h.logs.filter(row=>row.event==='transport_play_rejected').length,1,'every refusal remains observable');
+ }
+});
+
+test('explicit transport after permission refusal retries Play without turning Pause into a retry',async()=>{
+ const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+ h.video.play=()=>Promise.reject(Object.assign(new Error('denied'),{name:'NotAllowedError'}));
+ h.ctx.applyPlaybackTransportIntent(h.video,h.player);await flush();
+ const actions=[];h.ctx.playbackSurfaceAction=action=>actions.push(action);
+ vm.runInContext(shippedFunction('transport.js','setPlayerPlaying'),h.ctx);
+ h.ctx.setPlayerPlaying(false);assert.equal(h.player.wantsPlayback,false);assert.equal(actions.length,0);
+ h.ctx.setPlayerPlaying(true);assert.equal(h.player.wantsPlayback,true);assert.deepEqual(actions,['retry']);
+ h.stop();
 });

@@ -452,10 +452,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
     nativeReevaluated=true;
-    try{
-      const nudge=v.play();
-      if(nudge&&typeof nudge.catch==="function") nudge.catch(()=>{});
-    }catch(e){}
+    // The reevaluation is still a Play command. Its rejection belongs to the
+    // same transport owner as initial attach and explicit Resume.
+    applyPlaybackTransportIntent(v,p);
   }
   // Both the initial ask and any extension share the absolute stall deadline.
   // A callback near the boundary gets only the remaining control budget.

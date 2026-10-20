@@ -2743,6 +2743,9 @@ async function main() {
         shippedSource("persistentWaitEvidence"),
         shippedSource("endWait"),
         shippedSource("stallRecoverySnapshot"),
+        shippedSource("rememberPlaybackTransportIntent"),transportTelemetrySources(),
+        shippedSource("playbackTransportEvents"),shippedSource("pausePlaybackInternally"),
+        shippedSource("applyPlaybackTransportIntent"),
         shippedSource("persistentWait"),
         "function settlePlaybackControlSeek(){} function completeHlsStartup(){} function clearStall(){} function finishStallRecovery(){return false;}",
         // The control send now attaches the Auto link receipt. Auto's link
@@ -8172,4 +8175,53 @@ test("paused subtitle selection projects ordinal zero and Off immediately", asyn
   assert.equal(h.ccOn(),false);
   assert.match(h.ledger.innerHTML,/data-watch-sub="-1" aria-pressed="true"[^>]*>Off</);
   assert.equal(h.band.innerHTML,h.ledger.innerHTML);
+});
+
+// Model WebKit's per-element permission separately from the async source and
+// presentation facts. Real Safari acceptance is recorded in the incident note.
+function activationVideo(h,{source='',gesture=true}={}){
+ const v=h.video,events=[];let authorized=false,active=gesture,currentSource=source;
+ Object.defineProperty(v,'src',{configurable:true,get:()=>currentSource,set:value=>{currentSource=value;events.push('source');}});
+ v.getAttribute=name=>name==='src'?currentSource:null;
+ v.removeAttribute=name=>{if(name==='src')currentSource='';};
+ v.load=()=>{events.push(active?'gesture-load':'later-load');if(active)authorized=true;v.paused=true;};
+ v.play=()=>{events.push(authorized?'authorized-play':'blocked-play');v.paused=false;return Promise.resolve();};
+ return {v,events,endGesture(){active=false;},beginGesture(){active=true;}};
+}
+const activationDecision={method:'direct_play',play_url:'/movie.mp4',
+ source:{video_codec:'h264',duration_ms:600000},audio:[{index:1,default:true}],subtitles:[],ladder:[]};
+test('initial play prepares the persistent element inside the gesture before asynchronous decisions',async()=>{
+ const h=fullOpenHarness();h.setOpen(false);const media=activationVideo(h);
+ const opening=h.play(9,'Film',42000,600000,{});
+ assert.deepEqual(media.events,['gesture-load']);assert.equal(h.decisions.length,1);
+ media.endGesture();h.decisions[0].resolve(activationDecision);await opening;
+ assert.equal(h.video,media.v);assert.ok(media.events.includes('authorized-play'));
+ assert.ok(!media.events.includes('blocked-play'));assert.equal(h.current().wantsPlayback,true);
+ assert.equal(h.video.muted,undefined,'no muting is used to acquire permission');
+});
+test('preparing a replacement never reloads the incumbent element in the gesture',async()=>{
+ const h=fullOpenHarness();h.attach({fileId:8,started:true,wantsPlayback:false,offset:0,
+  knownDur:600000,source:{},curSub:-1,bookOffset:0});
+ const media=activationVideo(h,{source:'/incumbent.mp4'}),opening=h.play(9,'Replacement',0,600000,{});
+ assert.deepEqual(media.events,[],'the old picture survives pending preparation');
+ media.endGesture();h.advance(20000);await opening;
+ assert.deepEqual(media.events,[],'a refused decision does not touch the incumbent');
+ assert.equal(h.video.src,'/incumbent.mp4');
+});
+test('permission retry loads the same element synchronously and retains destination and selections',async()=>{
+ const h=fullOpenHarness(),media=activationVideo(h,{source:'/refused.mp4'});
+ const p={fileId:9,title:'Film',started:false,wantsPlayback:true,offset:0,knownDur:600000,
+  method:'direct_play',source:{},audio:[{index:1,default:true}],curAudio:0,curSub:-1,
+  preplay:{audio:1,subtitle:-1},aoffset:125,stallFrom:42,mediaAttachment:{},
+  controlSeek:{targetMs:84000,sequence:2,executed:false,frameFloor:0},controlIntentGeneration:2};
+ p.playPermissionDenied={element:media.v,attachment:p.mediaAttachment};h.attach(p);
+ const retry=h.retryPlayback();
+ assert.equal(media.events[0],'gesture-load');assert.equal(h.decisions.length,1);
+ assert.equal(h.decisions[0].selection.audio,1);assert.equal(h.decisions[0].selection.subtitle,-1);
+ assert.equal(h.decisions[0].selection.audio_offset_ms,125);
+ media.endGesture();h.decisions[0].resolve(activationDecision);await retry;
+ assert.equal(h.video,media.v);assert.ok(media.events.includes('authorized-play'));
+ assert.ok(!media.events.includes('blocked-play'));
+ assert.equal(h.current().controlSeek.targetMs,84000);assert.equal(h.current().wantsPlayback,true);
+ assert.equal(h.current().playPermissionDenied,null,'only the new attachment clears the refusal');
 });

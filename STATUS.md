@@ -1,10 +1,19 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-19 · Kept current by the working agent in the same
+**Updated:** 2026-10-20 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
 <!-- status: insert new efforts below this line -->
+
+## Safari resume activation and permission refusal
+
+**2026-10-20 · implementation complete, qualification pending.** The
+[incident note](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md) records the two
+native HLS Play permission rejections, synchronous element preparation,
+immediate transport-owner stop, and retained-intent retry. Regression cases
+are written. Independent adversarial review, the final affected test lane,
+and physical Safari/HEVC acceptance have not run at this handoff.
 
 ## Processed VOD successor root reuse
 

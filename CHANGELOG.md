@@ -16,6 +16,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Safari Play and Resume prepare the persistent media element during the user
+  gesture, before asynchronous stream readiness. Browser permission refusals
+  now stop recovery immediately and retain position and track choices for an
+  explicit retry instead of repeatedly reopening the same blocked stream.
+
 - Linux tray installation accepts ordinary group-writable user desktop folders,
   including existing hicolor icon directories, without changing permissions.
   Desktop destinations are checked before staging or registering the tray.

@@ -735,9 +735,15 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
   const inputs=capturePlayInputs(fileId,meta,retryIntent);
   const attempt=Object.freeze({...beginning,...inputs,fileContext,fileId,title,resumeMs,knownDurMs,meta});
-  const {modal,playerWasOpen}=attempt;
+  const {modal,video,playerWasOpen}=attempt;
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
+  // WebKit grants media permission to the element, in the user gesture.
+  // The decision/session/readiness awaits below cannot carry that gesture.
+  // Explicitly load the empty persistent element now; prepareForLoad in
+  // WebKit records the gesture even before a source is available. Never load
+  // an incumbent here: a refused replacement must retain its picture/position.
+  if(!video.getAttribute?.("src")&&!video.currentSrc&&!video.srcObject) video.load();
   if(!playerWasOpen){
     const app=document.getElementById("app"); if(app) app.inert=!WATCH;
     const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
@@ -1336,7 +1342,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   // restart, so the choice arrives with the first frames.
   if(applied.textSub!=null && openIsAttached()) setSub(applied.textSub);
 
-  if(!openIsAttached()) return;
+  if(!openIsAttached()||openedPlayer.playPermissionDenied) return;
 
   // Once, per playback, as soon as the element knows what it is decoding.
   probeDecode();

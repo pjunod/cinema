@@ -581,11 +581,20 @@ async function resumeQualityBoundary(p){
 function setPlayerPlaying(playing){
   const v=document.getElementById("video");
   if(!v||typeof playing!=="boolean") return false;
+  if(PLAYER?.playPermissionDenied){
+    PLAYER.wantsPlayback=playing;
+    if(playing) togglePlay();
+    return true;
+  }
   if(playerWantsPlayback(v)!==playing) togglePlay();
   return true;
 }
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
+  if(PLAYER?.playPermissionDenied){
+    PLAYER.wantsPlayback=true;
+    return playbackSurfaceAction("retry");
+  }
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
     &&LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0)){
     libraryChannelBoundary().catch(()=>{}); return;
