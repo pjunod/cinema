@@ -16,6 +16,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- macOS tray menus show a short error-details action and bound rendered row widths while retaining full text in dialogs, tooltips and accessibility. Successful GUI upgrades update status without opening a completion window.
 - Linux tray menus keep Docker startup details in the control window, bound long menu labels, and accept clicks after status refreshes when the panel fetches all D-Bus menu properties.
 
 
