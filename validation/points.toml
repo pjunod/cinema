@@ -510,6 +510,7 @@ paths = [
   "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/store_contract/formal_publication.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
