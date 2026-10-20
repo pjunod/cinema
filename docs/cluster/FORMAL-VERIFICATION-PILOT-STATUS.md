@@ -1,31 +1,24 @@
 # Formal verification pilot — status
 
-**Status:** M0 interface frozen; M1/M2/M3 implementation active; acceptance pending · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Base:** `3808640c79` · **PR:** [#1241](http://forge.lan:3000/noirr/plurx/pulls/1241) · **Merge readiness:** not ready
+**Status:** implementation active; no milestone or proof accepted · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Base:** `3808640c79` · **PR:** [#1241](http://forge.lan:3000/noirr/plurx/pulls/1241) · **Merge readiness:** not ready
 
-The pilot is in an agent-owned clone. The stable TLC 1.7.4 artifact and Temurin JDK 21.0.12+8 pins are prepared and verified. TLC help runs on the local macOS ARM64 JDK. This is toolchain feasibility evidence only; no protocol specification, model-check result or backend acceptance is claimed.
+GPT-6.1 Sol owns model implementation. GPT-6 Luna owns bounded tooling and mechanical source inventory. Following Paul's clarification, Fable 5.1 provides design advice and final adversarial review; it performs no further coding. Earlier authored files and commits are preserved, with their actual authorship intact. All work uses isolated agent-owned clones; the owner's checkout is untouched.
 
-Fable 5.1 task `t_7622df11` has frozen the seven-configuration model/runner interface and is implementing the protocol and source map. Fable task `t_5136edeb` owns the real backend insertion conformance bridge in a separate clone. GPT-6 Luna owns the bounded runner and strict receipts. The recovered API route is active; no model verdict or backend acceptance is claimed.
-
-The first development smoke exploration was stopped after exceeding its 60-second budget: at the last progress sample it had 65,236,225 distinct states and 37,650,419 queued states. This is **incomplete**, not accepted evidence. The model author must reduce the state representation with documented semantic limits before qualification.
-
-The build proceeds as one related batch for a single PR to `main`. When that PR is complete, the coordinator requests the directed final adversarial Fable 5.1 review, fixes its findings, and runs the affected fast lane once. Only failed or invalidated evidence is rerun. Model checking, compile checks and static inspection are available during development; no unit suites run before the final review. The pilot adds no product feature gate.
-
-The pinned Rust 1.97.1 `hiqlite-store` all-target baseline check completed. The explicit checksummed toolchain bootstrap is committed. The draft PR allocates bookkeeping checks only; no pre-review unit or conformance suites have been started.
-
+The monolithic model draft is unqualified. Early exploration exceeded the 60-second smoke budget (65,236,225 distinct states and 37,650,419 queued at the last sample) and was stopped incomplete. A later calibration completed, but Sol found contradictory assignments disabling time/poll transitions, collapsed time samples and loss of aged traffic. That calibration supplies no accepted evidence. Sol is replacing the representation with explicitly bounded protocol fragments; Fable is advising on the scope and acceptance conditions. Excluded lifecycle composition must be explicit.
 
 ## Current implementation and acceptance
 
 | Scope | Owner/model | State | Evidence still owed |
 |---|---|---|---|
-| Toolchain pin/bootstrap | GPT-6 Luna | Committed `bf3c9c537`; fetch/resolve feasibility passed | Final synthetic tests and review |
-| Pinned compiler loop | Codex coordinator | Rust 1.97.1 core `hiqlite-store` all-target check completed | Changed-source checks if Rust tests are added |
-| Protocol/model | Fable 5.1, `t_7622df11` | M0 model/runner interface frozen; M1 being built | Source contract, complete exploration and intended controls |
-| Backend bridge | Fable 5.1, `t_5136edeb` | M2 author active in isolated clone | Real retained-state and ambiguous-reply conformance |
-| Runner/receipts | GPT-6 Luna | Runner and CI contracts integrated; metadata tightening active | Reviewed source/config metadata, observed control output and final synthetic controls |
-| CI integration | Codex coordinator | Existing preflights wired for affected smoke and explicit provisioning | Review and final CI qualification |
-| Review/fast lane/merge | Coordinator and designated Fable reviewer | Not ready | Complete PR, review fixes, once-per-candidate evidence |
+| Toolchain/bootstrap | GPT-6 Luna | Committed; TLC 1.7.4 and Temurin 21.0.12+8 fetch/resolve feasibility passed | Final synthetic tests and review |
+| Protocol/model and contract | GPT-6.1 Sol | Preserved draft inspected; finite fragment design in progress | Complete named configurations, clocks/source contract, intended controls and non-vacuity |
+| Source inventory | GPT-6 Luna | 84 candidate anchors across 31 files prepared | Semantic mapping review and current integrated hashes |
+| Backend insertion bridge | Coordinator integration; earlier Fable authorship | Integrated through `14a881a4f`; real-backend cases and per-store acknowledgement seam authored | Final review and actual SQLite/three-voter execution |
+| Compiler/static checks | Component author and coordinator | Pinned Rust 1.97.1 contract compile-only, both feature variants' Clippy and touched-file rustfmt passed | Final changed-candidate fast gate |
+| Runner/receipts | GPT-6 Luna | Strict runner, CI contracts, source identity and scratch cleanup integrated | Reviewed model/source metadata, observed control output, final synthetic tests |
+| CI | Coordinator | Existing main/manual preflights provision pinned Java/TLC, check source drift and affected smoke | Final fast lane and retained receipts |
+| Review and promotion | Designated Fable reviewer; coordinator | Not ready | Complete candidate, adversarial review, fixes, once-per-unchanged-code evidence, merge |
 
-The authoritative blocking workflow on this source is
-`main-fast-lane.yml`, whose preflight budget is 15 minutes. The older full
-`ci.yml` is manual. M3 must provision/run the tool in the actual affected
-fast-lane preflight rather than assuming manual full CI protects a merge.
+No unit or Store contract suites have run. Development model exploration and compile/static checks are separate from final qualification. The build remains one substantial PR to `main`: finish implementation, request final adversarial Fable review through the designated session, fix findings, then run the affected fast lane and focused qualification. Preserve passing evidence on unchanged checked inputs; rerun failed or invalidated checks only.
+
+The authoritative blocking workflow is `main-fast-lane.yml` (15-minute preflight). The older full `ci.yml` is manual. The pilot adds no product feature gate and claims neither whole-cluster deadlock freedom nor permission to remove existing tests.

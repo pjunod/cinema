@@ -1,7 +1,7 @@
 # Formal verification pilot — check durable-job authority before expanding proofs
 
 **Status:** implementation active; M0 interface frozen; no formal result · **Revised:** 2026-10-20 ·
-**Owner:** Codex coordinator (this chat); Fable 5.1 contracts/model ·
+**Owner:** Codex coordinator (this chat); Sol implementation; Fable 5.1 advice/review ·
 **Executes:** Paul's request to turn the formal-methods exploration into a
 reviewable project · **Source inspected:** `9ab523c32e00e5b56c15bbc7a71ac2d3d48c0d5e`.
 
@@ -518,8 +518,11 @@ Each receipt records source commit/tree and dirty state, hashes of relevant
 source/model/config/tool artifacts, Java/TLC identity, invocation, bounds and
 assumptions, selected properties, reductions, generated/distinct states where
 available, completion state, expected versus actual verdict, runtime, memory
-and artifact hashes. Never reuse a success from another candidate tree.
-Schema fields that TLC cannot supply are explicitly unavailable, not zero.
+and artifact hashes. Record the checked commit/tree. Later documentation-only
+bookkeeping can retain evidence only when every governed source, model,
+configuration, tool and runner hash still matches; record both commits in the
+PR. Changed checked inputs invalidate their affected results. Schema fields
+that TLC cannot supply are explicitly unavailable, not zero.
 
 **How to read it:** `complete / bounded-model-checked` means only the listed
 safety properties on those configurations passed. `complete / conditional-
@@ -628,8 +631,9 @@ source; rerun only failed or genuinely invalidated checks. Development model
 checking and compile/static checks remain available while building. No
 construction-time unit suites. Existing correctness requirements remain.
 
-Fable 5.1 owns heavy cross-file/contract work and final review; lower-cost
-models handle bounded tasks with explicit ownership. The coordinator owns the
+Paul clarified the model roles: Fable 5.1 advises on heavy decisions and
+performs final review; lower models do the coding. Sol handles substantial
+implementation and Luna handles bounded tasks, with explicit file ownership. The coordinator owns the
 PR and [status](FORMAL-VERIFICATION-PILOT-STATUS.md). M0 semantics/tool
 feasibility remains prerequisite to M1; implementation and acceptance are
 reported separately.

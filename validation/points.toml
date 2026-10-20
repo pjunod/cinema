@@ -28,6 +28,7 @@ audit_paths = [
   "scripts/**",
   "tests/**",
   "validation/**",
+  "verification/**",
   "vendor/**",
 ]
 audit_exclude = []
@@ -1410,6 +1411,7 @@ paths = [
   "scripts/install-linux-source-runtime",
   "scripts/bootstrap-formal-toolchain",
   "scripts/check-formal",
+  "verification/durable-jobs/**",
   "scripts/install-compose-tray",
   "scripts/linux-tray-release",
   "scripts/package-macos",
