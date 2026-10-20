@@ -66,7 +66,7 @@ services:
         SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
-    restart: unless-stopped
+    restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"
     # This must cover the effective snapshot deadline plus the three startup
     # allowances (135s total). Keeping that pair in step used to be an
     # operator's job, and it does not work: the deadline commonly lives in a
@@ -165,7 +165,7 @@ services:
     # Reusing PLURX_IMAGE also lets one pull satisfy both image-only services.
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurx-discovery
-    restart: unless-stopped
+    restart: "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"
     network_mode: host
     # The advertiser uses the machine hostname when the configured server name
     # is the generic default `plurx`, so a multi-server picker shows lab6/lab4/etc.

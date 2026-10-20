@@ -1403,6 +1403,7 @@ paths = [
   "scripts/build-macos-source-parser",
   "scripts/build-macos-source-runtime",
   "scripts/install-linux-source-runtime",
+  "scripts/install-compose-tray",
   "scripts/package-macos",
   "scripts/build-subtitle-engine",
   "scripts/subtitle-engine-manifest.json",
@@ -1679,7 +1680,7 @@ depends_on = ["core.media", "server.api"]
 id = "desktop.control"
 title = "Native desktop control and authenticated upgrades"
 contract = "Native owners manage only the identified local installation. Shutdown requires a connection-bound generation and a clean durable receipt; signed complete release cohorts install under exclusive coordination, preserve startup policy, and recover or hold before any later service start. Headless operation needs no desktop libraries."
-paths = ["crates/plurx-desktop-control/**"]
+paths = ["crates/plurx-desktop-control/**", "scripts/plurx-compose-control"]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
 depends_on = ["server.api", "identity.access"]
 

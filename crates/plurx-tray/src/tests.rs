@@ -1223,3 +1223,60 @@ fn confirmed_host_loss_exposes_fallback_and_return_never_mutates_server() {
     );
     assert!(core.snapshot.busy.is_none());
 }
+
+#[test]
+fn container_lifecycle_progress_never_claims_an_upgrade_or_offers_cancellation() {
+    let mut snapshot = snap(ServiceState::Running);
+    let mut progress = update(UpdateState::ShutdownCommitted, "0.7.1");
+    progress.version = None;
+    progress.detail = Some("Container stop is waiting for graceful exit".into());
+    assert!(progress.is_server_operation());
+    assert_eq!(
+        progress.title(),
+        "Container stop is waiting for graceful exit"
+    );
+    snapshot.update = Some(progress.clone());
+    let entries = model::build(&snapshot);
+    assert!(model::find(&entries, &Action::ShowUpgradeProgress)
+        .unwrap()
+        .title
+        .starts_with("Server operation:"));
+    assert!(model::find(&entries, &Action::CancelUpgrade).is_none());
+    assert!(!model::upgrade_explanation(Some(&progress)).contains("upgrade"));
+    progress.state = UpdateState::Complete;
+    progress.detail = Some("Container stop completed".into());
+    snapshot.update = Some(progress.clone());
+    let entries = model::build(&snapshot);
+    assert!(model::find(&entries, &Action::ShowUpgradeProgress)
+        .unwrap()
+        .title
+        .starts_with("Last operation:"));
+    assert_eq!(
+        model::upgrade_explanation(Some(&progress)),
+        "Container stop completed"
+    );
+    snapshot.update = Some(UpdateV1 {
+        state: UpdateState::Idle,
+        version: None,
+        transaction_id: None,
+        detail: Some("Use the selected deployment tools".into()),
+    });
+    assert!(!model::build(&snapshot)
+        .iter()
+        .any(|entry| entry.title == "No update available"));
+}
+
+#[test]
+fn actual_compose_backend_wire_examples_decode_strictly() {
+    let examples: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../tests/fixtures/compose-wire-v1.json")).unwrap();
+    let kinds: Vec<_> = examples
+        .iter()
+        .map(|example| {
+            decode_response(&serde_json::to_vec(example).unwrap())
+                .unwrap()
+                .kind()
+        })
+        .collect();
+    assert_eq!(kinds, ["status", "startup", "logs", "update", "update"]);
+}

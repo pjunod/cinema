@@ -1,4 +1,4 @@
-# Desktop controls — run and maintain one native server
+# Desktop controls — run and maintain one local server
 
 **Status:** open · **Updated:** 2026-10-19 · implementation and native qualification in progress.
 
@@ -36,8 +36,27 @@ On systemd Linux, install the server package and the matching `plurx-desktop`
 package from the same release. The server package owns the daemon, controller,
 service and narrow authorization helper. The desktop package owns the tray,
 GTK4 dependency, icons, desktop launcher and autostart entry. A headless server
-needs only the server package. Docker/container installations continue to use
-their existing supervisor and acquire no automatic tray process.
+needs only the server package.
+
+For a Linux GUI host running the standard local Compose deployment,
+`make install-docker` installs a separate host tray. An existing deployment can
+add it with `python3 scripts/install-compose-tray --checkout "$PWD"` from its
+checkout. It controls only the pinned local engine and two selected containers,
+opens the observed published loopback port and reads bounded container logs.
+It never installs a native host daemon or GUI dependencies in the image.
+Root and headless installs print a later-install command. Containers recreated
+by `make docker-up` require an explicit same-deployment tray refresh. Custom Pi
+setup ownership and remote Docker engines are not supported by this adapter.
+
+Container startup On selects `always`; Off selects `no`; the choice persists in
+`deploy/.env` for recreation. Existing `unless-stopped` remains until changed,
+and manually stopped containers under that policy stay stopped across engine
+restarts. Docker must itself start at boot. Stop/Restart send TERM and wait for
+actual container exit, without Docker's eventual forced kill. Long operations
+continue in a private host worker after the UI closes; an uncertain outcome
+holds controls for local recovery. Check for updates explains the existing
+source/image deployment command; native release archives cannot update a
+container. No image signature verification is claimed.
 
 A previous source install is not adopted merely because its HTTP port responds.
 The controller requires a native installation record with exact paths, owner,

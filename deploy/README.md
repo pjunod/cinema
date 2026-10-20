@@ -79,6 +79,32 @@ It writes `deploy/.env` (with your uid/gid) and
 `deploy/docker-compose.override.yml` from their examples when they are
 missing, creates the data directory named in `.env`, runs `make docker-up`,
 and then waits for `/readyz` and prints the version the server reports.
+On a Linux laptop's ordinary local graphical login, this also builds and opens
+an unprivileged **host** tray for that exact Compose deployment. The container
+image stays headless. Headless, SSH-only and root installs skip the GUI; root
+prints a command to run later as the desktop user. To add the tray to an
+already-running checkout without recreating its containers, run:
+
+```sh
+python3 scripts/install-compose-tray --checkout "$PWD"
+```
+
+The host needs the native Rust/GTK build prerequisites and access to the selected
+local Docker Unix socket. This supports the standard two-service project in
+`deploy/docker-compose.yml`, including its local override. The tray pins Docker
+engine, full container and image identities; after `make docker-up` recreates
+containers, rerun the command to refresh that same selection. It refuses a
+remote engine or ambiguous selection. **Start server automatically** persists
+Docker's `always` / `no` policy in `deploy/.env` and updates both containers;
+Docker itself must start at boot. An existing `unless-stopped` policy remains
+until explicitly changed. Tray login is a separate user preference. Stop and
+Restart request graceful TERM without forced container termination.
+
+Container upgrades continue through `make docker-up` for source or the qualified
+`make docker-image-up` path for published images. The tray explains this when
+checking for updates; it does not apply native GitHub release archives to an
+image. Use `INSTALL_FLAGS=--server-only` to skip host controls explicitly.
+
 Host-specific bits (media mounts, explicit GPU selections, and shared Docker networks) live in
 that untracked override file, so pulling updates never conflicts with local
 edits — put your mounts there and run `make docker-up` again; that is

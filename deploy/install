@@ -1057,6 +1057,26 @@ env_value() {
     | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
 }
 
+# Docker remains headless. An eligible Linux login gets a separate user-owned
+# host tray, scoped to this checkout's Compose project by its installer.
+docker_install_host_tray() {
+  [ "$server_only" != 1 ] || return 0
+  [ "$(uname -s)" = Linux ] || return 0
+  if [ "$dry_run" = 1 ]; then
+    say 'would install the host tray after Compose is ready, only for an eligible Linux graphical login'
+    return 0
+  fi
+  if [ "$(id -u)" = 0 ]; then
+    say "the container is ready; run as your graphical login user: python3 $root/scripts/install-compose-tray --checkout $root"
+    return 0
+  fi
+  if linux_has_local_gui; then
+    python3 "$root/scripts/install-compose-tray" --checkout "$root"
+  else
+    say "no eligible local graphical login; to add host controls later run: python3 $root/scripts/install-compose-tray --checkout $root"
+  fi
+}
+
 docker_install() {
   if [ "$dry_run" = 0 ]; then
     command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
@@ -1088,6 +1108,7 @@ docker_install() {
   fi
   (cd "$root" && run make docker-up)
   wait_ready "$port" "cd deploy && docker compose logs plurxd"
+  docker_install_host_tray
   say "logs: cd deploy && docker compose logs -f plurxd"
 }
 

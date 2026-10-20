@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+"""Unprivileged host controls for one explicitly registered local Compose stack.
+
+The container image remains headless. This executable speaks desktop-control v1;
+registration is an installer operation, never deployment discovery by name.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import time
+import urllib.parse
+import uuid
+
+LIMIT = 1024 * 1024
+CID = re.compile(r"[0-9a-f]{64}\Z")
+NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z")
+ENTRY = "tv.plurx.Server-autostart.desktop"
+FINAL = {"complete", "failed", "recovery_required", "cancelled"}
+INSPECT = '''{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"restart":{{json .HostConfig.RestartPolicy.Name}},"stop_timeout":{{json .Config.StopTimeout}}}'''
+
+
+class ControlError(Exception):
+    def __init__(self, code, message, retryable=False):
+        super().__init__(message)
+        self.code, self.message, self.retryable = code, message, retryable
+
+
+def fail(code, message, retryable=False):
+    raise ControlError(code, message, retryable)
+
+
+def private_file(path):
+    meta = path.lstat()
+    if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+        fail("invalid_installation", "Companion record/state must be a private file owned by this user")
+    if meta.st_size > LIMIT:
+        fail("invalid_installation", "Companion record/state exceeds its size limit")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as stream:
+        now = os.fstat(stream.fileno())
+        if (now.st_dev, now.st_ino) != (meta.st_dev, meta.st_ino):
+            fail("invalid_installation", "Companion file changed during inspection")
+        return json.load(stream)
+
+
+def private_directory(path, create=False):
+    if create:
+        path.mkdir(mode=0o700, parents=False, exist_ok=True)
+    meta = path.lstat()
+    if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+        fail("invalid_installation", "Companion state directory must be private and owned by this user")
+
+
+def save(path, value):
+    private_directory(path.parent)
+    temporary = path.parent / ("." + path.name + "." + uuid.uuid4().hex)
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def normalized(value):
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts or "\x00" in value or "\n" in value:
+        fail("invalid_installation", "Companion paths must be normalized absolute paths")
+    return path
+
+
+def trusted_executable(value):
+    path = normalized(value)
+    meta = path.stat()
+    if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or meta.st_mode & 0o022 or not os.access(path, os.X_OK):
+        fail("invalid_installation", "Docker/tray executable must be trusted and non-writable by other users")
+    return path
+
+
+def endpoint(value):
+    if not value.startswith("unix:///"):
+        fail("invalid_installation", "Only an explicit local Docker Unix socket is supported")
+    path = normalized(value[7:])
+    meta = path.lstat()
+    if not stat.S_ISSOCK(meta.st_mode) or meta.st_uid not in (0, os.getuid()):
+        fail("identity_mismatch", "Registered Docker endpoint is not a local owned socket")
+    return path
+
+
+def browser(value):
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError:
+        fail("invalid_installation", "Invalid local browser address")
+    if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1") or parsed.username or parsed.password or not port or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        fail("invalid_installation", "Browser address must name a loopback HTTP origin with an explicit port")
+    return value.rstrip("/")
+
+
+def run(argv, timeout=12, limit=LIMIT, merge_stderr=False):
+    """Bounded stdout; Docker diagnostics may contain credentials, so discard them."""
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(Path.home())}
+    process = subprocess.Popen(list(map(str, argv)), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT if merge_stderr else subprocess.DEVNULL, env=env, start_new_session=True)
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    fail("unavailable", "Docker did not answer within its bounded timeout", True)
+                for key, _ in selector.select(min(left, 0.2)):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        output.extend(chunk)
+                        if len(output) > limit:
+                            fail("unavailable", "Docker response exceeded its bounded output limit")
+            result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if result:
+            fail("unavailable", "The registered Docker command failed; inspect Docker locally", True)
+        return output.decode("utf-8", errors="replace")
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        if process.stdout:
+            process.stdout.close()
+
+
+RESTART_KEY = b"PLURX_CONTAINER_RESTART_POLICY"
+
+
+def read_environment(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        meta = os.fstat(stream.fileno())
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o022 or meta.st_nlink != 1 or meta.st_size > LIMIT:
+            fail("policy_conflict", "Compose environment must be an owned, unshared regular file")
+        content = stream.read(LIMIT + 1)
+    if len(content) > LIMIT:
+        fail("policy_conflict", "Compose environment exceeds its bounded size limit")
+    return content, meta
+
+
+def compose_environment(checkout, project):
+    base = normalized(checkout) / "deploy"
+    compose = base / "docker-compose.yml"
+    fd = os.open(compose, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        meta = os.fstat(stream.fileno())
+        if not stat.S_ISREG(meta.st_mode) or meta.st_size > LIMIT:
+            fail("invalid_installation", "Compose base file must be a bounded regular file")
+        content = stream.read(LIMIT + 1)
+    text = content.decode("utf-8")
+    if not re.search(r"(?m)^name: " + re.escape(project) + r"\s*$", text):
+        fail("unsupported", "Only the explicitly named standard Compose project is supported")
+    for name in ("plurxd", "plurx-discovery"):
+        match = re.search(r"(?ms)^  " + re.escape(name) + r":\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", text)
+        values = re.findall(r"(?m)^    restart: ([^\r\n]+)$", match.group(1)) if match else []
+        expected = "${PLURX_CONTAINER_RESTART_POLICY:-unless-stopped}"
+        if len(values) != 1 or values[0].strip() not in (expected, '"' + expected + '"', "'" + expected + "'"):
+            fail("unsupported", "Compose must use the supported restart-policy variable for both selected services")
+    environment = base / ".env"
+    raw, _ = read_environment(environment)
+    return environment, hashlib.sha256(raw).hexdigest(), hashlib.sha256(content).hexdigest()
+
+
+def update_environment(backend, policy):
+    path, digest, compose_digest = compose_environment(backend.record["checkout"], backend.record["project"])
+    if digest != backend.record["environment_sha256"] or compose_digest != backend.record["compose_sha256"]:
+        fail("policy_conflict", "Compose configuration changed; refresh this deployment before changing startup")
+    raw, meta = read_environment(path)
+    pattern = re.compile(rb"(?m)^[ \t]*(?:export[ \t]+)?PLURX_CONTAINER_RESTART_POLICY[ \t]*=([^\r\n]*)(\r?\n|$)")
+    matches = list(pattern.finditer(raw))
+    if len(matches) > 1:
+        fail("policy_conflict", "Compose restart policy has ambiguous duplicate assignments")
+    if matches:
+        match = matches[0]
+        previous = match.group(1).strip().strip(b"\"'")
+        if previous not in (b"no", b"always", b"unless-stopped"):
+            fail("policy_conflict", "Compose restart policy was set outside the supported startup choices")
+        replacement = RESTART_KEY + b"=" + policy.encode("ascii") + match.group(2)
+        updated = raw[:match.start()] + replacement + raw[match.end():]
+    else:
+        updated = raw + (b"" if not raw or raw.endswith(b"\n") else b"\n") + RESTART_KEY + b"=" + policy.encode("ascii") + b"\n"
+    temporary = path.parent / (".plurx-startup-" + uuid.uuid4().hex)
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IMODE(meta.st_mode))
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        check, current = read_environment(path)
+        if check != raw or (current.st_dev, current.st_ino) != (meta.st_dev, meta.st_ino):
+            fail("policy_conflict", "Compose environment changed during startup-policy update")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    backend.record["environment_sha256"] = hashlib.sha256(updated).hexdigest()
+    save(backend.path, backend.record)
+
+
+class Backend:
+    def __init__(self, record_path, record=None):
+        self.path = normalized(str(record_path))
+        self.record = private_file(self.path) if record is None else record
+        self.state = self.path.with_name(self.path.name + ".state")
+        self.validate()
+
+    def validate(self):
+        r = self.record
+        if r.get("schema_version") != 1 or r.get("owner_uid") != os.getuid() or os.getuid() == 0:
+            fail("invalid_installation", "Companion belongs to another user or unsupported schema")
+        try:
+            uuid.UUID(r["installation_id"])
+        except (ValueError, KeyError, TypeError):
+            fail("invalid_installation", "Invalid companion installation identity")
+        for key in ("server_id", "discovery_id"):
+            if not CID.fullmatch(r.get(key, "")):
+                fail("invalid_installation", "Full registered container IDs are required")
+        if r["server_id"] == r["discovery_id"]:
+            fail("invalid_installation", "Server and discovery must be distinct containers")
+        for key in ("project", "server_service", "discovery_service"):
+            if not NAME.fullmatch(r.get(key, "")):
+                fail("invalid_installation", "Invalid explicitly selected Compose identity")
+        if r["server_service"] == r["discovery_service"]:
+            fail("invalid_installation", "Server and discovery services must differ")
+        for key in ("server_image", "discovery_image"):
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", r.get(key, "")):
+                fail("invalid_installation", "An immutable image ID is required")
+        if not isinstance(r.get("engine_id"), str) or not 1 <= len(r["engine_id"]) <= 128:
+            fail("invalid_installation", "Missing registered Docker engine identity")
+        trusted_executable(r["docker"])
+        trusted_executable(r["tray"])
+        browser(r["browser_origin"])
+        normalized(r["checkout"])
+        for key in ("environment_sha256", "compose_sha256"):
+            if not CID.fullmatch(r.get(key, "")):
+                fail("invalid_installation", "Missing registered Compose configuration digest")
+        if r.get("update_mode") not in ("source", "published"):
+            fail("invalid_installation", "Unknown image update mode")
+        reference = r.get("image_reference")
+        if reference is not None and (not isinstance(reference, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/@:-]{0,511}", reference)):
+            fail("invalid_installation", "Invalid explicitly trusted image reference")
+        private_directory(self.path.parent)
+        if self.state.exists():
+            private_directory(self.state)
+
+    def docker(self, *args, **kwargs):
+        endpoint(self.record["endpoint"])
+        return run([self.record["docker"], "--host", self.record["endpoint"], *args], **kwargs)
+
+    def engine(self):
+        identity = json.loads(self.docker("info", "--format", "{{json .ID}}"))
+        if identity != self.record["engine_id"]:
+            fail("identity_mismatch", "Docker engine differs from the registered local engine")
+
+    def inspect(self, kind):
+        value = json.loads(self.docker("inspect", "--type", "container", "--format", INSPECT,
+                                       self.record[kind + "_id"]))
+        expected = {"id": self.record[kind + "_id"], "image": self.record[kind + "_image"],
+                    "project": self.record["project"], "service": self.record[kind + "_service"]}
+        if any(value.get(key) != wanted for key, wanted in expected.items()):
+            fail("identity_mismatch", "Container/image/Compose identity changed; register this deployment again")
+        if not isinstance(value.get("running"), bool):
+            fail("identity_mismatch", "Docker omitted the selected container state")
+        return value
+
+    def observe(self):
+        self.engine()
+        return self.inspect("server"), self.inspect("discovery")
+
+    @staticmethod
+    def service_state(server):
+        if not server["running"]:
+            return "stopped" if server.get("status") in ("created", "exited") else "unknown"
+        if server.get("health") == "healthy":
+            return "running"
+        if server.get("health") == "starting":
+            return "starting"
+        return "unhealthy" if server.get("health") == "unhealthy" else "unknown"
+
+    def journal(self):
+        path = self.state / "operation.json"
+        if not path.exists():
+            return None
+        value = private_file(path)
+        if value.get("installation_id") != self.record["installation_id"]:
+            fail("identity_mismatch", "Operation belongs to another deployment")
+        return value
+
+    def store_journal(self, value):
+        save(self.state / "operation.json", value)
+
+    @contextlib.contextmanager
+    def locked(self):
+        private_directory(self.state, create=True)
+        fd = os.open(self.state / "lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "r+") as lock:
+            if os.fstat(lock.fileno()).st_uid != os.getuid() or os.fstat(lock.fileno()).st_mode & 0o077:
+                fail("invalid_installation", "Invalid companion operation lock")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                fail("busy", "Another companion operation is in progress", True)
+            yield
+
+    def entry(self):
+        configured = os.environ.get("XDG_CONFIG_HOME")
+        base = normalized(configured) if configured else Path.home() / ".config"
+        return base / "autostart" / ENTRY
+
+    def tray_startup(self):
+        entry = self.entry()
+        if not entry.exists():
+            return state("disabled", "This user has no container companion login entry")
+        text = entry.read_text() if entry.stat().st_size <= 65536 else ""
+        if "X-Plurx-Installation=" + self.record["installation_id"] not in text:
+            return state("policy_managed", "A different installation owns the tray login entry")
+        return state("disabled" if "Hidden=true" in text else "enabled")
+
+    def startup(self, observed=None):
+        server, discovery = observed or self.observe()
+        policies = {server.get("restart"), discovery.get("restart")}
+        if policies == {"always"}:
+            server_state = state("enabled", "Docker restart policy: always. Docker itself must start at boot; stopped containers start when Docker restarts.")
+        elif policies == {"unless-stopped"}:
+            server_state = state("enabled", "Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts.")
+        elif policies == {"no"}:
+            server_state = state("disabled", "Docker restart policy: no. Containers do not start automatically when Docker restarts.")
+        else:
+            names = ", ".join(sorted(str(policy) for policy in policies))
+            server_state = state("policy_managed", "Selected container restart policies: " + names + ". Docker itself must start at boot; reconcile differing or conditional policies explicitly.")
+        return {"kind": "startup", "server": server_state, "tray": self.tray_startup()}
+
+    def status(self):
+        journal = self.journal()
+        transaction = journal["transaction_id"] if journal and journal["state"] not in FINAL else None
+        try:
+            observed = self.observe()
+            startup = self.startup(observed)
+            service = self.service_state(observed[0])
+        except (ControlError, OSError) as error:
+            if isinstance(error, ControlError) and error.code not in ("unavailable", "io"):
+                raise
+            startup = {"server": state("unknown", "Registered local Docker engine is unavailable"), "tray": self.tray_startup()}
+            service = "unknown"
+        return {"kind": "status", "installation_id": self.record["installation_id"], "service_state": service,
+                "version": self.record.get("version"), "browser_origin": self.record["browser_origin"],
+                "server_startup": startup["server"], "tray_startup": startup["tray"], "transaction_id": transaction}
+
+    def logs(self, lines):
+        self.observe()
+        output = self.docker("logs", "--tail", str(lines), self.record["server_id"], limit=512 * 1024, merge_stderr=True)
+        return {"kind": "logs", "lines": output.splitlines(), "truncated": False}
+
+    def set_startup(self, target, choice):
+        with self.locked():
+            journal = self.journal()
+            if journal and journal["state"] not in FINAL:
+                fail("busy", "Wait for the active container operation")
+            observed = self.observe()
+            if target == "tray":
+                entry = self.entry()
+                if entry.exists() and "X-Plurx-Installation=" + self.record["installation_id"] not in entry.read_text():
+                    fail("policy_conflict", "A different installation owns the tray login entry")
+                entry.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if entry.parent.stat().st_uid != os.getuid() or entry.parent.is_symlink():
+                    fail("policy_conflict", "Tray login directory belongs to another owner")
+                def quote(value):
+                    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%') + '"'
+                command = " ".join(map(quote, [self.record["tray"], "--autostart", "--control", str(Path(__file__).resolve()), "--installation", str(self.path)]))
+                text = "[Desktop Entry]\nType=Application\nName=Plurx Server\nTerminal=false\nExec=" + command + "\nIcon=tv.plurx.Server\nX-Plurx-Installation=" + self.record["installation_id"] + "\nHidden=" + ("false" if choice == "on" else "true") + "\n"
+                # The entry belongs to the desktop user's configuration, not root.
+                fd = os.open(entry, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "w") as stream:
+                    stream.write(text)
+            else:
+                policy = "always" if choice == "on" else "no"
+                update_environment(self, policy)
+                for kind in ("server", "discovery"):
+                    self.observe()
+                    self.docker("update", "--restart", policy, self.record[kind + "_id"])
+            return self.startup()
+
+    def lifecycle(self, operation, confirmed):
+        if operation in ("stop", "restart") and not confirmed:
+            fail("invalid_request", "Stopping a container requires explicit interruption confirmation")
+        with self.locked():
+            observed = self.observe()
+            existing = self.journal()
+            if existing and existing["state"] not in FINAL:
+                fail("busy", "A recorded container operation already owns this deployment", True)
+            transaction = str(uuid.uuid4())
+            value = {"installation_id": self.record["installation_id"], "transaction_id": transaction,
+                     "operation": operation, "state": "shutdown_committed" if operation != "start" else "restarting",
+                     "detail": "Container operation accepted; waiting for Docker without forced termination", "version": None}
+            self.store_journal(value)
+        # Release the lock before dispatch: the child must be able to acquire it.
+        try:
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--installation", str(self.path), "--worker", transaction],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             close_fds=True, start_new_session=True)
+        except OSError:
+            with self.locked():
+                value.update(state="failed", detail="Could not start the host operation worker")
+                self.store_journal(value)
+            raise
+        return {"kind": "operation", "operation": operation, "service_state": self.service_state(observed[0])}
+
+    def worker(self, transaction):
+        with self.locked():
+            value = self.journal()
+            if not value or value["transaction_id"] != transaction or value["state"] in FINAL:
+                fail("identity_mismatch", "Worker does not own the recorded operation")
+            try:
+                initial = self.observe()
+                if value["operation"] != "start":
+                    policies = {kind: initial[index]["restart"] for index, kind in enumerate(("server", "discovery"))}
+                    if any(policy not in ("no", "always", "unless-stopped") for policy in policies.values()):
+                        fail("policy_conflict", "Selected container has an unsupported restart policy")
+                    value["restart_policies"] = policies
+                    self.store_journal(value)
+                    for kind in ("server", "discovery"):
+                        self.observe()
+                        self.docker("update", "--restart", "no", self.record[kind + "_id"])
+                    # TERM only. Never `docker stop`'s eventual SIGKILL or a generic kill.
+                    for kind in ("discovery", "server"):
+                        observed = self.observe()[0 if kind == "server" else 1]
+                        if observed["running"]:
+                            self.docker("kill", "--signal", "TERM", self.record[kind + "_id"])
+                    deadline = time.monotonic() + 14400
+                    while any(item["running"] for item in self.observe()):
+                        if time.monotonic() > deadline:
+                            fail("recovery_required", "Container has not exited after four hours; it was not force-killed")
+                        time.sleep(2)
+                    for kind in ("server", "discovery"):
+                        self.observe()
+                        self.docker("update", "--restart", policies[kind], self.record[kind + "_id"])
+                if value["operation"] != "stop":
+                    value.update(state="restarting", detail="Starting the selected server and waiting for health")
+                    self.store_journal(value)
+                    self.observe()
+                    self.docker("start", self.record["server_id"])
+                    deadline = time.monotonic() + 14400
+                    while self.service_state(self.observe()[0]) != "running":
+                        if time.monotonic() > deadline:
+                            fail("recovery_required", "Selected server did not become healthy; discovery remains stopped")
+                        time.sleep(2)
+                    self.observe()
+                    self.docker("start", self.record["discovery_id"])
+                value.update(state="complete", detail="Container " + value["operation"] + " completed")
+            except (ControlError, OSError, ValueError) as error:
+                value.update(state="recovery_required", detail=error.message if isinstance(error, ControlError) else "Container operation needs local inspection")
+            self.store_journal(value)
+
+    def updates(self, action, transaction=None):
+        if action == "status":
+            value = self.journal()
+            if value and transaction is not None and value["transaction_id"] != transaction:
+                fail("identity_mismatch", "Unknown companion operation transaction")
+            if value:
+                return {"kind": "update", **{key: value.get(key) for key in ("state", "version", "transaction_id", "detail")}}
+        if action in ("prepare", "apply", "cancel"):
+            if action == "cancel" and self.journal():
+                fail("unsafe_shutdown", "Container lifecycle is already committed and cannot be cancelled")
+            fail("unsupported", "Native signed release upgrades do not apply to this container; use the qualified image deployment path")
+        self.observe()
+        detail = ("This deployment builds local source. Update the checkout and run make docker-up; the tray does not fetch or execute source automatically."
+                  if self.record["update_mode"] == "source" else
+                  "Published image deployment is managed by make docker-image-up, which pins the image ID, requires matching clean source revision and checks startup policy. No image signature verification is claimed by this tray.")
+        if action == "check":
+            fail("unsupported", detail)
+        return {"kind": "update", "state": "idle", "version": None, "transaction_id": None, "detail": detail}
+
+
+def state(value, detail=None):
+    return {"state": value, "detail": detail}
+
+
+def register(args):
+    path = normalized(args.installation)
+    if path.exists() or path.is_symlink():
+        if not args.refresh:
+            fail("policy_conflict", "Registration already exists; use explicit same-deployment refresh")
+        previous = Backend(path)
+        with previous.locked():
+            return register_locked(args, previous)
+    return register_locked(args)
+
+
+def register_locked(args, previous=None):
+    path = normalized(args.installation)
+    private_directory(path.parent)
+    if previous is None and (path.exists() or path.is_symlink()):
+        fail("policy_conflict", "Registration appeared concurrently; retry explicit refresh")
+    if previous is not None:
+        existing = previous.journal()
+        if existing and existing["state"] not in ("complete", "failed", "cancelled"):
+            fail("busy", "Reconcile the recorded container operation before refreshing its identity")
+    if os.getuid() == 0:
+        fail("authorization_denied", "The container companion never runs as root")
+    trusted_executable(args.docker)
+    endpoint(args.endpoint)
+    prefix = [args.docker, "--host", args.endpoint]
+    engine = json.loads(run([*prefix, "info", "--format", "{{json .ID}}"] ))
+    selected = {}
+    for kind in ("server", "discovery"):
+        identity = getattr(args, kind + "_id")
+        if not CID.fullmatch(identity):
+            fail("invalid_request", "Registration requires full exact container IDs")
+        item = json.loads(run([*prefix, "inspect", "--type", "container", "--format", INSPECT, identity]))
+        if item.get("id") != identity or item.get("project") != args.project or item.get("service") != getattr(args, kind + "_service"):
+            fail("identity_mismatch", "Selected container does not have the requested Compose identity")
+        selected[kind + "_id"] = identity
+        selected[kind + "_image"] = item["image"]
+    _, environment_digest, compose_digest = compose_environment(args.checkout, args.project)
+    if args.server_service != "plurxd" or args.discovery_service != "plurx-discovery":
+        fail("unsupported", "Only the standard selected server/discovery services are supported")
+    record = {"environment_sha256": environment_digest, "compose_sha256": compose_digest, "schema_version": 1, "owner_uid": os.getuid(), "installation_id": str(uuid.uuid4()),
+              "docker": args.docker, "endpoint": args.endpoint, "engine_id": engine,
+              "project": args.project, "server_service": args.server_service, "discovery_service": args.discovery_service,
+              "browser_origin": browser(args.browser_origin), "tray": args.tray, "checkout": args.checkout,
+              "version": args.version, "update_mode": args.update_mode, "image_reference": args.image_reference, **selected}
+    if previous is not None:
+        for key in ("docker", "endpoint", "engine_id", "project", "server_service", "discovery_service", "checkout"):
+            if previous.record.get(key) != record[key]:
+                fail("identity_mismatch", "Refresh must name the same local engine and explicitly selected deployment")
+        record["installation_id"] = previous.record["installation_id"]
+    backend = Backend(path, record)
+    backend.observe()
+    private_directory(backend.state, create=True)
+    save(path, record)
+    return backend.status()
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        fail("invalid_request", "Invalid companion command arguments")
+
+
+def parser():
+    result = ArgumentParser(description=__doc__)
+    result.add_argument("--installation", required=True)
+    result.add_argument("--worker", help=argparse.SUPPRESS)
+    commands = result.add_subparsers(dest="command")
+    registration = commands.add_parser("register")
+    for name in ("docker", "endpoint", "project", "server-id", "discovery-id", "browser-origin", "tray", "checkout"):
+        registration.add_argument("--" + name, required=True)
+    registration.add_argument("--server-service", default="plurxd")
+    registration.add_argument("--discovery-service", default="plurx-discovery")
+    registration.add_argument("--update-mode", choices=("source", "published"), default="source")
+    registration.add_argument("--image-reference")
+    registration.add_argument("--version")
+    registration.add_argument("--refresh", action="store_true")
+    for operation in ("status", "start", "stop", "restart"):
+        command = commands.add_parser(operation)
+        if operation != "status":
+            command.add_argument("--confirm-interruption", action="store_true")
+    logs = commands.add_parser("logs")
+    logs.add_argument("--lines", type=int, default=100)
+    startup = commands.add_parser("startup").add_subparsers(dest="startup_action", required=True)
+    startup.add_parser("get")
+    setter = startup.add_parser("set")
+    setter.add_argument("target", choices=("server", "tray"))
+    setter.add_argument("choice", choices=("on", "off"))
+    updates = commands.add_parser("updates").add_subparsers(dest="update_action", required=True)
+    for action in ("check", "status", "prepare", "apply", "cancel"):
+        command = updates.add_parser(action)
+        command.add_argument("--transaction")
+        command.add_argument("--version")
+        command.add_argument("--confirm-interruption", action="store_true")
+    return result
+
+
+def execute(args):
+    if args.command == "register":
+        return register(args)
+    backend = Backend(args.installation)
+    if args.worker:
+        uuid.UUID(args.worker)
+        backend.worker(args.worker)
+        return {"kind": "operation", "operation": "stop", "service_state": "unknown"}
+    if args.command == "status":
+        return backend.status()
+    if args.command in ("start", "stop", "restart"):
+        return backend.lifecycle(args.command, args.confirm_interruption)
+    if args.command == "logs":
+        if not 1 <= args.lines <= 1000:
+            fail("invalid_request", "Log line count must be between 1 and 1000")
+        return backend.logs(args.lines)
+    if args.command == "startup":
+        return backend.startup() if args.startup_action == "get" else backend.set_startup(args.target, args.choice)
+    if args.command == "updates":
+        return backend.updates(args.update_action, args.transaction)
+    fail("invalid_request", "A companion command is required")
+
+
+def main(argv=None):
+    try:
+        value = execute(parser().parse_args(argv))
+        response = {"schema_version": 1, "ok": True, "result": value, "error": None}
+        code = 0
+    except ControlError as error:
+        response = {"schema_version": 1, "ok": False, "result": None,
+                    "error": {"code": error.code, "message": error.message, "retryable": error.retryable}}
+        code = 1
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        response = {"schema_version": 1, "ok": False, "result": None,
+                    "error": {"code": "unavailable", "message": "The registered container companion could not complete this request", "retryable": True}}
+        code = 1
+    print(json.dumps(response, separators=(",", ":")))
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
