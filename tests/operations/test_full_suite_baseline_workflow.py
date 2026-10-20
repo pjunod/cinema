@@ -105,6 +105,18 @@ class FullSuiteBaselineWorkflowCase(unittest.TestCase):
         body = script(step(jobs()["scope"], "Bind diagnostic execution to a frozen non-main commit"))
         return self.run_shell(body, env, {"git": 'printf "%s\\n" "$ACTUAL_SHA"'})[0]
 
+    def test_deferred_failures_use_literal_boolean_and_strict_ordinary_verdict(self):
+        text = WORKFLOW.read_text()
+        self.assertNotRegex(text, r"continue-on-error:.*\$\{\{")
+        for job_name in ('preflight', 'apple'):
+            block = jobs()[job_name]
+            deferred = re.findall(r"id: (baseline_\w+)\n        continue-on-error: true", block)
+            self.assertTrue(deferred)
+            for identity in deferred:
+                verdict = step(block, 'Require ordinary outcome for ' + identity)
+                self.assertIn("if: inputs.diagnostic_baseline != 'true' && steps." + identity + ".outcome != 'success'", verdict)
+                self.assertIn('run: exit 1', verdict)
+
     def test_diagnostic_binding_requires_frozen_off_main_manual_commit(self):
         self.assertEqual(self.binding().returncode, 0)
         for bad in (dict(EVENT_REF="refs/heads/main"), dict(EVENT_REF="refs/tags/v1"),

@@ -2268,6 +2268,10 @@ assert.equal(context.ACT_TIMER, null);
                     if "diagnostic" in name:
                         self.assertIn("inputs.diagnostic_baseline == 'true'", workflow_step_scalar(step, "if"))
                         continue
+                    if name.startswith("Require ordinary outcome for "):
+                        self.assertIn("inputs.diagnostic_baseline != 'true'", workflow_step_scalar(step, "if"))
+                        self.assertEqual(workflow_step_scalar(step, "run"), "exit 1")
+                        continue
                     # Existing mobile work and its always-run artifacts/cleanup are
                     # conditional, so a tray-only selection creates no simulators.
                     guard = workflow_step_scalar(step, "if")

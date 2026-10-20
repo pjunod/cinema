@@ -343,7 +343,7 @@ jobs:
           PYCONTEXT
       - name: Audit corrective-history evidence
         id: baseline_history
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -359,9 +359,12 @@ jobs:
             trap 'diagnostic_result=$?; cat "$diagnostic_log" >&3 || true; exit "$diagnostic_result"' EXIT
           fi
           make history-check
+      - name: Require ordinary outcome for baseline_history
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_history.outcome != 'success'
+        run: exit 1
       - name: Check validation catalog and contract unit tests
         id: baseline_validation
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         shell: bash
         env:
           RETAIN_VALIDATION_UNITS: ${{ needs.scope.outputs.retain_validation_units }}
@@ -388,14 +391,20 @@ jobs:
           else
             python3 -m unittest discover -s tests/validation -p 'test_*.py'
           fi
+      - name: Require ordinary outcome for baseline_validation
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_validation.outcome != 'success'
+        run: exit 1
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         id: baseline_node_setup
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         with:
           node-version: "22"
+      - name: Require ordinary outcome for baseline_node_setup
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_node_setup.outcome != 'success'
+        run: exit 1
       - name: Provision checksummed public K08 oracle sources
         id: baseline_oracle
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         shell: bash
         run: |
           if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
@@ -409,9 +418,12 @@ jobs:
           fixture="$RUNNER_TEMP/hiqlite-public-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           timeout 90s python3 scripts/provision-hiqlite-upstream "$fixture"
           printf 'PLURX_HIQLITE_UPSTREAM_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
+      - name: Require ordinary outcome for baseline_oracle
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_oracle.outcome != 'success'
+        run: exit 1
       - name: Check CI, deploy, and shipping contracts
         id: baseline_operations
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         shell: bash
         env:
           RETAIN_OPERATIONS_UNITS: ${{ needs.scope.outputs.retain_operations_units }}
@@ -430,9 +442,12 @@ jobs:
           else
             make operations-check
           fi
+      - name: Require ordinary outcome for baseline_operations
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_operations.outcome != 'success'
+        run: exit 1
       - name: Check the shared player input contract
         id: baseline_node
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         shell: bash
         env:
           RETAIN_WEB_PREFLIGHT: ${{ needs.scope.outputs.retain_web_preflight }}
@@ -458,6 +473,9 @@ jobs:
             node tests/playback/player-input-contract.test.js
             node tests/web/player-dom.test.js
           fi
+      - name: Require ordinary outcome for baseline_node
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_node.outcome != 'success'
+        run: exit 1
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only diff; runtime and compiler surfaces are skipped."
@@ -2153,7 +2171,7 @@ jobs:
           xcrun --find swift
       - name: Build and test native macOS server tray
         id: baseline_desktop
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         if: needs.scope.outputs.desktop_macos == 'true'
         # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
         # The complete native output is preserved independently, including failures.
@@ -2172,9 +2190,12 @@ jobs:
             make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
           fi
           echo "Native macOS server tray build and unit checks passed."
+      - name: Require ordinary outcome for baseline_desktop
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_desktop.outcome != 'success'
+        run: exit 1
       - name: Preserve native macOS server tray check output
         id: baseline_desktop_artifact
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         if: always() && needs.scope.outputs.desktop_macos == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
@@ -2182,6 +2203,9 @@ jobs:
           path: target/validation/desktop-macos-check.log
           if-no-files-found: error
           retention-days: 14
+      - name: Require ordinary outcome for baseline_desktop_artifact
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_desktop_artifact.outcome != 'success'
+        run: exit 1
       - name: Verify the pinned mobile Apple toolchain
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
@@ -2244,7 +2268,7 @@ jobs:
           done
       - name: Run the shared XCTest suite on iPhone, iPad, and Apple TV
         id: baseline_apple
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         run: |
           if [ "${{ inputs.diagnostic_baseline }}" = true ]; then
@@ -2288,13 +2312,19 @@ jobs:
           else
             make apple-test
           fi
+      - name: Require ordinary outcome for baseline_apple
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_apple.outcome != 'success'
+        run: exit 1
       - name: Require native TV navigation journeys
         id: baseline_tv_navigation
-        continue-on-error: ${{ inputs.diagnostic_baseline == 'true' }}
+        continue-on-error: true
         if: needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         env:
           PLURX_TV_NAVIGATION_OUTPUT: ${{ runner.temp }}/tv-navigation-${{ github.run_id }}-${{ github.run_attempt }}
         run: make apple-tv-navigation-test
+      - name: Require ordinary outcome for baseline_tv_navigation
+        if: inputs.diagnostic_baseline != 'true' && steps.baseline_tv_navigation.outcome != 'success'
+        run: exit 1
       - name: Preserve TV navigation evidence including failures
         if: always() && needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
