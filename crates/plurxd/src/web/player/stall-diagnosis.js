@@ -896,7 +896,10 @@ function retryPlayback(){
     const video=document.getElementById("video");
     if(!video||video!==PLAYER.playPermissionDenied.element) return;
     const p=PLAYER;
-    const targetMs=p.controlSeek?.targetMs??Math.round(t*1000);
+    // stallFrom survives startup and old seeks. Once playback has started,
+    // retry from the current file clock, not that historical/global position.
+    const targetMs=p.controlSeek?.targetMs??Math.round(
+      (p.started?positionForPlaybackIntent(video,p):t)*1000);
     const retry={wantsPlayback:p.wantsPlayback,selection:playbackSelection(p,playbackFileContextForPlayer(p)),
       audioOffsetMs:p.aoffset||0,controlSeek:p.controlSeek};
     resetMediaSource(video);

@@ -90,10 +90,14 @@ invocation can still be logged but cannot stop its successor.
 
 Try again clears and explicitly loads the same element within the new
 user gesture, then performs a full preparation with the retained intent.
+A pending seek keeps its destination; an initial start keeps its startup target.
+Established playback retries from the current file-relative clock, because the
+stall owner's historical startup/seek position can be stale.
 Only a new attachment clears the permission refusal. Repeated automatic
 Play calls and already-running stall callbacks cannot revive the stopped
-owner. The presentation reevaluation also uses the central transport owner,
-so its rejection cannot be swallowed and converted into a later stall.
+owner. Both initial presentation reevaluation and a supply wait that refills
+during the control request use the central transport owner. An immediate refill
+rejection is processed before the same callback can execute a recovery verdict.
 
 This repair adds no feature switch, watchdog, placeholder media, or muting.
 It does not change stream selection or claim to diagnose all decoder failures.

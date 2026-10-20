@@ -8238,3 +8238,21 @@ test('Pause during a pending permission retry belongs to that open and does not 
  assert.equal(h.current().wantsPlayback,false);assert.equal(h.video.paused,true);
  assert.ok(!media.events.includes('authorized-play'));assert.ok(!media.events.includes('blocked-play'));
 });
+
+test('permission retry preserves startup and pending destinations but resumes established playback at its current file position',async()=>{
+ for(const [started,pendingTarget,expectedMs] of [[false,null,42000],[true,null,400000],[true,84000,84000]]){
+  const h=fullOpenHarness(),media=activationVideo(h,{source:'/refused.mp4'});
+  const p={fileId:9,title:'Film',started,wantsPlayback:true,offset:100,bookOffset:600000,
+   knownDur:600000,method:'remux',source:{},audio:[{index:1,default:true}],curAudio:0,curSub:-1,
+   preplay:{audio:1,subtitle:-1},aoffset:0,stallFrom:42,mediaAttachment:{}};
+  if(pendingTarget!==null)p.controlSeek={targetMs:pendingTarget,sequence:2,executed:false,frameFloor:0};
+  p.playPermissionDenied={element:media.v,attachment:p.mediaAttachment};h.attach(p);
+  h.video.currentTime=300;
+  const retry=h.retryPlayback();media.endGesture();
+  h.decisions[0].resolve(activationDecision);await retry;
+  assert.equal(h.current().offset,expectedMs/1000,
+   `started=${started}, pending=${pendingTarget}: retry uses the file-relative destination`);
+  assert.equal(h.video.src,`/remux?audio=1&start=${expectedMs/1000}`);
+  assert.ok(media.events.includes('authorized-play'));
+ }
+});

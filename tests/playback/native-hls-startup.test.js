@@ -646,3 +646,36 @@ test('presentation reevaluation permission rejection fences the already pending 
  assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
  assert.equal(h.player.hlsStartup.state,'cancelled');assert.equal(h.stops.length,1);
 });
+
+test('refilled supply wait permission rejection stops before the same-turn recovery verdict',async()=>{
+ for(const rejection of ['throw','promise']){
+  const h=harness({realTransport:true});installPermissionOwner(h);await flush();
+  h.player.started=true;h.player.waitAt=1;h.player.waitStartedRunway=0;h.video.paused=false;
+  let answer,runway=0,now=8001,plays=0;
+  h.ctx.performance.now=()=>now;
+  Object.assign(h.ctx,{SUPPLY_RUNWAY_SECS:1.5,CONTROL_STALL_DEFER_DEADLINE_MS:20000,
+   bufferRunway:()=>runway,pbPosSec:()=>42,recordWaitStall(){},armedPlaybackControlVerdict:()=>null,
+   askPlaybackControl:()=>({trigger:'ask',action:new Promise(resolve=>{answer=resolve;})}),
+   controlVerdictText:text=>text,playbackStallActions:()=>['retry','close'],
+   endWait:()=>{h.player.waitAt=null;}});
+  vm.runInContext(shippedFunction('measurements.js','persistentWaitEvidence'),h.ctx);
+  vm.runInContext('async '+shippedFunction('measurements.js','persistentWait'),h.ctx);
+  h.video.play=()=>{
+   plays++;const error=Object.assign(new Error('denied'),{name:'NotAllowedError'});
+   if(rejection==='throw')throw error;
+   // Browser play() returns a promise from the media owner's realm.
+   return vm.runInContext("Promise.reject(Object.assign(new Error('denied'),{name:'NotAllowedError'}))",h.ctx);
+  };
+  const pending=h.ctx.persistentWait(h.video,h.player,1,0,0);await flush();
+  assert.equal(plays,0,'the initial empty buffer is a supply wait');
+  runway=5.5;now=25001;
+  answer({type:'terminal',code:'recipe_failed',message:'The producer recipe failed.'});await pending;
+  assert.equal(plays,1,'refill receives exactly one central transport reevaluation');
+  assert.ok(h.player.playPermissionDenied,rejection);
+  assert.equal(h.stops.length,1,'the permission owner alone stops the attachment');
+  assert.equal(h.surfaces.length,1,'the pending verdict cannot replace the permission prompt');
+  assert.match(h.surfaces[0].surface.title,/permission/);
+  assert.equal(h.reopens.length,0);assert.equal(h.rescues.length,0);
+  assert.equal(h.player.hlsStartup.state,'cancelled');
+ }
+});
