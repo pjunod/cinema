@@ -1,6 +1,6 @@
 # Safari playback activation — permission belongs to the media element
 
-**Status:** implemented, awaiting independent review and qualification ·
+**Status:** open · repair built, independently reviewed and focused regression qualified; physical acceptance pending ·
 **Written:** 2026-10-20 · **Initial base:** `4e049a4` · **Integrated main:** `2ae6675`
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (transport routing) and the
@@ -104,9 +104,12 @@ It does not change stream selection or claim to diagnose all decoder failures.
 
 ## Qualification — source regressions first, physical Safari after review
 
-The following tests are added but **not executed** at this implementation
-handoff. The requested workflow runs them after independent review and any
-repairs, on the final source:
+A fresh independent Astra review requested two repairs: centralize the refill
+Play refusal and retain the current position on an established-playback retry.
+Both were fixed and approved on integrated source `ae67fbcc`. The focused
+`web-control.test.js` run passed all **108 tests** with zero failures on
+2026-10-20. Its native startup cases are included; they were not run separately.
+The affected fast lane supplies the remaining checks below:
 
 ```bash
 scripts/quiet node --test tests/playback/web-control.test.js
@@ -133,3 +136,7 @@ position, and confirm a browser denial produces one immediate permission
 prompt with no automatic session reopen. Record the browser/build and exact
 source revision with the result; a synthetic H.264 pass alone does not
 qualify the original HEVC title.
+
+The real Safari mechanism check was attempted after review, but computer
+control reported that the Mac was locked before any fixture action. No physical
+pass is claimed. The original HEVC title remains a separate acceptance item.

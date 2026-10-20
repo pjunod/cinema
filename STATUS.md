@@ -8,12 +8,12 @@ first.
 
 ## Safari resume activation and permission refusal
 
-**2026-10-20 · implementation complete, qualification pending.** The
+**2026-10-20 · reviewed and focused regressions passed; physical acceptance pending.** The
 [incident note](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md) records the two
 native HLS Play permission rejections, synchronous element preparation,
-immediate transport-owner stop, and retained-intent retry. Regression cases
-are written. Independent adversarial review, the final affected test lane,
-and physical Safari/HEVC acceptance have not run at this handoff.
+immediate transport-owner stop, and retained-intent retry. Independent review
+and both requested repairs are complete; the focused run passed 108 tests.
+Physical Safari/HEVC acceptance remains pending (Mac locked).
 
 ## Processed VOD successor root reuse
 
