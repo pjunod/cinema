@@ -317,3 +317,50 @@ merged by commit `abc1234` (`git log v0.3.1..abc1234`). Across the fleet the
 same pair is the `plurx_build_info{version,build}` metric, and
 [OPERATIONS.md](OPERATIONS.md) "The fleet registry" says which image a node
 runs.
+
+## Desktop update signing — the initial trust bootstrap
+
+Native controllers embed the public keys in
+[`production-trust-roots.json`](../crates/plurx-desktop-control/production-trust-roots.json).
+Only public Ed25519 keys belong in the repository. The private production key
+lives in protected operator storage and the `desktop-release-signing` GitHub
+environment secret `PLURX_UPDATE_ED25519_PRIVATE_KEY`; build jobs never receive
+it. Keep a protected operator backup before retiring the provisioning machine.
+
+**First installation:** controllers built before a production root was pinned
+cannot authenticate an update that introduces that root. Manually reinstall a
+trusted source build or complete native release once. That rebuild must include
+the reviewed public root. Changing GitHub settings cannot alter a key list
+already compiled into an installed controller. The initial Linux Compose tray
+download uses GitHub HTTPS plus release checksums, independently of this signed
+native upgrade path.
+
+**GitHub setup:** require an operator reviewer on `desktop-release-signing`,
+restrict deployment branches/tags to `main` and `v*`, and upload the private PEM
+with `gh secret set PLURX_UPDATE_ED25519_PRIVATE_KEY --env desktop-release-signing
+--repo pjunod/cinema < /protected/path/key.pem`. Keep private bytes out of command
+arguments, logs, pull requests and build artifacts. Set these environment
+variables only for the reviewed, qualified release:
+
+| Variable | Required value |
+|---|---|
+| `PLURX_TRUSTED_PACKAGING_COMMIT` | Exact reviewed workflow commit used to dispatch publication; update after review when packaging changes. |
+| `PLURX_UPDATE_UPGRADE_FROM` | Qualified source-version requirement, such as `=0.7.0`; do not infer compatibility from the new version number. |
+| `PLURX_UPDATE_DATA_COMPATIBILITY` | Qualified data-format compatibility identity. |
+| `PLURX_UPDATE_CLUSTER_COMPATIBILITY` | Qualified cluster compatibility identity. |
+| `PLURX_UPDATE_MINIMUM_CONTROLLER` | Lowest controller version tested with this release. |
+| `PLURX_UPDATE_ROLLBACK` | `binary_compatible` after rollback qualification, otherwise `manual_recovery`. |
+
+**Publication:** the GitHub release workflow checks that the dispatch commit
+matches `PLURX_TRUSTED_PACKAGING_COMMIT`, that candidate and approved packaging
+roots agree, and that the private key matches a pinned public key. It signs the
+exact manifest bytes only after checking the native artifact cohort. A complete
+release includes `plurx-update-v1.json` and its detached `.sig`, plus the native
+packages/archives and `SHA256SUMS`. Missing signing configuration or qualification
+must remain a refusal; never substitute fixture keys or bypass authentication.
+
+**Reading the result:** a populated public-root document and configured secret
+establish signing capability; they do not mean a signed release is published.
+Check that the released manifest/signature exist and verify against a pinned
+root before declaring in-app updates available. For rotation, ship old and new
+public roots together in an old-key-signed release before retiring the old key.

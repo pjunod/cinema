@@ -16,6 +16,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Native desktop controllers embed the approved production update verification
+  key instead of refusing all update checks with an empty trust-root list.
+  Existing empty-root installations need one trusted manual reinstall; signed
+  release publication still requires protected GitHub signing configuration.
+
 - Linux installers use verified prebuilt GitHub tray artifacts by default and
   reserve GTK development packages/local tray compilation for `--build-tray`.
   Compose installs select the host architecture and stable release independently

@@ -3,14 +3,24 @@ use plurx_desktop_control::update::{parse_trust_roots, production_keys, PRODUCTI
 use serde_json::json;
 
 #[test]
-fn production_roots_are_embedded_and_fail_closed_until_provisioned() {
+fn production_signing_root_is_embedded_and_not_a_fixture() {
     let roots = parse_trust_roots(PRODUCTION_ROOTS_JSON.as_bytes()).expect("embedded roots schema");
     assert_eq!(roots.repository, "pjunod/cinema");
     assert!(
-        roots.keys.is_empty(),
-        "no fixture public key may be production-pinned"
+        !roots.keys.is_empty(),
+        "production updates need an approved public root"
     );
-    assert!(production_keys().expect("production keys").is_empty());
+    let keys = production_keys().expect("production keys");
+    assert_eq!(keys.len(), roots.keys.len());
+    for (root, key) in roots.keys.iter().zip(keys.iter()) {
+        assert_eq!(root.id, key.id);
+        assert_eq!(root.public_key_hex, hex::encode(key.public_key));
+        assert_ne!(
+            root.public_key_hex,
+            "ab".repeat(32),
+            "no fixture key may be pinned"
+        );
+    }
 }
 #[test]
 fn trust_roots_reject_wrong_repository_duplicates_and_malformed_keys() {
