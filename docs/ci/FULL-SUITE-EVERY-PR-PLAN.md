@@ -1,6 +1,6 @@
 # Full suite on every PR — audit, execution contract, and implementation plan
 
-**Status:** open — audit complete; M0 implementation and baseline in progress ·
+**Status:** open — M0 instrumentation built and diagnostic baseline measured; qualification remains open ·
 **Requested:** 2026-10-20 · **Audit source:** `c1c344132` ·
 **Evidence captured:** 2026-10-20 14:21:12 UTC
 
@@ -445,7 +445,7 @@ incomplete binaries; exact candidate/environment is recorded. Tests adding
 an undiscovered case, omitting a result, and failing discovery are rejected.
 Record baseline performance and the list of unresolved reds.
 
-#### M0 diagnostic implementation (2026-10-20, measurement in progress)
+#### M0 diagnostic implementation and measured baseline (2026-10-20)
 
 `ci.yml` accepts an explicit `diagnostic_baseline=true` with an exact
 `expected_sha` on a non-main branch. It refuses retained results and promotion
@@ -475,17 +475,33 @@ Current-job cgroup sampling cannot observe sibling Docker test containers. Those
 cells explicitly mark actual-test CPU, memory and I/O unavailable; wall timing
 remains valid. Unsupported macOS cgroup metrics are likewise explicit. This first
 run is observational, with existing runner cache state recorded; it cannot establish
-warm/cold variance or a p95 from a single sample. M0 remains open until the run,
-source inventory reconciliation, unresolved reds and environment gaps are recorded.
+warm/cold variance or a p95 from a single sample. Diagnostic attempts and
+continuations are recorded, including their unresolved reds and environment
+gaps. Qualification remains open: nested child logs defeat the frozen Rust
+case parser, some environments/fixtures are unavailable, and controlled
+warm/cold comparisons remain outstanding.
 
 #### First measured priorities
 
-The [baseline report](FULL-SUITE-BASELINE-2026-10-20.md) already separates
-three substantial costs: Store's serial bodies take 75m36s, seven jobs occupy
+The [baseline report](FULL-SUITE-BASELINE-2026-10-20.md) records an original
+diagnostic attempt ending red after 2h06m37s. A separate ordinary Rust
+continuation finishes in 87m47s, including 76m18s of binary bodies and only
+a 0.44 s Cargo finish during execution. Daemon, core and ordinary Store
+binaries consume 99.26% of those body times. All 36 outer summaries account
+for 6,970 cases (6,896 pass, 25 fail, 49 ignore). A source-bound secondary
+analysis reconciles every exact identity while preserving the frozen
+collector's nested-child parsing error. Of the historical 48 failures, 43
+now have observed passing outcomes and five still fail. Both exact ignored FFmpeg
+regressions subsequently pass. Splitting the three expensive binaries needs
+qualified scheduling and fixture isolation, not only a faster compile cache.
+
+The separate replicated Store cell's serial bodies take 75m36s; seven jobs occupy
 the single eligible topology runner for 77m02s, and the recovery validator is
 built independently three times for 14m24s. These observations make Store
 fixture lifecycle/isolation and balanced shards, compatible build reuse, and
-runner placement the first optimization investigations. iPhone and tvOS
+runner placement the first optimization investigations. Only one registered
+runner matches `ci-store`, so adding matrix entries alone does not establish
+parallel capacity. iPhone and tvOS
 add 20 minutes waiting for Xcode simulator diagnostics after native bundles
 finish, including after a passing tvOS bundle. Investigate that reporting
 phase while preserving native failures and necessary failure artifacts.

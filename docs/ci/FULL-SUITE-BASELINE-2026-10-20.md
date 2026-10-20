@@ -1,6 +1,6 @@
 # Full-suite M0 baseline — 2026-10-20
 
-**Status:** open — primary diagnostic attempt measured; ordinary Rust continuation and complete-suite qualification pending
+**Status:** measured — diagnostic attempts recorded; complete-suite qualification remains open
 
 The first measured candidate is `86f1385005b27122e8a8d3a3d5bd9501eb2fdb16`
 (tree `31501aa3d54a02e3bbb8288ba6104cceecd5f59c`), based on
@@ -52,7 +52,8 @@ cargo test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 
 Discovery first compiles that same cell with `--no-run --message-format=json`,
 then lists the exact executables. Discovery and execution share a target
-directory; compilation is measured separately rather than counted twice.
+directory. Native execution reports a 0.44 s Cargo finish with no `Compiling`
+lines, establishing reuse after the intervening static checks in this run.
 The two ignored real-FFmpeg restart regressions run afterward with their exact
 filters, `--ignored --exact --test-threads=1`.
 
@@ -79,7 +80,8 @@ answer different questions and are kept separate below.
 | Browser/layout | 222 structural-golden fact failures across 104 captures; seek/Cinema bodies missing | UI capture 687 s | 25m03s |
 | VOD browser | All three native scenarios passed; wrapper cleanup unqualified | 350.00 s command wall including setup/cleanup | 11m21s |
 | amd64 package/smoke | Failed downloading Dolby build input: temporary DNS failure | Not a unit-test duration | 25m11s |
-| Ordinary Rust continuation | Discovery complete: 6,970 cases, 49 ignored identities, 36 hashed binaries; test execution in progress | Compile 389.440 s; inventory 2.572 s; static checks 228.651 s | Separate active observation |
+| Ordinary Rust continuation | 6,970 exact cases independently reconciled: 6,896 passed, 25 failed, 49 ignored; original parser qualification remains false | 4,577.60 s native bodies; 4,585.024 s command; 389.440 s compile; 228.651 s static checks | Separate 87m47s job |
+| Exact ignored FFmpeg regressions | VFR and bitmap-burn each pass one exact native body; cleanup and binding qualified | 3.17 s / 3.22 s bodies; 4.009 s / 3.667 s commands | Included in Rust continuation |
 | Ordinary Rust, original attempt | Discovery reported 6,970 cases; exact lists/resource artifacts lost, no preserved completed unit outcomes | Discovery compile/list phase 101m04s; following combined phase 15m49s | 120m deadline + 64 s failed finalization |
 | Rust compile gate | Passed; no unit execution in this lane | Not a unit-test duration | 19m22s |
 | Apple | Desktop commands zero; iPhone exit65, iPad/tvOS zero; TV navigation hit job cap; native per-case artifacts unavailable | Mobile command phase 26m59s; no method counts retained | 60m01s, incomplete |
@@ -230,8 +232,8 @@ make this observed 75-minute serial body meet a 45-minute full-suite target.
 The scheduler assigns the fast Rust compile job to the single online
 `ci-topology` runner. The topology, WAL and transport contracts require that
 same class and queue behind compilation. The compile job occupied it for
-19m22s before topology could begin. Other online `ci-store` runners do
-not satisfy those labels. Required high-CPU jobs can also land on runners
+19m22s before topology could begin. The sole registered `ci-store` runner
+does not satisfy those labels. Required high-CPU jobs can also land on runners
 advertising different bare-metal/Incus and OS classes. This is scheduler and
 resource heterogeneity to measure, not evidence that every eligible runner
 has identical performance.
@@ -268,9 +270,10 @@ observed cache cannot persist across runs. Compilation occupied 509.00 s and
 6.21 s across its two commands, totaling 8m35s before/alongside 13m30s of test
 bodies. Registry/download warnings occupied seconds, not those minutes.
 Persistent bounded caches are therefore a measured optimization priority.
-The ordinary Rust no-run inventory and following test command already share a
-target directory within one job: do not count the inventory compile as an
-additional duplicate build, or assume `cargo check` produces runnable tests. The
+The ordinary Rust no-run inventory and following test command share a target
+directory within one job. The continuation's execution reports a 0.44 s Cargo
+finish and no `Compiling` lines: it reuses the compiled tests after static
+checks. `cargo check` alone does not produce runnable test executables. The
 original ordinary cell spent 101m04s in compile/list discovery, which completed
 at 17:24:56 UTC in step metadata and printed 6,970 identities at 17:24:54.
 The following combined command phase lasted 15m49s before the 17:40:46 job
@@ -308,6 +311,67 @@ class, cache/environment and build concurrency are not controlled together.
 This large observed difference therefore warrants runner qualification and
 resource investigation, rather than attributing it entirely to cache reuse.
 
+The continuation then finishes the ordinary command in **76m25s**, with
+complete process cleanup and native exit 101. Each of the 36 inventoried
+binaries has one outer summary matching its full expected case count:
+6,896 pass, 25 fail and 49 ignore, totaling 6,970. Their reported body times
+sum to **76m17.60s**. This is actual test execution, rather than another long
+compilation. Seven selected workspace doctest streams also finish; their
+native summaries remain distinct from the ordinary inventory.
+
+| Ordinary Rust binary | Native body time | Outer outcome |
+|---|---:|---|
+| `plurxd` | 36m41.83s | 4,362 pass, 15 fail, 40 ignore |
+| `plurx_core` | 22m05.21s | 1,932 pass, 10 fail, five ignore |
+| `store_contract` | 16m56.49s | 270 pass |
+
+These three binaries consume **99.26%** of the ordinary binary body time.
+The ordinary Store feature cell and the separate 75-minute replicated Store
+cell are distinct environments with overlapping source identities; their
+counts cannot be added as additional unique tests. Their durations describe
+separate required feature cells.
+The full continuation job takes **87m47s**, including compilation, inventory,
+static checks, both exact ignored regressions, setup and evidence handling.
+The two regressions each execute exactly one formerly ignored body and pass,
+without changing the ordinary run's 49-ignore observation.
+
+Samples wholly inside the unit phase cover 4,581.690 s, excluding 3.334 s at
+its edges. Current-job cgroup CPU increases by 61,335.195 CPU-seconds,
+averaging **13.39 CPU equivalents**; 85.39% is reported as system CPU.
+Sampled unit-phase memory peaks at **8.41 GiB**, swap at **0.102 GiB**.
+The observed cgroup records no throttle/high/max/OOM event increases and
+advertises no own CPU/memory cap. Parent/host constraints remain unobserved.
+This establishes substantial parallel CPU activity during the phase, not a
+per-case wait fraction or the cause of the high system time. Profile kernel
+work, process/fixture lifecycle and scheduling before assigning that cost.
+
+The frozen timing parser cannot qualify this ordinary stream: child-test
+diagnostic tails contain their own libtest banners, outcomes and summaries,
+which it mistakes for outer suites. Its original 1,730 qualification gaps and
+false verdict are retained. A separately reviewed, source-bound reconciliation
+excludes eight explicitly labelled restore stdout replay blocks and two
+filtered Tray child invocations. It then requires every exact inventoried
+case once, matching ignored flags, header/footer counts and all 36 executable
+identities. All 6,970 cases reconcile. Omission, duplication, changed-status
+and footer-mutation negative controls reject corrupted evidence. This targeted
+analysis is not a general replacement collector or a green gate verdict;
+future collection must frame nested output or apply equally strict checks.
+
+The 25 outer failures have exact source owners in the measurement extract:
+
+| Assertion family | Cases |
+|---|---:|
+| Core source census, durable-table and migration expectations | 10 |
+| Shared Source HTTP/actor acquisition and readiness | 9 |
+| Daemon read authority, refusal codes and seam census | 3 |
+| HLS processed-descriptor receipt counter | 1 |
+| Rolling publication capacity admission | 1 |
+| Serving-fence live-child negative control | 1 |
+
+These are assertion locations and observed symptoms, not established root
+causes. Twenty are absent from the historical 48-failure list; that alone does
+not establish new regressions because source and case universes changed.
+
 The preflight spends almost as long checking corrective history (148 s) as
 executing 1,895 Python tests (155.62 s). The Android device runner reports
 190.096 s inside a 1,053 s job; build, emulator and setup phases account for
@@ -315,6 +379,23 @@ the remaining wall time. The slowest Node command bodies are playback web
 control (17.57 s), network shaping (15.56 s), web asset ordering (14.91 s),
 cluster membership (13.06 s) and live TV (8.45 s). These are separate
 optimization targets from the Rust test bodies.
+
+## What the measurements prioritize next
+
+| Work | Evidence and qualification needed |
+|---|---|
+| Close actual failures and collection gaps | Preserve and diagnose the 25 ordinary Rust failures, replicated Store repair assertion, daemon follower readiness, iPhone navigation assertion and structural-golden facts. Frame nested child logs so exact case reconciliation cannot mistake diagnostic text for outer results. |
+| Profile and split the expensive ordinary binaries | Daemon, core and ordinary Store bodies consume 99.26% of ordinary Rust time. Unit-phase samples average 13.39 CPU equivalents with 85.39% system CPU; profile that work before attributing it. Qualify balanced scheduling with features, fixture isolation and every case preserved; compilation reuse alone leaves 76m18s of bodies. |
+| Bound Apple reporting | Native bundles finish in about 105–109 s, followed by two explicit 600 s diagnostics waits. Qualify a bounded collection policy that keeps native outcomes and necessary failure artifacts. |
+| Qualify Rust runner and cache placement | Discovery differs by 15.47× across these observations. Standardize measured capacity, observe parent/host constraints and demonstrate persistent cache mounts; repeat controlled same-source comparisons before claiming the cause or a steady-state budget. |
+| Reduce replicated Store lifecycle cost | Median serial completion interval is 11.105 s and outliers explain little of the total. Instrument admission/startup/readiness/body/drain separately; preserve isolated writable state and every backend. Then qualify balanced shards under host voter/memory limits and sufficient registered capacity: only one runner currently matches `ci-store`. |
+| Remove scarce-runner rebuild serialization | Seven lanes occupy 77m02s; three validator builds consume 14m24s. Qualify a compatible shared executable and move independent compile work off the scarce class only after capability equivalence is demonstrated. |
+| Close environment and execution gaps | Supply owned synthetic/native fixtures and privileged disposable environments, and account for the original incomplete TV navigation cell. Explicit owners and missing outcomes remain part of the manifest. |
+
+These priorities refine M1–M3 in the canonical plan. They are not implemented
+performance improvements or a promised new full-suite duration. The existing
+75-minute serial Store body alone exceeds the proposed 45-minute warm target;
+all critical paths must fit before the automatic gate can be promoted.
 
 ## Evidence and remaining qualification
 
@@ -324,8 +405,8 @@ ordinary Rust inventory also records exact executable hashes. Full original
 logs and artifact ZIP hashes are retained outside tracked source. The
 [compact measurement extract](FULL-SUITE-BASELINE-2026-10-20.json) records the
 exact input snapshot, original failures, artifact/report hashes and missing
-evidence. Its capture timestamp identifies which continuations were complete;
-it will be refreshed after the remaining ordinary Rust observation.
+evidence. Its capture timestamp identifies the completed observations and
+separates the original qualification failures from derived analyses.
 
 Timing granularity follows the native runner. Ordinary Rust reports completed
 binary durations and slow-test warnings; its redirected log does not provide
@@ -350,7 +431,7 @@ seccomp and AppArmor state before setup. The runner did not grant requested
 four environment-controlled cases are unqualified, not assertion failures.
 No host security settings were changed. The 55 governed crate `#[ignore]` identities
 are separately dispositioned: 14 fixture-catalog entries are part of those
-55, not 14 extra tests. Two serial restarts are configured, three delegated
+55, not 14 extra tests. Two exact serial restarts now execute and pass; three delegated
 child cases require their parent receipts, one FFmpeg capability case has a
 separate manual workflow, and 49 remain environment/fixture/campaign gaps.
 
@@ -383,11 +464,15 @@ longer phases and reserve time for cleanup and artifact persistence.
 
 All 48 historical failures have source ownership: seven specific repair
 candidates, 39 cases sharing the Source admission mitigation and two
-unresolved cases (Store-result census and stale telemetry sink). Fresh
-outcomes remain pending until their exact current test identities complete.
-Native decoder/pixel/renderer fixture gaps are retained individually. M0
-remains open until final runtime reconciliation, original failed outcomes,
-ignore/skip dispositions and environment gaps are recorded.
+previously unresolved cases (Store-result census and stale telemetry sink).
+The independent exact-binary/case reconciliation observes **43 passing and
+five failing** on the frozen candidate. The remaining five are two shared
+Source HTTP cases and three Source actor cases; earlier repair labels do not
+override those fresh failures. Original failed outcomes and the frozen
+observer's qualification error remain unchanged. Native decoder/pixel/renderer
+fixture gaps are retained individually. The diagnostic measurements are
+recorded; qualification remains open for unresolved assertions, environments,
+production-safe collection and controlled warm/cold comparisons.
 
 ## Measurement implementation checks
 
@@ -396,6 +481,10 @@ Python 3.12 local validation completed 547 tests with one skip;
 operations completed 1,431 with two skips. The first operations
 sweep exposed an ignored GitHub permissions declaration in the new Forgejo
 privileged workflow; removing it made the repeated complete sweep pass.
+The skipped landing-status audit passed after fetching the independent
+clone's missing history. The remaining local skips require GNU Linux
+linker/readelf and Linux pidfd lifecycle facilities; their original local
+skip outcomes are retained rather than relabeling the full sweep.
 Synthetic failures printed by negative-control tests are expected witnesses,
 not failed outer suites. Rust 1.97.1 formatting and workspace/all-target Clippy
 with warnings denied pass, as do syntax checks for all 95 served scripts.
