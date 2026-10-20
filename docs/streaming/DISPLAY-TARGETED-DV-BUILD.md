@@ -5,21 +5,27 @@
 
 ## PR A implementation checkpoint
 
-- The first full-helper attempt refused the synthetic scan before any required
-  case passed: the control muxer omitted the encoder's declared frame rate,
-  losing Matroska DefaultDuration and demuxed packet durations. The control-only
-  repair validates matching positive BL/EL rates and preserves them in the mux
-  header; packet timestamps/durations and the strict production scanner are
-  unchanged. Mux-only native compilation, demux timing audit and targeted review
-  precede retrying Stage2. No production helper/shader-bundle rebuild is needed.
+- The first full-helper attempt refused the synthetic scan: the control muxer
+  omitted the encoder's declared frame rate, losing Matroska DefaultDuration and
+  demuxed packet durations. The control-only repair preserves matching positive
+  BL/EL rates; native mux compilation and independent targeted review passed.
+  The coordinator reports the corrected Stage2 control passed 97 commands and
+  70 results, worst independent-oracle error one code. This is synthetic helper
+  acceptance, not real-title or device accuracy; the original refusal is retained.
 - Actual immutable43 Rust batch completed: 98 selected, 94 passed, four fixture
-  failures retained. Repairs are test-only: wall-clock-relative lease expiry,
-  distinct offline sources rather than deduplicated requests, owner-node versus
-  consumer-target semantics, and an exact empty114 title-schema rewind before
-  historical113/112 rewinds. New partial-schema refusal coverage is authored.
-  Compile and independent targeted repair closure precede failed/invalidated-only
-  retries. The actual380a B/interface integration is independently approved;
-  its native compilation is batched with these repairs. No94pass or141shader rerun.
+  failures retained. The first test-only repairs compiled natively at350 and
+  received independent targeted approval atf361. Failed-only plus new-case retry
+  passed the historical subtitle, F1 provenance and partial-schema refusal cases:
+  97 Rust passes are retained. Two fixtures still failed, with no production defect
+  established: one tried to claim a second background reader while the title
+  held the only background slot; the other exceeded the 128-probe per-coordinator
+  cap. Repairs use a production-attested live fragment reader and two valid
+  producer leases respectively, preserving resource, paging and preemption
+  assertions. Their native compile, targeted closure and only-two-case retry
+  remain. No retained Rust, shader or helper passes are repeated.
+- The actual380a B/interface integration is independently approved and compiled
+  natively with350. Production Rust/helper inputs are unchanged by fixture-only
+  follow-ups; the coordinator owns the four final-daemon real-source cells.
 - Full independent Astra review of `0d47bc6ac` is retained. Targeted independent
   review APPROVED the sole F1 repair at `43cce364a9e8`; its pinned native Clippy
   and Hiqlite-contract compilation passed. Post-review Rust qualification runs
@@ -36,9 +42,9 @@
   unwraps `WindowOutcome::Completed` and still checks every target/L1/operation.
   Ordinary production entrypoints remain master-only. Main still ends at schema
   113, so this additive title migration remains 114 without renumbering.
-- Remaining: real affected Rust/backend results, full-helper/window controls,
-  real-source P7 FEL/P8 1000/1600 harness matrix, pinned integration compilation,
-  independent targeted conflict/interface closure, fast lane and API merge.
+- Remaining: two failed Rust fixture cases, their pinned compilation and targeted
+  independent closure, real-source P7 FEL/P8 1000/1600 harness matrix, fast lane
+  and API merge.
   Preserve unchanged passing shader, policy/store and prior B evidence; check
   only actual changed surfaces, not whole suites or reviews for base motion.
 

@@ -156,6 +156,21 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         panic!("lease");
     };
     let coordinator = ProbeCoordinator::from_lease(&lease);
+    // A coordinator may own at most 128 active probes. A separate, valid
+    // library scan can supply the next page while the repair page is full.
+    let plurx_core::cluster::coordination::LeaseClaim::Acquired(scan_lease) = store
+        .acquire_lease(
+            &format!("scan:library:{}", library.id),
+            "scan-coordinator",
+            now,
+            now + 60_000,
+        )
+        .await
+        .expect("library scan coordinator")
+    else {
+        panic!("scan lease");
+    };
+    let scan_coordinator = ProbeCoordinator::from_lease(&scan_lease);
     for (index, file_id) in unreadable
         .iter()
         .copied()
@@ -164,6 +179,11 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
     {
         let id = uuid::Uuid::new_v4().to_string();
         let pipeline = "a".repeat(64);
+        let coordinator = if index < 128 {
+            &coordinator
+        } else {
+            &scan_coordinator
+        };
         assert!(matches!(
             store
                 .enqueue_job(EnqueueJob {
@@ -174,7 +194,7 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
                             file_id,
                             size,
                             mtime,
-                            &coordinator,
+                            coordinator,
                             &pipeline
                         ),
                         source_size: size,
@@ -212,11 +232,15 @@ async fn title_priority_walk_reaches_runnable_probe_beyond_unreadable_first_page
         .should_yield(&state)
         .await
         .expect("runnable next page preempts"));
-    // An offline/expired coordinator is not runnable, even with readable media.
+    // Offline/expired coordinators are not runnable, even with readable media.
     store
         .release_lease(&lease, now_ms())
         .await
         .expect("coordinator offline");
+    store
+        .release_lease(&scan_lease, now_ms())
+        .await
+        .expect("scan coordinator offline");
     task.probe_after = None;
     assert!(!task.should_yield(&state).await.expect("offline first page"));
     assert!(!task.should_yield(&state).await.expect("offline next page"));

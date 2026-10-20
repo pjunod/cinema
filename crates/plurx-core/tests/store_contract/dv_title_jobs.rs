@@ -571,7 +571,9 @@ async fn title_priority_observation_requires_live_higher_priority_same_node_work
             .probe_can_preempt_title(&ids[2], &title.id, "title-node", 1_001)
             .await
             .expect("remote consumer does not restrict unassigned execution"));
-        let ClaimOutcome::Claimed { job: blocker } = store
+        // The title owns the single background-reader slot. Another ordinary
+        // probe cannot manufacture a concurrent blocker by claiming that slot.
+        let ordinary_claim = store
             .claim_job(ClaimJob {
                 job_id: ids[1].clone(),
                 expected_revision: 0,
@@ -584,9 +586,83 @@ async fn title_priority_observation_requires_live_higher_priority_same_node_work
                 dispatched_at_ms: 1_002,
             })
             .await
-            .expect("other resource reader")
-        else {
-            panic!("{backend}: blocker claim");
+            .expect("ordinary background reader claim");
+        assert!(
+            matches!(ordinary_claim, ClaimOutcome::Contended),
+            "{backend}: title already owns the background-reader slot: {ordinary_claim:?}"
+        );
+        // Attest actual live fragment demand through the production viewer
+        // bridge. It may use the reserved second reader slot alongside title
+        // work, and must conservatively prevent preemption for another probe.
+        let source = "c".repeat(64);
+        let key = plurx_core::store::cluster_fragment_index_key(
+            file.id, file.size, file.mtime, &source, &scanner,
+        )
+        .expect("live fragment key");
+        let outcome = store
+            .enqueue_fragment_job(
+                plurx_core::store::background_jobs_fragment_admission::EnqueueFragmentJob {
+                    job: plurx_core::store::NewClusterFragmentIndexJob {
+                        cache_key: key.clone(),
+                        file_id: file.id,
+                        source_size: file.size,
+                        source_mtime: file.mtime,
+                        source_sha256: source,
+                        pipeline_sha256: scanner,
+                        priority: "foreground".into(),
+                        trigger: "foreground".into(),
+                        target_node_id: "title-node".into(),
+                        not_before_ms: 1_002,
+                        created_at_ms: 1_002,
+                    },
+                    analysis_request: None,
+                    repair: false,
+                    now_ms: 1_002,
+                },
+            )
+            .await
+            .expect("enqueue live fragment reader");
+        let EnqueueOutcome::Accepted { job_id, .. } = outcome else {
+            panic!("{backend}: live fragment admission: {outcome:?}");
+        };
+        let viewer = store
+            .create_user("title-priority-viewer", "hash", false)
+            .await
+            .expect("live viewer");
+        assert!(store
+            .join_artifact_viewer(plurx_core::store::ArtifactViewerInterest {
+                cache_key: key,
+                file_id: file.id,
+                target_node_id: "title-node".into(),
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: viewer.id,
+                },
+                playback_id: "title-priority-playback".into(),
+                now_ms: 1_002,
+            })
+            .await
+            .expect("attest live fragment demand"));
+        let candidate = store
+            .background_job(&job_id)
+            .await
+            .expect("live fragment job")
+            .expect("live fragment job");
+        let outcome = store
+            .claim_job(ClaimJob {
+                job_id,
+                expected_revision: candidate.revision,
+                node_id: "title-node".into(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                claim_id: uuid::Uuid::new_v4().to_string(),
+                kind: JobKind::FragmentIndexBuild,
+                payload_version: 1,
+                now_ms: 1_002,
+                dispatched_at_ms: 1_002,
+            })
+            .await
+            .expect("live resource reader claim");
+        let ClaimOutcome::Claimed { job: blocker } = outcome else {
+            panic!("{backend}: live blocker claim: {outcome:?}");
         };
         assert!(
             !store

@@ -135,11 +135,17 @@ incident and general remote processed requalification remain out of B scope.
 
 **Implementation update (2026-10-19):** Sol 6.1 owns current source on
 `codex/cinema-display-target-a`; coordinator owns publication. The build plan's
-checkpoint records the first full-helper refusal: the synthetic control muxer
-lost declared frame rate and packet duration. A control-only header/rate repair
-is authored; native compilation, timing audit and targeted closure remain.
-The four Rust fixture repairs likewise await native compilation and closure;
-94 valid Rust passes and 141 shader cases are retained without repetition. The
+checkpoint preserves the initial full-helper timing refusal and its control-only
+mux repair. Native compilation and independent targeted closure passed; the
+coordinator reports corrected Stage2 acceptance (97 commands, 70 results, worst
+one code). Rust350 compilation and f361 targeted closure passed. Failed-only
+retry retained three more passes, for 97 valid Rust passes and 141 shader cases
+without repetition. Two fixtures still failed: another background reader cannot
+claim alongside title work, and a single coordinator cannot enqueue129probes.
+Fixture-only repairs use attested live fragment demand and two valid producer
+leases, preserving the resource/paging assertions; native compilation, targeted
+closure and only those two retries remain. Four real-source cells, fast lane
+and API merge remain coordinator-owned. The
 current checkpoint and accepted explicit Annex B.2/B.3 RGB shader supersede the
 original built-in-libplacebo recipe below. API 374 inspection proved modified
 knee/adaptive/LMS behavior; no built-in ST2094-10 execution is claimed. Clip is
