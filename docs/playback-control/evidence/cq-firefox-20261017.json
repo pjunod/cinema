@@ -75,7 +75,7 @@
   },
   "scope": "Headless browser video evidence; no independent display or audio-render oracle.",
   "private_archive": {
-    "location": "lab4:~/cc-cq-receipts/firefox-nuc4-20261018/acceptance-private.tar.gz",
+    "location": "lab4:~/cc-cq-receipts/firefox-lab4-20261018/acceptance-private.tar.gz",
     "sha256": "991a0af00b532fe679ab733cbed700b1122614b1cfb8ebfc2d65df1538c85351",
     "verified_files": 18,
     "mismatches": 0,
