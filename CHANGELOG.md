@@ -16,6 +16,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux tray installation accepts ordinary group-writable user desktop folders,
+  including existing hicolor icon directories, without changing permissions.
+  Desktop destinations are checked before staging or registering the tray.
+
 - Native desktop controllers embed the approved production update verification
   key instead of refusing all update checks with an empty trust-root list.
   Existing empty-root installations need one trusted manual reinstall; signed
