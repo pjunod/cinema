@@ -92,7 +92,10 @@ fn hardware_profiles(
             }
         }
         if vendors.contains("0x1002") || caps.vaapi {
-            profiles.extend(["vaapi".to_owned(), "gpu".to_owned()]);
+            profiles.insert("gpu".to_owned());
+            if platform == "linux" {
+                profiles.insert("vaapi".to_owned());
+            }
         }
         if vendors.contains("0x10de") || caps.nvenc {
             profiles.extend(["nvidia".to_owned(), "gpu".to_owned()]);
@@ -687,6 +690,10 @@ mod tests {
         assert!(required.contains(&"qsv".to_owned()));
         assert!(!required.contains(&"vaapi".to_owned()));
         assert!(!required.contains(&"metal".to_owned()));
+        let amd = missing("windows", &["0x1002"], EncoderCaps::default());
+        assert!(amd.contains(&"vulkan".to_owned()));
+        assert!(!amd.contains(&"vaapi".to_owned()));
+        assert!(!amd.contains(&"vaapi_processing".to_owned()));
     }
 
     #[test]

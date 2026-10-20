@@ -18,6 +18,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+BREW_PREFIXES = [Path("/opt/homebrew"), Path("/usr/local")]
 TOOLS = {"wget": "wget", "cmake": "cmake", "meson": "meson", "ninja": "ninja",
          "pkg-config": "pkgconf", "autoconf": "autoconf",
          "nasm": "nasm", "gtimeout": "coreutils",
@@ -59,10 +60,10 @@ def source_generation_tools(prepared, env):
         run(["make", "install"], cwd=source, env=env)
 
 
-def build_environment(prepared):
+def build_tool_environment():
     env = dict(os.environ)
-    prefixes = [Path("/opt/homebrew"), Path("/usr/local")]
-    extra = [str(prefix / "opt/texinfo/bin") for prefix in prefixes]
+    extra = [str(prefix / suffix) for prefix in BREW_PREFIXES
+             for suffix in ["bin", "sbin", "opt/texinfo/bin"]]
     env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
     missing = sorted({formula for tool, formula in TOOLS.items() if not shutil.which(tool, path=env["PATH"])})
     if missing:
@@ -70,6 +71,11 @@ def build_environment(prepared):
         if not brew:
             raise ValueError("Homebrew build tools required: " + ", ".join(missing))
         run([brew, "install", *missing], env=env)
+    return env
+
+
+def build_environment(prepared):
+    env = build_tool_environment()
     source_generation_tools(prepared, env)
     (prepared / "bin/glibtoolize").symlink_to(shutil.which("libtoolize", path=env["PATH"]))
     for alias, source in [("timeout", "gtimeout"), ("shuf", "gshuf")]:

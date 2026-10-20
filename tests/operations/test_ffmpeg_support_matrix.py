@@ -3,7 +3,9 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -20,6 +22,24 @@ def load(name):
 
 
 class MediaSupportMatrixTests(unittest.TestCase):
+    def test_cold_build_discovers_homebrew_and_new_tools_with_system_only_path(self):
+        media = load("build-macos-source-media")
+        with tempfile.TemporaryDirectory() as work:
+            prefix = Path(work) / "homebrew"
+            (prefix / "bin").mkdir(parents=True)
+            executable = prefix / "bin/fixture-build-tool"
+            brew = prefix / "bin/brew"
+            brew.write_text("#!/bin/sh\n[ \"$1\" = install ] && [ \"$2\" = fixtureformula ] || exit 2\n"
+                            + f"printf '#!/bin/sh\\nexit 0\\n' > '{executable}'\nchmod 755 '{executable}'\n")
+            brew.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, clear=True), \
+                    mock.patch.object(media, "BREW_PREFIXES", [prefix]), \
+                    mock.patch.object(media, "TOOLS", {"fixture-build-tool": "fixtureformula"}):
+                env = media.build_tool_environment()
+            self.assertEqual(shutil.which("brew", path=env["PATH"]), str(brew))
+            self.assertEqual(shutil.which("fixture-build-tool", path=env["PATH"]), str(executable))
+            self.assertIn(str(prefix / "sbin"), env["PATH"].split(os.pathsep))
+
     def test_matrix_binds_current_jellyfin_source_and_every_plurx_patch(self):
         matrix = json.loads((ROOT / "scripts/ffmpeg-support-matrix.json").read_text())
         media = load("build-macos-video-ffmpeg")
