@@ -20,6 +20,9 @@ bump may break compatibility and a **patch** bump never does.
   gesture, before asynchronous stream readiness. Browser permission refusals
   now stop recovery immediately and retain position and track choices for an
   explicit retry instead of repeatedly reopening the same blocked stream.
+- macOS tray menus show a short error-details action and bound rendered row widths while retaining full text in dialogs, tooltips and accessibility. Successful GUI upgrades update status without opening a completion window.
+- Linux tray menus keep Docker startup details in the control window, bound long menu labels, and accept clicks after status refreshes when the panel fetches all D-Bus menu properties.
+
 
 - Linux tray installation accepts ordinary group-writable user desktop folders,
   including existing hicolor icon directories, without changing permissions.

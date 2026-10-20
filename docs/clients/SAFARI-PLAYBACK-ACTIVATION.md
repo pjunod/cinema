@@ -1,7 +1,7 @@
 # Safari playback activation — permission belongs to the media element
 
 **Status:** implemented, awaiting independent review and qualification ·
-**Written:** 2026-10-20 · **Base:** `4e049a4`
+**Written:** 2026-10-20 · **Initial base:** `4e049a4` · **Integrated main:** `2ae6675`
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (transport routing) and the
 [playback surface contract](PLAYBACK-SURFACE-CONTRACT.md) (what the player
