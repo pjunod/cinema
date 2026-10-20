@@ -169,7 +169,7 @@ pub fn validate_installed(i: &InstallationV1, plan: &PackagePlan, text: &str) ->
     }
     Ok(())
 }
-fn verify_package_identity(
+pub(crate) fn verify_package_identity(
     i: &InstallationV1,
     asset: &ArtifactV1,
     path: &std::path::Path,
@@ -443,6 +443,11 @@ pub fn hook_check(i: &InstallationV1, package: &str, version: &str, phase: &str)
     #[cfg(target_os = "linux")]
     {
         let dir = transactions.child(&j.transaction_id, false)?;
+        if j.manifest_digest.is_none() {
+            crate::source_install::hook_matches(i, &j, package, version)?;
+            dir.write_json(&format!("hook-{package}-{phase}.json"), &serde_json::json!({"schema_version":1,"package":package,"version":version,"phase":phase,"transaction_id":j.transaction_id,"authority":"explicit_local_source"}))?;
+            return Ok(true);
+        }
         let ledger: update::AcceptedReleasesV1 = root.json("accepted-releases.json")?;
         let verified = update::verify_manifest(
             &dir.read(update::MANIFEST_NAME, update::MAX_MANIFEST as u64)?,

@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""Install a locally built Linux GUI server through its native package manager.
+
+The eligibility probe is read-only and needs no GTK library. Headless callers
+use deploy/install's server-only path. Builds and package assembly finish before
+an existing server is stopped; source packages delegate service policy here.
+"""
+import argparse
+from dataclasses import dataclass
+import hashlib
+import grp
+import json
+import os
+from pathlib import Path
+import platform
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+UNIT = Path("/etc/systemd/system/plurxd.service")
+DROPINS = Path(str(UNIT) + ".d")
+RECORD = Path("/etc/plurx/installation.json")
+CONTROL = Path("/usr/bin/plurx-control")
+SOURCE_STATE = Path("/var/lib/plurx-source-installer")
+CONTROLS = ("plurx-control", "plurx-install-helper", "plurx-update-worker", "plurx-service-launch", "plurx-recovery")
+
+
+def run(argv, *, root=False, **kwargs):
+    argv = [str(value) for value in argv]
+    if root and os.geteuid() != 0:
+        argv = ["sudo", "--", *argv]
+    return subprocess.run(argv, check=True, **kwargs)
+
+
+def output(argv, **kwargs):
+    timeout = kwargs.pop("timeout", 30)
+    return run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+               timeout=timeout, **kwargs).stdout.strip()
+
+
+@dataclass
+class Session:
+    uid: int
+    user: str
+    environment: dict
+
+
+def user_argv(session, argv):
+    if os.geteuid() == 0:
+        return ["runuser", "-u", session.user, "--", *map(str, argv)]
+    if os.getuid() != session.uid:
+        raise ValueError("graphical session belongs to another user")
+    return list(map(str, argv))
+
+
+def owned_socket(path, uid=None):
+    try:
+        info = path.lstat()
+        return stat.S_ISSOCK(info.st_mode) and (uid is None or info.st_uid == uid)
+    except OSError:
+        return False
+
+
+def session_policy(uid, properties, environment, *, container, display_socket, session_bus):
+    if uid == 0 or container or any(environment.get(key) for key in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
+        return False
+    if any(properties.get(key) != value for key, value in {
+        "User": str(uid), "Active": "yes", "Remote": "no", "Class": "user",
+    }.items()):
+        return False
+    kind = properties.get("Type")
+    if kind not in ("x11", "wayland") or not properties.get("Seat"):
+        return False
+    if kind == "x11" and re.fullmatch(r"(?:unix)?:[0-9]+(?:\.[0-9]+)?", environment.get("DISPLAY", "")) is None:
+        return False
+    if kind == "wayland" and re.fullmatch(r"[A-Za-z0-9_.-]+", environment.get("WAYLAND_DISPLAY", "")) is None:
+        return False
+    return display_socket and session_bus
+
+
+def eligible_session(environment=None):
+    environment = dict(os.environ if environment is None else environment)
+    uid = os.getuid()
+    if uid == 0:
+        original_uid = environment.get("SUDO_UID", "")
+        if not original_uid.isdecimal() or int(original_uid) == 0:
+            raise ValueError("no non-root graphical caller was identified")
+        uid = int(original_uid)
+    account = pwd.getpwuid(uid)
+    container = bool(environment.get("container")) or any(
+        path.exists() for path in (Path("/.dockerenv"), Path("/run/.containerenv"), Path("/run/systemd/container")))
+    if container or any(environment.get(key) for key in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")):
+        raise ValueError("container and SSH installations do not launch a native tray")
+    session_id = environment.get("XDG_SESSION_ID") or output(["loginctl", "show-user", str(uid), "--property=Display", "--value"])
+    if re.fullmatch(r"[A-Za-z0-9_-]+", session_id or "") is None:
+        raise ValueError("no local graphical logind session was identified")
+    properties = dict(line.split("=", 1) for line in output([
+        "loginctl", "show-session", session_id, "--property=User", "--property=Active", "--property=Remote",
+        "--property=Class", "--property=Type", "--property=Seat",
+    ]).splitlines() if "=" in line)
+    runtime = Path(f"/run/user/{uid}")
+    runtime_info = runtime.lstat()
+    if environment.get("XDG_RUNTIME_DIR") != str(runtime) or not stat.S_ISDIR(runtime_info.st_mode) or runtime_info.st_uid != uid or runtime_info.st_mode & 0o077:
+        raise ValueError("no owning graphical runtime directory")
+    kind = properties.get("Type")
+    if kind == "wayland":
+        display = environment.get("WAYLAND_DISPLAY", "")
+        display_socket = bool(re.fullmatch(r"[A-Za-z0-9_.-]+", display)) and owned_socket(runtime / display, uid)
+    else:
+        display = environment.get("DISPLAY", "")
+        match = re.fullmatch(r"(?:unix)?:([0-9]+)(?:\.[0-9]+)?", display)
+        display_socket = bool(match) and owned_socket(Path("/tmp/.X11-unix") / ("X" + match[1]))
+    bus = environment.get("DBUS_SESSION_BUS_ADDRESS", "")
+    bus_path = runtime / "bus"
+    bus_valid = re.fullmatch(re.escape("unix:path=" + str(bus_path)) + r"(?:,guid=[0-9a-f]+)?", bus) is not None
+    if not session_policy(uid, properties, environment, container=container,
+                          display_socket=display_socket, session_bus=bus_valid and owned_socket(bus_path, uid)):
+        raise ValueError("the caller is not a verified local active graphical session")
+    environment.update(HOME=account.pw_dir, USER=account.pw_name, LOGNAME=account.pw_name)
+    session = Session(uid, account.pw_name, environment)
+    # A socket alone does not prove the caller can use this session bus.
+    output(user_argv(session, ["busctl", "--address=" + bus, "--no-pager", "list"]), env=environment)
+    return session
+
+
+def native_format():
+    if shutil.which("apt-get") and shutil.which("dpkg-query"):
+        return "deb"
+    if shutil.which("dnf") and shutil.which("rpm"):
+        return "rpm"
+    raise ValueError("native desktop source installation requires apt/dpkg or dnf/rpm; use --server-only on other distributions")
+
+
+def source_identity():
+    commit = output(["git", "-C", ROOT, "rev-parse", "HEAD"])
+    if not re.fullmatch(r"[0-9a-f]{40}", commit) or output(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"]):
+        raise ValueError("commit tracked changes before building an exact native source runtime")
+    version = re.search(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
+    return commit, version
+
+
+def installed_version(packager):
+    argv = ["dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "plurxd"] if packager == "deb" else ["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "plurxd"]
+    try:
+        value = output(argv)
+    except subprocess.CalledProcessError:
+        return None
+    if packager == "deb":
+        if not value.startswith("installed "):
+            return None
+        value = value.removeprefix("installed ")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-1", value):
+        raise ValueError("installed package has a nonstandard version; explicit package-manager reconciliation is required")
+    return value
+
+
+def permit_version(current, version):
+    candidate = tuple(map(int, version.split(".")))
+    if current and tuple(map(int, current.removesuffix("-1").split("."))) > candidate:
+        raise ValueError("source installation refuses to downgrade a newer installed release")
+
+
+def inspect_legacy(unit=UNIT, dropins=DROPINS):
+    files = []
+    if unit.exists() or unit.is_symlink():
+        info = unit.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or unit.read_bytes() != (ROOT / "deploy/plurxd.service").read_bytes():
+            raise ValueError("unrecognized local plurxd.service; preserve and reconcile it before native desktop migration")
+        files.append(unit)
+    if dropins.exists() or dropins.is_symlink():
+        directory_info = dropins.lstat()
+        if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != 0 or directory_info.st_mode & 0o022 or not files:
+            raise ValueError("unrecognized plurxd service drop-in directory")
+        for path in dropins.iterdir():
+            info = path.lstat()
+            text = path.read_text() if stat.S_ISREG(info.st_mode) else ""
+            match = re.fullmatch(r"\[Service\]\nExecStart=\nExecStart=(/[^\s]+?)/plurxd run\n", text)
+            if path.name != "10-prefix.conf" or info.st_uid != 0 or info.st_mode & 0o022 or not match or ".." in Path(match[1]).parts:
+                raise ValueError("unrecognized plurxd service drop-in; no files changed")
+            files.append(path)
+    return files
+
+
+def nfpm_tool(stage, architecture):
+    pins = re.findall(r"nfpm_asset:\s*(\S+)\s+nfpm_sha256:\s*([0-9a-f]{64})", (ROOT / ".github/workflows/github-release.yml").read_text())
+    suffix = "x86_64" if architecture == "amd64" else "arm64"
+    choices = [(asset, digest) for asset, digest in pins if asset.endswith(f"_Linux_{suffix}.tar.gz")]
+    if len(choices) != 1:
+        raise ValueError("release workflow does not name exactly one pinned native nFPM")
+    asset, digest = choices[0]
+    version = re.fullmatch(r"nfpm_([0-9.]+)_Linux_.*\.tar\.gz", asset)[1]
+    cache = ROOT / "target/linux-source-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    archive = cache / asset
+    if not archive.exists():
+        with urllib.request.urlopen(f"https://github.com/goreleaser/nfpm/releases/download/v{version}/{asset}", timeout=120) as response:
+            data = response.read(50 * 1024 * 1024 + 1)
+        if len(data) > 50 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("downloaded nFPM differs from the pinned release checksum")
+        archive.write_bytes(data)
+    if archive.is_symlink() or archive.stat().st_size > 50 * 1024 * 1024 or hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
+        raise ValueError("cached nFPM differs from pinned release checksum")
+    with tarfile.open(archive) as source:
+        matches = [member for member in source.getmembers() if member.name == "nfpm" and member.isfile()]
+        if len(matches) != 1:
+            raise ValueError("pinned nFPM archive has no unique regular executable")
+        (stage / "nfpm").write_bytes(source.extractfile(matches[0]).read())
+    (stage / "nfpm").chmod(0o755)
+    return stage
+
+
+def build_context(packager):
+    commit, version = source_identity()
+    channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M)[1]
+    rustc = Path(output(["rustup", "which", "--toolchain", channel, "rustc"], env={**os.environ, "RUSTUP_AUTO_INSTALL": "0"}))
+    if output([rustc, "--version"]).split()[1] != channel:
+        raise ValueError("source installation needs the pinned Rust compiler")
+    machine = platform.machine()
+    if machine not in ("x86_64", "aarch64", "arm64"):
+        raise ValueError("unsupported native Linux architecture")
+    architecture = "amd64" if machine == "x86_64" else "arm64"
+    host = re.search(r"^host: (.+)$", output([rustc, "-vV"]), re.M)[1]
+    if not host.startswith("x86_64-" if architecture == "amd64" else "aarch64-") or "linux" not in host:
+        raise ValueError("pinned Rust toolchain is not native to this Linux host")
+    env = {**os.environ, "PATH": str(rustc.parent) + os.pathsep + os.environ.get("PATH", ""),
+           "RUSTC": str(rustc), "PLURX_BUILD_SHA": commit}
+    env.pop("CARGO_BUILD_TARGET", None)
+    deps = ["apt-get", "install", "-y", "build-essential", "pkg-config", "libgtk-4-dev", "xdg-utils"] if packager == "deb" else ["dnf", "install", "-y", "gcc", "gcc-c++", "pkgconf-pkg-config", "gtk4-devel", "xdg-utils"]
+    run(deps, root=True, stdout=sys.stderr)
+    cargo = rustc.parent / "cargo"
+    build_target = Path(env.get("CARGO_TARGET_DIR", ROOT / "target"))
+    if not build_target.is_absolute():
+        build_target = ROOT / build_target
+    controls = build_target / "release"
+    return commit, version, architecture, cargo, controls, env
+
+
+def prepare(stage, args, packager):
+    commit, version, architecture, cargo, controls, env = build_context(packager)
+    run([cargo, "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins"], cwd=ROOT, env=env)
+    binary = args.binary.absolute() if args.binary else controls / "plurxd"
+    if not args.binary:
+        run([cargo, "build", "--locked", "--release", "-p", "plurxd"], cwd=ROOT, env=env)
+    if binary.is_symlink() or not binary.is_file() or output([binary, "--source-commit"]) != commit:
+        raise ValueError("daemon source identity differs from this checkout; rebuild before installing")
+    if not Path(str(binary) + ".dwp").is_file():
+        raise ValueError("Linux package installation requires the daemon's paired .dwp debug file; rebuild with the checked-in release profile")
+    run([cargo, "build", "--locked", "--release", "-p", "plurx-tray"], cwd=ROOT, env=env)
+    tools = nfpm_tool(stage, architecture)
+    env["PATH"] = str(tools) + os.pathsep + env["PATH"]
+    packages = stage / "packages"
+    run([ROOT / "scripts/package-linux", "--arch", architecture, "--version", version,
+         "--binary", binary, "--control-dir", controls, "--desktop-binary", controls / "plurx-tray",
+         "--out", packages, "--packager", packager, "--service-policy", "external"], cwd=ROOT, env=env)
+    artifacts = sorted(packages.glob("*." + packager))
+    if len(artifacts) != 2:
+        raise ValueError("source assembly did not produce exactly one server/desktop cohort")
+    shutil.copy2(controls / "plurx-control", stage / "plurx-control")
+    return version, artifacts
+
+
+def package_commands(packager, current, version, artifacts):
+    if packager == "deb":
+        return [["apt-get", "install", "--no-download", "--reinstall", "-y", *map(str, artifacts)]]
+    if current != version + "-1":
+        return [["dnf", "install", "--cacheonly", "-y", *map(str, artifacts)]]
+    try:
+        desktop_current = output(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", "plurx-desktop"])
+    except subprocess.CalledProcessError:
+        desktop_current = None
+    if desktop_current == current:
+        return [["dnf", "reinstall", "--cacheonly", "-y", *map(str, artifacts)]]
+    server = next(path for path in artifacts if path.name.startswith("plurxd-"))
+    desktop = next(path for path in artifacts if path.name.startswith("plurx-desktop-"))
+    return [["dnf", "reinstall", "--cacheonly", "-y", str(server)],
+            ["dnf", "install", "--cacheonly", "-y", str(desktop)]]
+
+
+def preflight_packages(commands):
+    # Resolve/download dependencies and exercise package-manager locking while
+    # the original server is still running. The transaction uses cached inputs.
+    for command in commands:
+        staged = [argument for argument in command if argument not in ("--no-download", "--cacheonly")]
+        if command[0] == "apt-get":
+            run([*staged[:2], "--download-only", *staged[2:]], root=True, stdout=sys.stderr)
+            run([*command[:2], "--simulate", *command[2:]], root=True, stdout=sys.stderr)
+        else:
+            run([*staged[:2], "--downloadonly", "--setopt=keepcache=True", *staged[2:]], root=True, stdout=sys.stderr)
+
+
+def staging_destination(destination, session):
+    if not destination.is_absolute() or destination.exists() or destination.is_symlink():
+        raise ValueError("--stage-tray requires a new absolute output directory")
+    resolved = destination.resolve()
+    if resolved != destination or not (resolved.is_relative_to(Path(session.environment["HOME"]).resolve()) or resolved.is_relative_to((ROOT / "target").resolve())):
+        raise ValueError("tray output must stay under the owning home or checkout target without symlinks")
+    parent = destination.parent
+    while not parent.exists():
+        parent = parent.parent
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != session.uid or info.st_mode & 0o022:
+        raise ValueError("tray output parent must be a safe directory owned by the graphical user")
+
+
+def stage_tray(destination, *, dry_run=False):
+    session = eligible_session()
+    owning_user_context(session)
+    staging_destination(destination, session)
+    if dry_run:
+        return {"tray": str(destination / "plurx-tray"), "build": "pinned native GTK tray only", "dry_run": True}
+    commit, version, architecture, cargo, controls, env = build_context(native_format())
+    run([cargo, "build", "--locked", "--release", "-p", "plurx-tray"], cwd=ROOT, env=env, stdout=sys.stderr)
+    executable = controls / "plurx-tray"
+    if executable.is_symlink() or not executable.is_file():
+        raise ValueError("tray compiler did not produce a regular executable")
+    with executable.open("rb") as stream:
+        header = stream.read(20)
+    machine = bytes.fromhex("3e00" if architecture == "amd64" else "b700")
+    if header[:6] != bytes.fromhex("7f454c460201") or header[18:20] != machine:
+        raise ValueError("tray compiler output is not a native ELF64 executable")
+    if output([executable, "--version"]) != f"plurx-tray {version} ({commit})":
+        raise ValueError("tray executable differs from the exact source build identity")
+    if source_identity() != (commit, version):
+        raise ValueError("source checkout changed during tray compilation")
+    eligible_session(session.environment)
+    staging_destination(destination, session)
+    destination.mkdir(mode=0o700, parents=True)
+    try:
+        shutil.copyfile(executable, destination / "plurx-tray")
+        (destination / "plurx-tray").chmod(0o755)
+        icons = destination / "icons"
+        icons.mkdir(mode=0o700)
+        for icon in [ROOT / "deploy/desktop/tv.plurx.Server.svg", *(ROOT / "deploy/desktop/icons").glob("*.svg")]:
+            if icon.is_symlink() or not icon.is_file():
+                raise ValueError("tray icon source must be a regular file")
+            shutil.copyfile(icon, icons / icon.name)
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+    return {"tray": str(destination / "plurx-tray"), "version": version,
+            "source_commit": commit, "architecture": architecture}
+
+
+# Privileged receipt access stays in one small fixed program. No shell or
+# package metadata can become executable code, and no repository credential is
+# copied into this root-owned recovery state.
+STATE_PROGRAM = r"""
+import fcntl,hashlib,json,os,pathlib,stat,sys,tempfile
+base=pathlib.Path(sys.argv[1]); action=sys.argv[2]
+def directory(path,create=False):
+ if create:
+  try: path.mkdir(mode=0o700)
+  except FileExistsError: pass
+ m=path.lstat()
+ if not stat.S_ISDIR(m.st_mode) or m.st_uid!=0 or m.st_mode&0o077: raise ValueError('unsafe source-install state directory')
+def read(path):
+ m=path.lstat()
+ if not stat.S_ISREG(m.st_mode) or m.st_uid!=0 or m.st_mode&0o077 or m.st_size>65536: raise ValueError('unsafe source-install receipt')
+ with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW)) as f: return json.load(f)
+def write(path,value):
+ fd,name=tempfile.mkstemp(prefix='.receipt-',dir=path.parent)
+ try:
+  with os.fdopen(fd,'w') as f:
+   json.dump(value,f);f.write('\n');f.flush();os.fsync(f.fileno())
+  os.replace(name,path)
+  fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
+ finally:
+  if os.path.exists(name):os.unlink(name)
+if action=='read':
+ if not base.exists() and not base.is_symlink():print('null');sys.exit(0)
+ directory(base)
+ pointer=base/'pending.json'
+ if not pointer.exists() and not pointer.is_symlink():print('null');sys.exit(0)
+ receipt=read(pointer)
+ if receipt.get('phase')=='complete':print('null');sys.exit(0)
+ candidate=pathlib.Path(receipt['candidate']); controller=pathlib.Path(receipt['controller'])
+ if candidate.parent.parent!=base or candidate.name!='candidate.json' or controller!=candidate.parent/'plurx-control':raise ValueError('unsafe candidate paths')
+ directory(candidate.parent)
+ receipt['request']=read(candidate)
+ with os.fdopen(os.open(controller,os.O_RDONLY|os.O_NOFOLLOW),'rb') as f:
+  m=os.fstat(f.fileno())
+  if not stat.S_ISREG(m.st_mode) or m.st_uid!=0 or m.st_mode&0o022:raise ValueError('unsafe candidate controller')
+  hasher=hashlib.sha256()
+  while chunk:=f.read(1024*1024):hasher.update(chunk)
+  digest=hasher.hexdigest()
+ if digest!=receipt['controller_sha256']:raise ValueError('candidate controller changed')
+ print(json.dumps(receipt))
+elif action=='phase':
+ directory(base);receipt=read(base/'pending.json')
+ if receipt['candidate']!=sys.argv[3]:raise ValueError('pending operation changed')
+ receipt['phase']=sys.argv[4];write(base/'pending.json',receipt)
+elif action=='complete':
+ directory(base);receipt=read(base/'pending.json')
+ if receipt['candidate']!=sys.argv[3]:raise ValueError('pending operation changed')
+ receipt['phase']='complete';write(base/'pending.json',receipt)
+elif action=='publish':
+ directory(base,True)
+ lock=os.open(base/'publish.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+ lock_meta=os.fstat(lock)
+ if not stat.S_ISREG(lock_meta.st_mode) or lock_meta.st_uid!=0 or lock_meta.st_mode&0o077:raise ValueError('unsafe source publication lock')
+ fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ pointer=base/'pending.json'
+ if (pointer.exists() or pointer.is_symlink()) and read(pointer).get('phase')!='complete':raise ValueError('a source installation already needs reconciliation')
+ incoming=json.load(sys.stdin);request=incoming['request'];destination=base/request['transaction_id']
+ import uuid
+ if str(uuid.UUID(request['transaction_id']))!=request['transaction_id']:raise ValueError('invalid candidate transaction')
+ destination.mkdir(mode=0o700)
+ def copy(source,target,digest,size,mode):
+  with os.fdopen(os.open(source,os.O_RDONLY|os.O_NOFOLLOW),'rb') as src:
+   m=os.fstat(src.fileno())
+   if not stat.S_ISREG(m.st_mode) or m.st_size!=size:raise ValueError('candidate input changed')
+   fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode)
+   with os.fdopen(fd,'wb') as dst:
+    hasher=hashlib.sha256()
+    while chunk:=src.read(1024*1024):dst.write(chunk);hasher.update(chunk)
+    dst.flush();os.fsync(dst.fileno())
+   if hasher.hexdigest()!=digest:raise ValueError('candidate input hash changed')
+ for package,source in zip(request['packages'],incoming['packages'],strict=True):
+  target=destination/(package['name']+'.'+request['packager'])
+  if package['path']!=str(target):raise ValueError('candidate package path changed')
+  copy(source,target,package['sha256'],package['size'],0o600)
+ for index,item in enumerate(request['legacy_files']):
+  if item['backup']!=str(destination/('legacy-'+str(index))):raise ValueError('candidate legacy backup path changed')
+  source=pathlib.Path(item['path']);copy(source,pathlib.Path(item['backup']),item['sha256'],source.stat().st_size,0o600)
+ copy(incoming['controller'],destination/'plurx-control',incoming['controller_sha256'],incoming['controller_size'],0o700)
+ write(destination/'candidate.json',request)
+ receipt={'schema_version':1,'candidate':str(destination/'candidate.json'),'controller':str(destination/'plurx-control'),'controller_sha256':incoming['controller_sha256'],'phase':'prepared'}
+ write(pointer,receipt)
+ print(json.dumps({**receipt,'request':request}))
+else:raise ValueError('unknown source state action')
+"""
+
+
+def pending_installation():
+    return json.loads(output(["python3", "-c", STATE_PROGRAM, SOURCE_STATE, "read"], root=True))
+
+
+def complete_pending(candidate):
+    run(["python3", "-c", STATE_PROGRAM, SOURCE_STATE, "complete", candidate], root=True)
+
+
+def mark_pending(candidate, phase):
+    run(["python3", "-c", STATE_PROGRAM, SOURCE_STATE, "phase", candidate, phase], root=True)
+
+
+def file_identity(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("source candidate inputs must be regular files")
+    with path.open("rb") as stream:
+        hasher = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+        digest = hasher.hexdigest()
+    return digest, info.st_size
+
+
+def publish_pending(stage, artifacts, legacy, identity, packager, original):
+    transaction = str(uuid.uuid4())
+    destination = SOURCE_STATE / transaction
+    packages = []
+    for path in artifacts:
+        name = "plurx-desktop" if path.name.startswith("plurx-desktop") else "plurxd" if path.name.startswith("plurxd") else None
+        if name is None or any(item["name"] == name for item in packages):
+            raise ValueError("source candidate must contain one server and one desktop package")
+        digest, size = file_identity(path)
+        packages.append({"name": name, "path": str(destination / (name + "." + packager)), "sha256": digest, "size": size})
+    if {item["name"] for item in packages} != {"plurxd", "plurx-desktop"}:
+        raise ValueError("source candidate package cohort is incomplete")
+    controller = stage / "plurx-control"
+    digest, size = file_identity(controller)
+    request = {"schema_version": 1, "transaction_id": transaction, "source_commit": identity[0], "version": identity[1],
+               "packager": packager, "packages": packages, "original_policy": original,
+               "legacy_files": [{"path": str(path), "sha256": file_identity(path)[0], "backup": str(destination / ("legacy-" + str(index)))} for index, path in enumerate(legacy)]}
+    incoming = {"request": request, "packages": list(map(str, artifacts)), "controller": str(controller),
+                "controller_sha256": digest, "controller_size": size}
+    result = run(["python3", "-c", STATE_PROGRAM, SOURCE_STATE, "publish"], root=True,
+                 input=json.dumps(incoming), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return json.loads(result.stdout)
+
+
+def preflight_service_account():
+    try:
+        grp.getgrnam("plurx")
+    except KeyError:
+        run(["groupadd", "--system", "plurx"], root=True)
+    try:
+        account = pwd.getpwnam("plurx")
+    except KeyError:
+        run(["useradd", "--system", "--gid", "plurx", "--home-dir", "/var/lib/plurx", "--no-create-home",
+             "--shell", "/usr/sbin/nologin", "--comment", "noirr cinema media server", "plurx"], root=True)
+        account = pwd.getpwnam("plurx")
+    if account.pw_uid == 0:
+        raise ValueError("the managed server service account must not be root")
+    validation = "import os,pathlib,pwd,stat; uid=pwd.getpwnam('plurx').pw_uid; pairs=[('/var/lib/plurx-control',0),('/var/lib/plurx-control/shutdown-receipts',uid)];\nfor name,owner in pairs:\n p=pathlib.Path(name)\n if p.exists() or p.is_symlink():\n  m=p.lstat()\n  if not stat.S_ISDIR(m.st_mode) or m.st_uid!=owner or m.st_mode&0o022: raise ValueError('unsafe native control state directory')"
+    run(["python3", "-c", validation], root=True)
+    run(["install", "-d", "-o", "root", "-g", "root", "-m", "0755", "/var/lib/plurx-control"], root=True)
+    run(["install", "-d", "-o", "plurx", "-g", "plurx", "-m", "0700", "/var/lib/plurx-control/shutdown-receipts"], root=True)
+
+
+def migrate_pending_legacy(pending):
+    request = pending["request"]
+    files = request["legacy_files"]
+    if not files or pending["phase"] in ("legacy_removed", "native_transaction"):
+        return
+    candidate = pending["candidate"]
+    if pending["phase"] in ("prepared", "legacy_stopping"):
+        for item in files:
+            path = Path(item["path"])
+            if file_identity(path)[0] != item["sha256"]:
+                raise ValueError("identified legacy unit changed; source recovery is held")
+        mark_pending(candidate, "legacy_stopping")
+        stop_legacy_main()
+        mark_pending(candidate, "legacy_stopped")
+    # A retry can enter after any individual unit/drop-in removal. Its original
+    # policy and backups come from the durable candidate, never a new snapshot.
+    mark_pending(candidate, "legacy_removing")
+    if request["original_policy"]["enabled"]:
+        # If the canonical unit was already removed, its disable action completed
+        # before that removal on the preceding attempt.
+        if Path(files[0]["path"]).exists():
+            run(["systemctl", "disable", "plurxd.service"], root=True)
+    for item in files:
+        path = Path(item["path"])
+        if path.exists() or path.is_symlink():
+            if file_identity(path)[0] != item["sha256"]:
+                raise ValueError("legacy unit changed during recovery; no further files removed")
+            run(["rm", "--", path], root=True)
+    if DROPINS.exists():
+        run(["rmdir", "--", DROPINS], root=True)
+    run(["systemctl", "daemon-reload"], root=True)
+    mark_pending(candidate, "legacy_removed")
+
+
+def finish_source_install(pending, args, session):
+    migrate_pending_legacy(pending)
+    mark_pending(pending["candidate"], "native_transaction")
+    verified = invoke_source_transaction(pending["candidate"])
+    policy = pending["request"]["original_policy"]
+    expected = "running" if policy["running"] else "stopped"
+    if verified.get("service_state") != expected or verified.get("version") != pending["request"]["version"] or verified.get("server_startup", {}).get("state") != ("enabled" if policy["enabled"] else "disabled"):
+        raise ValueError("native transaction did not prove the original running/startup policy; recovery receipt retained")
+    if not policy["existing"] and not policy["running"]:
+        run(user_argv(session, [CONTROL, "startup", "set", "tray", "off"]), env=session.environment)
+    complete_pending(pending["candidate"])
+    subprocess.Popen(user_argv(session, ["/usr/bin/plurx-tray", "--window"]), env=session.environment,
+                     start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def invoke_source_transaction(candidate):
+    candidate = Path(candidate)
+    result = output([candidate.parent / "plurx-control", "source-install", "--candidate", candidate], root=True, timeout=15000)
+    response = json.loads(result)
+    if response.get("schema_version") != 1 or response.get("ok") is not True:
+        raise ValueError("native source transaction did not prove restored policy and identity-bound readiness")
+    value = response.get("result", {})
+    if value.get("kind") != "status":
+        raise ValueError("native source transaction returned no verified installation status")
+    return value
+
+
+def policy_snapshot():
+    loaded = output(["systemctl", "show", "--property=LoadState", "--value", "plurxd.service"]) == "loaded"
+    if not loaded:
+        return False, False, False
+    enabled = output(["systemctl", "show", "--property=UnitFileState", "--value", "plurxd.service"])
+    active = output(["systemctl", "show", "--property=ActiveState", "--value", "plurxd.service"])
+    if enabled not in ("enabled", "disabled") or active not in ("active", "inactive", "failed"):
+        raise ValueError("ambiguous service startup/running policy; no service changes made")
+    return True, enabled == "enabled", active == "active"
+
+
+def legacy_service_observation():
+    properties = dict(line.split("=", 1) for line in output([
+        "systemctl", "show", "--property=ActiveState", "--property=MainPID", "plurxd.service",
+    ]).splitlines() if "=" in line)
+    active = properties.get("ActiveState")
+    pid = properties.get("MainPID", "")
+    if active not in ("active", "activating", "deactivating", "inactive", "failed") or not pid.isdecimal():
+        raise ValueError("cannot establish the legacy service drain state")
+    return active, int(pid)
+
+
+def stop_legacy_main():
+    # systemctl stop schedules TimeoutStopSec escalation. A legacy server must
+    # finish its own drain; this installer never requests that forced stop path.
+    active, pid = legacy_service_observation()
+    if active in ("inactive", "failed") and pid == 0:
+        return
+    if pid == 0:
+        raise ValueError("legacy service has no positively identified main process")
+    run(["systemctl", "kill", "--kill-whom=main", "--signal=SIGTERM", "plurxd.service"], root=True)
+    deadline = time.monotonic() + 90
+    while True:
+        active, pid = legacy_service_observation()
+        if active in ("inactive", "failed") and pid == 0:
+            return
+        if time.monotonic() >= deadline:
+            raise ValueError("legacy server is still draining; no forced stop or package replacement was attempted")
+        time.sleep(0.25)
+
+
+def owning_user_context(session):
+    # sudo make must not compile Rust/GTK or populate a user's build cache as root.
+    # Package/dependency mutations request their own elevation after this drop.
+    if os.geteuid() == 0:
+        account = pwd.getpwuid(session.uid)
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+        os.environ.clear()
+        os.environ.update(session.environment)
+
+
+def install(args):
+    session = eligible_session()
+    owning_user_context(session)
+    pending = pending_installation()
+    if pending is not None:
+        if args.dry_run:
+            print(json.dumps({"resume": pending["candidate"], "phase": pending["phase"], "original_policy": pending["request"]["original_policy"]}))
+            return
+        print("Resuming the retained source candidate and original service policy.", file=sys.stderr)
+        finish_source_install(pending, args, session)
+        print("Installed native server/controller/desktop cohort and verified the retained startup/running policy.")
+        return
+    packager = native_format()
+    current = installed_version(packager)
+    identity = source_identity()
+    _, version = identity
+    permit_version(current, version)
+    legacy = inspect_legacy()
+    legacy_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in legacy}
+    existing, enabled, running = policy_snapshot()
+    if existing and not legacy and not current and not RECORD.exists():
+        raise ValueError("an unrecognized server service already exists; no package or service changes made")
+    original = {"existing": existing, "enabled": enabled if existing else not args.no_start,
+                "running": running if existing else not args.no_start}
+    if args.dry_run:
+        print(json.dumps({"desktop": True, "packager": packager, "build": "pinned daemon, controllers and GTK tray", "restore_running": original["running"], "restore_enabled": original["enabled"], "legacy_files": [str(path) for path in legacy]}))
+        return
+    target = ROOT / "target"
+    target.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="linux-source-install-", dir=target) as temporary:
+        stage = Path(temporary)
+        version, artifacts = prepare(stage, args, packager)
+        commands = package_commands(packager, current, version, artifacts)
+        preflight_packages(commands)
+        preflight_service_account()
+        # Recheck source, caller and policy only for a new candidate. A retry
+        # must retain its original policy even after the legacy unit is absent.
+        session = eligible_session(session.environment)
+        if source_identity() != identity or installed_version(packager) != current:
+            raise ValueError("source or installed package changed during build; no service changes made")
+        if inspect_legacy() != legacy or any(hashlib.sha256(path.read_bytes()).hexdigest() != digest for path, digest in legacy_hashes.items()) or policy_snapshot() != (existing, enabled, running):
+            raise ValueError("service policy changed during source build; no service changes made")
+        pending = publish_pending(stage, artifacts, legacy, identity, packager, original)
+    # Candidate, policy and packages now outlive the temporary build directory.
+    # Rust owns the start interlock, exclusive launch lock, package operation,
+    # inventory/identity acceptance and controlled service-policy restoration.
+    try:
+        finish_source_install(pending, args, session)
+    except (Exception, KeyboardInterrupt):
+        print("Native source installation needs recovery; the protected candidate, original policy, packages and legacy backups are retained at " + str(SOURCE_STATE) + ". Retry this installer to reconcile that same operation.", file=sys.stderr)
+        raise
+    print("Installed native server/controller/desktop cohort and verified the selected startup/running policy.")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--eligible-session", action="store_true")
+    mode.add_argument("--stage-tray", type=Path)
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--no-start", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if platform.system() != "Linux":
+            raise ValueError("Linux source runtime installation requires a native Linux host")
+        if args.eligible_session:
+            session = eligible_session()
+            print(json.dumps({"eligible": True, "uid": session.uid}))
+        elif args.stage_tray:
+            if args.binary or args.no_start:
+                raise ValueError("--stage-tray builds only the companion; daemon/startup flags do not apply")
+            print(json.dumps(stage_tray(args.stage_tray, dry_run=args.dry_run)))
+        else:
+            install(args)
+    except (ValueError, KeyError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        if args.eligible_session:
+            print(json.dumps({"eligible": False, "reason": str(error)}))
+            return 1
+        print(f"install-linux-source-runtime: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

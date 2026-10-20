@@ -18,12 +18,33 @@ account that will run the server. The stable app location is
 macOS 13 or newer is required. A GUI login session is required for the menu-bar
 app and VideoToolbox service operation.
 
+From a source checkout, `make install-macos` builds the matching native
+controller and Swift companion as well as the daemon, prepares the complete
+runtime before changing the service, and opens the installed app in the GUI
+login. Building or copying `plurxd` alone does not install a menu-bar app. To
+reopen the installed companion, run `open "$HOME/Applications/Plurx Server.app"`.
+Choose **Show tray app at login** in its menu for future logins. The explicit
+`--server-only` installer option retains the legacy daemon-only installation
+for operators who deliberately do not want desktop controls.
+
+Local source runtimes attest their actual native architecture and exact source
+commit. They can later select a signed Universal release; they never make a
+thin or unsigned release artifact eligible. Source installation needs Rust and
+Swift even with `--binary`; release archives need neither.
+
 On systemd Linux, install the server package and the matching `plurx-desktop`
 package from the same release. The server package owns the daemon, controller,
 service and narrow authorization helper. The desktop package owns the tray,
 GTK4 dependency, icons, desktop launcher and autostart entry. A headless server
 needs only the server package. Docker/container installations continue to use
 their existing supervisor and acquire no automatic tray process.
+
+Local Linux source replacement retains a protected candidate receipt and original
+running/startup policy before downtime. The native controller holds its launch
+interlock across package replacement and exact identity/readiness verification;
+retry reconciles that saved candidate. A partial package result stays held for
+recovery. macOS validates migration conflicts before stopping the old agent and
+retains a private identity/policy receipt for verified legacy recovery.
 
 A previous source install is not adopted merely because its HTTP port responds.
 The controller requires a native installation record with exact paths, owner,
