@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import copy
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -184,6 +185,44 @@ class MappingFailClosedTests(unittest.TestCase):
         self.assertTrue(result["dirty"])
         self.assertIn("verification/durable-jobs/smoke.cfg", result["untracked_paths"])
         self.assertIn("verification/durable-jobs/smoke.cfg", result["governed_dirty_paths"])
+
+
+class TLCMetadataCleanupTests(unittest.TestCase):
+    def _config_dir(self) -> Path:
+        scratch_root = ROOT / "target/formal-tests"
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=scratch_root)
+        self.addCleanup(temporary.cleanup)
+        out_dir = Path(temporary.name) / "config"
+        out_dir.mkdir()
+        return out_dir
+
+    def test_cleanup_removes_only_metadir_and_preserves_receipt_log_sibling(self) -> None:
+        out_dir = self._config_dir()
+        metadir = out_dir / "metadir"
+        metadir.mkdir()
+        (metadir / "states.chkpt").write_text("generated state data")
+        log = out_dir / "tlc.log"
+        log.write_text("counterexample trace")
+
+        result = formal.cleanup_metadir(out_dir, metadir)
+
+        self.assertTrue(result["removed"])
+        self.assertFalse(metadir.exists())
+        self.assertEqual(log.read_text(), "counterexample trace")
+
+    def test_cleanup_refuses_symlinked_metadata_directory(self) -> None:
+        out_dir = self._config_dir()
+        outside = out_dir.parent / "preserve"
+        outside.mkdir()
+        marker = outside / "keep.txt"
+        marker.write_text("keep")
+        metadir = out_dir / "metadir"
+        metadir.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(formal.RunnerError):
+            formal.cleanup_metadir(out_dir, metadir)
+        self.assertTrue(marker.exists())
 
 
 if __name__ == "__main__":

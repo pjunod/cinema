@@ -10,6 +10,7 @@ import math
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -481,6 +482,22 @@ def execute(argv: list[str], cwd: Path, log_path: Path, timeout: int) -> dict[st
     }
 
 
+def cleanup_metadir(out_dir: Path, metadir: Path) -> dict[str, Any]:
+    """Remove only the fresh, direct per-config metadata directory after TLC exits."""
+    expected = out_dir / "metadir"
+    if metadir != expected or out_dir.is_symlink() or metadir.is_symlink() or not metadir.is_dir():
+        raise RunnerError(f"refusing unsafe TLC metadata cleanup path: {metadir}")
+    try:
+        resolved_out = out_dir.resolve(strict=True)
+        resolved_meta = metadir.resolve(strict=True)
+    except OSError as exc:
+        raise RunnerError(f"cannot validate TLC metadata cleanup path: {exc}") from exc
+    if resolved_meta.parent != resolved_out or resolved_meta.name != "metadir":
+        raise RunnerError(f"TLC metadata directory escaped its config output directory: {metadir}")
+    shutil.rmtree(metadir)
+    return {"path": str(metadir), "removed": True}
+
+
 STATE_RE = re.compile(
     r"(?P<generated>\d+) states? generated,\s+(?P<distinct>\d+) distinct states? found,\s+(?P<queued>\d+) states? left on queue",
     re.IGNORECASE,
@@ -652,6 +669,7 @@ def run(args: argparse.Namespace) -> int:
         raw_log = out_dir / "tlc.log"
         argv = [
             java,
+            f"-Djava.io.tmpdir={metadir}",
             aggregate["resource_policy"]["heap_arg"],
             "-XX:+UseParallelGC",
             "-cp",
@@ -668,6 +686,10 @@ def run(args: argparse.Namespace) -> int:
             model_path.name,
         ]
         execution = execute(argv, config_dir, raw_log, record["timeout_seconds"])
+        try:
+            scratch_cleanup = cleanup_metadir(out_dir, metadir)
+        except RunnerError as exc:
+            scratch_cleanup = {"path": str(metadir), "removed": False, "error": str(exc)}
         verdict = classify(
             execution["output"],
             execution["returncode"],
@@ -675,6 +697,15 @@ def run(args: argparse.Namespace) -> int:
             execution["timed_out"],
             execution["log_problem"],
         )
+        if not scratch_cleanup["removed"]:
+            verdict.update(
+                actual_verdict="incomplete",
+                complete=False,
+                exploration_complete=False,
+                counterexample_found=False,
+                completion_kind="incomplete",
+                reason=f"TLC scratch cleanup failed: {scratch_cleanup['error']}",
+            )
         config_receipt = {
             "config": name,
             "expected_verdict": record["verdict"],
@@ -689,6 +720,7 @@ def run(args: argparse.Namespace) -> int:
             "elapsed_seconds": execution["elapsed_seconds"],
             "peak_rss_bytes": execution["peak_rss_bytes"],
             "raw_log": {"path": str(raw_log), "sha256": sha256(raw_log)},
+            "scratch_cleanup": scratch_cleanup,
         }
         aggregate["configs"].append(config_receipt)
         if not verdict["complete"]:
