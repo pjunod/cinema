@@ -17,8 +17,11 @@
 #   --prefix DIR    where the binary goes (default: /usr/local, or the
 #                   Homebrew prefix on macOS); the service unit follows it
 #   --ffmpeg-archive PATH
-#                   macOS: the Jellyfin FFmpeg portable archive, already
-#                   downloaded (offline installs); still checksum-verified
+#                   legacy server-only macOS installs: pinned upstream archive
+#   --ffmpeg-package DIR
+#                   macOS native installs: complete verified Plurx Jellyfin
+#                   package, including Metal/Vulkan, fonts and parser. Reused
+#                   from the current runtime or built privately when omitted.
 #   --source-parser PATH
 #                   macOS: a built plurx-source-parser.wasm to install instead
 #                   of building one (a release archive's own module, beside
@@ -62,6 +65,7 @@ mode=auto
 binary=
 prefix=
 ffmpeg_archive=
+ffmpeg_package=
 source_parser=
 subtitle_engine_package=
 uninstall=0
@@ -201,6 +205,8 @@ while [ $# -gt 0 ]; do
     --prefix=*) prefix=${1#--prefix=} ;;
     --ffmpeg-archive) shift; [ $# -gt 0 ] || die "--ffmpeg-archive needs a path"; ffmpeg_archive=$1 ;;
     --ffmpeg-archive=*) ffmpeg_archive=${1#--ffmpeg-archive=} ;;
+    --ffmpeg-package) shift; [ $# -gt 0 ] || die "--ffmpeg-package needs a path"; ffmpeg_package=$1 ;;
+    --ffmpeg-package=*) ffmpeg_package=${1#--ffmpeg-package=} ;;
     --source-parser) shift; [ $# -gt 0 ] || die "--source-parser needs a path"; source_parser=$1 ;;
     --source-parser=*) source_parser=${1#--source-parser=} ;;
     --subtitle-engine-package) shift; [ $# -gt 0 ] || die "--subtitle-engine-package needs a path"; subtitle_engine_package=$1 ;;
@@ -995,6 +1001,7 @@ macos_native_source_install() {
   set -- --output "$package"
   [ -z "$binary" ] || set -- "$@" --binary "$binary"
   [ -z "$ffmpeg_archive" ] || set -- "$@" --ffmpeg-archive "$ffmpeg_archive"
+  [ -z "$ffmpeg_package" ] || set -- "$@" --ffmpeg-package "$ffmpeg_package"
   [ -z "$source_parser" ] || set -- "$@" --source-parser "$source_parser"
   [ -z "$subtitle_engine_package" ] || set -- "$@" --subtitle-engine-package "$subtitle_engine_package"
   if [ "$dry_run" = 1 ]; then

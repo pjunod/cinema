@@ -37,6 +37,7 @@ mod dv_disk;
 mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
+mod ffmpeg_support;
 mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
@@ -3092,6 +3093,17 @@ async fn probe_system(
     );
     system.hwaccel_override = hwaccel_override;
     system.transcoder_optimization = optimization;
+    let support = crate::ffmpeg_support::report(&system).await;
+    if !support.package_problems.is_empty()
+        || support.rows.iter().any(|row| row.required && !row.included)
+    {
+        tracing::error!(
+            executable = %support.executable,
+            package_problems = ?support.package_problems,
+            missing = ?support.rows.iter().filter(|row| row.required && !row.included).map(|row| (&row.label, &row.missing)).collect::<Vec<_>>(),
+            "FFmpeg does not satisfy this node's media support contract; see Settings > System"
+        );
+    }
     Ok((encoder_caps, system))
 }
 

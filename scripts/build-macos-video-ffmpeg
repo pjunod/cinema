@@ -144,6 +144,7 @@ def retain_compiled_source(prepared, evidence, historical_lineage=None):
     expected = {p.name: digest(p) for p in local}
     if not expected or manifest.get("local_patches") != expected:
         raise ValueError("prepared build's local patch set does not match this recipe")
+    vulkan = retain_native_vulkan(prepared, evidence, manifest)
     retained = {}
     for patch in local:
         actual = prepared / "local-patches" / patch.name
@@ -173,7 +174,7 @@ def retain_compiled_source(prepared, evidence, historical_lineage=None):
         loader.exec_module(module)
         closure = (module.retain_historical_build(prepared, evidence, historical_lineage)
                    if historical_lineage is not None else module.retain_archive_build(prepared, evidence))
-        return {"local_patches": retained, "contract": manifest["contract"], **closure}
+        return {"local_patches": retained, "contract": manifest["contract"], "native_vulkan": vulkan, **closure}
     offers = evidence / "dependency-source"
     offers.mkdir()
     facts = {}
@@ -216,8 +217,46 @@ def retain_compiled_source(prepared, evidence, historical_lineage=None):
     if not facts:
         raise ValueError("compiled package lacks retained dependency sources")
     (offers / "manifest.json").write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n")
-    return {"local_patches": retained, "dependency_sources": facts,
+    return {"local_patches": retained, "dependency_sources": facts, "native_vulkan": vulkan,
             "contract": manifest["contract"]}
+
+
+def retain_native_vulkan(prepared, evidence, prepared_manifest):
+    """Keep the static graphics closure and its exact source/license offer."""
+    work = prepared / "native-vulkan"
+    if not work.exists():
+        if "vulkan_builder_sha256" in prepared_manifest:
+            raise ValueError("prepared build is missing its required native Vulkan closure")
+        return None
+    builder = Path(__file__).with_name("build-macos-vulkan")
+    lock = Path(__file__).with_name("macos-vulkan-sources.json")
+    if (prepared_manifest.get("vulkan_builder_sha256") != digest(builder)
+            or prepared_manifest.get("vulkan_source_lock_sha256") != digest(lock)):
+        raise ValueError("prepared Vulkan recipe/source lock differs from this package recipe")
+    sources = json.loads(lock.read_text())["sources"]
+    facts = json.loads((work / "manifest.json").read_text())
+    if facts.get("sources") != sources:
+        raise ValueError("native Vulkan manifest does not match its pinned source lock")
+    destination = evidence / "native-vulkan"
+    destination.mkdir()
+    retained = {}
+    for fact in sources:
+        archive = work / "source-archives" / fact["archive"]
+        if archive.is_symlink() or digest(archive) != fact["sha256"]:
+            raise ValueError("native Vulkan source archive does not match its pinned checksum")
+        shutil.copyfile(archive, destination / archive.name)
+        retained[archive.name] = fact["sha256"]
+    for path in [builder, lock, work / "manifest.json"]:
+        shutil.copyfile(path, destination / path.name)
+        retained[path.name] = digest(path)
+    libraries = facts.get("static_libraries", {})
+    if set(libraries) != {"libvulkan.a", "libshaderc_combined.a", "libplacebo.a"}:
+        raise ValueError("native Vulkan receipt lacks the full static library closure")
+    for name, expected in libraries.items():
+        if Path(name).name != name or digest(prepared / "prefix/lib" / name) != expected:
+            raise ValueError("native Vulkan static library changed after its build receipt")
+    return {"source_archives": retained, "manifest_sha256": digest(work / "manifest.json"),
+            "runtime_libraries": facts.get("runtime_libraries")}
 
 
 def verify_strict_options(executable, evidence):
@@ -564,6 +603,12 @@ def main():
         }
         if args.prepared_build:
             receipt["compiled_source"] = retain_compiled_source(args.prepared_build, evidence, args.historical_build_lineage)
+            if receipt["compiled_source"].get("native_vulkan"):
+                filters = run([str(stage / "ffmpeg"), "-hide_banner", "-filters"])
+                hwaccels = run([str(stage / "ffmpeg"), "-hide_banner", "-hwaccels"])
+                if not re.search(r"^\s*[A-Z.]{1,6}\s+libplacebo\s", filters, re.MULTILINE) or "vulkan" not in hwaccels.splitlines():
+                    raise ValueError("compiled native package lacks Vulkan/libplacebo declarations")
+                receipt["capabilities"]["filters"]["libplacebo"] = "declared"
             receipt.pop("binary_archive_url")
             receipt.pop("binary_archive_sha256")
             receipt["checksum_authority"] = "pinned source and local compiled binary digests"
