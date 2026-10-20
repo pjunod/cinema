@@ -515,7 +515,7 @@ specific expected counterexample is an expected verdict, not a positive proof.
 
 The model uses seeded starting states with one shared safety transition
 relation. Smoke explores at most six modeled events and the two-job baseline eight;
-a supplementary single-job lifecycle configuration explores ten. The
+a supplementary single-job lifecycle configuration explores eleven. The
 reachability configurations use at most sixteen. These finite schedules do not
 prove arbitrary-length protocol safety. Recovery uses a separate finite
 suffix with explicit fairness and time-advance premises. Seven normal-model
@@ -659,7 +659,7 @@ The two-job ten-event exploration was stopped incomplete after sustained
 frontier growth. One positive-only state quotient reduced cost but did not
 make that horizon credible within the declared budget. Fable's second
 text-only design consultation recommended a two-job eight-event baseline
-and an additional single-job ten-event lifecycle check. Sol implements the
+and an additional single-job eleven-event lifecycle check. Sol implements the
 configurations; Fable has not performed the final implementation review.
 
 The identity domains, shared safety transition relation and enabled faults
@@ -671,5 +671,5 @@ combined two-job lifecycle. Normal reachability witnesses and real Store
 examples support their own narrower claims. Neither new positive check is
 accepted until it completes. The original incomplete configuration and its
 metrics remain negative feasibility evidence, outside the qualifying full
-profile. If ten single-job events exceed budget, a predeclared nine-event
+profile. If eleven single-job events exceed budget, a predeclared ten-event
 fallback covers commit without delivery and must be reported accordingly.
