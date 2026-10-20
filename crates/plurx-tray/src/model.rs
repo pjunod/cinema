@@ -289,6 +289,11 @@ pub fn build(s: &Snapshot) -> Vec<Entry> {
                 idle && managed && toggleable(st.server_startup.state),
                 check_for(st.server_startup.state),
             ));
+            if let Some(detail) = &st.server_startup.detail {
+                if !detail.is_empty() {
+                    out.push(Entry::info(detail.clone()));
+                }
+            }
             out.push(Entry::checked(
                 startup_title("Show tray app at login", st.tray_startup.state),
                 Action::ToggleTrayLogin,
@@ -322,11 +327,15 @@ fn update_entries(s: &Snapshot, idle: bool) -> Vec<Entry> {
     let mut out = Vec::new();
     if s.active_transaction().is_some() {
         let title = match &s.update {
-            Some(u) => format!("Upgrade: {}…", u.state.title()),
+            Some(u) if u.is_server_operation() => format!("Server operation: {}…", u.title()),
+            Some(u) => format!("Upgrade: {}…", u.title()),
             None => "Upgrade in progress…".into(),
         };
         out.push(Entry::command(title, Action::ShowUpgradeProgress, true));
-        if s.update.as_ref().is_some_and(|u| u.state.is_cancellable()) {
+        if s.update
+            .as_ref()
+            .is_some_and(|u| !u.is_server_operation() && u.state.is_cancellable())
+        {
             out.push(Entry::command(
                 "Cancel upgrade",
                 Action::CancelUpgrade,
@@ -343,12 +352,18 @@ fn update_entries(s: &Snapshot, idle: bool) -> Vec<Entry> {
             ))),
             UpdateState::Complete | UpdateState::Cancelled | UpdateState::Failed => {
                 out.push(Entry::command(
-                    format!("Last upgrade: {}…", u.state.title()),
+                    if u.is_server_operation() {
+                        format!("Last operation: {}…", u.title())
+                    } else {
+                        format!("Last upgrade: {}…", u.title())
+                    },
                     Action::ShowUpgradeProgress,
                     true,
                 ))
             }
-            UpdateState::Idle => out.push(Entry::info("No update available")),
+            UpdateState::Idle if u.version.is_some() => {
+                out.push(Entry::info("No update available"))
+            }
             _ => {}
         }
     }
@@ -401,6 +416,9 @@ pub fn upgrade_explanation(update: Option<&UpdateV1>) -> String {
     let Some(u) = update else {
         return "No upgrade has been started.".into();
     };
+    if u.is_server_operation() {
+        return u.title().to_owned();
+    }
     let detail = u
         .detail
         .as_deref()

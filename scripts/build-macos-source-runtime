@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""Prepare a complete native macOS source runtime without changing an installation.
+
+This local, ad-hoc signed package is deliberately distinct from a verified
+GitHub release. Offline --binary still requires Rust and Swift for the tray
+and controllers. All output stays under the checkout's target directory.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+CONTROLS = ["plurx-control", "plurx-install-helper", "plurx-update-worker", "plurx-service-launch", "plurx-recovery"]
+
+
+def run(argv, **kwargs):
+    return subprocess.run([str(value) for value in argv], check=True, **kwargs)
+
+
+def output(argv, **kwargs):
+    return subprocess.check_output([str(value) for value in argv], text=True, **kwargs).strip()
+
+
+def load_recipe(name):
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(ROOT / "scripts" / name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def digest(path):
+    result = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+
+
+def unpack_media(archive, destination):
+    # The checksum is verified by the pinned recipe before reaching here.
+    with tarfile.open(archive) as source:
+        for member in source.getmembers():
+            relative = Path(member.name)
+            if relative.is_absolute() or ".." in relative.parts or not (member.isdir() or member.isfile()):
+                raise ValueError("unsafe member in pinned media archive")
+        source.extractall(destination)
+    for name in ["ffmpeg", "ffprobe"]:
+        path = destination / name
+        if not path.is_file() or path.is_symlink() or not os.access(path, os.X_OK):
+            raise ValueError(f"pinned media archive lacks executable {name}")
+
+
+def verify_identity(binary, source_commit):
+    if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
+        raise ValueError("daemon must be an executable regular file")
+    if output([binary, "--source-commit"], timeout=30) != source_commit:
+        raise ValueError("daemon source identity differs from this checkout; rebuild plurxd before installing")
+
+
+def seal(package, version, source_commit, architecture):
+    marker = {"schema_version": 1, "source_commit": source_commit, "architecture": architecture}
+    write_json(package / "source-install-v1.json", marker)
+    write_json(package / "release.json", {**marker, "repository": "pjunod/cinema", "version": version})
+    files = []
+    for path in sorted(package.rglob("*")):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError("source runtime contains a link or special file")
+        if path.is_file():
+            files.append({"path": path.relative_to(package).as_posix(), "size": path.stat().st_size,
+                          "sha256": digest(path), "executable": bool(path.stat().st_mode & 0o111)})
+    write_json(package / "runtime-closure-v1.json", {"schema_version": 1, "version": version, "files": files})
+
+
+def build(args):
+    if platform.system() != "Darwin":
+        raise ValueError("the source tray runtime must be built on macOS")
+    machine = platform.machine()
+    if machine not in ["arm64", "x86_64"]:
+        raise ValueError(f"unsupported native architecture: {machine}")
+    target = ROOT / "target"
+    destination = args.output.absolute()
+    # Never write host install paths or follow an output parent out of target/.
+    if not destination.resolve().is_relative_to(target.resolve()) or destination.exists() or destination.is_symlink():
+        raise ValueError("--output must be a new directory under this checkout's target/")
+    source_commit = output(["git", "-C", ROOT, "rev-parse", "HEAD"])
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise ValueError("source runtime requires an exact committed checkout")
+    if output(["git", "-C", ROOT, "status", "--porcelain", "--untracked-files=no"]):
+        raise ValueError("commit tracked source changes before building an exact source runtime")
+    channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M).group(1)
+    rustup = shutil.which("rustup") or str(Path.home() / ".cargo/bin/rustup")
+    try:
+        rustc = Path(output([rustup, "which", "--toolchain", channel, "rustc"], env={**os.environ, "RUSTUP_AUTO_INSTALL": "0"}))
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(f"source tray installation requires the installed Rust {channel} toolchain, including with --binary") from error
+    if output([rustc, "--version"]).split()[1] != channel:
+        raise ValueError("installed Rust compiler differs from rust-toolchain.toml")
+    if not shutil.which("swift"):
+        raise ValueError("source tray installation requires Swift/Xcode command line tools, including with --binary")
+    env = {**os.environ, "PATH": str(rustc.parent) + os.pathsep + os.environ.get("PATH", ""),
+           "RUSTC": str(rustc), "PLURX_BUILD_SHA": source_commit}
+    cargo = rustc.parent / "cargo"
+    run([cargo, "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins"], cwd=ROOT, env=env)
+    build_target = Path(os.environ.get("CARGO_TARGET_DIR", target))
+    if not build_target.is_absolute():
+        build_target = ROOT / build_target
+    binary = args.binary.absolute() if args.binary else build_target / "release/plurxd"
+    if not args.binary:
+        run([cargo, "build", "--locked", "--release", "-p", "plurxd"], cwd=ROOT, env=env)
+    verify_identity(binary, source_commit)
+    version = re.search(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    cache = target / "macos-source-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".macos-source-runtime-", dir=destination.parent) as work:
+        temporary = Path(work)
+        package = temporary / "package"
+        runtime = package / "runtime"
+        runtime.mkdir(parents=True)
+        media = load_recipe("build-macos-video-ffmpeg")
+        archive = temporary / "media.tar.xz"
+        release_arch, expected = media.ARCHIVES[machine]
+        name = f"jellyfin-ffmpeg_{media.TAG[1:]}_portable_{release_arch}-gpl.tar.xz"
+        cached_archive = cache / f"{expected}.tar.xz"
+        local_archive = args.ffmpeg_archive
+        if local_archive is None and cached_archive.is_file() and not cached_archive.is_symlink() and digest(cached_archive) == expected:
+            local_archive = cached_archive
+        media.acquire(local_archive, f"https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/{media.TAG}/{name}", expected, archive)
+        if not cached_archive.exists():
+            shutil.copyfile(archive, cached_archive)
+        unpack_media(archive, runtime)
+        parser = args.source_parser
+        if parser is None:
+            parser_builder = ROOT / "scripts/build-macos-source-parser"
+            parser_package = cache / ("parser-" + digest(parser_builder))
+            parser = parser_package / "bin/plurx-source-parser.wasm"
+            stamp = parser_package / "source-cache.json"
+            cached = False
+            if parser.is_file() and not parser.is_symlink() and stamp.is_file() and not stamp.is_symlink():
+                cached = json.loads(stamp.read_text()).get("module_sha256") == digest(parser)
+            if not cached:
+                built_parser = temporary / "parser"
+                run([sys.executable, parser_builder, "--output", built_parser, "--jobs", "4"])
+                write_json(built_parser / "source-cache.json", {"module_sha256": digest(built_parser / "bin/plurx-source-parser.wasm")})
+                if parser_package.exists():
+                    shutil.rmtree(parser_package)
+                built_parser.rename(parser_package)
+        if parser.is_symlink() or not parser.is_file() or parser.read_bytes()[:8] != b"\0asm\1\0\0\0":
+            raise ValueError("source parser must be a regular WebAssembly module")
+        shutil.copyfile(parser, runtime / "plurx-source-parser.wasm")
+        engine = args.subtitle_engine_package
+        if engine is None:
+            engine_builder = ROOT / "scripts/build-subtitle-engine"
+            engine_key = digest(engine_builder) + digest(ROOT / "scripts/subtitle-engine-manifest.json")
+            engine = cache / ("subtitle-" + hashlib.sha256(engine_key.encode()).hexdigest())
+            cached = False
+            if engine.is_dir() and not engine.is_symlink():
+                try:
+                    run(["bash", ROOT / "deploy/verify-subtitle-engine", engine])
+                    cached = True
+                except subprocess.CalledProcessError:
+                    pass
+            if not cached:
+                built_engine = temporary / "subtitle-engine"
+                run([sys.executable, engine_builder, "--output", built_engine, "--jobs", "2"])
+                run(["bash", ROOT / "deploy/verify-subtitle-engine", built_engine])
+                if engine.exists():
+                    shutil.rmtree(engine)
+                built_engine.rename(engine)
+        run(["bash", ROOT / "deploy/verify-subtitle-engine", engine])
+        shutil.copytree(engine, runtime / "subtitle-engine")
+        shutil.copyfile(binary, runtime / "plurxd")
+        (runtime / "plurxd").chmod(0o755)
+        run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp=none", "--sign", "-",
+             "--entitlements", ROOT / "scripts/macos-source-parser.entitlements", runtime / "plurxd"])
+        controls = package / "control"
+        controls.mkdir()
+        for name in CONTROLS:
+            path = controls / name
+            shutil.copyfile(build_target / "release" / name, path)
+            path.chmod(0o755)
+            run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp=none", "--sign", "-", path])
+            run(["/usr/bin/codesign", "--verify", "--strict", path])
+        run([ROOT / "clients/server-tray/macos/build", "--configuration", "release", "--arch", machine,
+             "--version", version, "--build-id", source_commit, "--controller", controls / "plurx-control",
+             "--scratch", target / "macos-source-swift", "--output", package / "Plurx Server.app"])
+        run(["/usr/bin/codesign", "--verify", "--strict", runtime / "plurxd"])
+        seal(package, version, source_commit, "arm64" if machine == "arm64" else "amd64")
+        package.rename(destination)
+    return destination
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--ffmpeg-archive", type=Path)
+    parser.add_argument("--source-parser", type=Path)
+    parser.add_argument("--subtitle-engine-package", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.dry_run:
+        print(f"would build native Rust controllers and Swift tray, verify matching daemon and pinned media/subtitle runtime, and stage {args.output}")
+        return 0
+    try:
+        print(build(args))
+        return 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"source runtime: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

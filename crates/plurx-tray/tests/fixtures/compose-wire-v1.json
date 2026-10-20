@@ -1,0 +1,76 @@
+[
+  {
+    "schema_version": 1,
+    "ok": true,
+    "result": {
+      "kind": "status",
+      "installation_id": "c7de5385-b888-4bf3-bd54-44d885784332",
+      "service_state": "running",
+      "version": "1.2.3",
+      "browser_origin": "http://127.0.0.1:32400",
+      "server_startup": {
+        "state": "enabled",
+        "detail": "Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts."
+      },
+      "tray_startup": {
+        "state": "disabled",
+        "detail": "This user has no container companion login entry"
+      },
+      "transaction_id": null
+    },
+    "error": null
+  },
+  {
+    "schema_version": 1,
+    "ok": true,
+    "result": {
+      "kind": "startup",
+      "server": {
+        "state": "enabled",
+        "detail": "Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts."
+      },
+      "tray": {
+        "state": "disabled",
+        "detail": "This user has no container companion login entry"
+      }
+    },
+    "error": null
+  },
+  {
+    "schema_version": 1,
+    "ok": true,
+    "result": {
+      "kind": "logs",
+      "lines": [
+        "first log",
+        "second log"
+      ],
+      "truncated": false
+    },
+    "error": null
+  },
+  {
+    "schema_version": 1,
+    "ok": true,
+    "result": {
+      "kind": "update",
+      "state": "idle",
+      "version": null,
+      "transaction_id": null,
+      "detail": "This deployment builds local source. Update the checkout and run make docker-up; the tray does not fetch or execute source automatically."
+    },
+    "error": null
+  },
+  {
+    "schema_version": 1,
+    "ok": true,
+    "result": {
+      "kind": "update",
+      "state": "shutdown_committed",
+      "version": null,
+      "transaction_id": "09c1e668-d964-4595-bb25-fb1bf1960f36",
+      "detail": "fixture"
+    },
+    "error": null
+  }
+]

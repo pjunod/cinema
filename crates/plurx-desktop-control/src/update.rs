@@ -402,12 +402,19 @@ pub fn select_cohort<'a>(
             ))
         }
     };
+    // Source-built macOS runtimes adopt the same signed universal release cohort.
+    // A thin installation never makes a thin release archive eligible.
+    let architecture = if installed.method == InstallMethod::MacosNative {
+        Architecture::Universal
+    } else {
+        installed.architecture.clone()
+    };
     let mut selected = Vec::new();
     for component in required {
         let mut matches = verified.manifest.artifacts.iter().filter(|a| {
             a.platform == platform
                 && a.format == format
-                && a.architecture == installed.architecture
+                && a.architecture == architecture
                 && a.component == component
         });
         let a = matches

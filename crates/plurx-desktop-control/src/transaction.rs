@@ -302,7 +302,8 @@ pub fn config_digest(i: &InstallationV1) -> Result<String> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "configuration name invalid"))?;
-    let read = crate::secure_fs::open_dir(parent, i.owner_uid)?.read(name, 1024 * 1024);
+    let read = crate::secure_fs::open_dir(parent, i.owner_uid)
+        .and_then(|directory| directory.read(name, 1024 * 1024));
     let mut digest = Sha256::new();
     digest.update(i.paths.config.as_os_str().as_encoded_bytes());
     match read {

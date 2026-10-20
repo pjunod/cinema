@@ -2,7 +2,7 @@
 
 **Status:** open · **Updated:** 2026-10-19 · source built; Astra's PR #1220
 review is complete. Root owns fixes, passing unit tests and repository merge gates.
-PR #1213 tracks promotion; distribution acceptance remains open in
+PR #1213 merged the initial implementation; PR #1226 corrects native source installation; distribution acceptance remains open in
 [the qualification ledger](DESKTOP-TRAY-QUALIFICATION.md). This is P31's canonical
 implementation and acceptance ledger. [The plan review](DESKTOP-TRAY-REVIEW.md)
 records revision 2 approval and the earlier design findings.
@@ -20,7 +20,9 @@ machine's startup policy, or a fleet upgrade during implementation.
 Paul requested a visible way to know that a natively installed server is
 running, manage it, select automatic startup, and upgrade installations made
 from GitHub release downloads. Linux headless servers and containers keep
-working without a desktop dependency or an icon process.
+working without a desktop dependency or an icon process inside the container.
+A Linux laptop can run the companion on its host and explicitly select its
+standard local Compose deployment.
 
 | Surface | Required behavior |
 |---|---|
@@ -32,8 +34,10 @@ working without a desktop dependency or an icon process.
 | Upgrade | Current version, Check for updates, release notes, Upgrade to a named version, progress and recovery result. |
 
 The app controls one explicitly selected local native installation. It never
-chooses a remote/discovered server as a process-control target, administers
-Docker, or starts another daemon because an HTTP probe timed out.
+chooses a remote/discovered server as a process-control target or starts another
+daemon because an HTTP probe timed out. The Linux Compose adapter pins one
+local engine and exact server/discovery container and image IDs; container
+upgrades use the existing qualified deployment commands.
 Closing the control window or choosing **Quit tray app** leaves the server
 running. Stopping the server leaves the icon available for Start.
 

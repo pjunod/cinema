@@ -484,3 +484,220 @@ fn reload_policy_revision_preserves_dropin_names_bytes_order_and_startup_choice(
         revision("enabled", &reversed)
     );
 }
+
+fn bootstrap_identity_fixture(
+    root: &Path,
+    architecture: Architecture,
+    source: Option<serde_json::Value>,
+    bind_source: bool,
+) {
+    package(root);
+    let dir = secure_fs::open_dir(root, native_uid()).expect("owned identity fixture");
+    dir.write_json(
+        "release.json",
+        &native::ReleaseIdentityV1 {
+            schema_version: 1,
+            repository: REPOSITORY.into(),
+            version: "0.7.0".into(),
+            source_commit: "a".repeat(40),
+            architecture,
+        },
+    )
+    .expect("release identity");
+    if let Some(source) = source {
+        dir.write_json("source-install-v1.json", &source)
+            .expect("source identity");
+    }
+    let mut closure: RuntimeClosureV1 = dir.json(native::CLOSURE_NAME).expect("closure");
+    for name in ["release.json", "source-install-v1.json"] {
+        if name == "source-install-v1.json" && !bind_source {
+            continue;
+        }
+        let path = root.join(name);
+        if path.exists() {
+            let bytes = fs::read(&path).expect("identity bytes");
+            closure.files.push(ClosureFileV1 {
+                path: name.into(),
+                size: bytes.len() as u64,
+                sha256: hex::encode(Sha256::digest(bytes)),
+                executable: false,
+            });
+        }
+    }
+    dir.write_json(native::CLOSURE_NAME, &closure)
+        .expect("bound identity");
+}
+#[test]
+fn local_source_bootstrap_requires_exact_native_identity_bound_into_closure() {
+    use native::BootstrapPackageOrigin::LocalSource;
+    let architecture = native_architecture().expect("supported fixture architecture");
+    for case in 0..8 {
+        let scratch = Scratch::new();
+        let mut source = serde_json::json!({
+            "schema_version": 1,
+            "source_commit": "a".repeat(40),
+            "architecture": architecture,
+        });
+        let mut release_architecture = architecture.clone();
+        match case {
+            1 => source["source_commit"] = serde_json::json!("b".repeat(40)),
+            2 => source["schema_version"] = serde_json::json!(2),
+            3 => source["unexpected"] = serde_json::json!(true),
+            4 => {
+                release_architecture = if architecture == Architecture::Arm64 {
+                    Architecture::Amd64
+                } else {
+                    Architecture::Arm64
+                };
+                source["architecture"] = serde_json::to_value(&release_architecture).expect("arch");
+            }
+            5 => {
+                release_architecture = Architecture::Universal;
+                source["architecture"] = serde_json::json!("universal");
+            }
+            _ => (),
+        }
+        bootstrap_identity_fixture(
+            &scratch.0,
+            release_architecture,
+            if case == 6 { None } else { Some(source) },
+            case != 7,
+        );
+        assert_eq!(
+            native::verify_bootstrap_identity(&scratch.0, LocalSource).is_ok(),
+            case == 0,
+            "source identity case {case}"
+        );
+    }
+}
+#[test]
+fn local_source_route_never_weakens_universal_release_bootstrap() {
+    use native::BootstrapPackageOrigin::{LocalSource, Release};
+    let scratch = Scratch::new();
+    bootstrap_identity_fixture(&scratch.0, Architecture::Universal, None, false);
+    assert!(native::verify_bootstrap_identity(&scratch.0, Release).is_ok());
+    assert!(native::verify_bootstrap_identity(&scratch.0, LocalSource).is_err());
+    let scratch = Scratch::new();
+    let architecture = native_architecture().expect("supported fixture architecture");
+    bootstrap_identity_fixture(
+        &scratch.0,
+        architecture.clone(),
+        Some(serde_json::json!({
+            "schema_version":1, "source_commit":"a".repeat(40), "architecture":architecture
+        })),
+        true,
+    );
+    assert!(native::verify_bootstrap_identity(&scratch.0, LocalSource).is_ok());
+    assert!(native::verify_bootstrap_identity(&scratch.0, Release).is_err());
+}
+#[test]
+#[cfg(target_os = "macos")]
+fn thin_macos_record_keeps_exact_layout_uid_and_host_architecture_policy() {
+    let home = home_for(native_uid()).expect("owning account home");
+    let mut i = installation(&home, InstallMethod::MacosNative);
+    i.architecture = native_architecture().expect("native architecture");
+    assert!(i.validate().is_ok());
+    assert!(i.managed().is_ok());
+    let mut other = i.clone();
+    other.architecture = if i.architecture == Architecture::Arm64 {
+        Architecture::Amd64
+    } else {
+        Architecture::Arm64
+    };
+    assert!(other.validate().is_err());
+    other = i.clone();
+    other.paths.runtime = home.join("other-runtime");
+    assert!(other.validate().is_err());
+    i.method = InstallMethod::Source;
+    assert!(
+        i.managed().is_err(),
+        "external source management remains refused"
+    );
+}
+
+#[test]
+fn macos_source_preflight_refuses_stable_app_before_any_legacy_command() {
+    let scratch = Scratch::new();
+    let home = scratch.0.join("home");
+    fs::create_dir_all(home.join("Applications/Plurx Server.app"))
+        .expect("owned preflight fixture");
+    let error = native::preflight_macos_migration_with(&home, native_uid(), |_, _, _| {
+        panic!("stable app conflict must fail before even launchd inspection")
+    })
+    .expect_err("existing app cannot be overwritten by automatic migration");
+    assert_eq!(error.code, ErrorCode::InvalidInstallation);
+    assert!(!home
+        .join("Library/Application Support/plurx/runtime")
+        .exists());
+}
+
+#[test]
+fn macos_source_preflight_refuses_system_domain_and_linked_destinations_read_only() {
+    let scratch = Scratch::new();
+    let home = scratch.0.join("home");
+    fs::create_dir(&home).expect("owned preflight fixture");
+    let mut calls = Vec::new();
+    assert!(
+        native::preflight_macos_migration_with(&home, native_uid(), |program, args, _| {
+            calls.push((program.to_owned(), args.to_vec()));
+            Ok((0, String::new()))
+        })
+        .is_err()
+    );
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1, ["print", &format!("system/{LAUNCH_LABEL}")]);
+    assert!(!home.join("Applications").exists());
+    symlink(scratch.0.join("outside"), home.join("Applications"))
+        .expect("owned unsafe preflight fixture");
+    assert!(
+        native::preflight_macos_migration_with(&home, native_uid(), |_, _, _| {
+            panic!("linked destination must fail before launchd inspection")
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn macos_source_preflight_checks_loaded_and_registered_executable_without_signalling() {
+    let scratch = Scratch::new();
+    let home = scratch.0.join("home");
+    let agents = home.join("Library/LaunchAgents");
+    fs::create_dir_all(&agents).expect("owned preflight fixture");
+    let binary = home.join("bin/plurxd");
+    fs::create_dir_all(binary.parent().expect("fixture parent")).expect("owned preflight fixture");
+    fs::write(&binary, b"legacy executable").expect("owned preflight fixture");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o500))
+        .expect("owned preflight fixture");
+    let plist = serde_json::json!({"Label": LAUNCH_LABEL, "ProgramArguments": [binary, "run"], "EnvironmentVariables": {}});
+    let login = agents.join("com.plurx.plurxd.plist");
+    fs::write(&login, serde_json::to_vec(&plist).expect("fixture JSON"))
+        .expect("owned preflight fixture");
+    for matches in [false, true] {
+        let mut calls = Vec::new();
+        let result =
+            native::preflight_macos_migration_with(&home, native_uid(), |program, args, _| {
+                calls.push((program.to_owned(), args.to_vec()));
+                if program == "/usr/bin/plutil" {
+                    return Ok((0, serde_json::to_string(&plist).expect("fixture JSON")));
+                }
+                assert_eq!(args[0], "print");
+                if args[1].starts_with("system/") {
+                    return Ok((113, String::new()));
+                }
+                let program = if matches {
+                    binary.to_string_lossy().into_owned()
+                } else {
+                    "/unrelated/plurxd".into()
+                };
+                Ok((0, format!("program = {program}\npid = 4242\n")))
+            });
+        assert_eq!(result.is_ok(), matches);
+        assert!(calls
+            .iter()
+            .all(|(program, args)| program == "/usr/bin/plutil" || args[0] == "print"));
+        assert!(!home.join("Applications").exists());
+        assert!(!home
+            .join("Library/Application Support/plurx/runtime")
+            .exists());
+    }
+}

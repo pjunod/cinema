@@ -1387,3 +1387,57 @@ fn debian_server_first_configuration_keeps_unpacked_desktop_absent_until_its_own
     )
     .is_err());
 }
+
+#[test]
+fn thin_macos_source_install_selects_only_signed_universal_release_cohort() {
+    for architecture in [
+        Architecture::Arm64,
+        Architecture::Amd64,
+        Architecture::Universal,
+    ] {
+        let mut i = installed();
+        i.method = InstallMethod::MacosNative;
+        i.architecture = architecture;
+        let mut m = manifest();
+        m.artifacts = vec![native_archive_artifact(b"universal fixture")];
+        let candidate = signed(&m, &i, &AcceptedReleasesV1::default())
+            .expect("native source to signed universal release");
+        let cohort = select_cohort(&candidate, &i).expect("universal cohort");
+        assert_eq!(cohort.len(), 1);
+        assert_eq!(cohort[0].architecture, Architecture::Universal);
+        m.artifacts[0].architecture = Architecture::Arm64;
+        assert!(
+            signed(&m, &i, &AcceptedReleasesV1::default()).is_err(),
+            "a thin runtime never enables thin release archives"
+        );
+    }
+}
+#[test]
+fn source_bootstrap_is_an_explicit_cli_route_with_finite_arguments() {
+    use clap::Parser;
+    use plurx_desktop_control::cli::{BootstrapCommand, Cli, ControlCommand};
+    let cli = Cli::try_parse_from([
+        "plurx-control",
+        "bootstrap",
+        "macos-source",
+        "--package",
+        "/owned/source",
+        "--no-start",
+    ])
+    .expect("explicit local source route");
+    assert!(matches!(
+        cli.command,
+        ControlCommand::Bootstrap {
+            command: BootstrapCommand::MacosSource { no_start: true, .. }
+        }
+    ));
+    assert!(Cli::try_parse_from([
+        "plurx-control",
+        "bootstrap",
+        "macos-source",
+        "--package",
+        "/owned/source",
+        "--force"
+    ])
+    .is_err());
+}

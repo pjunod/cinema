@@ -312,6 +312,11 @@ pub(crate) fn test_temp_path(name: impl AsRef<std::path::Path>) -> std::path::Pa
     about = "plurx media server daemon"
 )]
 struct Cli {
+    /// Print the full compiled source commit and exit without loading configuration.
+    #[cfg(unix)]
+    #[arg(long)]
+    source_commit: bool,
+
     /// Path to a TOML config file (default: ./plurx.toml or
     /// /etc/plurx/plurx.toml if present).
     #[arg(long, global = true, env = "PLURX_CONFIG")]
@@ -539,6 +544,11 @@ compile_error!("DV segment physical probe requires Unix descriptor custody");
 #[tokio::main]
 async fn daemon_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    #[cfg(unix)]
+    if cli.source_commit {
+        println!("{}", crate::version::SOURCE_COMMIT);
+        return Ok(());
+    }
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     if let Err(error) = dispatch(
         cli.command.unwrap_or(Command::Run),

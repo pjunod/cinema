@@ -8,16 +8,22 @@ first.
 
 ## Processed VOD successor root reuse
 
-Owner: Sol (implementation), coordinator (publication/native compiler).
-PR #1225 on `codex/cinema-processed-successor-reuse`; not deployed.
-Exact-root reuse drops throughput gating, not identity/reservation fences.
-Private staged provenance and admitted epochs reach common attachment with
-actual-owner cleanup armed before async sealing; JSON still grants no authority.
-Independent Astra review and bounded F1/F2/F3 closure approved `03cbfe62c`;
-pinned fmt/Clippy/link passed. Six original passes remain; `7cd6b015` retry: 0/9.
-Clock/incarnation setup passed; PQ metadata and test-only driver custody repairs await qualification.
-B #1211 merged (`9753284e`, green lane 5600); history-only integration is retained.
-Fast lane/merge remain; no live reproduction or accuracy claim; [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair-in-progress-owner-sol-nativepublication-coordinator).
+Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225), not deployed. Exact748 source passed pinned fmt/all-target Clippy and independent source/fixture closure. The actual format preflight passed; six positives are retained and nine failed cases await the corrected binary. Exact-root reuse preserves identity, owner and reservation fences; serialized requests grant no authority.
+
+B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). Current root-reuse qualification/gate is recorded in the [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair-in-progress-owner-sol-nativepublication-coordinator) and PR.
+
+- **2026-10-19 · desktop Compose host controls:** native installer correction is
+  recorded in PR #1226. Linux Docker companion builds only the host tray,
+  pins the selected local deployment, and controls graceful lifecycle and
+  durable startup policy; source/published-image upgrades retain their existing
+  deployment paths. Focused fixture validation is recorded in its PR; real
+  desktop/engine acceptance and custom Pi ownership migration remain open.
+
+
+## macOS source installation and the missing tray
+
+**Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
+
 
 ## Native server tray, startup policy and release upgrades
 
@@ -27,13 +33,7 @@ Fast lane/merge remain; no live reproduction or accuracy claim; [handoff](docs/s
 
 **Merged to `main` as #1147 (`9de49f37`) and #1151 (`3103d0d9`), 2026-10-17; tooling and docs only, nothing to deploy.** Sessions that push should run `make hooks` once per clone — it installs the paperwork hook and Ripwire.
 
-- Round two (#1151): Ripwire is the default navigator; the ten largest docs open with `## At a glance`; docs over 40 KB sit on a shrink-only allowlist (`tests/operations/doc-size-allowlist.txt`); agent-tooling-only diffs skip the cargo gate.
-- Giant-file split: inline test modules moved into their own files — step one (#1157) for `playback_control.rs`, `media_sessions.rs` and `cluster/migration.rs`, step two (#1158) for the other 38 crate files over 150 KB (65 modules); `PlayerController.swift` split into the controller, `PlayerControllerSupport.swift` and `SharedPlayerController.swift` (Apple build 254). No code change; the commits are in `.git-blame-ignore-revs`.
-
-- `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories.
-- A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs.
-- `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)).
-- `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
+Round two (#1151): Ripwire is the default navigator; the ten largest docs open with `## At a glance`; docs over 40 KB sit on a shrink-only allowlist (`tests/operations/doc-size-allowlist.txt`); agent-tooling-only diffs skip the cargo gate. Giant-file split: inline test modules moved into their own files — step one (#1157) for `playback_control.rs`, `media_sessions.rs` and `cluster/migration.rs`, step two (#1158) for the other 38 crate files over 150 KB (65 modules); `PlayerController.swift` split into the controller, `PlayerControllerSupport.swift` and `SharedPlayerController.swift` (Apple build 254). No code change; the commits are in `.git-blame-ignore-revs`. `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories. A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs. `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)). `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
 
 ## Playback startup path: the per-read stall and the web scrim
 

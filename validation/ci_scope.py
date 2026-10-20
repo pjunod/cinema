@@ -113,6 +113,7 @@ SHIPPED_SOURCE_PATHS = (
 # The server menu-bar app has its own Swift package and no mobile release counter.
 # Shared controller changes can alter its protocol even when its Swift is unchanged.
 DESKTOP_MACOS_PATHS = (
+    "scripts/build-macos-source-runtime",
     "clients/server-tray/macos/**",
     "crates/plurx-desktop-control/**",
     "Makefile",
