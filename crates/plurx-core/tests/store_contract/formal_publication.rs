@@ -1205,11 +1205,12 @@ mod replicated {
             "{backend}: {stale_retry:?}"
         );
         // Evidence only: the test knows the successor the facade lost.
+        let live = publication_successor(&successor);
         store
             .insert_item_fenced(
                 &movie(library_id, "successor live"),
                 &successor,
-                &publication_successor(&successor),
+                &live,
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: committed successor is live: {error}"));
@@ -1225,7 +1226,6 @@ mod replicated {
         // Facade local revocation after a real commit returns FenceRejected
         // while the item stays visible: an error return does not imply that
         // no write happened.
-        let live = publication_successor(&successor);
         let revoked_fence = PublicationFence::new(live.clone());
         let revoked_publisher = PublicationStore::fenced(store.as_ref(), revoked_fence.clone());
         let revoked = {
