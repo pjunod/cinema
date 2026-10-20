@@ -18,6 +18,8 @@ baseline. Work is isolated in an independent clone on
 `codex/full-pr-suite-m0`; the user checkout is not used for edits or tests.
 Existing source fixes are identified separately from unimplemented work.
 No passing complete run is claimed until its outcomes are recorded.
+Current measurements are tracked in
+[FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md).
 
 ## 1. Outcome — every landing has complete, fresh test evidence
 
@@ -443,7 +445,7 @@ incomplete binaries; exact candidate/environment is recorded. Tests adding
 an undiscovered case, omitting a result, and failing discovery are rejected.
 Record baseline performance and the list of unresolved reds.
 
-#### M0 diagnostic implementation (2026-10-20, awaiting measured run)
+#### M0 diagnostic implementation (2026-10-20, measurement in progress)
 
 `ci.yml` accepts an explicit `diagnostic_baseline=true` with an exact
 `expected_sha` on a non-main branch. It refuses retained results and promotion
@@ -476,10 +478,27 @@ run is observational, with existing runner cache state recorded; it cannot estab
 warm/cold variance or a p95 from a single sample. M0 remains open until the run,
 source inventory reconciliation, unresolved reds and environment gaps are recorded.
 
+#### First measured priorities
+
+The [baseline report](FULL-SUITE-BASELINE-2026-10-20.md) already separates
+three substantial costs: Store's serial bodies take 75m36s, seven jobs occupy
+the single eligible topology runner for 77m02s, and the recovery validator is
+built independently three times for 14m24s. These observations make Store
+fixture lifecycle/isolation and balanced shards, compatible build reuse, and
+runner placement the first optimization investigations. iPhone and tvOS
+add 20 minutes waiting for Xcode simulator diagnostics after native bundles
+finish, including after a passing tvOS bundle. Investigate that reporting
+phase while preserving native failures and necessary failure artifacts.
+These observations do not establish an achieved full-suite duration.
+The proposed 45-minute warm target needs
+qualified Store parallelism or less repeated setup; cache improvements alone
+cannot meet it with the observed serial Store body.
+
 ### 6.2 M1 — repair failure ownership and qualify existing fixes
 
 **Files:** affected core migration/Store fixtures, HTTP/Source fixtures,
-transcode tests and focused regressions. Run after M0; serialize overlapping
+transcode tests, Apple/golden assertions and diagnostic collection controls,
+and focused regressions. Run after M0; serialize overlapping
 fixture edits with M2.
 
 Qualify the endpoint, route, runtime, child and body-budget fixes already
@@ -593,7 +612,7 @@ not part of the requested fresh-execution contract.
 | Milestone | State | Evidence / remaining work |
 |---|---|---|
 | Audit and plan | Complete | Read-only source inventory and Forgejo sample in the linked JSON; no controlled current full pass |
-| M0 | In progress · Codex | Independent clone, runtime manifests, diagnostic source binding and timing/resource collectors; complete-run evidence pending |
+| M0 | Instrumentation built; measurement and qualification open · Codex | Independent clone on `codex/full-pr-suite-m0`, draft PR #1237 into `effort/full-pr-suite`; frozen `86f13850` runtime observations in the linked baseline report, with unfinished executions and fixture gaps explicit |
 | M1 | Unclaimed | Current repair qualification and failure-safe cleanup |
 | M2 | Unclaimed | Measured fixture setup optimizations |
 | M3 | Unclaimed | Qualified execution/sharding and host budgets |
@@ -601,5 +620,6 @@ not part of the requested fresh-execution contract.
 | M5 | Unclaimed | Pilot, policy cutover and complete effort promotion |
 
 The ledger records owner, task branch/PR, tested SHA/tree, commands, counts,
-resource/timing evidence and acceptance outcome as work is claimed. This
-plan is ready for implementation; none of M0–M5 is recorded as built.
+resource/timing evidence and acceptance outcome as work is claimed.
+M0 instrumentation is implemented and under measurement; M1–M5 remain unclaimed.
+A diagnostic observation does not qualify the complete execution gate.

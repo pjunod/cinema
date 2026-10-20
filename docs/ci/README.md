@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md) · [data](FULL-SUITE-BASELINE-2026-10-20.json) | Frozen M0 runtime observations, queue/build/test timing and explicit qualification gaps. | open |
 | [FULL-SUITE-EVERY-PR-PLAN.md](FULL-SUITE-EVERY-PR-PLAN.md) | October 20 source/run audit, ranked slowdown findings, and the implementation contract for fresh complete tests on every ready PR; runtime qualification remains pending. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
