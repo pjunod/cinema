@@ -1114,4 +1114,28 @@ mod tests {
         release.source_commit = "e".repeat(40);
         assert!(verify_installed_identity(&c, &i, &release).is_err());
     }
+    #[test]
+    fn fresh_source_intent_can_digest_a_configuration_before_its_parent_exists() {
+        let scratch = Scratch::new();
+        let mut i = installation(&scratch.0);
+        i.paths.config = scratch.0.join("not-created/config/plurx.toml");
+        assert!(!i.paths.config.parent().expect("parent").exists());
+        let absent =
+            transaction::config_digest(&i).expect("missing parent represents absent configuration");
+        assert_eq!(
+            absent,
+            transaction::config_digest(&i).expect("stable missing configuration")
+        );
+        fs::create_dir_all(i.paths.config.parent().expect("parent"))
+            .expect("package creates parent");
+        assert_eq!(
+            absent,
+            transaction::config_digest(&i).expect("absent file has same identity")
+        );
+        fs::write(&i.paths.config, "[server]\n").expect("package configuration");
+        assert_ne!(
+            absent,
+            transaction::config_digest(&i).expect("present configuration bound")
+        );
+    }
 }
