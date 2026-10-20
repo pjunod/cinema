@@ -90,6 +90,17 @@ def normalized(value):
     return path
 
 
+def unsafe_source_mode(meta):
+    """The selected, owned checkout may intentionally be group editable.
+
+    Installing from this checkout already trusts its source and collaborators.
+    Do not infer private group membership from incomplete NSS enumeration.
+    Installed executables and private state have separate, stricter checks.
+    """
+    return bool(meta.st_mode & 0o002 or
+                (meta.st_uid != os.getuid() and meta.st_mode & 0o020))
+
+
 def trusted_executable(value):
     path = normalized(value)
     meta = path.stat()
@@ -160,8 +171,8 @@ def read_environment(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as stream:
         meta = os.fstat(stream.fileno())
-        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o022 or meta.st_nlink != 1 or meta.st_size > LIMIT:
-            fail("policy_conflict", "Compose environment must be an owned, unshared regular file")
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or unsafe_source_mode(meta) or meta.st_nlink != 1 or meta.st_size > LIMIT:
+            fail("policy_conflict", f"Compose environment must be an owned regular file without world-write: {path} (uid={meta.st_uid}, gid={meta.st_gid}, mode={stat.S_IMODE(meta.st_mode):04o})")
         content = stream.read(LIMIT + 1)
     if len(content) > LIMIT:
         fail("policy_conflict", "Compose environment exceeds its bounded size limit")
@@ -189,8 +200,8 @@ def compose_environment(checkout, project):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             meta = os.fstat(stream.fileno())
-            if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or meta.st_mode & 0o022 or meta.st_size > LIMIT:
-                fail("invalid_installation", "Compose inputs must be bounded protected regular files")
+            if not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.getuid()) or unsafe_source_mode(meta) or meta.st_size > LIMIT:
+                fail("invalid_installation", f"Compose input must be an owned/root-owned bounded regular file without untrusted write permissions: {path} (uid={meta.st_uid}, gid={meta.st_gid}, mode={stat.S_IMODE(meta.st_mode):04o})")
             content = stream.read(LIMIT + 1)
         if len(content) > LIMIT:
             fail("invalid_installation", "Compose input exceeds its bounded size limit")
@@ -291,6 +302,8 @@ def update_environment(backend, policy, intent=None, plan_only=False):
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IMODE(meta.st_mode))
         with os.fdopen(fd, "wb") as stream:
+            # Creation umask must not strip intentional group-write on .env.
+            os.fchmod(stream.fileno(), stat.S_IMODE(meta.st_mode))
             stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())

@@ -16,6 +16,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux Compose tray installation accepts the selected user-owned checkout and
+  Compose files with ordinary group-write permissions, without changing them.
+  Private tray state remains protected; permission errors name the exact path.
+
 - Linux GUI Compose installations can install a separate host tray for the
   selected local deployment, including status, logs, graceful lifecycle controls
   and separate container boot and tray login preferences. Headless hosts and
