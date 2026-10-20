@@ -1224,7 +1224,7 @@ impl TranscodeManager {
         request: &SessionRequest,
     ) -> Result<plurx_core::transcode::dv_processing::DvSelection, String> {
         use plurx_core::transcode::dv_processing::{
-            DvFallbackReason, DvSelection, dv_processing_preflight,
+            dv_processing_preflight, DvFallbackReason, DvSelection,
         };
         let (existing, destination, allowed) = request.dv_processing_route()?;
         let reason = dv_processing_preflight(

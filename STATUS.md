@@ -19,9 +19,15 @@ admitted predecessor epoch now reach the common exact-root attachment path.
 Cleanup is armed with the actual successor owner at registry commit, before
 later async marking/sealing. Ordinary serialized descriptors still grant no
 execution authority, and shared encoding priority is not changed by staging.
-Pinned native compilation, remaining lifecycle acceptance, independent final
-review and the affected qualification/merge gate remain outstanding; authored
-regressions have not yet been executed. No live failure reproduction is claimed.
+Authored lifecycle controls now cover two successive normal durable commits and
+parent retirements, mixed GPU1/CPU15 admission in the manager's real scheduler,
+cancellation at attachment/facts/seal boundaries, frozen-epoch rejection and
+actual-owner-bound controlled publication. They have not been executed. Early
+production checkpoint `b377f36f2` passed pinned fmt/all-target Clippy; complete
+candidate compilation, independent final review/fixes, the affected batch and
+required merge gate remain. Actual B #1211 is merged (`9753284e`, green lane
+5600); its history is incorporated without changing this candidate's tree.
+No live failure reproduction, renderer accuracy or deployment is claimed.
 
 ## Native server tray, startup policy and release upgrades
 

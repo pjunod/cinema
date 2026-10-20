@@ -33,14 +33,12 @@ impl TranscodeManager {
 
 fn pause_at(session: &str, boundary: &'static str) -> Arc<PreparationPause> {
     let pause = Arc::new(PreparationPause::default());
-    assert!(
-        PAUSES
-            .get_or_init(Default::default)
-            .lock()
-            .expect("preparation pauses")
-            .insert((session.to_owned(), boundary), Arc::clone(&pause))
-            .is_none()
-    );
+    assert!(PAUSES
+        .get_or_init(Default::default)
+        .lock()
+        .expect("preparation pauses")
+        .insert((session.to_owned(), boundary), Arc::clone(&pause))
+        .is_none());
     pause
 }
 
@@ -219,6 +217,12 @@ async fn staged_processed_root_refuses_current_input_and_owner_drift_without_spe
             "caps",
             "audio-offset",
             "audio-delivery",
+            "audio-claim",
+            "audio-track",
+            "source-size",
+            "file",
+            "missing-destination",
+            "previous-session",
             "geometry",
             "codec",
             "digest",
@@ -248,6 +252,14 @@ async fn staged_processed_root_refuses_current_input_and_owner_drift_without_spe
                 }
                 "audio-offset" => changed.request.audio_offset_ms = 1,
                 "audio-delivery" => changed.request.audio_delivery = None,
+                "audio-claim" => changed.request.audio_claim = None,
+                "audio-track" => changed.request.audio_index = Some(987),
+                "source-size" => changed.source_size += 1,
+                "file" => changed.request.file_id += 1,
+                "missing-destination" => changed.request.dv_processing_destination = None,
+                "previous-session" => {
+                    changed.request.previous_session_id = Some(f.session_id.clone())
+                }
                 "geometry" => {
                     changed
                         .candidate_catalog
@@ -307,20 +319,36 @@ async fn staged_processed_root_refuses_current_input_and_owner_drift_without_spe
             let mut wrong = expectation(&f, &incarnation, &session);
             wrong.owner_node_id = node.into();
             wrong.owner_epoch = epoch;
-            assert!(
-                f.manager
-                    .restore_staged_processed_root(
-                        &mut changed,
-                        &wrong,
-                        Instant::now() + Duration::from_secs(5)
-                    )
-                    .await
-                    .is_err()
-            );
+            assert!(f
+                .manager
+                .restore_staged_processed_root(
+                    &mut changed,
+                    &wrong,
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .await
+                .is_err());
         }
         assert!(
             f.manager.vod.hls_facts(&f.session_id).await.is_some(),
             "incumbent remains usable"
+        );
+        f.manager
+            .store
+            .put_setting(keys::SW_POOL_THREADS, "14")
+            .await
+            .expect("planning drift");
+        let mut changed = original.clone();
+        assert!(
+            f.manager
+                .restore_staged_processed_root(
+                    &mut changed,
+                    &expected,
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .await
+                .is_err(),
+            "a new planning generation cannot borrow the old graph"
         );
         f.manager
             .vod
@@ -976,13 +1004,12 @@ async fn staged_processed_second_successor_survives_normal_commit_and_parent_ret
             assert_eq!(encoding.processed_fel(), Some(true));
             // A selected descriptor is not report authority. Only the checked
             // control window's publication to this actual owner awards HDR10-E.
-            assert!(
-                f.manager
-                    .vod
-                    .dv_effective_report(&session, &incarnation)
-                    .await
-                    .is_none()
-            );
+            assert!(f
+                .manager
+                .vod
+                .dv_effective_report(&session, &incarnation)
+                .await
+                .is_none());
             f.manager
                 .vod
                 .test_publish_processed_control(&session, f.receipt.clone(), &f.payloads)
@@ -1045,8 +1072,8 @@ async fn staged_processed_second_successor_survives_normal_commit_and_parent_ret
 }
 
 #[tokio::test]
-async fn staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed()
- {
+async fn staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed(
+) {
     for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
         let mut f = fixture(destination).await;
         let (incarnation, session, json) = stage(&f).await;
@@ -1170,6 +1197,10 @@ async fn staged_processed_roots_reconstruct_both_destinations_without_serialized
             f.encoding.admissions.software_in_use(),
             15,
             "exclusive worker retains credit"
+        );
+        assert!(
+            !prepare(&f, &session, &json).await,
+            "completed capture without a local graph cannot mint authority again"
         );
         drop(f.worker.take());
         assert_eq!(f.encoding.admissions.in_use(), 0);
