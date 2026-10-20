@@ -8,6 +8,8 @@ an existing server is stopped; source packages delegate service policy here.
 import argparse
 from dataclasses import dataclass
 import hashlib
+import importlib.machinery
+import importlib.util
 import grp
 import json
 import os
@@ -218,7 +220,20 @@ def nfpm_tool(stage, architecture):
     return stage
 
 
-def build_context(packager):
+def tray_release_module():
+    loader = importlib.machinery.SourceFileLoader("linux_tray_release", str(ROOT / "scripts/linux-tray-release"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def tray_runtime_dependencies(packager):
+    command = ["apt-get", "install", "-y", "--no-install-recommends", "libgtk-4-1", "xdg-utils"] if packager == "deb" else ["dnf", "install", "-y", "gtk4", "xdg-utils"]
+    run(command, root=True, stdout=sys.stderr)
+
+
+def build_context(packager, *, build_tray=False):
     commit, version = source_identity()
     channel = re.search(r'^channel\s*=\s*"([^"]+)"', (ROOT / "rust-toolchain.toml").read_text(), re.M)[1]
     rustc = Path(output(["rustup", "which", "--toolchain", channel, "rustc"], env={**os.environ, "RUSTUP_AUTO_INSTALL": "0"}))
@@ -234,7 +249,9 @@ def build_context(packager):
     env = {**os.environ, "PATH": str(rustc.parent) + os.pathsep + os.environ.get("PATH", ""),
            "RUSTC": str(rustc), "PLURX_BUILD_SHA": commit}
     env.pop("CARGO_BUILD_TARGET", None)
-    deps = ["apt-get", "install", "-y", "build-essential", "pkg-config", "libgtk-4-dev", "xdg-utils"] if packager == "deb" else ["dnf", "install", "-y", "gcc", "gcc-c++", "pkgconf-pkg-config", "gtk4-devel", "xdg-utils"]
+    deps = ["apt-get", "install", "-y", "build-essential", "pkg-config"] if packager == "deb" else ["dnf", "install", "-y", "gcc", "gcc-c++", "pkgconf-pkg-config"]
+    if build_tray:
+        deps.extend(["libgtk-4-dev", "xdg-utils"] if packager == "deb" else ["gtk4-devel", "xdg-utils"])
     run(deps, root=True, stdout=sys.stderr)
     cargo = rustc.parent / "cargo"
     build_target = Path(env.get("CARGO_TARGET_DIR", ROOT / "target"))
@@ -245,7 +262,15 @@ def build_context(packager):
 
 
 def prepare(stage, args, packager):
-    commit, version, architecture, cargo, controls, env = build_context(packager)
+    release = None
+    if not getattr(args, "build_tray", False):
+        commit, version = source_identity()
+        release = tray_release_module().stage(stage / "released-tray", tag=getattr(args, "tray_release", None) or "v" + version)
+        if release["source_commit"] != commit or release["version"] != version:
+            raise ValueError("native source cohorts need the exact matching tray release; use --build-tray for an unreleased development checkout")
+    commit, version, architecture, cargo, controls, env = build_context(packager, build_tray=getattr(args, "build_tray", False))
+    if release and (release["source_commit"] != commit or release["version"] != version):
+        raise ValueError("source changed while preparing the released tray")
     run([cargo, "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins"], cwd=ROOT, env=env)
     binary = args.binary.absolute() if args.binary else controls / "plurxd"
     if not args.binary:
@@ -254,12 +279,16 @@ def prepare(stage, args, packager):
         raise ValueError("daemon source identity differs from this checkout; rebuild before installing")
     if not Path(str(binary) + ".dwp").is_file():
         raise ValueError("Linux package installation requires the daemon's paired .dwp debug file; rebuild with the checked-in release profile")
-    run([cargo, "build", "--locked", "--release", "-p", "plurx-tray"], cwd=ROOT, env=env)
+    if getattr(args, "build_tray", False):
+        run([cargo, "build", "--locked", "--release", "-p", "plurx-tray"], cwd=ROOT, env=env)
+        tray = controls / "plurx-tray"
+    else:
+        tray = Path(release["tray"])
     tools = nfpm_tool(stage, architecture)
     env["PATH"] = str(tools) + os.pathsep + env["PATH"]
     packages = stage / "packages"
     run([ROOT / "scripts/package-linux", "--arch", architecture, "--version", version,
-         "--binary", binary, "--control-dir", controls, "--desktop-binary", controls / "plurx-tray",
+         "--binary", binary, "--control-dir", controls, "--desktop-binary", tray,
          "--out", packages, "--packager", packager, "--service-policy", "external"], cwd=ROOT, env=env)
     artifacts = sorted(packages.glob("*." + packager))
     if len(artifacts) != 2:
@@ -311,13 +340,26 @@ def staging_destination(destination, session):
         raise ValueError("tray output parent must be a safe directory owned by the graphical user")
 
 
-def stage_tray(destination, *, dry_run=False):
+def stage_tray(destination, *, dry_run=False, build_from_source=False, release=None):
     session = eligible_session()
     owning_user_context(session)
     staging_destination(destination, session)
     if dry_run:
-        return {"tray": str(destination / "plurx-tray"), "build": "pinned native GTK tray only", "dry_run": True}
-    commit, version, architecture, cargo, controls, env = build_context(native_format())
+        return {"tray": str(destination / "plurx-tray"), "build": "source" if build_from_source else "GitHub prebuilt tray", "release_tag": release or "latest stable", "dry_run": True}
+    if not build_from_source:
+        print("Downloading the prebuilt Linux tray from GitHub releases (runtime packages only).", file=sys.stderr, flush=True)
+        receipt = tray_release_module().stage(destination, tag=release)
+        try:
+            tray_runtime_dependencies(native_format())
+            expected = f"plurx-tray {receipt['version']} ({receipt['source_commit']})"
+            if output([destination / "plurx-tray", "--version"]) != expected:
+                raise ValueError("released tray executable differs from its artifact identity")
+            eligible_session(session.environment)
+        except BaseException:
+            shutil.rmtree(destination)
+            raise
+        return receipt
+    commit, version, architecture, cargo, controls, env = build_context(native_format(), build_tray=True)
     run([cargo, "build", "--locked", "--release", "-p", "plurx-tray"], cwd=ROOT, env=env, stdout=sys.stderr)
     executable = controls / "plurx-tray"
     if executable.is_symlink() or not executable.is_file():
@@ -680,10 +722,14 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--eligible-session", action="store_true")
     mode.add_argument("--stage-tray", type=Path)
+    parser.add_argument("--build-tray", action="store_true", help="developer option: compile the tray locally and install GTK development packages")
+    parser.add_argument("--tray-release", help="stable GitHub tray release tag (default: latest for Compose; exact source version for native)")
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--no-start", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.build_tray and args.tray_release:
+        parser.error("--build-tray and --tray-release are mutually exclusive")
     try:
         if platform.system() != "Linux":
             raise ValueError("Linux source runtime installation requires a native Linux host")
@@ -693,7 +739,7 @@ def main(argv=None):
         elif args.stage_tray:
             if args.binary or args.no_start:
                 raise ValueError("--stage-tray builds only the companion; daemon/startup flags do not apply")
-            print(json.dumps(stage_tray(args.stage_tray, dry_run=args.dry_run)))
+            print(json.dumps(stage_tray(args.stage_tray, dry_run=args.dry_run, build_from_source=args.build_tray, release=args.tray_release)))
         else:
             install(args)
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:

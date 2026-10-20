@@ -16,6 +16,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Linux installers use verified prebuilt GitHub tray artifacts by default and
+  reserve GTK development packages/local tray compilation for `--build-tray`.
+  Compose installs select the host architecture and stable release independently
+  of the container, while native source cohorts require an exact source match.
+
 - Linux Compose tray installation accepts the selected user-owned checkout and
   Compose files with ordinary group-write permissions, without changing them.
   Private tray state remains protected; permission errors name the exact path.

@@ -286,6 +286,15 @@ jobs:
           binary=release-source/target-desktop/release/plurx-tray
           max_glibc=$(readelf --version-info "$binary" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -1)
           test "$(printf '%s\n' "$max_glibc" 2.34 | sort -V | tail -1)" = 2.34
+      - name: Package the standalone host tray (no server package dependency)
+        env:
+          ARCH: ${{ matrix.arch }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          python3 scripts/linux-tray-release \
+            --binary release-source/target-desktop/release/plurx-tray \
+            --icons release-source/deploy/desktop --out dist \
+            --version "$VERSION" --commit "$COMMIT" --arch "$ARCH"
       - name: Package the .deb and .rpm
         env:
           NFPM_ASSET: ${{ matrix.nfpm_asset }}
@@ -673,6 +682,7 @@ jobs:
             "plurxd-${VERSION}-1.x86_64.rpm" "plurxd-${VERSION}-1.aarch64.rpm" \
             "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
             "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
+            "plurx-tray-${VERSION}-linux-amd64.tar.gz" "plurx-tray-${VERSION}-linux-arm64.tar.gz" \
             "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
             | LC_ALL=C sort)
           test "$(ls assets | LC_ALL=C sort)" = "$expected"
@@ -816,6 +826,7 @@ jobs:
             "plurxd-${VERSION}-1.x86_64.rpm" "plurxd-${VERSION}-1.aarch64.rpm" \
             "plurx-desktop_${VERSION}-1_amd64.deb" "plurx-desktop_${VERSION}-1_arm64.deb" \
             "plurx-desktop-${VERSION}-1.x86_64.rpm" "plurx-desktop-${VERSION}-1.aarch64.rpm" \
+            "plurx-tray-${VERSION}-linux-amd64.tar.gz" "plurx-tray-${VERSION}-linux-arm64.tar.gz" \
             "plurx-update-v1.json" "plurx-update-v1.json.sig" \
             "plurxd-${VERSION}-macos-universal.tar.gz" "plurxd-${VERSION}-windows-x86_64.zip" \
             | LC_ALL=C sort)
