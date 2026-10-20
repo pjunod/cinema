@@ -123,6 +123,13 @@ transaction action. The facade precheck, successor computation and backend
 sample are separate state fields; the full submission history remains in
 raw witness traces.
 
+With integer samples and queue duration1, a valid queue renewal computes
+`sample+1 <= old expiry`. It advances revision and tests stable binding,
+reservation updates and backward-clock outcomes, but cannot demonstrate
+ordinary forward-time queue expiry extension. The real independent-renewal
+conformance example covers that behavior; this is an explicit finite S6
+coverage limit, not a claim about all production renewal timings.
+
 Time advancement is represented by **different observations in successive
 sample actions**, including backward/fast/slow observations. There is no
 safety `Tick` action or clock monotonicity premise. The three-samples witness

@@ -200,6 +200,12 @@ is not a statement that a reboot preserves runtime Rust futures. A delayed
 backend request may commit after its initiating process has gone away; an
 old facade result is not new-boot authority.
 
+The integer queue duration1 cannot produce a forward expiry extension under
+its strict live-renewal guard: sample+1 is at most the old expiry. Queue
+revision/binding continuity and backward-clock updates are modeled; ordinary
+forward expiry extension remains executable conformance evidence rather than
+a claim of this finite exploration.
+
 Every authority operation uses the same shared safety relation from all seeds.
 Only retention preparation is selected by its maintenance seed. Publication
 records its entire relevant pre-state for S2/S3; later cancellation never
