@@ -3,6 +3,14 @@
 let SUBTITLE_TRANSLATION=null;
 let TRANSLATION_SETUP=null;
 const TRANSLATION_READ_MAX=65536;
+function translationUuid(){
+  if(typeof crypto.randomUUID==="function")return crypto.randomUUID();
+  // LAN HTTP pages expose getRandomValues, but not randomUUID.
+  const bytes=crypto.getRandomValues(new Uint8Array(16));
+  bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const hex=Array.from(bytes,byte=>byte.toString(16).padStart(2,"0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
 function translationId(value){return typeof value==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);}
 function translationDigest(value){return typeof value==="string"&&/^[0-9a-f]{64}$/.test(value);}
 function translationCounter(value){return typeof value==="string"&&/^(0|[1-9][0-9]{0,18})$/.test(value)&&(value.length<19||value<="9223372036854775807");}
@@ -25,7 +33,7 @@ function translationEnvelope(state){
   if(!state.clock)throw Error("Refresh translation status before an action");
   const elapsed=Math.max(0,performance.now()-state.clock.at);
   if(elapsed>240000)throw Error("Refresh translation status before an action");
-  return {version:1,request_id:crypto.randomUUID(),intent_expires_at_ms:Math.floor(state.clock.server+elapsed+60000)};
+  return {version:1,request_id:translationUuid(),intent_expires_at_ms:Math.floor(state.clock.server+elapsed+60000)};
 }
 async function translationReadBytes(response,max){
   if(!Number.isSafeInteger(max)||max<=0||max>TRANSLATION_READ_MAX)throw Error("Invalid translation read budget");
@@ -166,7 +174,7 @@ async function translationOpen(button){
   const previous=SUBTITLE_TRANSLATION;if(previous&&translationCurrent(previous)){previous.panel?.scrollIntoView({block:"nearest"});return;}
   translationRetire();
   const panel=document.getElementById("watch-subtitle-translation");if(!panel)return;
-  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:player.audio[0].index,controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:crypto.randomUUID(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
+  const state={capture:translationCapture(),player,video,panel,attachment:player.mediaAttachment,fileId:String(player.fileId),audioChoice:player.curAudio,audioIndex:player.audio[0].index,controllers:new Set(),listeners:[],heartbeatTimer:null,heartbeatAttempt:0,segments:new Map(),cues:new Map(),coverage:[],operation:null,assetId:null,demand:null,playbackId:translationUuid(),queue:Promise.resolve(),timer:null,windowGeneration:0,retired:false,error:null};
   state.current=()=>translationCurrent(state);SUBTITLE_TRANSLATION=state;panel.hidden=false;panel.textContent="Loading translation choices…";
   try{
     const {data:options}=await translationRequest(state,`/files/${encodeURIComponent(state.fileId)}/subtitle-translation/options`);translationValidateOptions(options,state);state.options=options;
@@ -329,7 +337,7 @@ async function translationManifest(state,force){
 }
 async function translationSegment(state,reference,lease,windowGeneration){
   const {bytes}=await translationRequest(state,`/subtitle-translation/assets/${state.assetId}/segments/${reference.segment_id}`,{headers:{"X-Translation-Read-Lease":lease.id},max:state.limits.segment_bytes,raw:true});
-  const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),byte=>byte.toString(16).padStart(2,"0")).join("");
+  const digest=Array.from(new Uint8Array(await cinemaDiagnosticSHA256(bytes)),byte=>byte.toString(16).padStart(2,"0")).join("");
   if(!state.current()||state.windowGeneration!==windowGeneration||state.lease!==lease||!translationLeaseCurrent(state))return;
   if(digest!==reference.digest)throw Error("Caption segment digest mismatch");
   // Parse only after the exact fetched bytes have passed the digest boundary.
