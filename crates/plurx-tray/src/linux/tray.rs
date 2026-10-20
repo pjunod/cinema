@@ -114,20 +114,38 @@ mod tests {
     use zbus::blocking::{Connection, Proxy};
     use zbus::zvariant::OwnedValue;
 
+    const DOCKER_DETAIL: &str = "Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts.";
+
+    fn running_status() -> crate::protocol::StatusV1 {
+        crate::protocol::StatusV1 {
+            installation_id: "test".into(),
+            service_state: ServiceState::Running,
+            version: Some("test".into()),
+            browser_origin: "http://127.0.0.1:32400".into(),
+            server_startup: crate::protocol::StartupStateV1 {
+                state: crate::protocol::StartupState::Enabled,
+                detail: Some(DOCKER_DETAIL.into()),
+            },
+            tray_startup: crate::protocol::StartupStateV1 {
+                state: crate::protocol::StartupState::Enabled,
+                detail: None,
+            },
+            transaction_id: None,
+        }
+    }
+
     #[test]
     fn panel_menu_is_compact_and_control_window_retains_details() {
-        let detail = "Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts.";
         let mut snapshot = crate::model::Snapshot::new("test", crate::model::Management::Supported);
+        snapshot.status = Some(running_status());
         // Long errors remain available in the wrapping window.
-        snapshot.last_error = Some(detail.into());
-        let mut entries = crate::model::build(&snapshot);
-        entries.push(Entry {
-            kind: Kind::Detail,
-            title: detail.into(),
-            action: None,
-            enabled: false,
-            check: None,
-        });
+        let error = format!("Controller error\n{}", "é".repeat(100));
+        snapshot.last_error = Some(error.clone());
+        let entries = crate::model::build(&snapshot);
+        assert!(entries
+            .iter()
+            .any(|e| e.title == DOCKER_DETAIL && e.kind == Kind::Detail));
+        assert!(entries.iter().any(|e| e.title == error));
         let (tx, _rx) = async_channel::unbounded();
         let tray = SniTray {
             entries: entries.clone(),
@@ -136,12 +154,12 @@ mod tests {
         };
         let menu = ksni::Tray::menu(&tray);
         assert_eq!(menu.len(), entries.len() - 1);
-        assert!(entries.iter().any(|e| e.title == detail));
         assert_eq!(label("hello_world\nnext"), "hello__world next");
         assert_eq!(label(&"é".repeat(100)).chars().count(), 57);
-        assert!(label(detail).ends_with('…'));
+        assert!(label(&error).ends_with('…'));
         for item in menu {
             if let ksni::MenuItem::Standard(item) = item {
+                assert!(!item.label.starts_with("Docker restart policy"));
                 assert!(!item.label.contains('\n'));
                 assert!(item.label.chars().count() <= 57);
             }
@@ -214,12 +232,7 @@ mod tests {
         let menu = Proxy::new(&conn, name.as_str(), "/MenuBar", "com.canonical.dbusmenu").unwrap();
         // Opening the panel menu and a successful status refresh must leave its callbacks live.
         let _: bool = menu.call("AboutToShow", &(0_i32,)).unwrap();
-        snapshot.status = Some(crate::protocol::StatusV1 {
-            installation_id: "test".into(), service_state: ServiceState::Running,
-            version: Some("test".into()), browser_origin: "http://127.0.0.1:32400".into(),
-            server_startup: crate::protocol::StartupStateV1 { state: crate::protocol::StartupState::Enabled, detail: Some("Docker restart policy: unless-stopped. Docker itself must start at boot; manually stopped containers remain stopped across Docker restarts.".into()) },
-            tray_startup: crate::protocol::StartupStateV1 { state: crate::protocol::StartupState::Enabled, detail: None }, transaction_id: None,
-        });
+        snapshot.status = Some(running_status());
         let entries = crate::model::build(&snapshot);
         handle.update(|t| {
             t.entries = entries.clone();
