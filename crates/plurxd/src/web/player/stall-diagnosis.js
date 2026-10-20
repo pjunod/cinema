@@ -845,6 +845,21 @@ async function switchAutoCandidate(p,v,current,decision){
     p.abr.requestedCandidateId=chosen.id;
     p.autoRequestedHeight=null;
     p.abr.switching=true;
+    // Record the request before preparation can fail or be superseded. The
+    // completed-switch receipt alone loses the cause of a failed trial.
+    const pressure=p.abr.qualityPressureTransfer, now=performance.now();
+    const pressureKbps=pressure?.attachment===p.mediaAttachment
+      &&now-pressure.atMs>=0&&now-pressure.atMs<=15000
+      &&Number.isFinite(pressure.bps)&&pressure.bps>0
+      ?Math.round(pressure.bps/1000):null;
+    const transferBps=PlaybackPolicy.qualityTransferBps(candidateTransferEvidence(p,now));
+    const encode=p.health&&p.health.active_encode_milli_realtime;
+    clientLog(Object.assign({level:'info',event:'auto_quality_decision',
+      detail:`requested ${move.from} → ${move.to}: ${decision.reason}`,
+      message:`Auto quality trial requested — ${decision.reason}; `+
+        `completed_kbps=${transferBps>0?Math.round(transferBps/1000):'unknown'}; `+
+        `pressure_kbps=${pressureKbps??'unknown'}; encode_milli_realtime=${encode??'unknown'}`},
+      playbackContext()));
     const outcome=await requestQualityChange(p,'auto-quality',reopen,move,standingSelection);
     if(outcome==='continuous'&&p.directedChange&&!p.directedChange.settled){
       retained=true;
@@ -918,11 +933,16 @@ async function stallDiagnose(){
   const pending=p&&p.controlSeek;
   if(pending?.localVodSeekFallbackPending&&pending.executed
      &&!playbackSeekBufferCovers(v,p,pending.targetMs)) return;
+  // Startup and stall timers can both be due for the same attachment. A
+  // terminal diagnosis retires its startup episode, so a queued watchdog must
+  // not reinterpret that cancelled episode as a fresh generic source stall.
+  if(playbackAttemptTerminallyStopped(p)) return;
   const hlsStartup=hlsStartupIncomplete(p);
   if(!playbackOwnsAttachedMedia(p) || (!hlsStartup&&p.started)) return;
   if(hlsStartup&&p.hlsStartup.state==='paused') return;
   const generation=p._seekToken||0, action=p.controlIntentGeneration||0, attachment=p.mediaAttachment;
   const current=()=>playbackOwnsAttachedMedia(p)&&(hlsStartupIncomplete(p)||!p.started)
+    &&!playbackAttemptTerminallyStopped(p,attachment)
     &&p.mediaAttachment===attachment
     &&(p._seekToken||0)===generation
     &&(p.controlIntentGeneration||0)===action;

@@ -11,6 +11,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [WEB-PREPARED-SEEK-INCIDENT.md](WEB-PREPARED-SEEK-INCIDENT.md) | October 20 ROG backward-seek failure: subtitle reattachment cancelled the Auto request before commit; underlying repair, recovery ownership, quality indicators and remaining live qualification. | open |
 | [BROWSER-HDR-RESTART-LIFECYCLE-RCA.md](BROWSER-HDR-RESTART-LIFECYCLE-RCA.md) | Close/Resume HDR downgrade, lost DV cancellation, Safari startup intent corruption, lifecycle ownership and remaining stale-session evidence. | open |
 | [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
 | [TCL-CATALOG-REPAIR-STATUS.md](TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |

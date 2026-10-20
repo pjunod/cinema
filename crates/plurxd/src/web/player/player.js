@@ -191,6 +191,7 @@
  * @property {string|null} [waitReportedDetail]
  * @property {number|null} [waitNudgedAt]  the wait began-time a nudge was already spent on
  * @property {any} [surfaceState]          the presenter's shared state (PLAYBACK_SURFACE)
+ * @property {any} [qualityChrome]         last presented dimensions and transient quality notice
  * @property {any} [progressWatch]         the presentation-progress watch ({key, clock, frames, at, startedAt, fired})
  * @property {number|null} [presentationAdvancedAt] performance.now() the presented position last advanced
  * @property {{attachment:any,element:HTMLMediaElement}|null} [transportPresentation] actual presentation proof for the current attachment and element
@@ -683,7 +684,8 @@ function armHlsStartupRetry(video,player,episode){
     if(episode.retry.intentGeneration!==(player.controlIntentGeneration||0)){
       episode.retry.state='cancelled'; return;
     }
-    if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
+    if(episode.state!=='presenting'&&performance.now()>=episode.deadlineMs)
+      return exhaustHlsStartup(player,'deadline');
     const seekLoading=episode.pausedSeek?.pending===player.controlSeek
       &&episode.pausedSeek?.attachment===player.mediaAttachment
       &&episode.pausedSeek?.intentGeneration===(player.controlIntentGeneration||0);
