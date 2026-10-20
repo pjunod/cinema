@@ -39,6 +39,47 @@ jobs:
         timeout-minutes: 3
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Preserve exact committed safe observer outside tested checkout
+        timeout-minutes: 1
+        env:
+          WORKFLOW_TRANSPORT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          python3 - <<'PYCOPY'
+          import ast, hashlib, json, os, pathlib, re, subprocess, sys, tempfile
+          transport = os.environ['WORKFLOW_TRANSPORT_SHA']
+          assert re.fullmatch('[0-9a-f]{40}', transport)
+          actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert actual == transport, 'Observer checkout differs from workflow transport'
+          temporary = pathlib.Path(os.environ['RUNNER_TEMP']).resolve()
+          checkout = pathlib.Path.cwd().resolve()
+          assert temporary.is_dir() and not temporary.is_relative_to(checkout), 'Observer must be outside tested checkout'
+          source = 'validation/baseline_commands.py'
+          spec = transport + ':' + source
+          payload = subprocess.check_output(['git', 'show', spec])
+          blob = subprocess.check_output(['git', 'rev-parse', spec], text=True).strip()
+          assert subprocess.check_output(['git', 'hash-object', '--stdin'], input=payload).decode().strip() == blob
+          for node in ast.walk(ast.parse(payload, filename=source)):
+              if isinstance(node, ast.ImportFrom):
+                  assert node.level == 0 and node.module, 'Standalone observer cannot use relative imports'
+              imports = ([alias.name.split('.')[0] for alias in node.names] if isinstance(node, ast.Import) else [node.module.split('.')[0]] if isinstance(node, ast.ImportFrom) and node.module else [])
+              assert all(name in sys.stdlib_module_names for name in imports), 'Standalone observer must use only the standard library'
+          owned = pathlib.Path(tempfile.mkdtemp(prefix='plurx-apple-observer-', dir=temporary))
+          observer = owned / 'baseline_commands.py'
+          observer.write_bytes(payload)
+          digest = hashlib.sha256(observer.read_bytes()).hexdigest()
+          assert observer.read_bytes() == payload
+          receipt = owned / 'observer-provenance.json'
+          receipt.write_text(json.dumps(dict(workflow_transport_sha=transport, source_path=source, git_blob=blob, blob_sha256=digest, external_path=str(observer), standard_library_only=True), indent=2))
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('PLURX_BASELINE_COMMANDS=' + str(observer) + '\n')
+              environment.write('PLURX_BASELINE_OBSERVER_RECEIPT=' + str(receipt) + '\n')
+          PYCOPY
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
+        with:
+          persist-credentials: false
           ref: ${{ inputs.expected_sha }}
       - name: Bind exact frozen source and workflow transport
         id: bind
@@ -50,7 +91,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PYBIND'
-          import json, os, pathlib, platform, re, subprocess
+          import hashlib, json, os, pathlib, platform, re, subprocess
           assert os.environ['DIAGNOSTIC_BASELINE'] == 'true', 'Diagnostic continuation only'
           expected, transport = os.environ['EXPECTED_SHA'], os.environ['WORKFLOW_TRANSPORT_SHA']
           assert all(re.fullmatch('[0-9a-f]{40}', item) for item in [expected, transport])
@@ -65,6 +106,15 @@ jobs:
           status = git('status', '--porcelain', '--untracked-files=all')
           (output / 'source-before.json').write_text(json.dumps(dict(candidate_sha=actual, candidate_tree=tree, status=status)))
           assert not status, 'Initial source must be clean'
+          observer = pathlib.Path(os.environ['PLURX_BASELINE_COMMANDS']).resolve()
+          assert observer.is_file() and not observer.is_relative_to(pathlib.Path.cwd().resolve())
+          provenance = json.loads(pathlib.Path(os.environ['PLURX_BASELINE_OBSERVER_RECEIPT']).read_text())
+          assert provenance['workflow_transport_sha'] == transport
+          assert provenance['source_path'] == 'validation/baseline_commands.py'
+          assert provenance['external_path'] == str(observer) and provenance['standard_library_only'] is True
+          assert provenance['blob_sha256'] == hashlib.sha256(observer.read_bytes()).hexdigest(), 'External observer changed'
+          (output / 'observer-provenance.json').write_text(json.dumps(provenance, indent=2))
+          (output / 'baseline-commands-observer.py').write_bytes(observer.read_bytes())
           (output / 'continuation-provenance.json').write_text(json.dumps(dict(tested_sha=actual, tested_tree=tree, workflow_transport_sha=transport, observation_kind='separate-Apple-unit-continuation', primary_run_id=5620, cell=cell, python=platform.python_version(), limitation='Separate fresh execution; preserve primary3601s timeout and timing. No result reuse or TV navigation claim.'), indent=2))
           with open(os.environ['GITHUB_ENV'], 'a') as environment:
               for key, value in dict(PLURX_BASELINE_DIR=str(output), PLURX_TEST_CANDIDATE_SHA=actual, PLURX_TEST_CANDIDATE_TREE=tree).items():
@@ -129,7 +179,7 @@ jobs:
         timeout-minutes: 5
         shell: bash
         run: |
-          python3 -m validation.baseline_commands --manifest "$PLURX_BASELINE_DIR/simulator-setup.json" --output "$PLURX_BASELINE_DIR/simulator-setup"
+          python3 "$PLURX_BASELINE_COMMANDS" --manifest "$PLURX_BASELINE_DIR/simulator-setup.json" --output "$PLURX_BASELINE_DIR/simulator-setup"
       - name: Preserve native setup evidence before another phase
         if: always() && env.PLURX_BASELINE_DIR != '' && matrix.cell != 'desktop'
         timeout-minutes: 1
@@ -186,7 +236,7 @@ jobs:
         timeout-minutes: 3
         shell: bash
         run: |
-          python3 -m validation.baseline_commands --manifest "$PLURX_BASELINE_DIR/project.json" --output "$PLURX_BASELINE_DIR/project"
+          python3 "$PLURX_BASELINE_COMMANDS" --manifest "$PLURX_BASELINE_DIR/project.json" --output "$PLURX_BASELINE_DIR/project"
       - name: Preserve native project evidence before another phase
         if: always() && env.PLURX_BASELINE_DIR != '' && matrix.cell != 'desktop'
         timeout-minutes: 1
@@ -202,7 +252,7 @@ jobs:
         timeout-minutes: 11
         shell: bash
         run: |
-          python3 -m validation.baseline_commands --manifest "$PLURX_BASELINE_DIR/build.json" --output "$PLURX_BASELINE_DIR/build"
+          python3 "$PLURX_BASELINE_COMMANDS" --manifest "$PLURX_BASELINE_DIR/build.json" --output "$PLURX_BASELINE_DIR/build"
       - name: Preserve native build evidence before another phase
         if: always() && env.PLURX_BASELINE_DIR != '' && matrix.cell == 'desktop'
         timeout-minutes: 1
@@ -231,7 +281,7 @@ jobs:
         timeout-minutes: 21
         shell: bash
         run: |
-          python3 -m validation.baseline_commands --manifest "$PLURX_BASELINE_DIR/units.json" --output "$PLURX_BASELINE_DIR/units"
+          python3 "$PLURX_BASELINE_COMMANDS" --manifest "$PLURX_BASELINE_DIR/units.json" --output "$PLURX_BASELINE_DIR/units"
       - name: Preserve native units evidence before another phase
         if: always() && env.PLURX_BASELINE_DIR != ''
         timeout-minutes: 1

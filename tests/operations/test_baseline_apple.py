@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import textwrap
 from types import SimpleNamespace
@@ -40,6 +42,93 @@ class BaselineAppleCase(unittest.TestCase):
         path = Path(directory) / 'FrozenMakefile'
         path.write_text(source)
         return subprocess.check_output(['make', '--no-print-directory', '-f', str(path), '-n', 'apple-test'], cwd=ROOT, text=True)
+
+    def observer_fixture(self, directory):
+        base = Path(directory)
+        checkout = base / 'checkout'
+        checkout.mkdir()
+        (checkout / '.gitignore').write_text('/target\n')
+        module = checkout / 'validation/baseline_commands.py'
+        module.parent.mkdir()
+        module.write_text('# frozen old collector, never executed by continuation\n')
+        (checkout / 'native-source.txt').write_text('frozen native source\n')
+        subprocess.run(['git', 'init', '-q'], cwd=checkout, check=True, capture_output=True)
+        def commit():
+            subprocess.run(['git', 'add', '.'], cwd=checkout, check=True, capture_output=True)
+            subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                            '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'],
+                           cwd=checkout, check=True, capture_output=True)
+            return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=checkout, text=True).strip()
+        frozen = commit()
+        payload = subprocess.check_output(['git', 'show', 'HEAD:validation/baseline_commands.py'], cwd=ROOT)
+        module.write_bytes(payload)
+        transport = commit()
+        runtime = base / 'runtime'
+        runtime.mkdir()
+        environment = os.environ | dict(WORKFLOW_TRANSPORT_SHA=transport, RUNNER_TEMP=str(runtime),
+            GITHUB_ENV=str(base / 'copy.env'), GITHUB_RUN_ID='42', GITHUB_RUN_ATTEMPT='3',
+            CONTINUATION_CELL='iphone', EXPECTED_SHA=frozen, DIAGNOSTIC_BASELINE='true',
+            PYTHONDONTWRITEBYTECODE='1')
+        return checkout, environment, payload
+
+    def copy_observer(self, checkout, environment):
+        result = subprocess.run([sys.executable, '-c', embedded('PYCOPY')], cwd=checkout,
+                                env=environment, capture_output=True, text=True)
+        path = Path(environment['GITHUB_ENV'])
+        if path.exists():
+            environment |= dict(line.split('=', 1) for line in path.read_text().splitlines())
+        return result
+
+    def test_real_committed_safe_observer_survives_frozen_checkout_with_exact_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, environment, payload = self.observer_fixture(directory)
+            # A local transport worktree edit must never enter the executable copy.
+            (checkout / 'validation/baseline_commands.py').write_text('# local uncommitted edit\n')
+            copied = self.copy_observer(checkout, environment)
+            self.assertEqual(copied.returncode, 0, copied.stderr)
+            observer = Path(environment['PLURX_BASELINE_COMMANDS'])
+            self.assertFalse(observer.is_relative_to(checkout))
+            self.assertEqual(observer.read_bytes(), payload)
+            receipt = json.loads(Path(environment['PLURX_BASELINE_OBSERVER_RECEIPT']).read_text())
+            self.assertEqual(receipt['blob_sha256'], hashlib.sha256(payload).hexdigest())
+            self.assertEqual(receipt['workflow_transport_sha'], environment['WORKFLOW_TRANSPORT_SHA'])
+            blob = subprocess.check_output(['git', 'rev-parse', environment['WORKFLOW_TRANSPORT_SHA'] + ':validation/baseline_commands.py'], cwd=checkout, text=True).strip()
+            self.assertEqual(receipt['git_blob'], blob)
+            subprocess.run(['git', 'checkout', '-q', '-f', environment['EXPECTED_SHA']], cwd=checkout, check=True)
+            result = subprocess.run([sys.executable, '-c', embedded('PYBIND')], cwd=checkout,
+                                    env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = checkout / 'target/full-suite-baseline/42-3-apple-iphone'
+            self.assertEqual(json.loads((output / 'observer-provenance.json').read_text()), receipt)
+            self.assertEqual((output / 'baseline-commands-observer.py').read_bytes(), payload)
+            self.assertFalse(json.loads((output / 'source-before.json').read_text())['status'])
+            self.assertIn('frozen old collector', (checkout / 'validation/baseline_commands.py').read_text())
+            help_result = subprocess.run([sys.executable, str(observer), '--help'], cwd=checkout,
+                                         env=environment, capture_output=True, text=True)
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+
+    def test_observer_copy_refuses_nonstdlib_source_before_any_launch_export(self):
+        for payload in ('from validation import helper\n', 'from . import helper\n'):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
+                checkout, environment, _ = self.observer_fixture(directory)
+                (checkout / 'validation/baseline_commands.py').write_text(payload)
+                subprocess.run(['git', 'add', '.'], cwd=checkout, check=True)
+                subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                                '-c', 'commit.gpgsign=false', 'commit', '-qm', 'nonstandalone'],
+                               cwd=checkout, check=True, capture_output=True)
+                environment['WORKFLOW_TRANSPORT_SHA'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=checkout, text=True).strip()
+                result = self.copy_observer(checkout, environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(Path(environment['GITHUB_ENV']).exists())
+
+    def test_every_native_cell_launch_uses_external_standalone_observer(self):
+        source = WORKFLOW.read_text()
+        self.assertNotIn('python3 -m validation.baseline_commands', source)
+        launches = [line for line in source.splitlines() if ' --manifest ' in line]
+        self.assertEqual(len(launches), 4)
+        self.assertTrue(all('python3 "$PLURX_BASELINE_COMMANDS" --manifest ' in line for line in launches))
+        self.assertLess(source.index('ref: ${{ github.sha }}'), source.index('Preserve exact committed safe observer'))
+        self.assertLess(source.index('Preserve exact committed safe observer'), source.index('ref: ${{ inputs.expected_sha }}'))
 
     def test_each_mobile_destination_uses_original_recipe_pair_and_owns_build_destination(self):
         with tempfile.TemporaryDirectory() as directory:
