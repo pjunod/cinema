@@ -164,6 +164,7 @@ impl VodServe {
                                 .is_some_and(|current| Arc::ptr_eq(current, &rendition))
                     })
                     .map(|session| {
+                        session.processed_reuse_seed = None;
                         (
                             std::mem::take(&mut session.children),
                             session.root_admission.take(),
@@ -363,6 +364,50 @@ impl VodServe {
             .await
         {
             cleanup.wait().await;
+        }
+    }
+
+    /// Read-only assertion after the existing exact-owner cleanup await. Never
+    /// starts cleanup itself, so an orphan cannot be repaired by the fixture.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn test_assert_prepared_owner_detached(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+    ) {
+        let sessions = self.shared.sessions.lock().await;
+        if sessions
+            .get(session_id)
+            .is_some_and(|session| !Arc::ptr_eq(&session.incarnation, &owner.incarnation))
+        {
+            // Common replacement atomically swaps the same reader id; that
+            // new reader belongs to the replacement, not to the retired owner.
+            return;
+        }
+        if let Some(session) = sessions
+            .get(session_id)
+            .filter(|session| Arc::ptr_eq(&session.incarnation, &owner.incarnation))
+        {
+            assert!(session.tombstone.is_some());
+            assert!(session
+                .terminal_cleanup
+                .as_ref()
+                .expect("cleanup receipt")
+                .is_finished());
+            assert!(session.rendition.is_none());
+            assert!(session.children.is_empty());
+            assert!(session.root_admission.is_none());
+            assert!(session.processed_reuse_seed.is_none());
+        }
+        drop(sessions);
+        if let Some(rendition) = owner.rendition.as_ref() {
+            assert!(!rendition.readers.lock().await.contains_key(session_id));
+            assert!(!self
+                .shared
+                .pool
+                .demands(&rendition.key)
+                .iter()
+                .any(|demand| demand.session == session_id));
         }
     }
 

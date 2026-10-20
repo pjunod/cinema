@@ -101,6 +101,8 @@ windows-sys = { version = "0.61", features = [
 wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "runtime", "cranelift"] }
 
 [dev-dependencies]
+# Rewrites the checked RPU for byte-bound processed lifecycle controls only.
+dolby_vision = { workspace = true }
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }
 async-trait = { workspace = true }

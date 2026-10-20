@@ -6,6 +6,12 @@ first.
 
 <!-- status: insert new efforts below this line -->
 
+## Processed VOD successor root reuse
+
+Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225), not deployed. Exact `a857f488b` passed pinned fmt/all-target Clippy and fresh test linkage; fifteen focused contracts have valid passes (eight current, seven retained). Independent review and bounded closures are approved. Exact-root reuse preserves identity, owner and reservation fences; serialized requests grant no authority. The PR records the main gate and landing.
+
+B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
+
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,
   pins the selected local deployment, and controls graceful lifecycle and
@@ -27,13 +33,7 @@ first.
 
 **Merged to `main` as #1147 (`9de49f37`) and #1151 (`3103d0d9`), 2026-10-17; tooling and docs only, nothing to deploy.** Sessions that push should run `make hooks` once per clone — it installs the paperwork hook and Ripwire.
 
-- Round two (#1151): Ripwire is the default navigator; the ten largest docs open with `## At a glance`; docs over 40 KB sit on a shrink-only allowlist (`tests/operations/doc-size-allowlist.txt`); agent-tooling-only diffs skip the cargo gate.
-- Giant-file split: inline test modules moved into their own files — step one (#1157) for `playback_control.rs`, `media_sessions.rs` and `cluster/migration.rs`, step two (#1158) for the other 38 crate files over 150 KB (65 modules); `PlayerController.swift` split into the controller, `PlayerControllerSupport.swift` and `SharedPlayerController.swift` (Apple build 254). No code change; the commits are in `.git-blame-ignore-revs`.
-
-- `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories.
-- A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs.
-- `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)).
-- `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
+Round two (#1151): Ripwire is the default navigator; the ten largest docs open with `## At a glance`; docs over 40 KB sit on a shrink-only allowlist (`tests/operations/doc-size-allowlist.txt`); agent-tooling-only diffs skip the cargo gate. Giant-file split: inline test modules moved into their own files — step one (#1157) for `playback_control.rs`, `media_sessions.rs` and `cluster/migration.rs`, step two (#1158) for the other 38 crate files over 150 KB (65 modules); `PlayerController.swift` split into the controller, `PlayerControllerSupport.swift` and `SharedPlayerController.swift` (Apple build 254). No code change; the commits are in `.git-blame-ignore-revs`. `docs/README.md` is a 10 KB router to one index per subject folder (was 131 KB); this page keeps five efforts and moved the rest to folder histories. A root `.ignore` keeps evidence, archives, vendored and minified files out of searches; `.gitattributes` keeps large JSON out of diffs. `scripts/paperwork` checks the bookkeeping rules in about ten seconds with the fix printed under each failure. It runs from `make paperwork`, the pre-push hook, and as the first job of every pull request (drafts included), and no other job starts until it passes ([PAPERWORK.md](docs/ci/PAPERWORK.md)). `scripts/outline`, `scripts/quiet` and `scripts/ci-failures` keep file reads, build output and CI logs small; AGENTS.md opens with how to work efficiently.
 
 ## Playback startup path: the per-read stall and the web scrim
 

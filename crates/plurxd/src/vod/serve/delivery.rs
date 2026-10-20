@@ -14,6 +14,58 @@ impl VodServe {
         let sessions = self.shared.sessions.lock().await;
         let id = request.previous_session_id.as_deref()?;
         let session = sessions.get(id)?;
+        Self::capture_session_processed_root(
+            session,
+            id,
+            request,
+            supersession_user,
+            scope,
+            deadline,
+        )
+    }
+
+    /// Called only with the manager's verified staged-ledger predecessor.
+    /// Capture descriptive provenance and physical custody atomically. The
+    /// caller re-derives scope from current authoritative inputs before attach.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) async fn capture_staged_processed_root(
+        &self,
+        request: &SessionRequest,
+        predecessor: &StagedProcessedPredecessor,
+        supersession_user: &str,
+        deadline: Instant,
+    ) -> Option<(ProcessedReuseSeed, PreparedRootAdmission)> {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(&predecessor.session_id)?;
+        let seed = session.processed_reuse_seed.clone()?;
+        if seed.request_incarnation_id != predecessor.incarnation_id
+            || seed.owner_node_id != predecessor.owner_node_id
+            || request.request_id.as_deref() != Some(predecessor.successor_incarnation_id.as_str())
+            || predecessor.session_id == predecessor.successor_session_id
+            || predecessor.incarnation_id == predecessor.successor_incarnation_id
+        {
+            return None;
+        }
+        let root = Self::capture_session_processed_root(
+            session,
+            &predecessor.session_id,
+            request,
+            supersession_user,
+            session.processed_reuse_scope?,
+            deadline,
+        )?;
+        Some((seed, root))
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn capture_session_processed_root(
+        session: &Session,
+        id: &str,
+        request: &SessionRequest,
+        supersession_user: &str,
+        scope: [u8; 32],
+        deadline: Instant,
+    ) -> Option<PreparedRootAdmission> {
         if !session.renewable()
             || session.supersession_user != supersession_user
             || session.playback_id != request.playback_id
@@ -32,7 +84,6 @@ impl VodServe {
             owner: session.response_owner(),
             rendition: Arc::clone(&rendition),
             deadline,
-            probe: None,
         };
         if !rendition.ephemeral_processing || !reused_parent.matches(session, &permit) {
             return None;
@@ -45,129 +96,6 @@ impl VodServe {
             encoding,
             permit,
         })
-    }
-
-    /// Refresh only through the existing producer and verified publications.
-    /// A finite private reader spends its real parent's wait allowance and
-    /// never contributes an ordinary ahead-fill or marker window.
-    #[cfg(any(target_os = "linux", test))]
-    pub(crate) async fn refresh_processed_root(
-        &self,
-        root: &mut PreparedRootAdmission,
-        start_seconds: f64,
-    ) -> Result<(), String> {
-        if root.production_evidence().is_some_and(|proof| {
-            proof.milli_realtime >= 1150 && proof.active_ms >= 2000 && proof.completed_segments >= 2
-        }) {
-            return Ok(());
-        }
-        let reuse = root
-            .reused_parent
-            .as_mut()
-            .ok_or("processed predecessor missing")?;
-        let rendition = Arc::clone(&reuse.rendition);
-        let start = entry_containing(&rendition.plan, start_seconds);
-        let selected = {
-            let manifest = rendition.manifest.lock().await;
-            let first = manifest
-                .next_gap(start)
-                .ok_or("processed refresh has no missing window")?;
-            rendition
-                .plan
-                .entries
-                .iter()
-                .skip(first as usize)
-                .take(7)
-                .take_while(|entry| {
-                    manifest
-                        .state(entry.index)
-                        .is_some_and(|state| !state.is_materialized())
-                })
-                .map(|entry| entry.index)
-                .collect::<Vec<_>>()
-        };
-        if selected.len() < 3 {
-            return Err("processed refresh has no contiguous bounded window".into());
-        }
-        let sampler = root.encoding.processed_sampler(
-            &root.permit,
-            selected[0],
-            *selected.last().expect("selected windows"),
-            reuse.deadline,
-        );
-        let probe = Arc::new(ProcessedRootProbe {
-            active: AtomicBool::new(true),
-            deadline: reuse.deadline,
-            from: selected[0],
-            through: *selected.last().expect("selected windows"),
-            reader_id: uuid::Uuid::new_v4().to_string(),
-            rendition_key: rendition.key.clone(),
-            shared: Arc::downgrade(&self.shared),
-            rendition: Arc::downgrade(&rendition),
-            sampler,
-        });
-        let lease = ProcessedProbeLease {
-            probe: Arc::clone(&probe),
-            rendition: Arc::clone(&rendition),
-        };
-        {
-            let mut sessions = self.shared.sessions.lock().await;
-            let parent = sessions
-                .get_mut(&reuse.session_id)
-                .filter(|parent| reuse.matches(parent, &root.permit))
-                .ok_or("processed refresh predecessor changed")?;
-            let mut readers = rendition.readers.lock().await;
-            parent
-                .processed_probes
-                .retain(|weak| weak.strong_count() > 0);
-            parent.processed_probes.push(Arc::downgrade(&probe));
-            let mut reader = Reader::new(selected[0]);
-            reader.processing_probe = Some(Arc::clone(&probe));
-            readers.insert(probe.reader_id.clone(), reader);
-        }
-        reuse.probe = Some(lease);
-        let expiry = Arc::downgrade(&probe);
-        let deadline = probe.deadline;
-        tokio::spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-            if let Some(probe) = expiry.upgrade() {
-                probe.revoke();
-            }
-        });
-        for index in selected {
-            if !probe.live()
-                || !self
-                    .response_owner_is_live(&reuse.session_id, &reuse.owner)
-                    .await
-            {
-                return Err("processed refresh parent ended".into());
-            }
-            if probe.sampler.proof(&root.permit).is_some() {
-                return Ok(());
-            }
-            let remaining = reuse.deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err("processed refresh expired".into());
-            }
-            let ready = self
-                .blocked_wait_for_with_probe(
-                    &rendition,
-                    (&probe.reader_id, &reuse.session_id),
-                    index,
-                    remaining,
-                    Arc::new(crate::meter::Meter::new()),
-                    None,
-                    Some(&probe),
-                )
-                .await
-                .map_err(|error| format!("{error:?}"))?;
-            drop(ready);
-        }
-        probe
-            .sampler
-            .proof(&root.permit)
-            .ok_or("processed refresh did not qualify")?;
-        Ok(())
     }
 
     /// Every active VOD handle for the operator activity/session inventory.

@@ -65,6 +65,20 @@ pub(crate) struct ToolSet {
     pub(crate) identity: DvBackendIdentity,
     artifacts: Arc<Vec<(PathBuf, String)>>,
 }
+
+#[cfg(all(test, target_os = "linux"))]
+impl ToolSet {
+    /// Lifecycle fixtures never launch this renderer: they hold the exclusive
+    /// worker claim while exercising attachment of a checked completed plan.
+    pub(crate) fn lifecycle_fixture(identity: DvBackendIdentity) -> Self {
+        Self {
+            renderer: PathBuf::from("/bin/false"),
+            renderer_env: Vec::new(),
+            identity,
+            artifacts: Arc::new(Vec::new()),
+        }
+    }
+}
 fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }

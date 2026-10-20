@@ -578,7 +578,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # Merge of main 89d790d2e (#1125) into effort/dv-hdr-repair: both sides
 # raised this count independently; the integrated tree holds effort + main
 # - merge base. No new owner is introduced by the merge itself.
-expected_occurrences = 117
+expected_occurrences = 118
+# PR1225: +1 in manager/processed_reuse_tests.rs:67, Linux test-only
+# spawn_prepare. Callers abort/await it for cancellation or release the pause
+# and await refusal; exact-owner cleanup is observed separately. It exercises
+# real preparation with a 10s deadline, not a new shipped task owner.
 # Promotion union: final count is measured after architectural conflict resolution.
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
@@ -1471,7 +1475,10 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "m4-exact-activation-handoff-store"
 pattern = "complete_media_session_handoff"
-expected_occurrences = 2
+# PR1225: +1 in manager/processed_reuse_tests.rs:1537. commit_and_retire
+# awaits the exact predecessor's end before the existing Store handoff API;
+# test-only, not a new shipped transition owner.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-exact-activation-handoff-arm"
@@ -1487,7 +1494,10 @@ expected_occurrences = 3
 [[module_symbols]]
 id = "m4-durable-projection-completion-proof"
 pattern = "MediaSessionProjectionCompletion"
-expected_occurrences = 19
+# PR1225: +1 in manager/processed_reuse_tests.rs:1541, the existing
+# PredecessorAcknowledged proof after awaited exact-predecessor retirement.
+# This test helper does not add a proof variant or a shipped release owner.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
@@ -1614,7 +1624,11 @@ pattern = "publication_ready_at_ms"
 # sentinel. None moves a shipped fence.
 # #978: +2, test-only. The create.rs epoch-fence regression builds a blocked
 # activation and then the confirmed row a takeover produces.
-expected_occurrences = 144
+expected_occurrences = 147
+# PR1225: +3 in manager/processed_reuse_tests.rs:1425/1442/1547:
+# blocked incumbent activation, existing Confirm settlement, then successor
+# publication readback after exact predecessor end and handoff. Test-only;
+# the established Store APIs retain publication authority.
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -1676,7 +1690,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # #844: +3, the same three sites as the handoff fence above: the first-
 # preparation refusal compares the sentinel, and two fixtures set it.
 # #978: +1, test-only, the same blocked activation as the handoff fence above.
-expected_occurrences = 54
+# PR1225: +1 in manager/processed_reuse_tests.rs:1425, the test incumbent's
+# blocked activation before its existing Confirm settlement; no shipped write.
+expected_occurrences = 55
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_symbols]]
@@ -3101,7 +3117,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # dv_runtime::capture_owned_graph. It retires the exact registered encoder
 # and its JoinHandle is awaited after capture; no detached production task.
 # supervise_streaming_helper retains the existing run_streaming task site.
-expected_occurrences = 982
+# PR1225: +3 test-only syntax sites: manager/processed_reuse_tests.rs:67
+# (abort/await or release/await preparation), vod/driver.rs:8/1251 (the
+# controlled-driver call and its task). Guard Drop cancels the latter, Ticket
+# records exit even before first poll, and finish_controlled_driver_for_test
+# waits for all exits before capacity assertions; it never runs driver_pass.
+# -2 removed production tasks: serve/delivery.rs refresh expiry and
+# vodserve.rs ProcessedProbeLease drop cleanup. Net +1, no new shipped task.
+expected_occurrences = 983
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -3355,7 +3378,9 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # fixture retains the server task and cancels/joins it on teardown.
 # DV adapter: +2 names are its spawn function declaration and probe call;
 # both use the same retained cancellation/reap owner, not separate launchers.
-expected_occurrences = 15
+# PR1225: +1 is vod/driver.rs:1245's cfg(test) controlled_driver::spawn
+# declaration, not a second task. Its actual task/cancellation is noted above.
+expected_occurrences = 16
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -4752,7 +4777,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bound caller-cancel capture and helper-supervisor backpressure completion.
 # Neither supplies settlement: tests await original registered reap and helper
 # completion, including cleanup before asserting the backpressure bound.
-expected_occurrences = 1821
+# PR1225: +6 directly awaited test timeout futures: processed_reuse_tests.rs
+# :91 (5s cleanup observation), :117/:145/:218 (10s preparation pauses),
+# vod/driver.rs:1290/1348 (5s held/exited observations). Timeout is failure,
+# never cleanup evidence. -2 removed refresh timeout/expiry sleep in
+# manager/create.rs and serve/delivery.rs. Net +4; no new shipped timer.
+expected_occurrences = 1825
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5204,7 +5234,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # helper pairs in capture_owned_graph and the helper-backpressure regression.
 # These are the same four registered/awaited children reviewed under
 # method-spawn; no production child or independent reap owner is introduced.
-expected_occurrences = 285
+# PR1225: +3 Linux-test-only commands in manager/processed_reuse_tests.rs:
+# :789 muxes the source, :834 probes its actual clock/tracks, :1040 encodes
+# a three-frame control. Each output future is directly awaited and has
+# kill_on_drop(true); no separate per-command timeout or process-group/reap
+# guarantee on cancellation is asserted. No production launcher is added.
+expected_occurrences = 288
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5836,7 +5871,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # encoder/helper pairs reviewed under method-spawn and command-construction.
 # Existing ProducerSlot reaps encoders; helper futures await their own
 # children (killing on cancellation) before retained completion is observed.
-expected_occurrences = 780
+# PR1225: +3 in manager/processed_reuse_tests.rs:826/846/1104, the directly
+# awaited output calls for the test mux/probe/control commands above. Ordinary
+# completion waits for each child; kill-on-drop is a cancellation backstop,
+# not independent confirmed-reap evidence. No production launch is added.
+expected_occurrences = 783
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6336,7 +6375,10 @@ pattern = "kill_on_drop\\s*\\("
 # No repair delta; preserve current main's already reconciled fixture owners.
 # Acceptance root-cause batch: +2 unwind guards on the same two test-only
 # sleep producers; normal settlement is Step::Terminate's confirmed reap.
-expected_occurrences = 106
+# PR1225: +3 in manager/processed_reuse_tests.rs:825/845/1103, the same
+# directly awaited test mux/probe/control commands. These guards request child
+# kill if their output future drops; they are not confirmed-reap receipts.
+expected_occurrences = 109
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
