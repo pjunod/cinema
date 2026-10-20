@@ -73,7 +73,7 @@ function hasPendingPlaybackOpen(p){
 // media events/clock samples as playback evidence or trigger automatic work.
 // Transport/selection commands deliberately use desired PLAYER independently.
 function playbackOwnsAttachedMedia(p){
-  return !!p&&PLAYER===p&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p);
+  return !!p&&PLAYER===p&&!p.playPermissionDenied&&!p.pendingMediaChange&&!hasPendingPlaybackOpen(p);
 }
 // Always released, including on failure: a 5xx on the replacement session must
 // leave Auto able to try again rather than wedging every later rescue.
@@ -868,7 +868,7 @@ async function switchAutoCandidate(p,v,current,decision){
 // on "Buffering…" forever. A seek gets a shorter grace than a cold start: the
 // file is already open on the server, so 20s of nothing is already wrong.
 function armStall(fromSec, graceMs){
-  clearStall(); if(!PLAYER) return;
+  clearStall(); if(!PLAYER||PLAYER.playPermissionDenied) return;
   configureHlsStartupDeadline(PLAYER,graceMs||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms);
   if(PLAYER.samplingStopped) armPlaybackSampling(document.getElementById("video"),PLAYER);
   PLAYER.stallFrom=(fromSec!=null)?fromSec:pbPosSec();
@@ -889,6 +889,23 @@ function retryPlayback(){
   }
   if(!PLAYER) return;
   const t=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:pbPosSec();
+  if(PLAYER.playPermissionDenied){
+    // The stopped owner is already retired. Reset the SAME element within the
+    // retry gesture, before play can await a replacement session. WebKit's
+    // explicit load records permission; no placeholder or muted play is needed.
+    const video=document.getElementById("video");
+    if(!video||video!==PLAYER.playPermissionDenied.element) return;
+    const p=PLAYER;
+    // stallFrom survives startup and old seeks. Once playback has started,
+    // retry from the current file clock, not that historical/global position.
+    const targetMs=p.controlSeek?.targetMs??Math.round(
+      (p.started?positionForPlaybackIntent(video,p):t)*1000);
+    const retry={wantsPlayback:p.wantsPlayback,selection:playbackSelection(p,playbackFileContextForPlayer(p)),
+      audioOffsetMs:p.aoffset||0,controlSeek:p.controlSeek};
+    resetMediaSource(video);
+    PENDING_ATTEMPT_REASON="retry";
+    return play(p.fileId,p.title||"",targetMs,p.knownDur||0,p.meta,null,retry);
+  }
   raisePlaybackSurface("owner_recovery_step",{title:"Retrying…",detail:null});
   seekTo(t,true);
 }

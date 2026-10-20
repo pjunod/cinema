@@ -14,7 +14,7 @@ license notices are identified below. ffmpeg is invoked rather than linked
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 627 source-bearing crates in the root workspace · license fields
+the work. 626 source-bearing crates in the root workspace · license fields
 verified 2026-10-19; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
@@ -119,7 +119,7 @@ changed — only which file to open.
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
-Seven crates are vendored under `vendor/` rather than pulled from crates.io.
+Eight crates are vendored under `vendor/` rather than pulled from crates.io.
 Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
@@ -131,8 +131,10 @@ Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 | `rust_decimal` | 1.42.1 | MIT | Paul Mason · [paupino/rust-decimal](https://github.com/paupino/rust-decimal) | [rkyv 0.7 removal for RUSTSEC-2026-0235](vendor/rust_decimal/PLURX-PATCH.md) |
 | `dolby_vision` | 3.4.0 | MIT | quietvoid · [quietvoid/dovi_tool](https://github.com/quietvoid/dovi_tool/tree/main/dolby_vision) | [five refusals where a malformed RPU allocated or panicked](vendor/dolby_vision/PLURX-PATCH.md) |
 | `bitvec_helpers` | 4.0.2 | MIT | quietvoid · [quietvoid/bitvec_helpers](https://github.com/quietvoid/bitvec_helpers) | [two Exp-Golomb overflows refused](vendor/bitvec_helpers/PLURX-PATCH.md) |
+| `ksni` | 0.3.6 | Unlicense | iovxw · [iovxw/ksni](https://github.com/iovxw/ksni) | [consistent D-Bus menu item IDs](vendor/ksni/PLURX-PATCH.md) |
 
-Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
+Each directory retains its upstream license text; `ksni` uses
+[UNLICENSE](vendor/ksni/UNLICENSE).
 
 `s3-simple` is vendored but is not part of the default resolution: plurx
 builds hiqlite without `backup`/`s3`, so it reaches no shipped binary and
@@ -150,7 +152,7 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-627 source-bearing crates resolve into a plurx build, excluding the ten
+626 source-bearing crates resolve into a plurx build, excluding the ten
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). The independently built support service adds five MPL-2.0 libraries for
 passkey validation; the other selected license terms are permissive:
@@ -198,7 +200,6 @@ binding crates and are not bundled in `plurx-desktop`. See the
 | `MIT OR BSD-3-Clause` | 1 |
 | `MIT OR Zlib OR Apache-2.0` | 1 |
 | `MIT-0` | 1 |
-| `Unlicense` | 1 |
 | `Zlib` | 1 |
 
 `r-efi` also offers a copyleft license option (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`). It is a disjunction, so
@@ -239,7 +240,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (627)</summary>
+<summary>Full crate list (626)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -515,7 +516,6 @@ but they are not covered by the table above.
 | `jsonschema-regex` | 0.50.1 | MIT |
 | `jsonschema-value` | 0.50.1 | MIT |
 | `kamadak-exif` | 0.6.1 | BSD-2-Clause |
-| `ksni` | 0.3.6 | Unlicense |
 | `lazy_static` | 1.5.0 | MIT OR Apache-2.0 |
 | `leb128fmt` | 0.1.0 | MIT OR Apache-2.0 |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 |

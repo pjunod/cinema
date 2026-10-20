@@ -432,6 +432,7 @@ function beginPlaybackMediaAttachment(p){
   // A deliberate reopen mints a new attachment. Clear the retired attempt
   // only after the old attachment can no longer pass its identity closure.
   p.terminalStop=null;
+  p.playPermissionDenied=null;
   p.sessionTerminal=null;
   p.recoveryHealth=null;
   // Where this attempt's generation takes the picture: every attach on every
@@ -513,7 +514,7 @@ function rememberPlaybackTransportIntent(v,p){
   if(p&&typeof p.wantsPlayback!=="boolean") p.wantsPlayback=!!v&&!v.paused&&!v.ended;
 }
 function applyPlaybackTransportIntent(v,p){
-  if(!v||!p||PLAYER!==p) return;
+  if(!v||!p||PLAYER!==p||p.playPermissionDenied) return;
   rememberPlaybackTransportIntent(v,p);
   const proof=p.preparedCommitting;
   if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
@@ -625,7 +626,7 @@ function stopPlayerTimers(){
 // a presenter with no evidence, and neither would come back until the next
 // full open.
 function armPlaybackSampling(v,p){
-  if(!v||!p) return;
+  if(!v||!p||p.playPermissionDenied) return;
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);

@@ -1,10 +1,10 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-19 · Kept current by the working agent in the same
-commit as the work it describes; a stale entry here is a bug. Newest effort
-first.
+**Updated:** 2026-10-20 · Newest effort first; each entry links to its current ledger.
 
 <!-- status: insert new efforts below this line -->
+
+- **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
 ## Processed VOD successor root reuse
 

@@ -735,9 +735,15 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
   const inputs=capturePlayInputs(fileId,meta,retryIntent);
   const attempt=Object.freeze({...beginning,...inputs,fileContext,fileId,title,resumeMs,knownDurMs,meta});
-  const {modal,playerWasOpen}=attempt;
+  const {modal,video,playerWasOpen}=attempt;
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
+  // WebKit grants media permission to the element, in the user gesture.
+  // Decision/session/readiness can outlast its transient activation window.
+  // Explicitly load the empty persistent element now; prepareForLoad in
+  // WebKit records the gesture even before a source is available. Never load
+  // an incumbent here: a refused replacement must retain its picture/position.
+  if(!video.getAttribute?.("src")&&!video.currentSrc&&!video.srcObject) video.load();
   if(!playerWasOpen){
     const app=document.getElementById("app"); if(app) app.inert=!WATCH;
     const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
@@ -882,7 +888,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
   const selection=retryIntent?.selection??playbackSelection(PLAYER, meta&&meta.fileContext||fileId);
-  const modal=document.getElementById("modal"), video=document.getElementById("video");
+  const modal=document.getElementById("modal"), video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   const playerWasOpen=modal.classList.contains("open");
   const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
   const playerOpenerClick=playerWasOpen?(PLAYER&&PLAYER._openerClick):
@@ -1336,7 +1342,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   // restart, so the choice arrives with the first frames.
   if(applied.textSub!=null && openIsAttached()) setSub(applied.textSub);
 
-  if(!openIsAttached()) return;
+  if(!openIsAttached()||openedPlayer.playPermissionDenied) return;
 
   // Once, per playback, as soon as the element knows what it is decoding.
   probeDecode();

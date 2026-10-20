@@ -104,6 +104,7 @@
  * @property {any} [mediaAttachment]       the current media attachment token
  * @property {{sessionId:string|null,attachment:any,reason:string|null,message?:string}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
  * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
+ * @property {any} [playPermissionDenied] browser permission refusal retained until a new attachment
  * @property {any} [transportCommand] original transport command awaiting an actual element transition
  * @property {number} [_transportCommandSequence] causal command ordinal within this attempt
  * @property {any} [terminalStop]          the stop that ended this player, once one did
@@ -600,9 +601,23 @@ function notePlaybackPlayRejection(player,invocation,error){
     transport:record});
   const episode=player.hlsStartup;
   if(!cancelled&&current&&episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
-    // This is a command failure, not a decoder verdict or viewer Pause.
-    // The startup owner's existing absolute deadline still owns diagnosis.
+    // Keep the command failure separate from decoder evidence and viewer
+    // Pause. Permission refusal stops below; other failures retain the
+    // startup owner's existing absolute diagnosis deadline.
     episode.playRejection={name,code,status};
+  }
+  if(current&&!invocation.cancelledReason&&name==='NotAllowedError'&&!player.playPermissionDenied){
+    // Permission is a transport refusal, never evidence of missing bytes or a
+    // failed decoder. Retire every automatic owner now, before its stall clock
+    // can spend a reopen on the same unapproved element. Keep the viewer's
+    // intent and destination for an explicit gesture-bound retry.
+    player.playPermissionDenied={attachment:invocation.attachment,element:video};
+    endWait(false);
+    stopPlayerForExhaustion();
+    raisePlaybackSurface("owner_stopped",{player_stopped:true,
+      title:"Your browser needs permission to play.",
+      detail:"Choose Try again to allow playback. Your place and track choices are saved.",
+      actions:["retry","close"]});
   }
 }
 function diagnoseHlsStartup(player){
