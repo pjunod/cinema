@@ -177,6 +177,8 @@ struct Fixture {
     remote: crate::media_sessions::RemoteStartRequest,
     encoding: Arc<crate::vodencode::Encoding>,
     worker: Option<crate::vodencode::EncodeWorkerPermit>,
+    receipt: DvProcessingReceipt,
+    payloads: Vec<DvDigest>,
     user_id: i64,
     session_id: String,
 }
@@ -642,6 +644,15 @@ async fn fixture(destination: DvDestination) -> Fixture {
         decoder: plurx_core::transcode::DecodeBackend::Software,
     })
     .expect("real completed-window validation");
+    let receipt = dv_receipt_completed_window(
+        &selected_plan,
+        &keys,
+        &[DvDuration::new(1, 24, DvDurationProvenance::DeclaredFixtureInterval).expect("duration");
+            3],
+        &rpus,
+    )
+    .expect("checked control receipt");
+    let payloads = vec![digest(&bytes)];
     let runtime = Arc::new(crate::vodencode::dv_runtime::RuntimeRecipe {
         tools: Arc::new(crate::vodencode::dv_runtime::ToolSet::lifecycle_fixture(
             backend,
@@ -846,6 +857,8 @@ async fn fixture(destination: DvDestination) -> Fixture {
         remote,
         encoding,
         worker: Some(worker),
+        receipt,
+        payloads,
         user_id: user.id,
         session_id,
     }
@@ -916,6 +929,20 @@ async fn commit_and_retire(f: &mut Fixture, incarnation: &str, session: &str) {
             .end(&predecessor.session_id, crate::vodserve::Terminal::Deleted)
             .await
     );
+    let published = f
+        .manager
+        .store
+        .complete_media_session_handoff(
+            incarnation,
+            "node",
+            1,
+            plurx_core::domain::MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            now,
+        )
+        .await
+        .expect("acknowledged retirement")
+        .expect("current successor");
+    assert_eq!(published.publication_ready_at_ms, 0);
     f.remote = serde_json::from_str(&committed.route.recipe_json).expect("sealed wire recipe");
     assert!(
         f.remote.retained_output.is_none(),
@@ -934,6 +961,47 @@ async fn staged_processed_second_successor_survives_normal_commit_and_parent_ret
             let (incarnation, session, json) = stage(&f).await;
             assert!(prepare(&f, &session, &json).await);
             commit_and_retire(&mut f, &incarnation, &session).await;
+            let facts = f
+                .manager
+                .vod
+                .hls_facts(&session)
+                .await
+                .expect("committed HLS facts");
+            let encoding = facts.encoding.expect("actual processed encoding");
+            assert!(Arc::ptr_eq(&encoding, &f.encoding));
+            assert_eq!(
+                encoding.preserves_processed_dv(),
+                destination == DvDestination::Profile81
+            );
+            assert_eq!(encoding.processed_fel(), Some(true));
+            // A selected descriptor is not report authority. Only the checked
+            // control window's publication to this actual owner awards HDR10-E.
+            assert!(
+                f.manager
+                    .vod
+                    .dv_effective_report(&session, &incarnation)
+                    .await
+                    .is_none()
+            );
+            f.manager
+                .vod
+                .test_publish_processed_control(&session, f.receipt.clone(), &f.payloads)
+                .await;
+            let report = f
+                .manager
+                .vod
+                .dv_effective_report(&session, &incarnation)
+                .await;
+            if destination == DvDestination::Hdr10 {
+                let report = report.expect("actual-owner-bound control publication");
+                assert!(report.hdr10_enhanced && report.fel_contributed);
+                assert_eq!(report.generation, incarnation);
+            } else {
+                assert!(
+                    report.is_none(),
+                    "P81 reports its actual DV carrier, never HDR10-E"
+                );
+            }
             let (_, root) = f
                 .manager
                 .vod

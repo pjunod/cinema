@@ -413,6 +413,39 @@ impl VodServe {
         }
     }
 
+    /// Control-only publication seam: the caller has run the real completed
+    /// window validator on its encoded fixture. Bind its receipt to the actual
+    /// attached physical owner, not a fabricated session id or indicator bit.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) async fn test_publish_processed_control(
+        &self,
+        session_id: &str,
+        receipt: plurx_core::transcode::dv_processing::DvProcessingReceipt,
+        encoded_payloads: &[plurx_core::transcode::dv_processing::DvDigest],
+    ) {
+        let sessions = self.shared.sessions.lock().await;
+        let session = sessions.get(session_id).expect("control attachment");
+        let rendition = session.live_rendition().expect("control rendition");
+        let encoding = rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .expect("control encoding");
+        let runtime = encoding.dv_runtime.as_ref().expect("control runtime");
+        let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
+            &encoding.dv_processing
+        else {
+            panic!("checked completed-window plan");
+        };
+        runtime.published_window(
+            receipt,
+            encoded_payloads,
+            &plan.semantic_digest(),
+            &[Arc::clone(&session.response_owner().incarnation)],
+            runtime.report_revision.load(Acquire),
+        );
+    }
+
     /// One immutable plan entry's film-time window for WebVTT children.
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         let index = u32::try_from(segment_index).ok()?;
