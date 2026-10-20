@@ -1102,6 +1102,7 @@ function buildPlayer(attempt,decided,prepared){
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
     wantsPlayback:fullIntent.wantsPlayback,
     mediaPredecessor:outgoing,
+    qualityChrome:samePlaybackFile(outgoing,fileId,meta)?outgoing.qualityChrome:null,
     internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel,
     terminalStop:null, };
 }
@@ -1329,6 +1330,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   const {watchTicket,preparation,fullIntent,video,fileId}=attempt;
   const {applied}=prepared;
   if(!openIsAttached()) return;
+  if(applied.textSub!=null) openedPlayer.curSub=applied.textSub;
   openedPlayer.pendingOpenAttempt=null;
   watchAccept(watchTicket,openedPlayer);
   samplePlaybackPresentationClock(video,openedPlayer);
@@ -1337,10 +1339,12 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   if(play.pendingIntent===fullIntent)play.pendingIntent=null;
 
   // A pre-play TEXT subtitle, applied to the stream that just attached. Here
-  // rather than before the route, because setSub() shifts the cues by
+  // rather than before the route, because subtitle attachment shifts cues by
   // `PLAYER.offset` and the route is what sets it. A <track> is not a stream
   // restart, so the choice arrives with the first frames.
-  if(applied.textSub!=null && openIsAttached()) setSub(applied.textSub);
+  if(applied.textSub!=null && openIsAttached()){
+    attachPlaybackSubtitle(video,openedPlayer,applied.textSub);
+  }
 
   if(!openIsAttached()||openedPlayer.playPermissionDenied) return;
 
@@ -1475,7 +1479,7 @@ async function executePlaybackMediaChange(p,change){
       if(change.from!=null) recordAutoSwitch(p,change.from,change.height||"transcode Auto",
         change.switchReason||change.reason,pos,p.sessionId);
     }
-    if(subtitle>=0&&p.burnedSub==null) await setSub(subtitle);
+    if(subtitle>=0&&p.burnedSub==null) await attachPlaybackSubtitle(v,p,subtitle);
     return true;
   }catch(e){
     if(!live()) return false;

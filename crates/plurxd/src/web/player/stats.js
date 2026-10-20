@@ -346,6 +346,7 @@ function playbackWaitSurfaceLive(){
 function playbackSamplingTick(v,p){
   renderPlaybackSurface.waitDetail=playbackWaitLiveDetail(v,p);
   playbackProgressTick(v,p);
+  updatePlaybackQualityChrome(v,p);
   updatePlayerMediaSession(v,p);
 }
 function playbackStatsTelemetry(){
