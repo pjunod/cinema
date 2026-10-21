@@ -1,6 +1,6 @@
 # Engineering knowledge graph — trace code to intent and evidence
 
-**Status:** M0 frozen, graph implementation not started · **Written:** 2026-10-21 ·
+**Status:** M0 frozen; M1–M4 source drafted, qualification pending · **Written:** 2026-10-21 ·
 **Executes:** the owner's request for a bounded plurx pilot incorporating
 Astra's assessment and Fable 5.1's independent review · **Owner:** Codex integrator
 
@@ -599,13 +599,12 @@ them. Earlier percentage estimates remain unmeasured hypotheses.
 | Milestone | Implementation | Acceptance / remaining evidence |
 |---|---|---|
 | M0 | Frozen; Codex integrator, owned effort branch. | Twelve gold/rubric commitments sealed with 24 independent approvals and zero blockers. Source, cases and scoring frozen; runtime budget/isolation remain M5 acceptance. See [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md). |
-| M1–M2 | Not started. | Schema/adapters, dependency-aware snapshots and honest evidence states. |
-| M3–M4 | Not started. | Multi-hop queries, bounded output, scoped capture, skill integration and current gate. |
-| M5 | Not started. | Frozen comparative runs and all-in cost; capture stays advisory. |
+| M1–M2 | Implemented, unqualified. | Typed schema, 27 records, adapters, isolated snapshots and evidence dimensions; final review/checks pending. |
+| M3–M4 | Source drafted. | Bounded queries, scoped advisory capture and repository skill; final review/checks pending. |
+| M5 | Harness in progress. | Corpus projection/isolation, calibrated finite budget and frozen comparative runs remain; no savings established. |
 | M5b | Process window not started. | Begins when advisory M4 reaches main; enforcement/expansion decision after §6 window. Does not block M5 landing. |
 
-No graph, skill change, new enforcement, benchmark run or efficiency claim is
-delivered by this document. On task landing, update this ledger and
+Implementation and evidence live on the [status page](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md); this ledger does not claim runtime qualification or savings. On task landing, update this ledger and
 [the project backlog](PROJECT-BACKLOG.md) together with exact revision,
 focused regression command, review disposition, gate and retained evidence.
 Keep missing implementation separate from missing pilot/process acceptance.

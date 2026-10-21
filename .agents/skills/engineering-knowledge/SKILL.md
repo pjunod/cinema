@@ -16,8 +16,9 @@ For patches and reviews, also inspect
 `scripts/knowledge obligations --base origin/main --worktree`; use
 `--staged` when the staged change is the review scope. Check the returned
 snapshot/revision, authority, scope and coverage boundaries, and any conflicts
-before relying on a record. The CLI is being integrated; treat these commands
-as the pilot interface until its implementation lands.
+before relying on a record. `--staged` selects staged change paths against
+the explicitly identified worktree knowledge snapshot; it is not staged-tree
+execution evidence.
 
 An empty or uncurated result means the answer is unknown within that boundary,
 not that no contract, decision, or obligation exists. A `mentions` edge, file

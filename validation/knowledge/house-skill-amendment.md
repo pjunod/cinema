@@ -1,6 +1,6 @@
 # Proposed amendment to the maintained project-documentation skill
 
-The maintained source and supported installation path for the user's project-
+The maintained source and supported installation path for the user's project
 documentation house skill were not found. This file is the exact small
 amendment to apply when that canonical source becomes available; no installed
 or cached skill was edited, and installation has not been performed or
