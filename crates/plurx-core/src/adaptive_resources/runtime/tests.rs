@@ -254,7 +254,10 @@ fn options(root: &Path, owner: OwnerIdentity, installation: InstallationContext)
 #[tokio::test]
 async fn actual_journal_reopen_retains_prepared_trial_cost_paths_and_owner_data() {
     let root = tempfile::tempdir().expect("durable TMPDIR fixture");
-    let owner = daemon_owner("fixture-node".into(), "fixture-cluster".into());
+    let mut owner = daemon_owner("fixture-node".into(), "fixture-cluster".into());
+    // Model a former instance. Reusing this process's real singleton UUID on
+    // reopen must conflict: only actual daemon restart creates a new instance.
+    owner.owner_id = Uuid::new_v4();
     let (journal, _) = CustodyJournal::open(options(
         root.path(),
         owner.clone(),
@@ -302,9 +305,12 @@ async fn actual_journal_reopen_retains_prepared_trial_cost_paths_and_owner_data(
     journal
         .drain()
         .expect("actual DB owner joined before reopen");
-    let runtime =
-        NodeResourceRuntime::open(options(root.path(), owner, InstallationContext::Existing))
-            .expect("composed real reconstruction");
+    let runtime = NodeResourceRuntime::open(options(
+        root.path(),
+        daemon_owner("fixture-node".into(), "fixture-cluster".into()),
+        InstallationContext::Existing,
+    ))
+    .expect("composed real reconstruction");
     assert!(runtime.has_recovered_obligations());
     assert_eq!(runtime.accounting().expect("full charge").used, vector(2));
     assert_eq!(runtime.accounting().expect("full hold").unknown_held, 1);
@@ -315,6 +321,8 @@ async fn actual_journal_reopen_retains_prepared_trial_cost_paths_and_owner_data(
         vec![protected.as_path()]
     );
     assert_eq!(runtime.recovery().owners.len(), 1);
+    assert_eq!(runtime.recovery().owners[0].owner_id, owner.owner_id);
+    assert_ne!(runtime.owner().owner_id, owner.owner_id);
     runtime.drain().expect("actual composed DB owner joined");
     std::fs::remove_file(root.path().join("resource-custody/installation.json"))
         .expect("fault fixture only");
