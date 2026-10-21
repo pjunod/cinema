@@ -3,6 +3,7 @@
 These fixtures qualify no execution receipt, CI run or real environment.
 """
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from validation.knowledge import GraphData, KnowledgeError, Receipt, content_digest
-from validation.knowledge import model, snapshot as snapshot_module
+from validation.knowledge import index as index_module, model, snapshot as snapshot_module
 from validation.knowledge.evidence import assess
 from validation.knowledge.index import build, load
 from validation.knowledge.snapshot import SnapshotChanged, capture
@@ -293,6 +294,143 @@ checks=["fixture-check"]
             snapshots.append(load(self.root))
         self.assertEqual(len({item.snapshot.key for item in snapshots}), 4)
         self.assertEqual(len(list(snapshots[-1].database.parent.parent.glob("bundle-*"))), 2)
+
+    def test_warm_hit_reuses_authenticated_graph_without_discovery_or_reparse(self):
+        cold = build(self.root)
+        with patch("validation.knowledge.index.capture", side_effect=AssertionError("unexpected cold capture")), \
+             patch("validation.knowledge.index.model.load_graph", side_effect=AssertionError("unexpected M1 reparse")):
+            warm = load(self.root)
+        self.assertEqual(warm.database, cold.database)
+        self.assertEqual(warm.graph.to_dict(), cold.graph.to_dict())
+        self.assertEqual(warm.snapshot.key, cold.snapshot.key)
+        self.assertTrue(warm.snapshot.verify(self.root))
+        self.assertNotIn("cache_signature", warm.snapshot.metadata())
+        cache = warm.database.parent.parent.parent
+        self.assertEqual((cache.stat().st_mode & 0o777), 0o700)
+        self.assertEqual(((cache / ".cache-key").stat().st_mode & 0o777), 0o600)
+
+    def test_warm_cache_invalidates_source_index_modes_dirty_membership_and_branch(self):
+        current = build(self.root)
+        def changed():
+            nonlocal current
+            previous = current
+            current = load(self.root)
+            self.assertNotEqual(current.snapshot.key, previous.snapshot.key)
+            self.assertNotEqual(current.database, previous.database)
+            self.assertTrue(current.snapshot.verify(self.root))
+        self.write("src/dependency.txt", "different selected bytes\n")
+        changed()
+        self.run_git("add", "src/dependency.txt")
+        changed()
+        (self.root / "src/dependency.txt").chmod(0o755)
+        changed()
+        self.write("src/new-input.txt", "new selected member\n")
+        changed()
+        self.run_git("switch", "-c", "fixture-warm-branch")
+        changed()
+        self.assertTrue(current.snapshot.identity["branch"].endswith("fixture-warm-branch"))
+        self.run_git("reset", "--hard", self.head)
+        (self.root / "src/new-input.txt").unlink()
+        current = load(self.root)
+        self.assertFalse(current.snapshot.repository_dirty)
+        self.write("unrelated-owner-note.txt", "outside selected graph but globally dirty\n")
+        changed()
+        self.assertTrue(current.snapshot.repository_dirty)
+
+    def test_warm_cache_implementation_and_environment_identity_cannot_cross_views(self):
+        first = build(self.root)
+        original_versions = snapshot_module.versions()
+        changed_versions = {**original_versions, "synthetic-implementation-boundary": "sha256:" + "e" * 64}
+        with patch("validation.knowledge.snapshot.versions", return_value=changed_versions):
+            changed = load(self.root)
+            self.assertNotEqual(changed.snapshot.key, first.snapshot.key)
+            self.assertNotEqual(changed.database, first.database)
+        # The prior bundle remains valid for the restored exact implementation.
+        restored = load(self.root)
+        self.assertEqual(restored.database, first.database)
+        self.assertEqual(restored.snapshot.key, first.snapshot.key)
+        recipe = first.snapshot.recipe()
+        self.assertIsNone(snapshot_module.recapture(self.root, recipe, environment={"runtime": "different explicit identity"}))
+
+    def test_warm_cache_forged_graph_narrowed_recipe_or_schema_is_never_used(self):
+        for field in ("graph", "snapshot_recipe", "index_version"):
+            with self.subTest(field=field):
+                trusted = build(self.root)
+                expected = trusted.graph.to_dict()
+                with sqlite3.connect(trusted.database) as connection:
+                    value = json.loads(connection.execute("SELECT value FROM meta WHERE name=?", (field,)).fetchone()[0])
+                    if field == "graph":
+                        value["nodes"][0]["title"] = "forged cache-only semantic assertion"
+                    elif field == "snapshot_recipe":
+                        value["patterns"] = [path for path in value["patterns"] if path != "src/**"]
+                        value["untracked"] = []
+                    else:
+                        value = -1
+                    connection.execute("UPDATE meta SET value=? WHERE name=?", (json.dumps(value), field))
+                rebuilt = load(self.root)
+                self.assertNotEqual(rebuilt.database, trusted.database)
+                self.assertEqual(rebuilt.graph.to_dict(), expected)
+                self.assertEqual(rebuilt.snapshot.patterns, trusted.snapshot.patterns)
+                self.assertTrue(rebuilt.snapshot.verify(self.root))
+
+    def test_warm_cache_key_rotation_and_unsafe_key_cannot_reuse_old_signatures(self):
+        first = build(self.root)
+        key = first.database.parent.parent.parent / ".cache-key"
+        key.write_bytes(os.urandom(32))
+        rotated = load(self.root)
+        self.assertNotEqual(rotated.database, first.database)
+        self.assertEqual(rotated.graph.to_dict(), first.graph.to_dict())
+        self.assertEqual(rotated.snapshot.key, first.snapshot.key)
+        with patch("validation.knowledge.index.capture", side_effect=AssertionError("unexpected rebuild after rotation")):
+            self.assertEqual(load(self.root).database, rotated.database)
+        key.chmod(0o644)
+        with self.assertRaises(KnowledgeError):
+            load(self.root)
+        key.unlink()
+        outside = self.root.parent / "outside-key"
+        outside.write_bytes(b"not an owned cache integrity key!!")
+        key.symlink_to(outside)
+        with self.assertRaises((KnowledgeError, OSError)):
+            load(self.root)
+
+    def test_cache_key_atomic_concurrent_creation_uses_one_complete_private_key(self):
+        cache = index_module._cache(self.root, None)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            keys = list(executor.map(lambda _: index_module._cache_key(self.root, cache, create=True), range(4)))
+        self.assertEqual(len(set(keys)), 1)
+        self.assertEqual(len(keys[0]), 32)
+        self.assertEqual(list(cache.glob(".cache-key-*")), [])
+        self.assertEqual((cache / ".cache-key").stat().st_mode & 0o777, 0o600)
+
+    def test_warm_cache_read_restore_race_retries_once_then_refuses(self):
+        first = build(self.root)
+        original = snapshot_module._read
+        modifications = []
+        def observed_race(root, relative):
+            item = original(root, relative)
+            if relative == "src/input.rs" and not modifications:
+                modifications.append(relative)
+                path = Path(root) / relative
+                raw = path.read_bytes()
+                path.write_bytes(raw + b"// transient mutation\n")
+                path.write_bytes(raw)
+            return item
+        with patch("validation.knowledge.snapshot._read", side_effect=observed_race), \
+             patch("validation.knowledge.index.model.load_graph", side_effect=AssertionError("race must retry warm validation")):
+            retried = load(self.root)
+        self.assertEqual(retried.database, first.database)
+        self.assertTrue(retried.snapshot.verify(self.root))
+        def continuous_race(root, relative):
+            item = original(root, relative)
+            if relative == "src/input.rs":
+                path = Path(root) / relative
+                raw = path.read_bytes()
+                path.write_bytes(raw + b"// transient mutation\n")
+                path.write_bytes(raw)
+            return item
+        with patch("validation.knowledge.snapshot._read", side_effect=continuous_race):
+            with self.assertRaises(SnapshotChanged):
+                load(self.root)
 
     def test_named_check_is_not_execution_and_raw_origin_cannot_authenticate(self):
         check = next(node for node in model.load_graph(self.root).nodes if node.kind == "check")

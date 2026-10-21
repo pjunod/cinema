@@ -17,7 +17,7 @@ from typing import Any
 from . import model
 from .model import KnowledgeError, canonical_json, content_digest, digest_bytes, require, safe_relative
 
-VERSION = 1
+VERSION = 2
 BASE_PATHS = ("validation/knowledge/pilot.json", "validation/knowledge/records.toml",
               "validation/knowledge/coverage.toml", "validation/knowledge/conflicts.toml",
               "tests/playback/routing-decisions.toml", "validation/points.toml",
@@ -173,9 +173,13 @@ def selection(graph: model.GraphData, extra_paths=()) -> tuple[str, ...]:
 
 def _members(root: Path, patterns: tuple[str, ...]):
     tracked, other = _inventory(root)
-    selected = {p for p in tracked | other if any(_matches(p, pat) for pat in patterns)}
-    # Literal missing inputs bind absence too, including deleted tracked files.
-    selected.update(p for p in patterns if not any(c in p for c in "*?[]"))
+    # Most pilot inputs are literal paths. Exact set membership preserves the
+    # canonical glob semantics while avoiding a glob call for every file/path.
+    literals = {p for p in patterns if not any(c in p for c in "*?[]")}
+    globs = tuple(p for p in patterns if p not in literals)
+    selected = set(literals)  # Missing literals bind absence as before.
+    if globs:
+        selected.update(p for p in tracked | other if any(_matches(p, pat) for pat in globs))
     for path in selected:
         _safe_selection(path)
     return tuple(sorted(selected)), tuple(sorted(other & selected))
@@ -189,7 +193,8 @@ def _identity(root: Path) -> dict[str, Any]:
     if not index_path.is_absolute():
         index_path = root / index_path
     index_sig = _signature(index_path.stat()) if index_path.exists() else ()
-    return {"head": head, "tree": tree,
+    branch = git(root, "rev-parse", "--symbolic-full-name", "HEAD").decode().strip()
+    return {"head": head, "tree": tree, "branch": branch,
             "worktree_id": content_digest([str(root), gitdir]),
             "index": digest_bytes(git(root, "ls-files", "--stage", "-z")),
             "index_stat": index_sig,
@@ -277,6 +282,17 @@ class Snapshot:
                 "input_count": len(self.inputs), "repository_dirty": self.repository_dirty,
                 "versions": json.loads(canonical_json(self.module_versions)), "descriptor_digests": list(self.descriptor_digests)}
 
+    def recipe(self) -> dict[str, Any]:
+        """Complete source-selection recipe, never input bytes or cache keys.
+
+        An index may reuse this recipe only after verifying its local MAC.
+        Source byte digests are always checked again against the live worktree.
+        """
+        return json.loads(canonical_json({"key": self.key, "identity": self.identity,
+            "inputs": [item.metadata() for item in self.inputs], "patterns": self.patterns,
+            "untracked": self.untracked, "versions": self.module_versions,
+            "environment": self.environment, "descriptor_digests": self.descriptor_digests}))
+
     def materialize(self, dest: Path) -> None:
         dest = Path(dest)
         require(dest.exists() and not dest.is_symlink() and not any(dest.iterdir()), "frozen destination must be empty owned directory")
@@ -302,6 +318,57 @@ class Snapshot:
             return False
 
 
+def _assemble(identity, inputs, patterns, untracked, module_versions, environment, descriptors):
+    payload = {"identity": {k: v for k, v in identity.items() if k != "index_stat"},
+               "inputs": [item.metadata() for item in inputs], "patterns": patterns,
+               "untracked": untracked, "versions": module_versions,
+               "environment": environment, "descriptor_digests": descriptors}
+    return Snapshot(content_digest(payload).removeprefix("sha256:"), identity["head"], identity["tree"],
+                    identity["worktree_id"], inputs, patterns, untracked, identity,
+                    module_versions, environment, descriptors)
+
+
+def recapture(root: Path, recipe: dict, *, environment=None) -> Snapshot | None:
+    """Re-read an authenticated cache selection without reparsing the graph.
+
+    This is an internal cache primitive, not an authority for caller-supplied
+    scopes: index.load must authenticate the whole graph and recipe first.
+    Changed source/identity means a cold rebuild; an observed read race still
+    refuses/retries rather than returning any cached graph.
+    """
+    required = {"key", "identity", "inputs", "patterns", "untracked", "versions", "environment", "descriptor_digests"}
+    require(isinstance(recipe, dict) and set(recipe) == required, "invalid snapshot recipe")
+    root = Path(root).resolve()
+    before = _identity(root)
+    expected = recipe["identity"]
+    require(isinstance(expected, dict), "invalid snapshot identity")
+    if ({k: v for k, v in before.items() if k != "index_stat"} !=
+            {k: v for k, v in expected.items() if k != "index_stat"}):
+        return None
+    module_versions = versions()
+    env = json.loads(canonical_json(_environment(environment or {})))
+    if module_versions != recipe["versions"] or env != recipe["environment"]:
+        return None
+    require(isinstance(recipe["patterns"], list) and len(recipe["patterns"]) <= model.MAX_ROWS,
+            "invalid snapshot selection")
+    patterns = tuple(_safe_selection(path) for path in recipe["patterns"])
+    require(patterns == tuple(sorted(set(patterns))), "noncanonical snapshot selection")
+    paths, untracked = _members(root, patterns)
+    require(isinstance(recipe["inputs"], list) and len(recipe["inputs"]) <= model.MAX_ROWS, "invalid input recipe")
+    if paths != tuple(row.get("path") for row in recipe["inputs"]) or list(untracked) != recipe["untracked"]:
+        return None
+    inputs = tuple(_read(root, path) for path in paths)
+    if [item.metadata() for item in inputs] != recipe["inputs"]:
+        return None
+    descriptors = tuple(recipe["descriptor_digests"])
+    snapshot = _assemble(before, inputs, patterns, untracked, module_versions, env, descriptors)
+    if snapshot.key != recipe["key"]:
+        return None
+    if not snapshot.verify(root):
+        raise SnapshotChanged("snapshot-changed: cached selection changed during validation")
+    return snapshot
+
+
 def capture(root: Path, *, extra_paths=(), environment=None) -> Snapshot:
     root = Path(root).resolve()
     for attempt in range(2):
@@ -317,13 +384,7 @@ def capture(root: Path, *, extra_paths=(), environment=None) -> Snapshot:
             env = json.loads(canonical_json(_environment(environment or {})))
             descriptors = tuple(sorted({node.attributes["descriptor_digest"] for node in discovery.nodes
                                         if "descriptor_digest" in node.attributes}))
-            payload = {"identity": {k: v for k, v in before.items() if k != "index_stat"},
-                       "inputs": [item.metadata() for item in inputs], "patterns": patterns,
-                       "untracked": untracked, "versions": module_versions,
-                       "environment": env, "descriptor_digests": descriptors}
-            snapshot = Snapshot(content_digest(payload).removeprefix("sha256:"), before["head"], before["tree"],
-                                before["worktree_id"], inputs, patterns, untracked, before,
-                                module_versions, env, descriptors)
+            snapshot = _assemble(before, inputs, patterns, untracked, module_versions, env, descriptors)
             if snapshot.verify(root):
                 return snapshot
         except (SnapshotChanged, model.SourceReadChanged):
