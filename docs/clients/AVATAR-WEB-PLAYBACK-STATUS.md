@@ -9,9 +9,11 @@ This ledger tracks the Safari buffering overlay and false-stall investigation.
 
 Isolated branch `codex/avatar-web-stall`; [PR #1247](http://forge.lan:3000/noirr/plurx/pulls/1247)
 is owned by Codex for this investigation and remains draft. A bounded observer
-repair is implemented; regression coverage is being added. Review has not run.
+repair and regression coverage are implemented. The single adversarial review
+of `fa492e1` found no actionable issues. Focused evidence passed; fast lane and
+merge are next.
 Lower model GPT-6 Luna completed a bounded, read-only source trace.
-Review and test runs are deferred until the implementation is ready, as requested.
+Review and test execution followed implementation, as requested.
 
 ## Incident evidence
 
@@ -43,8 +45,24 @@ The original failed attempt did not retain its hitch/metadata counters, so
 its exact trigger is unconfirmed. The regression must prove the identified
 counter defect without claiming the original physical failure was reproduced.
 
+## Review and focused evidence
+
+The adversarial reviewer checked the diff, touched outlines and this ledger.
+No actionable findings. Ownership guards remain before receipt counting, and
+seek settlement still requires valid timestamps and current identity/epoch.
+
+`node --test tests/web/hitch-lifecycle.test.js`: **7 passed**, October 20.
+The production detector and progress sampler retain presentation for 20 seconds
+of moving video with future callback timestamps, retire a media wait, and do
+not enter persistent recovery. Missing callbacks and a frozen element clock
+still enter stall handling. Invalid PTS cannot enter seek or hitch evidence.
+This is a deterministic callback-metadata regression, not a reproduction of
+the original Safari attempt.
+
+Browser tracing was removed; diagnostic playback was closed and the resume
+point restored conservatively to the original displayed 1:13.
+
 ## Remaining work
 
-Complete focused regression coverage; obtain one
-adversarial review; run focused evidence and the fast lane; merge green.
+Run the fast lane and merge green.
 Physical acceptance and deployment will be reported separately from merge.
