@@ -7,12 +7,12 @@ This ledger tracks the Safari buffering overlay and false-stall investigation.
 
 ## Current state
 
-Isolated branch `codex/avatar-web-stall`; [PR #1247](http://forge.lan:3000/noirr/plurx/pulls/1247)
-is owned by Codex for this investigation and remains draft. A bounded observer
-repair and regression coverage are implemented. The single adversarial review
-of `fa492e1` found no actionable issues. Focused evidence passed; fast lane and
-merge are next.
-Lower model GPT-6 Luna completed a bounded, read-only source trace.
+The observer repair and regression coverage are complete. [PR #1247](http://forge.lan:3000/noirr/plurx/pulls/1247)
+is owned by Codex for this investigation and carries the current gate and
+merge state. The single adversarial review of `fa492e1` found no actionable
+issues; focused evidence passed. The original incident's exact timestamp
+trigger and deployment remain distinct from the proven observer defect.
+Lower model GPT-6 Luna completed bounded source tracing and regression work.
 Review and test execution followed implementation, as requested.
 
 ## Incident evidence
@@ -62,7 +62,27 @@ the original Safari attempt.
 Browser tracing was removed; diagnostic playback was closed and the resume
 point restored conservatively to the original displayed 1:13.
 
-## Remaining work
+## Safari fault injection
 
-Run the fast lane and merge green.
-Physical acceptance and deployment will be reported separately from merge.
+Native Safari playback with callback media timestamps offset by one second
+reproduced the complete preparing/buffering, one restart, and exhausted prompt
+sequence over moving video. At 1:13:14, 338 callback timestamps were rejected
+and zero receipts credited. Loaded media remained plentiful.
+
+With the reviewed receipt ordering applied in memory on a fresh player under
+the same injected timestamps, playback remained healthy past that interval:
+297 receipts/anomalies at 1:13:51, 849 at 1:14:13, and 1,207 at 1:14:28.
+There was no active wait, no recovery spent, and the loading overlay was hidden.
+This confirms the mechanism on real Safari frames with synthetic timestamp
+faults; the original attempt's callback metadata was not retained.
+
+All injected code and temporary tracing were removed by restoring the native
+callback API and reloading the page. Diagnostic playback was closed; the
+visible resume point was restored to 1:13 and Web Inspector hidden.
+
+## Remaining acceptance
+
+The PR records current fast-lane and merge results. Deployment and an
+uninstrumented replay of the original failure remain separate acceptance;
+healthy resumes alone do not prove which original callback metadata occurred.
+
