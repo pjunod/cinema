@@ -16,6 +16,64 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::store::MediaSessionStore;
 
+use crate::store::adaptive_resource_attempts::{
+    schema as attempt_schema, transactions as attempts,
+};
+
+attempts::impl_attempt_store!(SqliteStore);
+
+#[cfg(test)]
+#[path = "../adaptive_resource_attempts/tests.rs"]
+mod adaptive_attempt_tests;
+
+#[async_trait]
+impl attempts::Backend for SqliteStore {
+    async fn attempt_layout(&self) -> Result<attempt_schema::Layout, StoreError> {
+        self.with_conn(|conn| {
+            Ok(if route_projection(conn)? == PRINCIPAL_ROUTE_COLS {
+                attempt_schema::Layout::Principal
+            } else {
+                attempt_schema::Layout::Legacy
+            })
+        })
+        .await
+    }
+
+    async fn attempt_read(&self, sql: String) -> Result<Vec<String>, StoreError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            route_projection(&tx)?;
+            let rows = tx
+                .prepare(&sql)?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            tx.commit()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn attempt_transaction(&self, statements: Vec<String>) -> Result<(), StoreError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            route_projection(&tx)?;
+            for sql in statements {
+                tx.execute(&sql, [])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn attempt_activate(
+        &self,
+        plan: &attempts::AdoptionPlan,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        activate_with_authority(self, &plan.input.activation, None, None, Some(plan)).await
+    }
+}
+
 const MAX_IN_FLIGHT_PER_USER: i64 = 32;
 const MAX_CURRENT_PER_USER: i64 = 64;
 const MAX_REQUEST_ROWS_PER_USER: i64 = 4_096;
@@ -951,7 +1009,20 @@ async fn activate_with_authority(
     activation: &MediaSessionActivation,
     authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
     receiver: Option<&crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority>,
+    adaptive: Option<&crate::store::adaptive_resource_attempts::transactions::AdoptionPlan>,
 ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+    if let Some(plan) = adaptive {
+        if authority.is_some() || receiver.is_some() || activation != &plan.input.activation {
+            return Err(StoreError::Task(
+                "conflicting adaptive activation authority".into(),
+            ));
+        }
+        validate_activation(activation)?;
+        return crate::store::adaptive_resource_attempts::transactions::commit_adoption(
+            store, plan,
+        )
+        .await;
+    }
     let activation = activation.clone();
     let authority = authority.cloned();
     let receiver = receiver.cloned();
@@ -1773,7 +1844,7 @@ impl MediaSessionStore for SqliteStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
-        activate_with_authority(self, activation, None, None).await
+        activate_with_authority(self, activation, None, None, None).await
     }
 
     async fn activate_receiver_media_session(
@@ -1789,7 +1860,7 @@ impl MediaSessionStore for SqliteStore {
         {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, None, Some(authority)).await
+        activate_with_authority(self, activation, None, Some(authority), None).await
     }
 
     async fn activate_source_media_session(
@@ -1804,7 +1875,7 @@ impl MediaSessionStore for SqliteStore {
         ) {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, Some(authority), None).await
+        activate_with_authority(self, activation, Some(authority), None, None).await
     }
 
     async fn settle_media_session_activation(
@@ -4505,6 +4576,13 @@ impl MediaSessionStore for SqliteStore {
                 "user_id"
             };
             let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
+            let adaptive: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_resource_requests')", [], |row| row.get(0))?;
+            let adaptive_layout = if owner_column == "owner_key" { attempt_schema::Layout::Principal } else { attempt_schema::Layout::Legacy };
+            let ordinary_request = attempt_schema::ordinary_request_filter(adaptive_layout,"media_session_requests",adaptive);
+            let ordinary_request_alias = attempt_schema::ordinary_request_filter(adaptive_layout,"request",adaptive);
+            let ordinary_route = attempt_schema::ordinary_route_filter("media_sessions",adaptive);
+            let ordinary_route_alias = attempt_schema::ordinary_route_filter("session",adaptive);
+            let ordinary_lease = attempt_schema::ordinary_lease_filter("lease",adaptive);
             let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
             let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
             // Compiling a media_sessions UPDATE expands its trigger graph even
@@ -4666,23 +4744,23 @@ impl MediaSessionStore for SqliteStore {
                 params![MAINTENANCE_BATCH],
             )?;
             tx.execute(
-                "DELETE FROM media_session_requests WHERE rowid IN (
+                &format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT rowid FROM media_session_requests
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= ?1
-                    ORDER BY claim_expires_at_ms, rowid LIMIT ?2)",
+                    WHERE {ordinary_request} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= ?1
+                    ORDER BY claim_expires_at_ms, rowid LIMIT ?2)"),
                 params![now_ms, MAINTENANCE_BATCH],
             )?;
             tx.execute(
-                "DELETE FROM media_session_requests WHERE rowid IN (
+                &format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT rowid FROM media_session_requests
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < ?1
-                    ORDER BY updated_at_ms, rowid LIMIT ?2)",
+                    WHERE {ordinary_request} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < ?1
+                    ORDER BY updated_at_ms, rowid LIMIT ?2)"),
                 params![failed_cutoff, MAINTENANCE_BATCH],
             )?;
             tx.execute(
                 &format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT request.rowid FROM media_session_requests request
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < ?1
+                    WHERE {ordinary_request_alias} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < ?1
                       AND NOT EXISTS (SELECT 1 FROM media_sessions session
                         WHERE session.incarnation_id = request.incarnation_id
                           AND session.{owner_column} = request.{owner_column}
@@ -4692,12 +4770,12 @@ impl MediaSessionStore for SqliteStore {
                 params![retained_cutoff, now_ms, MAINTENANCE_BATCH],
             )?;
             tx.execute(
-                "DELETE FROM job_leases WHERE rowid IN (
+                &format!("DELETE FROM job_leases WHERE rowid IN (
                    SELECT lease.rowid FROM job_leases lease
                    JOIN media_sessions session
                      ON lease.resource = 'session:' || session.incarnation_id
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=session.incarnation_id) AND session.state = 'ended' AND session.updated_at_ms < ?1
-                    ORDER BY session.updated_at_ms, lease.rowid LIMIT ?2)",
+                    WHERE {ordinary_route_alias} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=session.incarnation_id) AND session.state = 'ended' AND session.updated_at_ms < ?1
+                    ORDER BY session.updated_at_ms, lease.rowid LIMIT ?2)"),
                 params![retained_cutoff, MAINTENANCE_BATCH],
             )?;
             tx.execute(
@@ -4727,19 +4805,19 @@ impl MediaSessionStore for SqliteStore {
                 ORDER BY receipt.updated_at_ms, receipt.receipt_key LIMIT ?2)",
                 params![now_ms.saturating_sub(60_000), MAINTENANCE_BATCH])?;
             tx.execute(
-                "DELETE FROM media_sessions WHERE rowid IN (
+                &format!("DELETE FROM media_sessions WHERE rowid IN (
                    SELECT rowid FROM media_sessions
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < ?1
-                    ORDER BY updated_at_ms, rowid LIMIT ?2)",
+                    WHERE {ordinary_route} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < ?1
+                    ORDER BY updated_at_ms, rowid LIMIT ?2)"),
                 params![retained_cutoff, MAINTENANCE_BATCH],
             )?;
             tx.execute(
-                "DELETE FROM job_leases WHERE rowid IN (
+                &format!("DELETE FROM job_leases WHERE rowid IN (
                    SELECT lease.rowid FROM job_leases lease
-                    WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < ?1
+                    WHERE {ordinary_lease} AND lease.resource LIKE 'session:%' AND lease.updated_at_ms < ?1
                       AND NOT EXISTS (SELECT 1 FROM media_sessions session
                         WHERE lease.resource = 'session:' || session.incarnation_id)
-                    ORDER BY lease.updated_at_ms, lease.rowid LIMIT ?2)",
+                    ORDER BY lease.updated_at_ms, lease.rowid LIMIT ?2)"),
                 params![retained_cutoff, MAINTENANCE_BATCH],
             )?;
             tx.commit()?;

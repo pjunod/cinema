@@ -17,6 +17,65 @@ use crate::domain::{
 };
 use crate::error::StoreError;
 
+use crate::store::adaptive_resource_attempts::{
+    schema as attempt_schema, transactions as attempts,
+};
+
+attempts::impl_attempt_store!(HiqliteAuthStore);
+
+struct AttemptPayload(String);
+impl From<&mut Row<'_>> for AttemptPayload {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("payload"))
+    }
+}
+
+#[async_trait]
+impl attempts::Backend for HiqliteAuthStore {
+    async fn attempt_layout(&self) -> Result<attempt_schema::Layout, StoreError> {
+        Ok(match session_layout(self, true).await? {
+            SessionLayout::Legacy => attempt_schema::Layout::Legacy,
+            SessionLayout::Principal => attempt_schema::Layout::Principal,
+        })
+    }
+
+    async fn attempt_read(&self, sql: String) -> Result<Vec<String>, StoreError> {
+        // SessionClient proves the recognized layout and performs a leader
+        // barrier; the SQL itself includes exact adjunct shape/data admission.
+        Ok(self
+            .session_client()
+            .query_consistent_map::<AttemptPayload, _>(sql, params!())
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect())
+    }
+
+    async fn attempt_transaction(&self, statements: Vec<String>) -> Result<(), StoreError> {
+        let expected = statements.len();
+        let result = self
+            .session_client()
+            .txn(statements.into_iter().map(|sql| (sql, params!())))
+            .await?;
+        if result.len() != expected {
+            return Err(StoreError::Database(
+                "incomplete adaptive transaction acknowledgement".into(),
+            ));
+        }
+        for count in result {
+            count.map_err(database_error)?;
+        }
+        Ok(())
+    }
+
+    async fn attempt_activate(
+        &self,
+        plan: &attempts::AdoptionPlan,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        activate_with_authority(self, &plan.input.activation, None, None, Some(plan)).await
+    }
+}
+
 struct QualityIntervalRow {
     json: String,
 }
@@ -2224,7 +2283,20 @@ async fn activate_with_authority(
     activation: &MediaSessionActivation,
     authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
     receiver: Option<&crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority>,
+    adaptive: Option<&crate::store::adaptive_resource_attempts::transactions::AdoptionPlan>,
 ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+    if let Some(plan) = adaptive {
+        if authority.is_some() || receiver.is_some() || activation != &plan.input.activation {
+            return Err(StoreError::Task(
+                "conflicting adaptive activation authority".into(),
+            ));
+        }
+        validate_activation(activation)?;
+        return crate::store::adaptive_resource_attempts::transactions::commit_adoption(
+            store, plan,
+        )
+        .await;
+    }
     if authority.is_some() && session_layout(store, true).await? != SessionLayout::Principal {
         return Ok(None);
     }
@@ -3095,7 +3167,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
-        activate_with_authority(self, activation, None, None).await
+        activate_with_authority(self, activation, None, None, None).await
     }
 
     async fn activate_receiver_media_session(
@@ -3111,7 +3183,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, None, Some(authority)).await
+        activate_with_authority(self, activation, None, Some(authority), None).await
     }
 
     async fn activate_source_media_session(
@@ -3126,7 +3198,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         ) {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, Some(authority), None).await
+        activate_with_authority(self, activation, Some(authority), None, None).await
     }
 
     async fn prepare_media_session(
@@ -5869,6 +5941,21 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn maintain_media_sessions(&self, now_ms: i64) -> Result<(), StoreError> {
         let owner_column = LocalSessionSql::load(self).await?.column();
+        let adaptive = self.client().query_consistent_map::<PendingMaintenanceRow,_>("SELECT count(*) AS pending FROM sqlite_master WHERE type='table' AND name='media_resource_requests'",params!()).await?.first().is_some_and(|row|row.0==1);
+        let adaptive_layout = match session_layout(self, true).await? {
+            SessionLayout::Legacy => attempt_schema::Layout::Legacy,
+            SessionLayout::Principal => attempt_schema::Layout::Principal,
+        };
+        let ordinary_request = attempt_schema::ordinary_request_filter(
+            adaptive_layout,
+            "media_session_requests",
+            adaptive,
+        );
+        let ordinary_request_alias =
+            attempt_schema::ordinary_request_filter(adaptive_layout, "request", adaptive);
+        let ordinary_route = attempt_schema::ordinary_route_filter("media_sessions", adaptive);
+        let ordinary_route_alias = attempt_schema::ordinary_route_filter("session", adaptive);
+        let ordinary_lease = attempt_schema::ordinary_lease_filter("lease", adaptive);
         let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
         let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
         let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
@@ -6066,23 +6153,23 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(MAINTENANCE_BATCH),
             ),
             (
-                "DELETE FROM media_session_requests WHERE rowid IN (
+                format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT rowid FROM media_session_requests
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= $1
-                    ORDER BY claim_expires_at_ms, rowid LIMIT $2)".to_owned(),
+                    WHERE {ordinary_request} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= $1
+                    ORDER BY claim_expires_at_ms, rowid LIMIT $2)"),
                 params!(now_ms, MAINTENANCE_BATCH),
             ),
             (
-                "DELETE FROM media_session_requests WHERE rowid IN (
+                format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT rowid FROM media_session_requests
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < $1
-                    ORDER BY updated_at_ms, rowid LIMIT $2)".to_owned(),
+                    WHERE {ordinary_request} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < $1
+                    ORDER BY updated_at_ms, rowid LIMIT $2)"),
                 params!(failed_cutoff, MAINTENANCE_BATCH),
             ),
             (
                 format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT request.rowid FROM media_session_requests request
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < $1
+                    WHERE {ordinary_request_alias} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < $1
                       AND NOT EXISTS (SELECT 1 FROM media_sessions session
                         WHERE session.incarnation_id = request.incarnation_id
                             AND session.{owner_column} = request.{owner_column}
@@ -6092,12 +6179,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(retained_cutoff, now_ms, MAINTENANCE_BATCH),
             ),
             (
-                "DELETE FROM job_leases WHERE rowid IN (
+                format!("DELETE FROM job_leases WHERE rowid IN (
                    SELECT lease.rowid FROM job_leases lease
                    JOIN media_sessions session
                      ON lease.resource = 'session:' || session.incarnation_id
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=session.incarnation_id) AND session.state = 'ended' AND session.updated_at_ms < $1
-                    ORDER BY session.updated_at_ms, lease.rowid LIMIT $2)".to_owned(),
+                    WHERE {ordinary_route_alias} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=session.incarnation_id) AND session.state = 'ended' AND session.updated_at_ms < $1
+                    ORDER BY session.updated_at_ms, lease.rowid LIMIT $2)"),
                 params!(retained_cutoff, MAINTENANCE_BATCH),
             ),
             (
@@ -6133,19 +6220,19 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(now_ms.saturating_sub(60_000), MAINTENANCE_BATCH),
             ),
             (
-                "DELETE FROM media_sessions WHERE rowid IN (
+                format!("DELETE FROM media_sessions WHERE rowid IN (
                    SELECT rowid FROM media_sessions
-                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < $1
-                    ORDER BY updated_at_ms, rowid LIMIT $2)".to_owned(),
+                    WHERE {ordinary_route} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < $1
+                    ORDER BY updated_at_ms, rowid LIMIT $2)"),
                 params!(retained_cutoff, MAINTENANCE_BATCH),
             ),
             (
-                "DELETE FROM job_leases WHERE rowid IN (
+                format!("DELETE FROM job_leases WHERE rowid IN (
                    SELECT lease.rowid FROM job_leases lease
-                    WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $1
+                    WHERE {ordinary_lease} AND lease.resource LIKE 'session:%' AND lease.updated_at_ms < $1
                       AND NOT EXISTS (SELECT 1 FROM media_sessions session
                         WHERE lease.resource = 'session:' || session.incarnation_id)
-                    ORDER BY lease.updated_at_ms, lease.rowid LIMIT $2)".to_owned(),
+                    ORDER BY lease.updated_at_ms, lease.rowid LIMIT $2)"),
                 params!(retained_cutoff, MAINTENANCE_BATCH),
             ),
         ];
