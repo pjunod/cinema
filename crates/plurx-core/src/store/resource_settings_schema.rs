@@ -222,4 +222,81 @@ mod tests {
         assert!(sqlite_ready(&conn).expect("verified complete installation"));
         assert_eq!(report(&conn).hardware_sessions.state, ReadState::Absent);
     }
+
+    #[test]
+    fn full_image_restore_retains_bound_mode_and_persistent_legacy_invalidation() {
+        let root = tempfile::tempdir().expect("durable test TMPDIR");
+        let path = root.path().join("restored.db");
+        let source = settings();
+        install_sqlite(&source).expect("installed source");
+        automatic(&source);
+        source
+            .execute("VACUUM INTO ?1", [path.to_str().expect("test path")])
+            .expect("actual full SQLite image");
+        let restored = Connection::open(path).expect("reopen restored image");
+        install_sqlite(&restored).expect("idempotent restore open");
+        assert!(sqlite_snapshot(&restored)
+            .expect("shape and marker")
+            .is_some());
+        assert_eq!(
+            report(&restored).hardware_sessions.state,
+            ReadState::Automatic
+        );
+        restored
+            .pragma_update(None, "recursive_triggers", false)
+            .expect("old connection");
+        restored
+            .execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES(?1,'2')",
+                [keys::MAX_HW_SESSIONS],
+            )
+            .expect("rollback writer after restore");
+        assert_eq!(
+            report(&restored).hardware_sessions.state,
+            ReadState::LegacyAmbiguous
+        );
+    }
+
+    #[test]
+    fn unknown_future_schema_and_missing_marker_are_preserved_but_never_ready() {
+        let conn = settings();
+        conn.execute("CREATE TABLE resource_settings_schema(singleton INTEGER PRIMARY KEY, version INTEGER, future_state TEXT)", [])
+            .expect("future shape");
+        conn.execute(
+            "INSERT INTO resource_settings_schema VALUES(1,2,'preserve custody')",
+            [],
+        )
+        .expect("future state");
+        automatic(&conn);
+        install_sqlite(&conn).expect("legacy open does not rewrite future data");
+        assert!(sqlite_snapshot(&conn)
+            .expect("refuse future shape")
+            .is_none());
+        let retained: String = conn
+            .query_row(
+                "SELECT future_state FROM resource_settings_schema",
+                [],
+                |row| row.get(0),
+            )
+            .expect("preserved future state");
+        assert_eq!(retained, "preserve custody");
+        assert!(
+            report(&conn).hardware_sessions.provenance_valid,
+            "no destructive normalization of unknown version"
+        );
+        let conn = settings();
+        install_sqlite(&conn).expect("known installation");
+        automatic(&conn);
+        conn.execute("DELETE FROM resource_settings_schema", [])
+            .expect("incomplete restored marker");
+        install_sqlite(&conn).expect("do not invent a success marker");
+        assert!(sqlite_snapshot(&conn)
+            .expect("missing marker refused")
+            .is_none());
+        assert_eq!(
+            report(&conn).hardware_sessions.state,
+            ReadState::Automatic,
+            "data preserved, not authorization"
+        );
+    }
 }
