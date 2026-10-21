@@ -113,6 +113,7 @@ async fn expired_unknown_attempt_refuses_source_rebuild_and_preserves_history() 
 }
 
 #[tokio::test]
+#[cfg(feature = "hiqlite-store")]
 async fn drained_source_rebind_preserves_synthetic_terminal_audit_bytes_and_operations() {
     let (store, claim) = fixture().await;
     store

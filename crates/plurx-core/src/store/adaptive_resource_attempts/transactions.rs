@@ -212,6 +212,7 @@ pub(crate) async fn readiness<B: Backend>(store: &B) -> Result<AttemptSchemaRead
 
 /// New ordinary claim callers must not reacquire an expired adaptive root.
 /// Old binaries are independently fenced by the actual write triggers.
+#[cfg(feature = "hiqlite-store")]
 pub(crate) async fn root_held<B: Backend>(
     store: &B,
     owner: &str,
