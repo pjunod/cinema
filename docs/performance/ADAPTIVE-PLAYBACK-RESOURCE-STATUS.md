@@ -252,10 +252,76 @@ pass; tests have NOT executed. Native Linux/Windows compilation, whole-graph
 sampling, output/phase adapters, effective constraints and bounded-overhead
 qualification remain. Admission policy is unchanged.
 
+Subsequent source commits: `6e2104efb` adds dimensioned useful-service windows,
+verified VOD package/phase diagnostics, effective-limit diagnostics and a daemon-
+shutdown-owned sampler; `449747f36` associates actual finite/streaming DV managed
+helper/encoder launcher registrations with node-local observation graphs;
+`068f56f22` uses the repository-required pinned atomic `try_update` API. The
+first graph Clippy failed on banned `fetch_update`; corrected all-target plurxd
+Clippy `-D warnings` passed on exact `068f56f22` (67 s, log ending `215330.log`).
+No implementation tests have executed. Managed grouping is not graph-total
+measurement, custody or descendant closure. Unix file limits and visible Linux
+cgroup-v2 ancestor ceilings are explicit dimensions; hidden/unsupported/unbounded
+containment is Unknown, not host totals. `resource_limits` and process diagnostic
+fields are documented in the API reference. M1 whole-graph accounting and full
+adapter/phase/overhead/platform evidence are still owed.
+
+### Checked M0 lexical launcher inventory
+
+Manager-supplied Luna read-only inventory at `8081f025c` follows
+`process/census.rs` governed four-daemon-crate scope (core, daemon, PGS,
+compat-Plex), excluding harness and test-only modules. Its cfg/test stripping,
+recursive include traversal and typed Clippy complement source search. These
+are lexical anchors, NOT positive admission/lifecycle/descendant proof; none of
+the inherited tests were executed. Do not repeat this inventory as acceptance.
+
+| Area | Actual baseline call-site anchors (symbol; line) |
+|---|---|
+| Core launcher/bounded | process/mod.rs spawn_job_owned81, output_job_owned126, status_job_owned150, output_job_owned_blocking211; process/bounded.rs output_command_environment161/197 |
+| Core probes/metadata | scan/probe.rs self_check28, probe_reporter_identity210, probe_with_threads292, probe_first_frame478; metadata/book.rs collect_attached_picture686; metadata/local.rs generate_thumb_with389 |
+| Core backend probes | transcode/avc_qualification.rs probe_output255; decoder_inventory.rs advertised_backends447/probe_clip520/probe_decode570/measure_request_decode642; encoder.rs detection/benchmark/yielding1532/1611/1710/1774/2030 |
+| FFmpeg wrappers | ffmpeg.rs spawn236/spawn_piped_output259 (return owned child/job), stamped_with_this_reporter723, bounded_command_output_with_limits3265; Dovi/HDR/burst3815/3909/3990/4084/4121/4179/4215/4480 |
+| Bound probes / source | transcode/source_preparation.rs run_child_with631; decode_facts.rs spawn_configured_probe2645/probe_version3737/collect5213; transcoder_optimization/comparison.rs run666; media_pool.rs spawn_library_root_probe1723 |
+| HDR / disk / census | dv_disk.rs215/1542/1647/5883; hevc_census.rs sample220; pipeprobe.rs ffmpeg387/ffprobe407; producer_spawn.rs verify145 returns child/job |
+| Live / subtitles / indexing | live_tv/caption_probe.rs media_command265/run_live_graph702; live_tv.rs probe_live_source7983/spawn_live_ffmpeg8238/run_graph_probe10092; fragindex.rs build_with_args_owned2419; state.rs run_subtitle_source_pass3180; subtitle_ride_along.rs judge_text_mks1653/run_ffmpeg2854; subtitles.rs extract_vtt3022 |
+| Remaining source paths | http/stream.rs run_chapter_probe2084; transcode/content_encoding.rs measure_content485/sample_probe_document785; transcode/media_origin.rs probe56 (enclosing symbol unresolved) |
+
+No production matches found in PGS/compat-Plex within that bounded scan, not an
+absolute absence proof. Outstanding caller tracing: actual admission/work-class
+association, capacity retained through wait/pipe settlement, returned-child
+factory ownership, unmanaged descendants, non-Rust/separate-binary boundary,
+media_origin symbol and Live factory chain. The current DV finite stage owner
+retains Arc source/admission/offset resources through registered child wait;
+streaming renderer and encoder share those resources through separate existing
+supervisors. That does not by itself prove every possible descendant is gone.
+
+Manager lifecycle resolution: managed-graph custody must gather every actual
+identity-matched managed-child wait plus writer/non-process close. Recipe lists,
+leader receipts, job Drop/kill-on-close and elapsed time do not prove unmanaged
+descendant closure. Unsupported closure keeps UnknownHeld and bars speculation;
+reconciliation belongs to the SAME existing cleanup owner using positive OS
+job-empty/group/descendant evidence where available, never a watchdog. Distinguish
+unknown expansion evidence from actually live residency so supported ordinary
+graphs do not permanently leak reservations. Cancellation/panic followed by
+confirmed reconciliation and the positive normal-cleanup path need real tests.
+
+Clock anchors verified: `cluster/clock.rs:PeerClockOffset::Bounded` carries signed
+offset, uncertainty and monotonic observation age (25 s maximum); continuity and
+membership/admission generations are serialized in `capture_with`. Existing
+public acquisition may soften Unknown in advisory mode: it is NOT a strict
+adaptive-deadline proof. The new consumer must use strict bound/revalidation
+independent of advisory mode, or refuse new adaptive Prepare/Adopt.
+
 ## M0 contract refinement for manager check (revision 2)
 
-These decisions supersede ambiguous prose above. They remain proposed until
-the manager resolves them; no M4 behavior has been enabled.
+These decisions supersede ambiguous prose above. Manager accepted the direction
+for implementation with the mandatory INSERT-guard refinement below. This is
+not final adversarial review or M0/M4 completion; no M4 behavior is enabled.
+
+Draft PR #1248 is open, owner task `t_161f6652`; manager/root owns authenticated
+transport until final handoff. Keep it draft through complete implementation,
+independent Fable review and fixes. Paperwork-only draft CI is allowed; no ready
+transition, implementation units or qualification before the manager handoff.
 
 ### Database enforcement, including old SQL and retention
 
@@ -291,7 +357,14 @@ whole-batch abort that would break unrelated ordinary playback):
   Claim-expiry renewal alone does not authorize a new attempt or move its deadline.
 - `resource_request_retain_bd`: ignore deletion of a request with any unclosed
   attempt, even after failed/resolved/expired retention. This also prevents
-  delete+reinsert (`REPLACE`) from detaching its physical obligations.
+  an explicit delete from detaching its physical obligations. DELETE triggers
+  alone do NOT protect implicit REPLACE deletion with recursive_triggers OFF.
+- `resource_request_identity_bi`, `resource_route_owner_bi`, and identity BEFORE
+  INSERT guards on every replaceable owner/parent/extension refuse insertion
+  when it would conflict with any existing unclosed custody. This protects
+  INSERT OR REPLACE independently of DELETE triggers or the connection's
+  recursive_triggers PRAGMA. Both OFF and ON legacy-SQL fixtures are mandatory;
+  no claim of REPLACE protection is valid from a DELETE-only trigger.
 - `resource_route_owner_bi/bu`: block conflicting route insertion and epoch/
   identity/recipe changes for an attempt. Permit `starting -> active` only for
   its durable winner in `adopting`, matching exact worker, session, principal,
