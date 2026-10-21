@@ -36,7 +36,7 @@ class WorkerCorrespondenceTests(unittest.TestCase):
     def test_package_registry_is_closed_and_bounded(self) -> None:
         package = formal.package_spec("worker-refinement")
         self.assertEqual(package["model_file"], "verification/worker-refinement/WorkerRefinement.tla")
-        self.assertEqual(len(package["config_order"]), 17)
+        self.assertEqual(len(package["config_order"]), 14)
         self.assertIn("control-no-useful-progress.cfg", package["config_order"])
         self.assertEqual(package["smoke_configs"], ("progress.cfg", "witness-both-complete.cfg"))
         self.assertEqual(package["smoke_wall_budget_seconds"], 600)

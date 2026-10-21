@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "model_file": "verification/worker-refinement/WorkerRefinement.tla",
-  "model_sha256": "1d7f6370e91ed3a57a088b49b132e02a64e84ac0bf41d944591aa2c308ee6905",
+  "model_sha256": "c3e5f8bce35504020bb93c87fcbf3bd6315945250331923bb240316f813ba370",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "5ceb7e9aec8e69fb632942abc253c9c2ce14c46d8c23677cab4cbf5bb2162bad"
+    "sha256": "0533dc9b55369b8b430f9b3fd7ee27c92eb03deda27a89b5e32437cc595a0bde"
   },
   "configs": {
     "progress.cfg": {
@@ -572,8 +572,8 @@
       },
       "minimum_trace_states": 2
     },
-    "witness-cancel-scan.cfg": {
-      "sha256": "18d9bfad0a46dff774ef6eb59ebef06cc4e3ab805de3437f4cb16ef714096dc4",
+    "witness-cancel.cfg": {
+      "sha256": "1721eeb67e58941f6077f6a8f989ea3a919209ac9c26ecd9cf0e8ced7af71bad",
       "verdict": "witness",
       "purpose": "reachability_witness",
       "expected_error": "NoCancelCleanupWitness",
@@ -599,7 +599,7 @@
             "none"
           ],
           "Scenario": [
-            "cancel_scan"
+            "cancel"
           ],
           "Recurring": [
             "FALSE"
@@ -614,148 +614,7 @@
           "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
           "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
           "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
-          "Configuration uses Mutation=none, Scenario=cancel_scan, Recurring=FALSE, and FaultBudget=0."
-        ]
-      },
-      "minimum_trace_states": 2
-    },
-    "witness-cancel-queue-loss.cfg": {
-      "sha256": "2d2d1f065e236cb9f23c4007b86dacac045474bcec98767ddd428a29a2820a15",
-      "verdict": "witness",
-      "purpose": "reachability_witness",
-      "expected_error": "NoCancelCleanupWitness",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant NoCancelCleanupWitness is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "timeout_seconds": 300,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "workers": 2,
-          "distinct_queue_jobs": 2,
-          "shared_exclusive_domains": 1,
-          "item_milestones_per_worker": 1,
-          "FaultBudget": 0,
-          "RetryLimit": 2,
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "cancel_queue"
-          ],
-          "Recurring": [
-            "FALSE"
-          ]
-        },
-        "properties": [
-          "NoCancelCleanupWitness"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
-          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
-          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
-          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
-          "Configuration uses Mutation=none, Scenario=cancel_queue, Recurring=FALSE, and FaultBudget=0."
-        ]
-      },
-      "minimum_trace_states": 2
-    },
-    "witness-cancel-domain-loss.cfg": {
-      "sha256": "40d752b4e949ccd7a7713317be94132c592a42f3322995a2c4fcb5435db09213",
-      "verdict": "witness",
-      "purpose": "reachability_witness",
-      "expected_error": "NoCancelCleanupWitness",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant NoCancelCleanupWitness is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "timeout_seconds": 300,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "workers": 2,
-          "distinct_queue_jobs": 2,
-          "shared_exclusive_domains": 1,
-          "item_milestones_per_worker": 1,
-          "FaultBudget": 0,
-          "RetryLimit": 2,
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "cancel_domain"
-          ],
-          "Recurring": [
-            "FALSE"
-          ]
-        },
-        "properties": [
-          "NoCancelCleanupWitness"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
-          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
-          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
-          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
-          "Configuration uses Mutation=none, Scenario=cancel_domain, Recurring=FALSE, and FaultBudget=0."
-        ]
-      },
-      "minimum_trace_states": 2
-    },
-    "witness-cancel-pressure.cfg": {
-      "sha256": "51a1a93066514373a7a59ce57cab5526d7a1264a30e923de95eff86d7e53b35f",
-      "verdict": "witness",
-      "purpose": "reachability_witness",
-      "expected_error": "NoCancelCleanupWitness",
-      "expected_exit": 12,
-      "expected_error_match": {
-        "line": "Invariant NoCancelCleanupWitness is violated.",
-        "attribution": "named_property",
-        "allowed_error_lines": [
-          "The behavior up to this point is:"
-        ]
-      },
-      "timeout_seconds": 300,
-      "analysis": {
-        "status": "reviewed",
-        "bounds": {
-          "workers": 2,
-          "distinct_queue_jobs": 2,
-          "shared_exclusive_domains": 1,
-          "item_milestones_per_worker": 1,
-          "FaultBudget": 0,
-          "RetryLimit": 2,
-          "Mutation": [
-            "none"
-          ],
-          "Scenario": [
-            "cancel_pressure"
-          ],
-          "Recurring": [
-            "FALSE"
-          ]
-        },
-        "properties": [
-          "NoCancelCleanupWitness"
-        ],
-        "reductions": [],
-        "assumptions": [
-          "Two fixed workers run distinct queue jobs for the same library and contend for one exclusive domain; each has one modeled item milestone.",
-          "FaultBudget is finite and global, RetryLimit is two; the model does not cover arbitrary worker/job scheduling, migration, or unbounded retries.",
-          "FIFO intent grant fairness and action-specific temporal fairness are model assumptions; source correspondence identifies implementation anchors and gaps but is not a refinement theorem.",
-          "The Rust conformance schedules exercise selected source behaviors and do not convert model checking into proof of implementation correctness.",
-          "Configuration uses Mutation=none, Scenario=cancel_pressure, Recurring=FALSE, and FaultBudget=0."
+          "Configuration uses Mutation=none, Scenario=cancel, Recurring=FALSE, and FaultBudget=0."
         ]
       },
       "minimum_trace_states": 2
