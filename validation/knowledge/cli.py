@@ -110,7 +110,7 @@ def _run(args, root: Path) -> int:
         from . import lint
         result = lint.run(root, body=_body(args), base=args.base)
         payload = json.dumps(result, ensure_ascii=False, sort_keys=True)
-        if len(payload.encode("utf-8")) > 8192:
+        if len(payload.encode("utf-8")) + 1 > 8192:
             _refusal("budget-too-small", "lint result exceeds the 8192-byte output limit")
             return 2
         print(payload)
@@ -160,12 +160,16 @@ def _run(args, root: Path) -> int:
                 raise ValueError("evidence identity is absent from the captured graph")
     else:
         cohort = args.cohort
-    result = queries.answer(indexed.graph, indexed.snapshot.metadata(), command=args.command,
+    metadata = indexed.snapshot.metadata()
+    metadata["knowledge_view"] = "worktree"
+    if args.command == "obligations":
+        metadata["change_view"] = "staged paths only" if args.staged else "full proposed worktree diff"
+    result = queries.answer(indexed.graph, metadata, command=args.command,
                             paths=paths, symbol=symbol, identity=identity, cohort=cohort,
                             max_depth=args.max_depth, max_bytes=args.max_bytes,
                             continuation=args.continuation,
                             evidence_assessment=assessment)
-    print(queries.render(result, format=args.format, max_bytes=args.max_bytes))
+    print(queries.render(result, format=args.format, max_bytes=args.max_bytes), end="")
     return 0
 
 

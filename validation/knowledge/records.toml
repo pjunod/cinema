@@ -114,12 +114,84 @@ selector = ["Python unit receipts — one success per test per PR", "The rule", 
 digest = "sha256:529564a4da73f68d0399fefe9ea9a15d9f697ddf02af42606d9461db1b242ccf"
 excerpt = "The bespoke recoveries\nare gone. One rule covers every case."
 
+[[anchors]]
+id = "plurx:symbol:reviewed.server.capability-profile"
+path = "crates/plurxd/src/http/stream.rs"
+kind = "symbol"
+selector = "fn profile(&self, now_ms: i64) -> playback::DeviceProfile"
+digest = "sha256:da33b9e0ee62f48826342b5586a05bf7e7a235e03165d4796ffde7e10e2a046e"
+owner_module = "crates/plurxd/src/http/stream.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.learned-decode-limit"
+path = "crates/plurx-core/src/playback/mod.rs"
+kind = "symbol"
+selector = "fn matching_learned_limit("
+digest = "sha256:1534f573e0de8bb00b611523676898482d1526073e2241c372d586dcd6f4f24b"
+owner_module = "crates/plurx-core/src/playback/mod.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.learned-decode-limit-expiry"
+path = "crates/plurx-core/src/playback/caps.rs"
+kind = "symbol"
+selector = "pub fn applies_at("
+digest = "sha256:8e58b7a58850951af1267f384cca1365a8b3e622382d790355cc03f89926b2b0"
+owner_module = "crates/plurx-core/src/playback/caps.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.verdict"
+path = "crates/plurx-core/src/playback/mod.rs"
+kind = "symbol"
+selector = "pub fn decide("
+digest = "sha256:1534f573e0de8bb00b611523676898482d1526073e2241c372d586dcd6f4f24b"
+owner_module = "crates/plurx-core/src/playback/mod.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.manual-quality"
+path = "crates/plurx-core/src/playback/mod.rs"
+kind = "symbol"
+selector = "pub fn decide_forced("
+digest = "sha256:1534f573e0de8bb00b611523676898482d1526073e2241c372d586dcd6f4f24b"
+owner_module = "crates/plurx-core/src/playback/mod.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.server.execution-plan"
+path = "crates/plurxd/src/http/stream.rs"
+kind = "symbol"
+selector = "fn delivery_plan("
+digest = "sha256:da33b9e0ee62f48826342b5586a05bf7e7a235e03165d4796ffde7e10e2a046e"
+owner_module = "crates/plurxd/src/http/stream.rs"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.receipt.applicability"
+path = "validation/python_unit_receipts.py"
+kind = "symbol"
+selector = "class SourceApplicability:"
+digest = "sha256:b05f1ab3a171e35565208b4c6000ebfe65ae68d4e8a76d19b010f09ecae810da"
+owner_module = "validation/python_unit_receipts.py"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.receipt.adoption"
+path = "validation/main_unit_receipts.py"
+kind = "symbol"
+selector = "def restore("
+digest = "sha256:883e510a5cc025eb2a4acac09bc73d522e6f5583785bd4217ee6b863f5315885"
+owner_module = "validation/main_unit_receipts.py"
+
+[[anchors]]
+id = "plurx:symbol:reviewed.receipt.inputs"
+path = "validation/main_preflight_adoption.py"
+kind = "symbol"
+selector = "def input_digest("
+digest = "sha256:ce7599264b973786d4fbb1d4c0a105d6e3d692f21f528779145a1de7ccb6aeb4"
+owner_module = "validation/main_preflight_adoption.py"
+
 [[records]]
 id = "plurx:contract:routing.server.capability-profile"
 kind = "contract"
 title = "server.capability-profile governing routing rule"
 scope = ["crates/plurxd/src/http/stream.rs"]
-anchors = ["plurx:section:routing.server.capability-profile"]
+anchors = ["plurx:section:routing.server.capability-profile", "plurx:symbol:reviewed.server.capability-profile"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -138,7 +210,7 @@ id = "plurx:obligation:preserve.server.capability-profile"
 kind = "obligation"
 title = "Preserve server.capability-profile when changing its owner"
 scope = ["crates/plurxd/src/http/stream.rs"]
-anchors = ["plurx:section:routing.server.capability-profile"]
+anchors = ["plurx:section:routing.server.capability-profile", "plurx:symbol:reviewed.server.capability-profile"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -158,7 +230,7 @@ id = "plurx:contract:routing.server.learned-decode-limit"
 kind = "contract"
 title = "server.learned-decode-limit governing routing rule"
 scope = ["crates/plurx-core/src/playback/mod.rs"]
-anchors = ["plurx:section:routing.server.learned-decode-limit"]
+anchors = ["plurx:section:routing.server.learned-decode-limit", "plurx:symbol:reviewed.server.learned-decode-limit"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -177,7 +249,7 @@ id = "plurx:obligation:preserve.server.learned-decode-limit"
 kind = "obligation"
 title = "Preserve server.learned-decode-limit when changing its owner"
 scope = ["crates/plurx-core/src/playback/mod.rs"]
-anchors = ["plurx:section:routing.server.learned-decode-limit"]
+anchors = ["plurx:section:routing.server.learned-decode-limit", "plurx:symbol:reviewed.server.learned-decode-limit"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -197,7 +269,7 @@ id = "plurx:contract:routing.server.learned-decode-limit-expiry"
 kind = "contract"
 title = "server.learned-decode-limit-expiry governing routing rule"
 scope = ["crates/plurx-core/src/playback/caps.rs"]
-anchors = ["plurx:section:routing.server.learned-decode-limit-expiry"]
+anchors = ["plurx:section:routing.server.learned-decode-limit-expiry", "plurx:symbol:reviewed.server.learned-decode-limit-expiry"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -216,7 +288,7 @@ id = "plurx:obligation:preserve.server.learned-decode-limit-expiry"
 kind = "obligation"
 title = "Preserve server.learned-decode-limit-expiry when changing its owner"
 scope = ["crates/plurx-core/src/playback/caps.rs"]
-anchors = ["plurx:section:routing.server.learned-decode-limit-expiry"]
+anchors = ["plurx:section:routing.server.learned-decode-limit-expiry", "plurx:symbol:reviewed.server.learned-decode-limit-expiry"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -236,7 +308,7 @@ id = "plurx:contract:routing.server.verdict"
 kind = "contract"
 title = "server.verdict governing routing rule"
 scope = ["crates/plurx-core/src/playback/mod.rs"]
-anchors = ["plurx:section:routing.server.verdict"]
+anchors = ["plurx:section:routing.server.verdict", "plurx:symbol:reviewed.server.verdict"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -255,7 +327,7 @@ id = "plurx:obligation:preserve.server.verdict"
 kind = "obligation"
 title = "Preserve server.verdict when changing its owner"
 scope = ["crates/plurx-core/src/playback/mod.rs"]
-anchors = ["plurx:section:routing.server.verdict"]
+anchors = ["plurx:section:routing.server.verdict", "plurx:symbol:reviewed.server.verdict"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -275,7 +347,7 @@ id = "plurx:contract:routing.server.manual-quality"
 kind = "contract"
 title = "server.manual-quality governing routing rule"
 scope = ["crates/plurx-core/src/playback/mod.rs"]
-anchors = ["plurx:section:routing.server.manual-quality"]
+anchors = ["plurx:section:routing.server.manual-quality", "plurx:symbol:reviewed.server.manual-quality"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -294,7 +366,7 @@ id = "plurx:obligation:preserve.server.manual-quality"
 kind = "obligation"
 title = "Preserve server.manual-quality when changing its owner"
 scope = ["crates/plurx-core/src/playback/mod.rs"]
-anchors = ["plurx:section:routing.server.manual-quality"]
+anchors = ["plurx:section:routing.server.manual-quality", "plurx:symbol:reviewed.server.manual-quality"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -314,7 +386,7 @@ id = "plurx:contract:routing.server.execution-plan"
 kind = "contract"
 title = "server.execution-plan governing routing rule"
 scope = ["crates/plurxd/src/http/stream.rs"]
-anchors = ["plurx:section:routing.server.execution-plan"]
+anchors = ["plurx:section:routing.server.execution-plan", "plurx:symbol:reviewed.server.execution-plan"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -333,7 +405,7 @@ id = "plurx:obligation:preserve.server.execution-plan"
 kind = "obligation"
 title = "Preserve server.execution-plan when changing its owner"
 scope = ["crates/plurxd/src/http/stream.rs"]
-anchors = ["plurx:section:routing.server.execution-plan"]
+anchors = ["plurx:section:routing.server.execution-plan", "plurx:symbol:reviewed.server.execution-plan"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -389,7 +461,7 @@ id = "plurx:contract:receipt.execution-distinction"
 kind = "contract"
 title = "A named check is a definition, not an execution"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.identity"]
+anchors = ["plurx:section:receipt.identity", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -426,7 +498,7 @@ id = "plurx:obligation:preserve.receipt.execution-distinction"
 kind = "obligation"
 title = "Preserve receipt boundary: A named check is a definition, not an execution"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.identity"]
+anchors = ["plurx:section:receipt.identity", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -446,7 +518,7 @@ id = "plurx:contract:receipt.origin-applicability"
 kind = "contract"
 title = "Origin and applicability are independent"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.authentication"]
+anchors = ["plurx:section:receipt.authentication", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -483,7 +555,7 @@ id = "plurx:obligation:preserve.receipt.origin-applicability"
 kind = "obligation"
 title = "Preserve receipt boundary: Origin and applicability are independent"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.authentication"]
+anchors = ["plurx:section:receipt.authentication", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -503,7 +575,7 @@ id = "plurx:contract:receipt.input-closure"
 kind = "contract"
 title = "Declared inputs and environment constrain evidence"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.applicability"]
+anchors = ["plurx:section:receipt.applicability", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -540,7 +612,7 @@ id = "plurx:obligation:preserve.receipt.input-closure"
 kind = "obligation"
 title = "Preserve receipt boundary: Declared inputs and environment constrain evidence"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.applicability"]
+anchors = ["plurx:section:receipt.applicability", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -560,7 +632,7 @@ id = "plurx:contract:receipt.history-fallback"
 kind = "contract"
 title = "Unusable history reruns without blocking the lane"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.rule"]
+anchors = ["plurx:section:receipt.rule", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"
@@ -597,7 +669,7 @@ id = "plurx:obligation:preserve.receipt.history-fallback"
 kind = "obligation"
 title = "Preserve receipt boundary: Unusable history reruns without blocking the lane"
 scope = ["validation/python_unit_receipts.py", "validation/main_unit_receipts.py", "validation/main_preflight_adoption.py", "validation/main-preflight-inputs.json"]
-anchors = ["plurx:section:receipt.rule"]
+anchors = ["plurx:section:receipt.rule", "plurx:symbol:reviewed.receipt.applicability", "plurx:symbol:reviewed.receipt.adoption", "plurx:symbol:reviewed.receipt.inputs"]
 [records.provenance]
 method = "reviewed"
 author = "Codex integrator"

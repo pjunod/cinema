@@ -491,7 +491,7 @@
   "authored_record_curation": {
     "state": "initial-reviewed-data",
     "records": 27,
-    "anchors": 14,
+    "anchors": 23,
     "edges": 60,
     "real_review_findings": "not-recorded-in-consulted-sources",
     "real_execution_receipts": "not-imported",
