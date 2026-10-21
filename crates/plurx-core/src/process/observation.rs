@@ -18,7 +18,7 @@ pub async fn graph_scope<F: std::future::Future>(future: F) -> F::Output {
     }
     use std::sync::atomic::Ordering;
     let Ok(id) =
-        NEXT_GRAPH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        NEXT_GRAPH.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
     else {
         // Exhausted diagnostic identifiers grant no grouping or authority.
         return future.await;
