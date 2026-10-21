@@ -457,49 +457,49 @@
       },
       {
         "anchor": "async fn formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back"
       },
       {
         "anchor": "async fn formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit"
       },
       {
         "anchor": "async fn formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample"
       },
       {
         "anchor": "async fn formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics"
       },
       {
         "anchor": "async fn formal_publication_resolved_claim_keeps_attempt_identity_through_insertion",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244",
+        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_resolved_claim_keeps_attempt_identity_through_insertion"
       },
@@ -517,55 +517,55 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
+        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
       {
         "anchor": "        let publisher = lease.publisher(self.store.as_ref());",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
+        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:257"
       },
       {
         "anchor": "            result => {\n                tracing::warn!(library_id, ?result, \"library publication binding refused\");\n                drop(publisher);\n                if let Err(error) = lease.release().await {",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
+        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:260"
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
+        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "f3dcb1cc9533d510df8051c40edf1b4540739b49ba8bea12e9e2b56fd44c6702",
+        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "f3dcb1cc9533d510df8051c40edf1b4540739b49ba8bea12e9e2b56fd44c6702",
+        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "f3dcb1cc9533d510df8051c40edf1b4540739b49ba8bea12e9e2b56fd44c6702",
+        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "f3dcb1cc9533d510df8051c40edf1b4540739b49ba8bea12e9e2b56fd44c6702",
+        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "f3dcb1cc9533d510df8051c40edf1b4540739b49ba8bea12e9e2b56fd44c6702",
+        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },

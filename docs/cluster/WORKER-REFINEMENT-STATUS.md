@@ -16,7 +16,7 @@ No whole-cluster deadlock theorem or removal of existing tests is claimed.
 | Two complete workers, temporal properties and controls | GPT-6.1 Sol | Committed two-worker model; duplicate cancellation witnesses consolidated after review |
 | Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Integrated strict 57-action/18-boundary checks; all three source mappings pass static validation |
 | Integration, ledger, PR and exact-tree qualification | Codex coordinator | Owned clone established at `c2d5aa257` |
-| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings addressed; qualification found fixture corrections |
+| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings addressed; qualification fixture corrections integrated |
 
 ## 2. Implementation correspondence is an explicit obligation
 
@@ -173,17 +173,17 @@ queue-loss and admission-pressure ordering tests. The paired-worker test
 missed a checkpoint and the reread assertion expected a storage label where
 the API projects a success label. Both core tests stopped on in-memory SQLite
 before Hiqlite: one terminal-result label assertion and one refused claim.
-The four failed tests are under concrete fixture/predicate diagnosis; three
-passing cases are preserved. No replicated-backend evidence is claimed yet.
-Formal smoke is running separately. The draft PR records live progress and
+The four failed tests have concrete assertion/admission fixture corrections;
+three passing cases are preserved using byte-equivalence evidence. No replicated-backend evidence is claimed yet.
+Formal qualification awaits the corrected candidate source pins. The draft PR records live progress and
 will stay draft until qualification and required main-gate preparation permit
 promotion. No failing result is counted as a pass.
 
 Qualification correction: the initial `progress.cfg` run hit its 300-second cap
 with 678,415 distinct states and 51,612 queued; it is incomplete, not a pass.
 Same-root `source_io` admission also prevents the originally proposed paired
-library-job fixture. Fable design task `t_3aed651f` is advising on reachable
-schedules and bounded TLC feasibility; production admission will remain intact.
+library-job fixture. Fable design task `t_3aed651f` supplied reachable schedules and bounded
+TLC feasibility advice; production admission remains intact.
 The initial ready-event CI attempt refused units after draft conversion.
 
 Design recovery `t_3aed651f` confirms two independent physical pools with
@@ -192,3 +192,10 @@ and can retry after the first settles. The proposed TLC retry defers
 liveness analysis until graph completion, retains all properties and both
 pipelines, and is capped at 900 seconds. Incomplete execution will remain
 a failed qualification; simulation or safety-only runs cannot replace it.
+
+Current main `168fe74fb` is integrated. The lower-model equivalence audit
+confirms all three passing test functions, eight common helpers and relevant
+production worker paths are unchanged. The new node constructor is test-only
+fixture setup. All three source mappings pass static validation after
+refreshing verified fixture file hashes. Four failed checks await targeted
+reruns; no passing cancellation case will be repeated.
