@@ -44,6 +44,7 @@ earlier failure.
 | Replicated browse authority bar | Setup proof preceded fixture writes, so it did not necessarily cover the echo being tested. | Establish an observable applied-index/proof precondition before each route; invoke each handler once. Stop the sampler and prove an actually expired proof requires authority fallback. |
 | Media seam census | Processed-reuse tests replaced the real driver with a test-only early return. | Exercise the real driver with typed ordering/observation hooks; preserve real task and slot ownership assertions, including teardown races and panic/cancellation. |
 | Nine Source/HTTP cases | Linux baseline failed during actual Source startup; local execution has not reproduced it. Failure-only diagnostics now preserve the typed Store/startup refusal and first HTTP response. | Do not increase deadlines, retry assertions or claim a repair from a local pass. Diagnose the Linux/full-suite result before closure. |
+| Newly surfaced K06 clock case, outside the original 25 | Full run 5679 constructed a clock observer before its actual applied-membership watch was ready. | Share the original 45-second startup deadline with a wait for both real nodes to observe the same committed learner membership. Construct the manager once; preserve every authorization, stale-heartbeat, fresh-heartbeat, removal and cleanup assertion. Add this case to the additional repeated cohort. |
 
 ## 3. Qualification binds actual execution to the source and inventory
 
@@ -58,11 +59,13 @@ The declared sequence is compile, inventory, static checks (including the
 21 evidence/controller controls), ten rounds of
 the affected Core/daemon cohort, the complete ordinary Rust cell, and the
 two exact serial media cases. Each round runs the inventoried real
-binaries with 22 test threads and all original failed identities. Eight additional
+binaries with 22 test threads and all original failed identities. Nine additional
 regressions are listed separately, including five actual-task panic,
 cancellation and registration-teardown controls. Three of those controls
-reside in the existing Linux-only processed-reuse module; a Mac result
-cannot qualify them. The full cell also declares 22 threads;
+reside in the existing Linux-only processed-reuse module; Mac results cannot
+qualify those three. The newly surfaced K06 case is also repeated, making
+340 executions for the next candidate while the original 25 identities
+remain unchanged. The full cell also declares 22 threads;
 the baseline resource receipt reported 22 logical and affinity CPUs.
 This is recorded execution context, not a reduction in the case universe.
 The qualification job declares one Cargo build job to avoid concurrent
@@ -105,8 +108,11 @@ not performance estimates or permission to drop cases.
 | First Linux qualification, run 5675 on `b10f7c6c7` | Compile passed in 1,084.352s, inventory in 6.710s and static checks in 753.591s. Inventory: 36 native binaries, 6,977 cases, 49 ignored. Rust 1.97.1 and Jellyfin FFmpeg 8.1.3 verified. All ten Core rounds passed 13 cases; all ten daemon rounds aborted with a browse-test stack overflow. The 301-second cohort is failed and incomplete, with safe process-group cleanup. No Source/HTTP outcome is inferred from an aborted binary. |
 | Browse default-stack correction | Heap-own each real handler future before nested accounting helpers, and separately box the unchanged expiry sequence. Preserve the sampler abort/join, real expiry, one request and exact `[0,4,0]` assertion. The complete test passes locally with `RUST_MIN_STACK` unset in 10.45s; fresh Linux qualification remains owed. Earlier focused Mac commands used an 8-MiB stack and did not expose the default-stack failure. |
 | Local Linux native code generation | Two affected-daemon native build attempts exceeded the shared VM memory limit, including one job with incremental/debug symbols disabled. Neither yielded test outcomes; the two additional OOM kills remain setup failures. |
-| Ten Linux cohort repetitions after stack correction | Pending. |
-| Full ordinary Rust and exact serial media cells | Pending. |
+| Ten Linux cohort repetitions after stack correction | On exact `9971299d6`, all 330 executions passed: 250 original-failure bodies and 80 controls. Every native exit was zero, cleanup qualified, and strict accounting found no gaps. This receipt remains bound to that source. The next candidate adds K06 as a ninth additional case and requires 340 fresh executions. |
+| Full Core on `9971299d6` | 1,943 passed, one failed and five ignored in 1,388.11s. The sole failure was the previously passing, unchanged K06 fixture: `Internal("clock observation lacks applied membership")` at manager construction. An additional SQL-writer panic appeared in its captured output. The original ten Core failures passed in this full body. The run remains red. |
+| Isolated K06 before correction | Passed in 19.97s with the real Hiqlite backend and default stack; the known shutdown-handler panic was matched by the existing strict catcher. An isolated pass does not repair the full-run readiness race. |
+| K06 correction, local native checks | The complete unchanged assertion sequence passes in 19.89s after the real-watch readiness wait. The expanded Core cohort (all original ten plus four additional cases) passes all 14 in 22.54s, with default stack and 22 test threads. Strict helper/controller/document controls pass 27 cases; independent review confirms the single original deadline and one constructor invocation. |
+| Full ordinary Rust and exact serial media cells | Run 5679 continues under its original `9971299d6` source to retain later diagnostic outcomes; its Core failure remains a failure. Fresh complete qualification after the K06 correction is owed. |
 | Independent review | Store schema/preservation, native accounting, browse proof, real publisher cleanup and real driver teardown reviewed; no remaining blocker. |
 | Exact-head effort gate | Pending. |
 

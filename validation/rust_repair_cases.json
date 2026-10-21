@@ -160,6 +160,11 @@
       "owner": "crates/plurx-core/src/store/sqlite/dv_conversion.rs"
     },
     {
+      "target": "plurx_core",
+      "name": "cluster::membership::tests::k06_aged_committed_learner_clock_response_keeps_other_routes_live_only",
+      "owner": "crates/plurx-core/src/cluster/membership/tests.rs"
+    },
+    {
       "target": "plurxd",
       "name": "transcode::tests::serving_fence_real_media_cleanup_survives_an_observer_panic",
       "owner": "crates/plurxd/src/transcode/tests/chunk_06.rs"

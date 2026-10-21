@@ -60,11 +60,12 @@ class RepairWorkflowCase(unittest.TestCase):
         cells, bindings = self.api['cohort'](self.inventory)
         self.assertEqual(len(cells), 20)
         self.assertEqual({row['repetition'] for row in bindings.values()}, set(range(1, 11)))
-        originals = {(row['target'], row['name']) for row in self.policy['cases']}
+        declared = {(row['target'], row['name']) for row in
+                    self.policy['cases'] + self.policy.get('additional_repeated_cases', [])}
         for repetition in range(1, 11):
             observed = {(row['binary']['target']['name'], name) for row in bindings.values()
                         if row['repetition'] == repetition for name in row['names']}
-            self.assertLessEqual(originals, observed)
+            self.assertEqual(declared, observed)
         for cell in cells:
             self.assertEqual(cell['timeout_seconds'], 180)
             self.assertIn('--exact', cell['argv'])
