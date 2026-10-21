@@ -224,6 +224,11 @@ impl JobManager {
                 return false;
             }
         };
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::Claimed,
+        )
+        .await;
         let fence = active.fence();
         let library_id = match job.supported_payload() {
             Ok(
@@ -236,8 +241,20 @@ impl JobManager {
             }
         };
         let lease = match self.acquire_job(format!("scan:library:{library_id}")).await {
-            Ok(Some(lease)) => lease,
+            Ok(Some(lease)) => {
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::DomainAcquired,
+                )
+                .await;
+                lease
+            }
             result => {
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::DomainUnavailable,
+                )
+                .await;
                 if let Err(error) = result {
                     tracing::warn!(library_id, %error, "library domain lease unavailable");
                 }
@@ -251,12 +268,29 @@ impl JobManager {
                 )
                 .await;
                 active.finish().await;
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::Finished,
+                )
+                .await;
+                drop(admission);
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::AdmissionDropped,
+                )
+                .await;
                 return true;
             }
         };
         let publisher = lease.publisher(self.store.as_ref());
         match fence.bind_library(&publisher).await {
-            Ok(true) => {}
+            Ok(true) => {
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::Bound,
+                )
+                .await;
+            }
             result => {
                 tracing::warn!(library_id, ?result, "library publication binding refused");
                 drop(publisher);
@@ -273,6 +307,17 @@ impl JobManager {
                 )
                 .await;
                 active.finish().await;
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::Finished,
+                )
+                .await;
+                drop(admission);
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::AdmissionDropped,
+                )
+                .await;
                 return true;
             }
         }
@@ -280,6 +325,15 @@ impl JobManager {
         let queue_loss = fence.loss_token();
         let domain_loss = lease.loss_token();
         let (result, yielded) = {
+            #[cfg(test)]
+            crate::background_jobs::faults::worker::at_with_signals(
+                crate::background_jobs::faults::worker::Point::Processing,
+                Some(crate::background_jobs::faults::worker::Signals {
+                    queue_loss: queue_loss.clone(),
+                    domain_loss: domain_loss.clone(),
+                }),
+            )
+            .await;
             let work = plurx_core::process::bounded::cancellable(
                 cancellation.clone(),
                 self.process_library_requests(&job.id, library_id, &lease, &publisher, &fence),
@@ -290,15 +344,34 @@ impl JobManager {
                 tokio::select! {
                     biased;
                     () = queue_loss.cancelled() => {
+                        #[cfg(test)]
+                        crate::background_jobs::faults::worker::at(
+                            crate::background_jobs::faults::worker::Point::QueueLoss,
+                        )
+                        .await;
                         lease.revoke(); cancellation.cancel();
                         break (work.await, false);
                     }
                     () = domain_loss.cancelled() => {
+                        #[cfg(test)]
+                        crate::background_jobs::faults::worker::at(
+                            crate::background_jobs::faults::worker::Point::DomainLoss,
+                        )
+                        .await;
                         lease.revoke(); cancellation.cancel();
                         break (work.await, true);
                     }
                     _ = pressure.tick() => {
-                        if !transcode.fragment_worker_idle(&admission) {
+                        let pressured = !transcode.fragment_worker_idle(&admission);
+                        #[cfg(test)]
+                        let pressured = pressured
+                            || crate::background_jobs::faults::worker::force_pressure();
+                        if pressured {
+                            #[cfg(test)]
+                            crate::background_jobs::faults::worker::at(
+                                crate::background_jobs::faults::worker::Point::Pressure,
+                            )
+                            .await;
                             lease.revoke(); cancellation.cancel();
                             break (work.await, true);
                         }
@@ -307,12 +380,27 @@ impl JobManager {
                 }
             }
         };
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::WorkJoined,
+        )
+        .await;
         // `work` has returned only after the blocking walker and any bounded
         // media child joined. Keep the physical admission until that point.
         drop(publisher);
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::ReleaseStarted,
+        )
+        .await;
         if let Err(error) = lease.release().await {
             tracing::warn!(library_id, %error, "releasing library domain lease");
         }
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::ReleaseFinished,
+        )
+        .await;
         if yielded {
             settle_library(
                 &fence,
@@ -337,7 +425,17 @@ impl JobManager {
             .await;
         }
         active.finish().await;
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::Finished,
+        )
+        .await;
         drop(admission);
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::AdmissionDropped,
+        )
+        .await;
         true
     }
 
@@ -411,6 +509,11 @@ impl JobManager {
                 }
             }
             if !full.is_empty() {
+                #[cfg(test)]
+                crate::background_jobs::faults::worker::at(
+                    crate::background_jobs::faults::worker::Point::BeforeScan,
+                )
+                .await;
                 let why = match full[0].2 {
                     LibraryTrigger::Manual => ScanTrigger::Manual,
                     LibraryTrigger::Scheduled => ScanTrigger::Scheduled,
@@ -497,6 +600,11 @@ impl JobManager {
         {
             result = LibraryWorkResult::Failed { error: "scan result exceeded the durable 64 KiB response bound; narrow the requested path".into() };
         }
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::BeforeCompletion,
+        )
+        .await;
         let reply = fence.complete_library(publisher, id.clone(), result).await;
         if matches!(reply, Ok(true)) {
             return Ok(());
@@ -510,6 +618,11 @@ impl JobManager {
                 ..Default::default()
             })
             .await?;
+        #[cfg(test)]
+        crate::background_jobs::faults::worker::at(
+            crate::background_jobs::faults::worker::Point::CompletionReconciled,
+        )
+        .await;
         if current
             .first()
             .is_some_and(|record| record.state != "pending")
@@ -570,10 +683,131 @@ fn request_record(record: LibraryWorkRecord) -> ScanRequestRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::background_jobs::faults::worker::{Event as WorkerEvent, Point as WorkerPoint};
     use plurx_core::cluster::coordination::LeaseClaim;
     use plurx_core::domain::NewLibrary;
+    use plurx_core::store::background_jobs_library::{LibraryTrigger, LibraryWorkInput};
     use plurx_core::store::{SqliteStore, Store};
     use plurx_core::transcode::{EncoderCaps, Pipeline};
+    use tokio::sync::{mpsc, oneshot};
+
+    type SpawnedWorker = (
+        tokio::task::JoinHandle<(bool, u8)>,
+        Arc<crate::background_jobs::faults::worker::Scope>,
+        Option<oneshot::Sender<()>>,
+    );
+
+    fn worker_scope(
+        worker: &str,
+        events: mpsc::UnboundedSender<WorkerEvent>,
+        pause_at: Option<WorkerPoint>,
+        force_pressure: bool,
+    ) -> (
+        Arc<crate::background_jobs::faults::worker::Scope>,
+        Option<oneshot::Sender<()>>,
+    ) {
+        let (resume, pause) = match pause_at {
+            Some(point) => {
+                let (resume, receiver) = oneshot::channel();
+                (Some(resume), Some((point, receiver)))
+            }
+            None => (None, None),
+        };
+        (
+            crate::background_jobs::faults::worker::scope(worker, events, pause, force_pressure),
+            resume,
+        )
+    }
+
+    async fn next_worker_event(
+        events: &mut mpsc::UnboundedReceiver<WorkerEvent>,
+        worker: &str,
+        point: WorkerPoint,
+    ) -> WorkerEvent {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let event = events.recv().await.expect("worker event channel");
+                if event.worker == worker && event.point == point {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("worker reached scheduled point")
+    }
+
+    async fn enqueue_full(store: &dyn Store, library_id: i64, request_id: &str, refresh: bool) {
+        assert!(matches!(
+            store
+                .enqueue_library_work(NewLibraryWork {
+                    request_id: request_id.into(),
+                    library_id,
+                    input: LibraryWorkInput::Full {
+                        refresh,
+                        trigger: LibraryTrigger::Manual,
+                    },
+                    now_ms: clock_ms(),
+                })
+                .await
+                .expect("enqueue full library request"),
+            EnqueueOutcome::Accepted { .. }
+        ));
+    }
+
+    fn transcode_for(store: Arc<dyn Store>, root: &std::path::Path) -> Arc<TranscodeManager> {
+        Arc::new(TranscodeManager::new(
+            store,
+            root.join("scratch"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ))
+    }
+
+    fn spawn_worker(
+        worker: &str,
+        jobs: Arc<JobManager>,
+        transcode: Arc<TranscodeManager>,
+        events: mpsc::UnboundedSender<WorkerEvent>,
+        pause_at: Option<WorkerPoint>,
+        force_pressure: bool,
+        dropped_replies: u8,
+    ) -> SpawnedWorker {
+        let (scope, resume) = worker_scope(worker, events, pause_at, force_pressure);
+        let worker_scope = Arc::clone(&scope);
+        let task = tokio::spawn(async move {
+            crate::background_jobs::faults::dropping(dropped_replies, async move {
+                crate::background_jobs::faults::worker::run(worker_scope, async move {
+                    jobs.work_library_queue(&transcode, None).await
+                })
+                .await
+            })
+            .await
+        });
+        (task, scope, resume)
+    }
+
+    async fn request_record(store: &dyn Store, request_id: &str) -> LibraryWorkRecord {
+        store
+            .library_work_requests(LibraryWorkQuery {
+                request_id: Some(request_id.into()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("read library request")
+            .into_iter()
+            .next()
+            .expect("library request exists")
+    }
+
+    fn assert_no_worker_event(
+        events: &mut mpsc::UnboundedReceiver<WorkerEvent>,
+        point: WorkerPoint,
+    ) {
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event.point, point, "{point:?} occurred before work joined");
+        }
+    }
 
     #[tokio::test]
     async fn repeated_scheduled_ticks_do_not_report_new_scan_admissions() {
@@ -677,6 +911,196 @@ mod tests {
         assert!(
             transcode.admit_fragment().await.is_some(),
             "physical capacity returned after contention"
+        );
+    }
+
+    #[tokio::test]
+    async fn library_worker_two_jobs_share_domain_and_both_complete() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Two workers".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, "request-scan", false).await;
+        enqueue_full(store.as_ref(), library.id, "request-refresh", true).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        let (tx, mut events) = mpsc::unbounded_channel();
+
+        let (first, _, resume_first) = spawn_worker(
+            "w1",
+            Arc::clone(&jobs),
+            Arc::clone(&transcode),
+            tx.clone(),
+            Some(WorkerPoint::BeforeScan),
+            false,
+            0,
+        );
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        let (second, _, _) = spawn_worker(
+            "w2",
+            Arc::clone(&jobs),
+            Arc::clone(&transcode),
+            tx.clone(),
+            None,
+            false,
+            0,
+        );
+        next_worker_event(&mut events, "w2", WorkerPoint::DomainUnavailable).await;
+        assert!(second.await.expect("contending worker joined").0);
+        assert_eq!(
+            request_record(store.as_ref(), "request-refresh")
+                .await
+                .state,
+            "pending"
+        );
+        resume_first
+            .expect("first worker barrier")
+            .send(())
+            .expect("resume scan");
+        assert!(first.await.expect("first worker joined").0);
+        assert_eq!(
+            request_record(store.as_ref(), "request-scan").await.state,
+            "completed"
+        );
+
+        // The contention path applies the production five-second uncharged
+        // yield. Let that exact due time pass before retrying the second job.
+        tokio::time::sleep(Duration::from_millis(5_100)).await;
+        let (retry, _, _) = spawn_worker("w2-retry", jobs, transcode, tx, None, false, 0);
+        assert!(retry.await.expect("retry worker joined").0);
+        assert_eq!(
+            request_record(store.as_ref(), "request-refresh")
+                .await
+                .state,
+            "completed"
+        );
+    }
+
+    async fn cancellation_schedule(point: WorkerPoint, force_pressure: bool) {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Cancellation schedule".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, "cancel-request", false).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (task, scope, resume) = spawn_worker(
+            "w1",
+            jobs,
+            transcode,
+            tx,
+            Some(WorkerPoint::BeforeScan),
+            false,
+            0,
+        );
+        let processing = next_worker_event(&mut events, "w1", WorkerPoint::Processing).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        if force_pressure {
+            crate::background_jobs::faults::worker::set_force_pressure(&scope, true);
+            next_worker_event(&mut events, "w1", WorkerPoint::Pressure).await;
+        } else {
+            let signals = processing.signals.expect("worker loss tokens");
+            match point {
+                WorkerPoint::QueueLoss => signals.queue_loss.cancel(),
+                WorkerPoint::DomainLoss => signals.domain_loss.cancel(),
+                _ => unreachable!("unsupported cancellation point"),
+            }
+            next_worker_event(&mut events, "w1", point).await;
+        }
+
+        // The controlled scan is still held at its worker-side checkpoint.
+        // The production loss arm has run, but release cannot start until the
+        // work future is allowed to return and the worker joins it.
+        assert_no_worker_event(&mut events, WorkerPoint::ReleaseStarted);
+        resume
+            .expect("scan barrier")
+            .send(())
+            .expect("resume worker");
+        next_worker_event(&mut events, "w1", WorkerPoint::WorkJoined).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::ReleaseStarted).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::ReleaseFinished).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::Finished).await;
+        next_worker_event(&mut events, "w1", WorkerPoint::AdmissionDropped).await;
+        assert!(task.await.expect("cancelled worker joined").0);
+        assert_eq!(
+            request_record(store.as_ref(), "cancel-request").await.state,
+            "pending"
+        );
+        let job = store
+            .background_job(
+                &request_record(store.as_ref(), "cancel-request")
+                    .await
+                    .job_id,
+            )
+            .await
+            .expect("read durable job")
+            .expect("job retained");
+        assert_eq!(job.state, JobState::Queued);
+    }
+
+    #[tokio::test]
+    async fn library_worker_domain_loss_joins_before_release_and_admission_drop() {
+        cancellation_schedule(WorkerPoint::DomainLoss, false).await;
+    }
+
+    #[tokio::test]
+    async fn library_worker_queue_loss_joins_before_release_and_retirement() {
+        cancellation_schedule(WorkerPoint::QueueLoss, false).await;
+    }
+
+    #[tokio::test]
+    async fn library_worker_admission_pressure_joins_before_release_and_drop() {
+        cancellation_schedule(WorkerPoint::Pressure, true).await;
+    }
+
+    #[tokio::test]
+    async fn library_worker_reconciles_lost_completion_acknowledgement() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("root");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Completion acknowledgement".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        enqueue_full(store.as_ref(), library.id, "completion-ack", false).await;
+        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
+        let transcode = transcode_for(Arc::clone(&store), root.path());
+        let (tx, mut events) = mpsc::unbounded_channel();
+        let (task, _, _) = spawn_worker(
+            "w1",
+            jobs,
+            transcode,
+            tx,
+            None,
+            false,
+            crate::background_jobs::faults::COMPLETE,
+        );
+        next_worker_event(&mut events, "w1", WorkerPoint::CompletionReconciled).await;
+        assert!(task.await.expect("worker reconciled completion").0);
+        let record = request_record(store.as_ref(), "completion-ack").await;
+        assert_eq!(record.state, "completed");
+        assert!(
+            record.result.is_some(),
+            "committed completion survives lost acknowledgement"
         );
     }
 }

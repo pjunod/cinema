@@ -177,7 +177,13 @@ impl ActiveJobLease {
         if let Some(token) = token {
             let mut attempt = 1;
             let released = loop {
-                match self.coordinator.release(&token).await {
+                let result = self.coordinator.release(&token).await;
+                #[cfg(test)]
+                let result = crate::background_jobs::faults::after_commit(
+                    crate::background_jobs::faults::RELEASE,
+                    result,
+                );
+                match result {
                     Ok(value) => break Ok(value),
                     Err(error) if attempt < RELEASE_ATTEMPTS => {
                         tracing::warn!(

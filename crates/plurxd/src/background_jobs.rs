@@ -24,7 +24,7 @@ pub(crate) mod subtitle_fixture;
 
 #[cfg(test)]
 #[path = "background_job_faults.rs"]
-mod faults;
+pub(crate) mod faults;
 #[path = "background_job_metrics.rs"]
 mod metrics;
 use metrics::Event;
@@ -673,9 +673,12 @@ impl JobFence {
         let Some(token) = state.token.clone() else {
             return Ok(false);
         };
-        publisher
+        let completed = publisher
             .complete_library_work(token, request_id, result, unix_ms()?)
-            .await
+            .await;
+        #[cfg(test)]
+        let completed = faults::after_commit(faults::COMPLETE, completed);
+        completed
     }
 
     pub(crate) async fn bind_transcode_recipe(
