@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Processed Dolby Vision admission respects actual HLS support when clients
+  also advertise progressive DV; native web startup reads complete long-film
+  processing timelines without confusing them with small master playlists.
+
 - Dolby Vision FEL processing on Intel servers can use the independently
   proved VAAPI output encoder when hardware selection prefers Quick Sync,
   avoiding an unintended single-thread software encode and startup timeout.
