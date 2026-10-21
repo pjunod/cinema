@@ -17,6 +17,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) | How every playback pipeline learns per-node capacity, preserves owned resources, and uses eligible cluster workers before quality fallback. | open |
 | [HDR-REFERENCE-SCORING.md](HDR-REFERENCE-SCORING.md) | Independent bounded PQ code-domain metrics/census and explicitly graded BT.709 reference provenance for SDR VMAF; diagnostic evidence does not close genuine corpus, GPU or physical acceptance. | open |
 | [TONEMAP-SEGMENT-CONSISTENCY.md](TONEMAP-SEGMENT-CONSISTENCY.md) | Exact source-frame and rational-PTS comparison of continuous and restarted tone-map filters; separate from seek, encoded-HLS and display acceptance. | open |
 | [Tone-map reset receipt](evidence/tonemap-reset-20261015.json) | Four authored CPU/Metal campaigns, exact raw-frame and rational-PTS results, the preserved fixture failure and metadata-only correction proof. | done |
