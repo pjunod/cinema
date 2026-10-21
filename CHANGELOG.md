@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Apple TV movie and show rows keep complete posters, titles and metadata
+  visible while browsing. Library headings, search and the letter index scroll
+  with the results, leaving the compact tools available above them.
+
 - Web prepared quality switches reattach selected subtitles without cancelling
   the pending quality request or sending a contradictory commit to the server.
   Visible successors retain HLS failure recovery; established retries and
