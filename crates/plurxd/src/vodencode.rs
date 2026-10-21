@@ -369,6 +369,7 @@ pub(crate) struct ActiveProductionWindow {
     /// Instrumentation-only, dimensioned useful-output observations. Existing
     /// recipe proof and admission policy do not consume these diagnostics.
     service: plurx_core::resource_observation::ServiceWindow,
+    service_entry: Option<u32>,
 }
 
 impl ActiveProductionWindow {
@@ -400,24 +401,23 @@ impl ActiveProductionWindow {
         contiguous
     }
 
-    fn observe(
-        &mut self,
-        now: Instant,
-        generation: u64,
-        entry: u32,
-        end_ms: i64,
-    ) -> Option<ActiveProductionEvidence> {
+    fn observe_service(&mut self, now: Instant, generation: u64, entry: u32, end_ms: i64) {
         if !self.active || self.generation != generation {
-            return None;
+            return;
         }
-        if self.points.back().is_some_and(|(_, previous, end)| {
-            previous.checked_add(1) != Some(entry) || *end >= end_ms
-        }) {
-            self.points.clear();
-            self.evidence = None;
+        if self
+            .service_entry
+            .is_some_and(|previous| previous.checked_add(1) != Some(entry))
+        {
             self.service = Default::default();
         }
-        if let Ok(completed) = u64::try_from(end_ms) {
+        self.service_entry = Some(entry);
+        let Ok(completed) = u64::try_from(end_ms) else {
+            self.service = Default::default();
+            self.service_entry = None;
+            return;
+        };
+        {
             use plurx_core::process::observation::{Metric, UnknownReason};
             use plurx_core::resource_observation::{ServiceUnit, WorkPhase, WorkSample};
             if let Some(observation) = self.service.observe(WorkSample {
@@ -435,6 +435,24 @@ impl ActiveProductionWindow {
                     interval_ms = observation.interval_ms,
                     "verified VOD output resource observation");
             }
+        }
+    }
+
+    fn observe(
+        &mut self,
+        now: Instant,
+        generation: u64,
+        entry: u32,
+        end_ms: i64,
+    ) -> Option<ActiveProductionEvidence> {
+        if !self.active || self.generation != generation {
+            return None;
+        }
+        if self.points.back().is_some_and(|(_, previous, end)| {
+            previous.checked_add(1) != Some(entry) || *end >= end_ms
+        }) {
+            self.points.clear();
+            self.evidence = None;
         }
         while self
             .points
@@ -954,11 +972,15 @@ impl Encoding {
     }
 
     pub(crate) fn note_active_segment(&self, generation: u64, entry: u32, end_ms: i64) {
+        let mut window = self.active_production.lock().expect("active production");
+        let now = Instant::now();
+        window.observe_service(now, generation, entry, end_ms);
         if self.shared_audio.is_some() {
+            // Audio's useful service belongs in resource diagnostics, never
+            // in video recipe/compatibility proof or an enhancement badge.
             return;
         }
-        let mut window = self.active_production.lock().expect("active production");
-        let proof = window.observe(Instant::now(), generation, entry, end_ms);
+        let proof = window.observe(now, generation, entry, end_ms);
 
         if let (Some(recipe), Some(proof)) = (self.candidate_recipe, proof) {
             self.production_proofs.record(recipe, proof);
@@ -1620,6 +1642,68 @@ pub(crate) fn frame_grid(probe: Option<&str>) -> Option<VodFrameGrid> {
             VodFrameGrid::new(numerator.parse().ok()?, denominator.parse().ok()?)
         })
     })
+}
+
+#[cfg(test)]
+mod resource_service_tests {
+    use super::*;
+    use plurx_core::process::observation::{Metric, UnknownReason};
+
+    #[test]
+    fn audio_service_observation_cannot_mint_video_recipe_proof() {
+        let now = Instant::now();
+        let mut window = ActiveProductionWindow {
+            generation: 7,
+            active: true,
+            ..Default::default()
+        };
+        for (seconds, entry, frontier) in [(0, 0, 4_000), (1, 1, 8_000), (2, 2, 12_000)] {
+            window.observe_service(now + Duration::from_secs(seconds), 7, entry, frontier);
+        }
+        assert_eq!(
+            window
+                .service
+                .snapshot(now + Duration::from_secs(2))
+                .expect("audio service")
+                .units_per_second,
+            Metric::Known(4_000)
+        );
+        assert!(window.evidence.is_none());
+        assert!(window.points.is_empty());
+    }
+
+    #[test]
+    fn service_window_rejects_wrong_generation_and_resets_at_missing_segments() {
+        let now = Instant::now();
+        let mut window = ActiveProductionWindow {
+            generation: 7,
+            active: true,
+            ..Default::default()
+        };
+        window.observe_service(now, 8, 0, 4_000);
+        assert!(window.service.snapshot(now).is_none());
+        window.observe_service(now, 7, 0, 4_000);
+        window.observe_service(now + Duration::from_secs(1), 7, 2, 12_000);
+        let observation = window
+            .service
+            .snapshot(now + Duration::from_secs(1))
+            .expect("reset");
+        assert_eq!(observation.interval_ms, 0);
+        assert_eq!(
+            observation.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
+        window.active = false;
+        window.observe_service(now + Duration::from_secs(2), 7, 3, 16_000);
+        assert_eq!(
+            window
+                .service
+                .snapshot(now + Duration::from_secs(2))
+                .expect("held")
+                .completed,
+            12_000
+        );
+    }
 }
 
 #[cfg(test)]
