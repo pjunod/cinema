@@ -579,7 +579,7 @@ async fn raw_refused(raw: &StrandedFieldOrder, sql: &str) -> bool {
             .execute_batch(sql)
             .is_err(),
         #[cfg(feature = "hiqlite-contract-tests")]
-        StrandedFieldOrder::Hiqlite(client) => match client.batch(sql).await {
+        StrandedFieldOrder::Hiqlite(client) => match client.batch(sql.to_owned()).await {
             Err(_) => true,
             Ok(results) => results.iter().any(Result::is_err),
         },
