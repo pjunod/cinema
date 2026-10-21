@@ -268,6 +268,24 @@ checks=["fixture-check"]
         self.assertFalse(list((self.root / "target/knowledge").rglob("graph.sqlite")))
         self.assertFalse(list((self.root / "target/knowledge").rglob(".build-*")))
 
+    def test_discovery_read_race_retries_even_when_git_identity_is_restored(self):
+        actual = model.load_graph
+        attempts = []
+        def observed_race(root, **kwargs):
+            attempts.append(root)
+            if len(attempts) == 1:
+                raise model.SourceReadChanged("observed write-and-restore during discovery")
+            return actual(root, **kwargs)
+        with patch("validation.knowledge.snapshot.model.load_graph", side_effect=observed_race):
+            current = capture(self.root)
+        self.assertEqual(2, len(attempts))
+        self.assertEqual(self.head, current.head)
+        with patch("validation.knowledge.snapshot.model.load_graph",
+                   side_effect=model.SourceReadChanged("continuous discovery race")) as racing:
+            with self.assertRaises(SnapshotChanged):
+                capture(self.root)
+        self.assertEqual(2, racing.call_count)
+
     def test_load_revalidates_and_prunes_old_owned_bundles(self):
         snapshots = []
         for n in range(4):
