@@ -1,11 +1,26 @@
 {
   "schema_version": 1,
-  "scope": "Generic trusted evaluator source frozen for independent source review; private gold remains separate.",
-  "source_metadata_sha256": "b2619daa9c31d78b24f43c8ce86a0dddddbf9ae4786520ff931795bf50ea1f3c",
+  "scope": "Generic trusted evaluator and synthetic contract source frozen for same-task independent recheck; private gold remains separate.",
+  "source_metadata_sha256": "a53c4bcaef34349631c5e26d4ea76a31cc91d0c447914e91804e929adb9875db",
   "sources": {
-    "runtime_bindings.py": "67ed829aedaf1517f2b3f2a89ec531dee42805b94908ee1b9c370156e9b747e5",
-    "trusted_launcher.py": "83b04ab3d1c7e6f5fba31c948114548d814f512166f0d60280e135a5085b1409",
-    "isolation_adapter.py": "2fb9ab1adfa0ea3bfcb39543cc8e33da14010d8bfaeb8c3bd3c473cdfb7dbca7"
+    "isolation_adapter.py": "3d9d2d85dba0bcd82e23d8d09b414d21504a0e35d104fc8fec5db9fb06f86b33",
+    "private_contract_tests.py": "eded34662c4f9fcd498242e0908e15113d4f0d8eae7bfc21dcb5aaae6774c172",
+    "python_byte_outcome_driver.py": "3abcfec23be7e60426899eeb7428b2271d6cf12e0db269e8bbe6ef8d2147c14f",
+    "runtime_bindings.py": "c66bda9e0c9083561171729acbe4c079f67459401159be7fc73f536b32e4b251",
+    "trusted_launcher.py": "5290da17e0d7f0995f96dd66eafa8e8cabf91d9524fe1abb6c5d017ec446a1fe"
   },
-  "qualification": "not-run; no approval or runtime evidence implied"
+  "acceptance_capability_counts": {
+    "actual_qualified_bundles": 0,
+    "frozen_bundles": 4,
+    "full_study_prerequisites_available": false,
+    "model_spend_refused_until_all_qualify": true,
+    "statically_supported_bundle_shapes": 1,
+    "supported_mechanism": "immutable AST-recognized inert file bytes only",
+    "unsupported_bundle_shapes": 3,
+    "unsupported_mechanisms": [
+      "candidate Python imports",
+      "candidate Rust compile/test"
+    ]
+  },
+  "qualification": "not-run; source commitments confer no approval, actual family qualification or runtime evidence"
 }
