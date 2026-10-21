@@ -803,6 +803,10 @@ CPU nanoseconds/resident bytes, CPU ns per wall second, sample age and explicit
 incomplete-tree Unknown. A readable leader counter is not a graph-total,
 playable-output or spare-capacity claim. Samples share a one-second per-child
 cache; unavailable counters, pid reuse and stale windows never become zero.
+Optional `resource_graph` associates actual managed helper/encoder registrations
+within this daemon. It is diagnostic-only, not a serialized permit, graph-total
+measurement, descendant-closure proof or release receipt. An absent grouping is
+unknown; task-local association does not implicitly propagate to spawned tasks.
 
 Analysis progress may include paired `durable_job_id` and `durable_fence`
 fields for an explicitly correlated execution attempt. Job summaries include

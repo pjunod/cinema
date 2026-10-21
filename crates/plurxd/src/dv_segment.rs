@@ -635,7 +635,7 @@ pub(crate) async fn spawn(request: SegmentRequest) -> Result<SegmentProducer, St
     let work_cancel = cancel.clone();
     let receiver_cancel = cancel.clone();
     tokio::spawn(async move {
-        let result = run(request, work_cancel).await;
+        let result = plurx_core::process::observation::graph_scope(run(request, work_cancel)).await;
         // A refused oneshot handoff drops SegmentProducer: its cancellation
         // token retires the registered encoder and its abandoned pipes settle.
         let _ = sender.send(result);
@@ -941,7 +941,10 @@ pub(crate) async fn spawn_streaming(
     let cancel = request.request.cancel.child_token();
     let owner_cancel = cancel.clone();
     tokio::spawn(async move {
-        let _ = sender.send(run_streaming(request, owner_cancel).await);
+        let result =
+            plurx_core::process::observation::graph_scope(run_streaming(request, owner_cancel))
+                .await;
+        let _ = sender.send(result);
     });
     struct CancelOnDrop(Option<CancellationToken>);
     impl Drop for CancelOnDrop {

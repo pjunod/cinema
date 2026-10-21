@@ -4,6 +4,32 @@
 
 use std::time::{Duration, Instant};
 
+tokio::task_local! {
+    static OBSERVATION_GRAPH: u64;
+}
+static NEXT_GRAPH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Associate actual launcher registrations in this task with one managed
+/// graph. An observation scope is NOT admission, custody, descendant closure,
+/// or a reap receipt. Spawned tasks do not inherit task-local association.
+pub async fn graph_scope<F: std::future::Future>(future: F) -> F::Output {
+    if current_graph().is_some() {
+        return future.await;
+    }
+    use std::sync::atomic::Ordering;
+    let Ok(id) =
+        NEXT_GRAPH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    else {
+        // Exhausted diagnostic identifiers grant no grouping or authority.
+        return future.await;
+    };
+    OBSERVATION_GRAPH.scope(id, future).await
+}
+
+pub(crate) fn current_graph() -> Option<u64> {
+    OBSERVATION_GRAPH.try_with(|id| *id).ok()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownReason {
@@ -443,5 +469,25 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), sample_loop(shutdown))
             .await
             .expect("sampler stopped");
+    }
+
+    #[tokio::test]
+    async fn managed_graph_scope_is_task_local_not_a_cleanup_receipt() {
+        assert_eq!(current_graph(), None);
+        let first = graph_scope(async {
+            let id = current_graph().expect("managed scope");
+            assert_eq!(graph_scope(async { current_graph() }).await, Some(id));
+            assert_eq!(
+                tokio::spawn(async { current_graph() })
+                    .await
+                    .expect("child task"),
+                None
+            );
+            id
+        })
+        .await;
+        assert_eq!(current_graph(), None);
+        let second = graph_scope(async { current_graph().expect("second scope") }).await;
+        assert_ne!(first, second);
     }
 }

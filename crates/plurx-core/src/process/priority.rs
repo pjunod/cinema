@@ -293,6 +293,10 @@ pub struct RunningChild {
     /// Identity-bound leader counters. Successful reads do not imply complete
     /// descendant measurement or verified packaged output.
     pub resources: super::observation::ProcessObservation,
+    /// Node-local diagnostic grouping of actual managed launcher children;
+    /// never a permit, lifetime fence or proof of complete descendant custody.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_graph: Option<u64>,
 }
 
 /// Per-class counters for `/metrics`.
@@ -310,6 +314,7 @@ struct Entry {
     program: String,
     started_at_ms: u64,
     resources: Arc<Mutex<super::observation::ProcessObserver>>,
+    resource_graph: Option<u64>,
     #[cfg(target_os = "linux")]
     pidfd: Option<std::os::fd::OwnedFd>,
 }
@@ -378,6 +383,7 @@ pub(crate) fn register(
         program,
         started_at_ms,
         resources: Arc::new(Mutex::new(super::observation::ProcessObserver::new(pid))),
+        resource_graph: super::observation::current_graph(),
         #[cfg(target_os = "linux")]
         pidfd: linux::pidfd_open(pid),
     };
@@ -413,12 +419,13 @@ pub fn running() -> Vec<RunningChild> {
                 entry.started_at_ms,
                 stoppable,
                 Arc::clone(&entry.resources),
+                entry.resource_graph,
             )
         })
         .collect::<Vec<_>>();
     rows.into_iter()
         .map(
-            |(pid, work, program, started_at_ms, stoppable, resources)| {
+            |(pid, work, program, started_at_ms, stoppable, resources, resource_graph)| {
                 let policy = work.class.policy();
                 let observed = observe(pid);
                 let resources = resources
@@ -437,6 +444,7 @@ pub fn running() -> Vec<RunningChild> {
                     observed,
                     stoppable,
                     resources,
+                    resource_graph,
                 }
             },
         )
