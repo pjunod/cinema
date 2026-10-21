@@ -1,6 +1,6 @@
 # Operation progress — repeat selected worker attempts without a horizon
 
-**Status:** independent review approved; qualification pending.
+**Status:** independently approved; all nine configurations qualified. Delivery and the current main gate are recorded in the status page.
 
 This separate TLA+/TLC package checks a finite abstraction of one bound
 `library_scan` / `metadata_refresh` request: claim, domain lease, binding,

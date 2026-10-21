@@ -1,6 +1,6 @@
 # Operation progress — what the finite model can establish
 
-**Status:** independent review approved; qualification pending.
+**Status:** independently approved; all nine configurations qualified. Delivery and the current main gate are recorded in the status page.
 
 Companion to [README.md](README.md) (commands and configuration registry)
 and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).

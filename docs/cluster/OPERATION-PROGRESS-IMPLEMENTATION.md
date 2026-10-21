@@ -1,6 +1,6 @@
 # Operation progress — source waits to a repeatable progress argument
 
-**Status:** independently approved; comment clarification and qualification pending · **Date:** 2026-10-21 · **Owner:** Codex coordinator.
+**Status:** built, independently approved and formally qualified; delivery tracked by PR #1249 · **Date:** 2026-10-21 · **Owner:** Codex coordinator.
 
 [The status page](OPERATION-PROGRESS-STATUS.md) records current ownership, evidence and delivery. This is the next phase after [the bounded formal verification pilot](FORMAL-VERIFICATION-PILOT-PROPOSAL.md); its safety checks remain unchanged unless an explicit reviewed correction requires otherwise.
 
@@ -39,3 +39,5 @@ The fixed package has two positive configurations, four deliberate non-progress 
 Smoke uses the same small positive and success-witness inputs as full qualification. Final evidence may combine current-input CI smoke receipts with individual receipts for remaining configurations, avoiding a second execution of a configuration that already passed. No new runtime behavior change is planned without a concretely identified source defect.
 
 Fable approved the complete candidate without blocking findings. The status ledger records twelve comments and their dispositions. The clarification batch changes documentation/registry metadata only; the reviewed TLA and configuration bytes remain frozen. Effort compile-only mode now skips toolchain provisioning and both package smokes, while still validating both source mappings.
+
+Qualification completed all nine expected formal outcomes and the affected Python batch (1,862 methods) in CI run 5724. The status ledger distinguishes the two exhaustive positives from controls/witnesses and links the live promotion/landing receipt.

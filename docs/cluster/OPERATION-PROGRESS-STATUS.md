@@ -1,6 +1,6 @@
 # Operation progress — wait mapping and model delivery
 
-**Status:** Fable approved; seven local configurations complete; CI smoke and affected gate pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** [#1249](http://forge.lan:3000/noirr/plurx/pulls/1249); reviewed, local formal slice complete, CI smoke and main gate pending.
+**Status:** implemented, independently approved and formally qualified; live delivery and main gate are recorded in PR #1249 · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** [#1249](http://forge.lan:3000/noirr/plurx/pulls/1249); reviewed and formally qualified; current promotion and landing state live in the PR.
 
 Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). This phase extends the [completed bounded pilot](FORMAL-VERIFICATION-PILOT-STATUS.md) with a source-backed wait map and a finite-state model that permits repeated execution. It does not yet establish operation progress or cluster deadlock freedom.
 
@@ -10,10 +10,10 @@ Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). Th
 |---|---|---|
 | Waits, resources and completing tasks | GPT-6 Luna | 45 wait anchors across 19 files committed; plus the Tokio lockfile pin gives 46 package anchors across 20 files |
 | Property, fairness and abstraction design | Fable 5.1 | Advice and source-corrected addendum delivered; no coding or final review |
-| Repeated-operation model and contract | GPT-6.1 Sol | Integrated; final static parse and 46 mapped anchors pass; no final qualification yet |
-| Checker and existing CI integration | GPT-6 Luna | Committed and integrated; static Python parsing complete, unit checks await final review |
-| Final independent adversarial review | Fresh Fable 5.1 reviewer | APPROVE on `3da7e0a34`; no blockers; 12 comments being recorded |
-| Qualification, PR and merge | Codex coordinator | PR #1249 open; seven local configurations complete; CI smoke/unit checks and merge remain |
+| Repeated-operation model and contract | GPT-6.1 Sol | Integrated; all nine outcomes qualified, with reviewed model/configuration bytes unchanged |
+| Checker and existing CI integration | GPT-6 Luna | Committed and integrated; affected unit batch passed, including parser regressions |
+| Final independent adversarial review | Fresh Fable 5.1 reviewer | APPROVE on `3da7e0a34`; no blockers; all 12 comments dispositioned |
+| Qualification, PR and merge | Codex coordinator | PR #1249 owns live promotion/landing; all nine formal outcomes and 1,862 Python methods have passing evidence |
 
 Persistent work uses agent-owned clones. One accidental tooling write to the operator checkout was reversed with explicit approval and an exact captured patch; the affected file has no remaining diff. Subsequent editing is confined to explicit owned paths. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
 
@@ -21,7 +21,7 @@ The source map is [WAIT-MAP.md](../../verification/operation-progress/WAIT-MAP.m
 
 ## Evidence and remaining acceptance
 
-A pre-review development calibration explored 13,514 states in 2.778 seconds on its recorded earlier model hash. A subsequent TTL fallback correction received static parsing only. Seven current-model configurations now have valid local results; the two CI smoke configurations and affected unit/gate results remain pending. The prior pilot's results retain their original scope. New acceptance requires reviewed wait edges, explicit external premises, repeated-execution progress checks, deliberate deadlock/livelock controls, interpretable receipts, final independent review dispositions and the current candidate's affected main gate. Passing evidence is retained only where its governed inputs remain unchanged.
+A pre-review development calibration explored 13,514 states in 2.778 seconds on its recorded earlier model hash. A subsequent TTL fallback correction received static parsing only. All nine configurations now have valid results; CI run 5724 also completed 1,862 Python methods with no fixture errors. The main promotion and landing receipt are maintained in the linked PR. The prior pilot's results retain their original scope. New acceptance requires reviewed wait edges, explicit external premises, repeated-execution progress checks, deliberate deadlock/livelock controls, interpretable receipts, final independent review dispositions and the current candidate's affected main gate. Passing evidence is retained only where its governed inputs remain unchanged.
 
 ## Decisions and limits
 
@@ -40,7 +40,7 @@ Fresh non-author Fable 5.1 (`claude-fable-5-1`), Hermes task `t_09b0b514`, appro
 | Comment | Disposition |
 |---|---|
 | C1 · dependency drift | Retain whole-file lockfile pin; document deliberate mapping review on dependency changes. |
-| C2 · temporal translator | Confirm by the first real positive run; change syntax only if it actually fails. |
+| C2 · temporal translator | Confirmed by both completed positive configurations; no syntax rewrite needed. |
 | C3 · local revocation abstraction | Disclose omitted late-commit timing; local revocation is not a durable backend check. |
 | C4 · effort compile-only | Explicitly name the existing pilot behavior change below. |
 | C5 · shape invariants | Label by-construction consistency guards separately from implementation evidence. |
@@ -60,6 +60,21 @@ The first paperwork batch passed 13 of 14 rules (76 of 77 methods); the status p
 
 `contention.cfg` passed complete exploration. The first lock-cycle control produced the correct temporal lasso, but the inherited runner rejected TLC's annotated `Back to state` line. Luna fixed the strict matcher and added positive/malformed-format regressions; only the failed control reran. The passing contention raw log was verified against identical model/config/source/mapping hashes and reclassified with the final runner without repeating TLC. The parser change touches only temporal-violation recognition, leaving the positive path unchanged.
 
-The four controls and reconciliation/cancellation witnesses then completed with their expected named outcomes. These are seven locally qualified configurations, including retained contention; CI will run the remaining positive and success witness. C2's temporal-translator concern is settled by the completed positive contention run. Full traces, original parser rejection, retry and retention receipt are preserved with qualification evidence. No product runtime source changed.
+The four controls and reconciliation/cancellation witnesses then completed with their expected named outcomes. These are seven locally qualified configurations, including retained contention; CI completed the remaining positive and success witness on identical governed inputs. C2's temporal-translator concern is settled by the completed positive contention run. Full traces, original parser rejection, retry and retention receipt are preserved with qualification evidence. No product runtime source changed.
 
 The source tracer inspected the actual lasso states for all four controls: the added token/publication lock cycle, scanner scheduling starvation despite continuing heartbeat, a busy walker retaining admission, and a durable running row after local cleanup without expiry. It also inspected witness final states: committed result plus terminal waiter plus reconciliation/cleanup, and cancelled cleanup with the request still pending. The first parser-rejected trace remains explicitly incomplete; the fixed rerun is the counted evidence.
+
+## Qualified results and their limits
+
+The nine required outcomes comprise **two exhaustive positives, four deliberate temporal failures and three normal reachability witnesses**. Qualifying TLC execution totals **13.431 seconds** across local macOS and CI Linux runs, with separate pinned platform JDK hashes and common TLC/model/configuration/source hashes. This total excludes provisioning, wrapper overhead, the original parser-rejected invocation and development calibration.
+
+| Positive | Generated / distinct / queued | Depth | TLC seconds |
+|---|---|---|---|
+| Selected request progress | 51,143 / 13,514 / 0 | 122 | 3.808 |
+| Domain contention, cleanup/retirement only | 22,549 / 5,260 / 0 | 64 | 1.882 |
+
+The first positive establishes eventual durable result and eventual attempt cleanup under the stated finite model and dependency premises. The contention positive establishes selected-attempt cleanup/retirement, not per-job starvation freedom. The controls and witnesses verify the model's sensitivity and reachable paths; they are not additional exhaustive positives. Always-enabled Tick makes global deadlock detection vacuous: temporal progress properties are the actual acceptance checks.
+
+Existing tests remain. There is no cluster-wide deadlock theorem, Rust refinement, Raft-liveness proof, numeric deadline or general graceful-shutdown guarantee. Whole-file dependency pins deliberately require mapping review after lockfile changes. Normal main qualification uses affected smokes; effort compile-only validates both mappings while skipping toolchain fetch and both smokes.
+
+The PR carries the exact current candidate, authenticated CI artifacts, formal receipt/input equivalence, full independent review and final landing receipt. Keeping that live state in the PR avoids claiming a future merge hash in this immutable source snapshot.
