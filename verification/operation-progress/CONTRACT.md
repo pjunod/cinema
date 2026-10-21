@@ -1,6 +1,6 @@
 # Operation progress — what the finite model can establish
 
-**Status:** implemented; independent review and qualification pending.
+**Status:** independent review approved; qualification pending.
 
 Companion to [README.md](README.md) (commands and configuration registry)
 and [WAIT-MAP.md](WAIT-MAP.md) (source waits and external boundaries).
@@ -11,8 +11,11 @@ extend the original [safety contract](../durable-jobs/CONTRACT.md).
 
 `request = "done"` means a durable, non-pending library request result
 (completed or failed) and its waiter's terminal update were applied atomically.
-The model's `StoreApply` performs both updates. `ResultAtomicity` checks
-that they agree. The item-insertion action is only an intermediate milestone.
+The model's `StoreApply` performs both updates. `ResultAtomicity` and
+`NoFictitiousRelease` are model-consistency guards that hold by construction:
+they pin the chosen update and lock-ownership shapes, not the correctness of
+SQL atomicity or Rust lock handling. Source evidence belongs to the wait map
+and mapped excerpts separately. Item insertion is an intermediate milestone.
 A successful `process_library_requests` turn settles `Yield(now)` and requeues
 the job; it does not put the job in a terminal successful state.
 
@@ -21,7 +24,9 @@ lease or local queue claim. Its durable queue row can still be running after
 a lost/non-applied settlement. That row becomes eligible only after expiry.
 Admission stays held until the blocking walker returns, work joins, domain
 heartbeat drains and release returns, queue heartbeat drains and the local
-claim retires. Cancellation can reach cleanup with a pending request.
+claim retires. Cancellation can reach cleanup with a pending request. The
+cancellation witness enables `Cancel` only during scanning; it does not cover
+interruptions at every source await or a general shutdown path.
 
 | Formula | Exact meaning | Configurations |
 |---|---|---|
@@ -40,7 +45,10 @@ has its own state and does not alter request/waiter state. The conditional
 formula never equates exhaustion with durable completion. The contention
 positive deliberately checks cleanup/retirement only: a competitor can
 reacquire the domain indefinitely, and no source queue-order guarantee
-justifies per-job starvation freedom.
+justifies per-job starvation freedom. `TypeOK` bounds retries only for the
+registered fault budgets 0/1 and retry limit 2. Larger fault budgets are
+unsupported: retry increments are not capped, so widening the constants
+requires review and an explicit retry bound/capping decision.
 
 ## Dependencies are scheduled individually
 
@@ -115,6 +123,15 @@ request may never commit. Cleanup never waits for that detached slot.
 observed. This distinction avoids deriving lower-write cancellation from
 the caller's deadline.
 
+The model narrows one source behavior: `Current` includes local `~revoked`,
+so local revocation immediately prevents modeled backend completion. The
+source backend sees durable queue/domain rows, not that local flag; a detached
+completion may still commit after local revoke and before durable release.
+Those earlier-result traces are omitted. The durable stale-attempt guard is
+represented separately by clearing `detachedCurrent` on release or fresh claim
+application. Neither this guard nor the local simplification proves full
+source refinement.
+
 The authoritative reread can observe non-pending and set `reconciled`, or
 observe pending and fail the attempt before a later retry. Reconciliation is
 about the worker learning the outcome and cleaning up; durable usefulness
@@ -164,11 +181,15 @@ all lower-layer writes have drained when release returns.
    queue loss, renewal deadline, completion timeout, failed release and
    non-applied settlement are alternative uses of that one fault. They do not
    claim composition of many simultaneous failures. Release retains the
-   source maximum of five attempts, with a backoff barrier and TTL fallback;
-   the current fault budget reaches only a first failed attempt plus retry.
-   If all five releases fail at larger budgets, local cleanup proceeds while
-   the durable domain owner remains until an independently observed TTL; the
-   model does not make release wait for that TTL.
+   modeled limit of five release attempts, with a backoff barrier and TTL
+   fallback, corresponding to the source limit. Every registered fault budget
+   is at most one: the fifth-failure branch and `DomainExpiry` are unreachable,
+   so their coverage is not claimed. The model contains that branch for local
+   cleanup followed by independent durable TTL recovery; larger budgets remain
+   unsupported without the retry-bound review above. Item-insert timeout and
+   its attempt failure/retry control flow are abstracted by `WorkFault`; any
+   ambiguous intermediate catalogue effect is not asserted to roll back. This
+   abstraction does not enumerate all item-timeout traces.
 6. **Successful suffix and cleanup paths are distinct.** Work success settles
    before domain release; failure/cancellation joins work, releases domain,
    then settles. Queue loss prevents a successful settlement and needs queue
@@ -188,8 +209,8 @@ not a proof that these abstractions refine every execution of the daemon.
 The lock control adds a token-mutex wait to renewal while renewal owns
 publication write. Bind/complete can own token and wait for publication read,
 forming a real cycle in the mutated wait graph. The source has no reverse
-edge. Tick can still run, so the expected failure is `AttemptCleanup`,
-not necessarily a global TLC deadlock.
+edge. `Tick` is always enabled, so global TLC deadlock detection cannot fire.
+The temporal `AttemptCleanup` failure is the progress check for this cycle.
 
 The renewal-livelock control removes only fairness of `ScanFinish`: external
 work has returned, but worker scheduling can starve while renewal/ticks keep

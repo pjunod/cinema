@@ -1,6 +1,6 @@
 # Operation progress — repeat selected worker attempts without a horizon
 
-**Status:** implemented; final independent review and qualification pending.
+**Status:** independent review approved; qualification pending.
 
 This separate TLA+/TLC package checks a finite abstraction of one bound
 `library_scan` / `metadata_refresh` request: claim, domain lease, binding,
@@ -17,6 +17,18 @@ owns the delivery scope; its
 [status page](../../docs/cluster/OPERATION-PROGRESS-STATUS.md) owns review,
 qualification and merge evidence. `mapping.json` pins model/config/source
 hashes, expected errors and limits; an edited input invalidates its receipt.
+Whole-file source hashes are intentional: any `Cargo.lock` dependency bump
+requires a reviewed mapping refresh, even when unrelated to Tokio. Mapping
+drift is not itself a model regression.
+
+For this package, formal governed inputs are exactly the executable model,
+registered configurations, mapped source files, `mapping.json`,
+`scripts/check-formal`, `scripts/bootstrap-formal-toolchain` and the shared
+`verification/durable-jobs/toolchain.json`. Receipts also show full repository
+dirty/untracked paths, but package docs, tests and `validation/points.toml`
+are not in this package's governed dirty subset. That subset is narrower
+than the original pilot's; a clean governed subset does not certify those
+other files.
 
 ## Run the separate package with the existing pinned toolchain
 
@@ -60,8 +72,8 @@ It does not model a second complete request pipeline.
 | `witness-reconcile.cfg` | 1 / absent | Reach lost completion acknowledgement, authoritative non-pending reread and cleanup |
 | `witness-cancel-cleanup.cfg` | 0 / absent | Reach cooperative cancellation and cleanup while durable request remains pending |
 
-Deadlock checking stays on. `Tick` can continue while an individual worker
-is blocked, so global deadlock absence says little about useful progress.
+Deadlock checking stays on, but `Tick` is always enabled, so TLC global
+deadlock detection cannot fire in any registered configuration.
 The four temporal controls check the local operation's failure to progress
 while other transitions remain possible. In particular the lock-cycle
 control is a deliberate reverse-edge mutation: the examined source has no
@@ -83,8 +95,12 @@ The isolated development workspace retained
 receipt. The final source then corrected the unreachable five-failed-release
 fallback to drop the local lease without waiting for the durable TTL; that
 final model was statically parsed, not recalibrated. The calibration hashes
-above identify the earlier development input, not the final candidate. No controls, witnesses, unit suites or full formal qualification
-were run before final independent review.
+above identify the earlier development input, not the final candidate.
+No controls, witnesses, unit suites or full formal qualification were run
+before final independent review. The first post-review `progress.cfg` run
+must confirm TLC accepts the temporal `IF` expressions in `Fair`; SANY does
+not check the liveness translator. Translation failure fails qualification
+and would require a reviewed equivalent rewrite, not a success receipt.
 
 ## Limits belong to every result
 

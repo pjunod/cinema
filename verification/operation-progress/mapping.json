@@ -305,13 +305,13 @@
           "publication_intents": 2,
           "FaultBudget": 1,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "none"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "TypeOK",
@@ -334,7 +334,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": null
@@ -360,13 +366,13 @@
           "publication_intents": 2,
           "FaultBudget": 0,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "none"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "TypeOK",
@@ -388,7 +394,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": null
@@ -420,13 +432,13 @@
           "publication_intents": 2,
           "FaultBudget": 0,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "lock_cycle"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "AttemptCleanup"
@@ -443,7 +455,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
@@ -475,13 +493,13 @@
           "publication_intents": 2,
           "FaultBudget": 0,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "renewal_livelock"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "AttemptCleanup"
@@ -498,7 +516,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
@@ -530,13 +554,13 @@
           "publication_intents": 2,
           "FaultBudget": 0,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "external_stall"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "AttemptCleanup"
@@ -553,7 +577,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
@@ -585,13 +615,13 @@
           "publication_intents": 2,
           "FaultBudget": 1,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "lost_settlement"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "AttemptProgress"
@@ -608,7 +638,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
@@ -640,13 +676,13 @@
           "publication_intents": 2,
           "FaultBudget": 0,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "none"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "TypeOK",
@@ -667,7 +703,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
@@ -699,13 +741,13 @@
           "publication_intents": 2,
           "FaultBudget": 1,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "none"
           ],
           "Scenario": [
             "normal"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "TypeOK",
@@ -726,7 +768,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
@@ -758,13 +806,13 @@
           "publication_intents": 2,
           "FaultBudget": 0,
           "RetryLimit": 2,
-          "maximum_release_attempts": 5,
           "Mutation": [
             "none"
           ],
           "Scenario": [
             "cancel"
-          ]
+          ],
+          "modeled_release_attempt_limit": 5
         },
         "properties": [
           "TypeOK",
@@ -785,7 +833,13 @@
           "relative authority rejects superseded domain and stale detached old attempts; no numeric fence-ordering or arbitrary boot-reply-adoption theorem",
           "PRM-time: backoff/expiry classes eventually observed, no timing ratios or numeric latency bound; Tick can continue during stuck operations",
           "contention is one abstract competing domain worker with finite backend/release dependencies, zero faults, and no perjob success/starvation claim",
-          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review"
+          "expected control/witness checker formats are standard pinned-TLC expectations, not observed results before final review",
+          "registered FaultBudget0/1 and RetryLimit2 only: fifth failed release and TTLfallback unreachable; modeled release limit5 is not explored fivefailure coverage; wider fault budgets require retry-bound review",
+          "Current folds local revocation into backend fencing, omitting source latecommit-after-localrevoke-before-durablerelease traces; detachedCurrent clearing on release/claim application represents durable staleattempt guard; no fullrefinement claim",
+          "ResultAtomicity and NoFictitiousRelease are modelshape consistency guards by construction, not SQL/Rust implementation proofs; iteminsert timeout controlflow abstracted by WorkFault without asserting intermediate catalogue rollback",
+          "Cancel witness covers scanphase only; Tick alwaysenabled means global deadlockchecking cannot fire; temporalproperties provide progress evidence",
+          "wholefile Cargo.lock hashing intentional: any dependencybump requires reviewed mappingrefresh; governed inputs are executablemodel/configs+mappedsource+runner/bootstrap/toolmanifest/mapping, not package docs/tests/validationpoints",
+          "first postreview progress qualification must confirm temporal IF translation; no prerewrite or prior SANY success substitutes for TLC liveness checking"
         ]
       },
       "minimum_trace_states": 2
