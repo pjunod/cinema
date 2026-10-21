@@ -35,8 +35,9 @@ These build on the atomic physical ledger/UnknownHeld, bounded family overlap an
 independently installed settings schema/API/System controls. No AUTH bump/implicit
 Source activation; preserve unknown schema/data, numeric rollback cache and omission.
 
-Pinned core all-target Hiqlite-contract Clippy PASS18s (`124911`) and daemon
+Pinned core all-target Hiqlite-contract Clippy PASS16s (`125413`) and daemon
 all-target Clippy PASS164s (`124616`) cover current runtime; test bodies NOT RUN.
+Restore/future/missing-marker fixtures (`8b1d95f96`) compile, NOT RUN.
 Earlier scoped passes remain in private task evidence. An edition2024 recursive
 formatter expansion was removed
 using sole-writer provenance; exact five-file guard compile PASS55s (`122819`).
