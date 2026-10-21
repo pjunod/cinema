@@ -7,6 +7,77 @@ fn evaluate(conn: &rusqlite::Connection, predicate: &str) -> bool {
 }
 
 #[tokio::test]
+async fn synthetic_closed_audit_keeps_three_worker_sequence_and_epoch_bound() {
+    let (store, first) = fixture().await;
+    let claimed = match store.claim_adaptive_attempt(&first).await.expect("first") {
+        AttemptMutation::Applied(s) => s,
+        other => panic!("{other:?}"),
+    };
+    let next = |status: &RequestStatus| {
+        let mut claim = first.clone();
+        claim.context.operation_id = Uuid::new_v4();
+        claim.context.expected_request_sequence = status.sequence;
+        claim.key.attempt_id = Uuid::new_v4();
+        claim.key.route_incarnation_id = Uuid::new_v4();
+        claim.key.session_id = Uuid::new_v4();
+        claim.key.ordinal = status.next_ordinal;
+        claim.key.owner_epoch = i64::from(status.next_ordinal);
+        claim.key.worker_node_id = Uuid::new_v4().to_string();
+        claim.domains = vec![claim.key.worker_node_id.clone()];
+        claim
+    };
+    let second = next(&claimed);
+    let two = match store.claim_adaptive_attempt(&second).await.expect("second") {
+        AttemptMutation::Applied(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        store
+            .claim_adaptive_attempt(&next(&two))
+            .await
+            .expect("third unresolved"),
+        AttemptMutation::Refused(AttemptRefusal::Bound)
+    );
+    store
+        .with_conn(|conn| {
+            // Isolated no-resource fixture seeding, not a production close API.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("DROP TRIGGER media_resource_attempt_update", [])?;
+            tx.execute("UPDATE media_resource_attempts SET phase='closed'", [])?;
+            let (_, sql) = schema::trigger_objects(schema::Layout::Legacy)
+                .into_iter()
+                .find(|(name, _)| name == "media_resource_attempt_update")
+                .expect("exact trigger");
+            tx.execute(&sql, [])?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .expect("synthetic terminal audits");
+    let status = store
+        .adaptive_request_status(&first.binding.key, &first.binding.principal)
+        .await
+        .expect("authority")
+        .expect("frozen sequence");
+    let third = next(&status);
+    let three = match store
+        .claim_adaptive_attempt(&third)
+        .await
+        .expect("third total")
+    {
+        AttemptMutation::Applied(s) => s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(three.attempts.len(), 3);
+    assert_eq!(three.attempts[2].key.owner_epoch, 3);
+    assert_eq!(three.next_ordinal, 4);
+    assert!(
+        store.claim_adaptive_attempt(&next(&three)).await.is_err(),
+        "no hidden fourth ordinal or wrap"
+    );
+}
+
+#[tokio::test]
 async fn expired_unknown_attempt_refuses_source_rebuild_and_preserves_history() {
     let (store, claim) = fixture().await;
     store
