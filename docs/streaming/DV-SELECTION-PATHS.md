@@ -93,6 +93,14 @@ unreadable or unrecognized values keep its default enabled.
 | Producer | Current public completed-window route is Linux finite VOD, with current planning/source authority, suitable HLS fMP4 HEVC caps and admitted preparation/graph/resources |
 | Raster/cadence | Uses the selected source/rung geometry, rounded to even height. No Auto-only restriction, 720p clamp or extra speed threshold is imposed by qualification |
 | Startup budget | Optional first-window qualification receives at most 8 s and half the remaining create budget. A successful verified first window does not require additional trial windows or a throughput gate |
+
+Processed P8.1 admission uses the client's actual HLS/MP4 transport and
+same-entry Main10/P8/PQ decoder claims. `dv_transport` describes an original
+preserved-DV delivery requirement; a progressive claim does not prohibit HLS
+when `transports` includes it. Native web readiness reads the complete finite
+media timeline within its explicit 4 MiB + 72-byte budget; master/error bodies
+retain 64 KiB and initialization 1 MiB. The initial URL may be scalar media.
+These byte limits are client readiness bounds, not a universal duration claim.
 | Completion | Source binding, fresh supported RPUs, frame coverage, actual decoder/encoder, encoded samples, timestamps/grid and destination metadata must validate before publication |
 
 The preflight owner is

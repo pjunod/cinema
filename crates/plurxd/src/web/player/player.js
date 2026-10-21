@@ -1677,6 +1677,11 @@ function nativeHlsResourceUrl(uri,parent){
     child.searchParams.set(key,origin.searchParams.get(key));
   return child.href;
 }
+// Readiness consumes the full VOD timeline, including processed two-second
+// windows. Keep a finite media-document budget comparable to the retained
+// rendition manifest (4 MiB), plus the bounded acquisition-start tag. A master
+// or an error response is a different, small document; init has its own bound.
+const NATIVE_HLS_BODY_LIMITS=Object.freeze({playlist:4*1024*1024+72,master:65536,error:65536,init:1048576});
 async function nativeHlsFetch(player,episode,url,{init=false}={}){
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
   const current=()=>nativeHlsCurrent(player,episode,execution,intent);
@@ -1698,7 +1703,8 @@ async function nativeHlsFetch(player,episode,url,{init=false}={}){
     return await Promise.race([bound,(async()=>{
       const headers=init?{Range:'bytes=0-1048575'}:{};
       const res=await fetch(url,{signal:ctl.signal,headers,cache:'no-store',redirect:'error'});
-      const max=init?1048576:65536;
+      const max=!res.ok?NATIVE_HLS_BODY_LIMITS.error:
+        init?NATIVE_HLS_BODY_LIMITS.init:NATIVE_HLS_BODY_LIMITS.playlist;
       if(!res.body?.getReader) throw Object.assign(new Error('Native readiness response has no bounded body.'),{terminal:true});
       const reader=res.body.getReader(),chunks=[];bodyReader=reader;let size=0;
       if(ctl.signal.aborted){reader.cancel().catch(()=>{});throw Object.assign(new Error('Native readiness cancelled.'),{cancelled:true});}
@@ -1729,6 +1735,10 @@ async function nativeHlsFetch(player,episode,url,{init=false}={}){
       const text=new TextDecoder().decode(bytes);
       if(!text.trimStart().startsWith('#EXTM3U'))
         throw Object.assign(new Error('The HLS readiness response is not a playlist.'),{terminal:true});
+      // The initial URL can itself be a scalar media playlist. Classify from
+      // its grammar before applying the smaller master budget, not its URL.
+      if(size>NATIVE_HLS_BODY_LIMITS.master&&/^#EXT-X-(?:I-FRAME-)?STREAM-INF:/m.test(text))
+        throw Object.assign(new Error('Native readiness master exceeds its byte limit.'),{terminal:true});
       return {text,url:res.url||url};
     })()]);
   }finally{clearTimeout(timer);ctl.signal.removeEventListener('abort',abortListener);ctl.abort();episode.loaders.delete(loader);}
