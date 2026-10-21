@@ -16,6 +16,8 @@ use crate::resource_custody::{
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
+mod pipe_drains;
+
 #[derive(Default)]
 pub(super) struct Operations {
     draining: bool,
@@ -58,6 +60,8 @@ struct OwnedRole {
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
+    drains: BTreeMap<Uuid, physical_graph::GraphPipeDrain>,
+    closed_drains: BTreeMap<Uuid, crate::resource_custody::ClosedMemberFact>,
     graph: Option<OwnedPhysicalGraph>,
     sealed: Option<SealedPhysicalGraph>,
     // Retain the SAME cleanup owner; never reconstruct one from a UUID.
@@ -316,6 +320,8 @@ impl NodeResourceRuntime {
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),
+                drains: BTreeMap::new(),
+                closed_drains: BTreeMap::new(),
                 graph: Some(graph),
                 sealed: None,
                 _cleanup: cleanup,

@@ -27,6 +27,8 @@ use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure
 
 mod source_files;
 pub use source_files::GraphSourceFile;
+mod pipe_drains;
+pub(super) use pipe_drains::GraphPipeDrain;
 
 const MAX_ROOTS: usize = 32;
 const MAX_WRITERS: usize = 32;
@@ -80,10 +82,17 @@ struct Root {
 struct Members {
     acquired: bool,
     roots: Vec<Root>,
-    writers: Vec<JoinHandle<()>>,
+    writers: Vec<Writer>,
     joined_writers: usize,
     abandoned_writers: usize,
     source_files: Vec<source_files::SourceFile>,
+}
+
+struct Writer {
+    task: JoinHandle<()>,
+    // Caller-supplied generic futures never receive an audited adapter record.
+    drain: Option<pipe_drains::DrainRecord>,
+    joined: bool,
 }
 
 pub(super) struct GraphCustody {
@@ -360,7 +369,11 @@ impl OwnedPhysicalGraph {
         };
         // No await separates task creation from retaining its JoinHandle. If
         // factory construction panics, the root/reservation stay in custody.
-        members.writers.push(runtime.spawn(writer(pipes)));
+        members.writers.push(Writer {
+            task: runtime.spawn(writer(pipes)),
+            drain: None,
+            joined: false,
+        });
         Ok(())
     }
 
@@ -610,6 +623,14 @@ impl SealedPhysicalGraph {
             };
         }
         retain_or_release_unacquired(&self.ledger, &self.custody);
+        // Concrete drains own only pipes, no output flush or external work.
+        // Joining their aborted futures closes those handles even if an
+        // uncontained descendant keeps its other pipe end open.
+        for writer in &members.writers {
+            if writer.drain.is_some() && !writer.joined {
+                writer.task.abort();
+            }
+        }
         // Request all roots' termination before awaiting any of them. Their
         // real retained handles, not recycled numeric PIDs, select the targets.
         for root in &mut members.roots {
@@ -629,9 +650,13 @@ impl SealedPhysicalGraph {
                 root.exit_status = Some(status);
             }
         }
-        while members.joined_writers < members.writers.len() {
-            let index = members.joined_writers;
-            let abandoned = (&mut members.writers[index]).await.is_err();
+        for index in 0..members.writers.len() {
+            let writer = &mut members.writers[index];
+            if writer.joined {
+                continue;
+            }
+            let abandoned = (&mut writer.task).await.is_err();
+            writer.joined = true;
             members.joined_writers += 1;
             members.abandoned_writers += usize::from(abandoned);
         }
