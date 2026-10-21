@@ -10,7 +10,7 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
-| [AVATAR-WEB-PLAYBACK-STATUS.md](AVATAR-WEB-PLAYBACK-STATUS.md) | Avatar Safari buffering/stall diagnosis, ownership, review and merge state. | open |
+| [AVATAR-WEB-PLAYBACK-STATUS.md](AVATAR-WEB-PLAYBACK-STATUS.md) | Avatar Safari presentation faults, FEL encoder-selection root cause, physical evidence and review state. | open |
 | [Apple TV library row clipping](../apple-builds/1245-tvos-library-row-clipping.md) | Complete movie/show posters and metadata fit while browsing; the preamble scrolls and compact tools retain Back/Down focus. Physical Apple TV acceptance pending. | built |
 | [SYSTEM-SETTINGS-STATUS.md](SYSTEM-SETTINGS-STATUS.md) | Approved System layout, backend capability/package facts, representative comparison and source-bound rendering; Linux hardware acceptance remains open. | built |
 | [SAFARI-PLAYBACK-ACTIVATION.md](SAFARI-PLAYBACK-ACTIVATION.md) | Safari gesture-bound media preparation, immediate permission-refusal ownership, independent review and focused regression evidence, and pending physical acceptance. | open |

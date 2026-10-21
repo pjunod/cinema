@@ -3,8 +3,8 @@
 **Updated:** 2026-10-21 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+- **2026-10-21 · Avatar Dolby Vision:** [selection repair and evidence](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); Fable approved; regression and two private-harness FEL/P8.1 windows passed. [PR #1250](http://forge.lan:3000/noirr/plurx/pulls/1250) tracks landing; Paul owns deployment; frame-drop cause remains open.
 - **2026-10-21 · Operation progress:** [live ledger](docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.
-
 - **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
 - **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
