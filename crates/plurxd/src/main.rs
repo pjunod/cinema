@@ -3007,23 +3007,14 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let optimization = match tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
-    )
-    .await
+    // Representative comparisons run only on an explicit idle-node request.
+    // A saved receipt is reusable only for this executable/fixture/driver set.
+    let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
+        .await
     {
-        Ok(Ok(report)) => {
-            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
-                tracing::warn!(%error, "could not persist transcoder benchmark");
-            }
-            Some(report)
-        }
-        result => {
-            tracing::warn!(
-                ?result,
-                "transcoder benchmark unavailable; using validated encoder order"
-            );
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not load representative transcode comparison; using validated hardware order");
             None
         }
     };

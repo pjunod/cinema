@@ -82,29 +82,30 @@ test("media support warns when a required included device fails execution", () =
   assert.doesNotMatch(html,/Install the complete/);
 });
 
+function renderTranscoder(sys){
+  const helpers=["systemCapabilityHtml","systemGraphicsHtml","systemToneMapDetails","transcoderCard"].map(shippedSource).join("\n");
+  return new Function("esc",`${helpers}\nreturn transcoderCard;`)(esc)(sys);
+}
 test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
-  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
-  const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
+  const html = renderTranscoder({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
   assert.doesNotMatch(html, /value="qsv"/);
   assert.match(html, /saved backend is unavailable/);
   assert.match(html, /value="auto" selected/);
   assert.match(html, /waiting for this node to restart/);
   assert.match(html, /data-node-id="rog&quot;node"/);
-  assert.match(html, /Active: <b>NVIDIA NVENC/);
-  assert.doesNotMatch(html, /disabled/);
+  assert.doesNotMatch(html, / disabled/);
 });
 
-test("transcoder menu shows every measured speed against CPU and names Auto winner", () => {
-  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
-  const html = render({node_id:"node",hwaccel_pref:"auto",encoder_selected:"Apple VideoToolbox",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{measured_at:1,results:[
-    {backend:"software",fps:120,relative_to_cpu:1},
-    {backend:"videotoolbox",fps:480,relative_to_cpu:4}
+test("transcoder preference keeps available hardware independent of synthetic speed results", () => {
+  const html = renderTranscoder({node_id:"node",hwaccel_pref:"auto",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{results:[
+    {backend:"software",fps:480,relative_to_cpu:1},
+    {backend:"videotoolbox",fps:120,relative_to_cpu:.25}
   ]}}});
-  assert.match(html, /Auto — Apple VideoToolbox · 480 fps · 4.00× CPU/);
-  assert.match(html, /CPU — 120 fps · 1.00× CPU/);
-  assert.match(html, /Apple VideoToolbox — 480 fps · 4.00× CPU/);
-  assert.doesNotMatch(html, /value="nvenc"/);
-  assert.match(html, />Optimize<\/button>/);
+  assert.match(html, /value="auto" selected>Auto/);
+  assert.match(html, /value="software">CPU \(software\)/);
+  assert.match(html, /value="videotoolbox">Apple VideoToolbox/);
+  assert.match(html, /value="nvenc">NVIDIA · NVENC/);
+  assert.doesNotMatch(html, /fps|fastest|benchmark on startup/);
 });
 
 test("transcoder polling discards a response from before leaving and reentering System", async () => {
@@ -284,7 +285,7 @@ test("every section is a route, grouped in the rail's order", () => {
     analysis: "analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
     users: "usersPanel(d.users,d.settings)",
-    system: "systemPanel(d.sys,d.playbackEvents)",
+    system: "systemPanel(d.sys)",
     cluster: "clusterPanel(d)",
     sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
