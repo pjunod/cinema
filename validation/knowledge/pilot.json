@@ -482,5 +482,28 @@
     "runtime_evaluation": "not-run; measured budget and enforced isolation required at final candidate",
     "unit_qualification": "deferred by latest owner instruction",
     "curation_measurement": "agent-session wall intervals and conservative initial bounds; exclusive person-time unavailable; no human productivity claim"
+  },
+  "document_roles": {
+    "docs/PLAYBACK.md": "reference",
+    "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md": "reference",
+    "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md": "plan"
+  },
+  "authored_record_curation": {
+    "state": "initial-reviewed-data",
+    "records": 27,
+    "anchors": 14,
+    "edges": 60,
+    "real_review_findings": "not-recorded-in-consulted-sources",
+    "real_execution_receipts": "not-imported",
+    "gold_read": false,
+    "schema_validation": "pending-final-reviewed-candidate",
+    "timing": {
+      "start_utc": "2026-10-21T18:54:13.768319+00:00",
+      "end_utc": "2026-10-21T19:04:57.428547+00:00",
+      "elapsed_wall_seconds": 643.660228,
+      "measurement": "shared agent-session wall time, not exclusive person-time",
+      "token_usage": null,
+      "exclusive_person_minutes": null
+    }
   }
 }

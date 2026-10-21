@@ -8,7 +8,7 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — M0 frozen; M1 next
+## Current work — M1 records and read-only adapters
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
@@ -23,6 +23,8 @@ updates are implementation status, not a new claim of Fable approval.
 | Sol 6.1 curator A | Private routing gold; no source or graph-record writes | Done. Six routing cases sealed; independent B/C approval. |
 | Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | Done. Six evidence cases sealed; independent A/C approval. |
 | Sol 6.1 scorer C | Independent static gold/rubric adjudication; no record writes | Done. Twelve final revisions independently approved, exact hashes sealed. |
+| Sol 6.1 model author | M1 model, adapters and test drafts | Active in isolated owned clone; no gold access or test execution. |
+| Luna source lookup | Existing governing passage candidates, read-only | Done. Seven bounded citations; no accepted cohort-specific review finding found. |
 | Luna | Mechanical skill-source lookup, read-only | Done. Only installed cache located; maintained source/update path unverified. |
 
 M0 manifest: [pilot.json](../../validation/knowledge/pilot.json). It contains
@@ -42,7 +44,7 @@ the public record after independent cross-adjudication.
 | M0 skill | Installed cache found, maintained source unknown | Carry repository-owned skill and small amendment; do not edit cache. |
 | M0 feasibility | Initial three approved by two nonauthor reviewers each, zero blockers | Complete. Initial authoring timestamp gaps are explicit; measured review effort is 5.965 minutes, initial authoring conservative wall-time bound is ten minutes. No execution occurred. |
 | M0 seal | Complete. Safe metadata SHA-256 `9c4c69510a157c6bd280c078515f395c258d1ec32d0a75c9600c69dafff23c51` | Runtime isolation and budget activation remain final-harness acceptance; the seal does not claim execution. |
-| M1 | Ready to start after this freeze commit | Implement model/read-only adapters and independently author records. |
+| M1 | Active after M0 freeze `aa0df2e1a`; no tests run | Sol 6.1 implements model/read-only adapters in an isolated owned clone; integrator authors records independently of gold. |
 | M2–M5 | Not started | Implementation then final review/fixes/fast lane. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
 
