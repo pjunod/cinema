@@ -15,9 +15,12 @@ from validation.knowledge.adapters import (artifact_id, import_catalog,
     route_id, symbol_id)
 from validation.knowledge.model import read_source, read_source_file, source_path
 
+# Paths below belong to disposable repositories, not this documentation tree.
+FIXTURE_DOC_ROOT = "docs"
+
 REV = "a" * 40
 SHA = "sha256:" + "b" * 64
-PROV = Provenance("reviewed", "fixture author", "fixture reviewer", "docs/fixture.md", SHA, REV)
+PROV = Provenance("reviewed", "fixture author", "fixture reviewer", f"{FIXTURE_DOC_ROOT}/fixture.md", SHA, REV)
 
 
 class KnowledgeModelTests(unittest.TestCase):
@@ -36,9 +39,9 @@ class KnowledgeModelTests(unittest.TestCase):
         return target
 
     def section(self, raw, selector=("Fixture", "Policy"), excerpt="Required behavior."):
-        self.write("docs/fixture.md", raw)
+        self.write(f"{FIXTURE_DOC_ROOT}/fixture.md", raw)
         passage = raw[raw.index("## Policy"):]
-        return {"id": "plurx:section:fixture-policy", "path": "docs/fixture.md",
+        return {"id": "plurx:section:fixture-policy", "path": f"{FIXTURE_DOC_ROOT}/fixture.md",
                 "kind": "section", "selector": list(selector),
                 "digest": digest_bytes(passage.encode()), "excerpt": excerpt}
 
@@ -49,7 +52,7 @@ class KnowledgeModelTests(unittest.TestCase):
         self.assertEqual(anchor.integrity, "valid")
         self.assertEqual(anchor.excerpt, "Required behavior.")
         self.assertEqual(anchor.line, 3)
-        self.write("docs/fixture.md", raw + "New constraint.\n")
+        self.write(f"{FIXTURE_DOC_ROOT}/fixture.md", raw + "New constraint.\n")
         changed = resolve_anchor(self.root, spec)
         self.assertEqual(changed.integrity, "changed")
         self.assertNotEqual(changed.current_digest, anchor.digest)
@@ -57,10 +60,10 @@ class KnowledgeModelTests(unittest.TestCase):
     def test_missing_duplicate_heading_and_inexact_excerpt_refuse(self):
         spec = self.section("# Fixture\n\n## Policy\nRequired behavior.\n")
         for raw in ("# Fixture\nNo section.\n", "# Fixture\n## Policy\nRequired behavior.\n## Policy\nRequired behavior.\n"):
-            self.write("docs/fixture.md", raw)
+            self.write(f"{FIXTURE_DOC_ROOT}/fixture.md", raw)
             with self.assertRaises(KnowledgeError):
                 resolve_anchor(self.root, spec)
-        self.write("docs/fixture.md", "# Fixture\n## Policy\nChanged words.\n")
+        self.write(f"{FIXTURE_DOC_ROOT}/fixture.md", "# Fixture\n## Policy\nChanged words.\n")
         with self.assertRaises(KnowledgeError):
             resolve_anchor(self.root, spec)
 
@@ -72,12 +75,12 @@ class KnowledgeModelTests(unittest.TestCase):
 
     def test_path_traversal_and_symlink_escape_refuse(self):
         spec = self.section("# Fixture\n## Policy\nRequired behavior.\n")
-        for path in ("../outside.md", "/etc/passwd", "docs/../fixture.md", "C:\\fixture.md"):
+        for path in ("../outside.md", "/etc/passwd", f"{FIXTURE_DOC_ROOT}/../fixture.md", "C:\\fixture.md"):
             with self.assertRaises(KnowledgeError):
                 resolve_anchor(self.root, {**spec, "path": path})
         (self.root / "docs" / "escape.md").symlink_to(self.root.parent / "outside.md")
         with self.assertRaises(KnowledgeError):
-            resolve_anchor(self.root, {**spec, "path": "docs/escape.md"})
+            resolve_anchor(self.root, {**spec, "path": f"{FIXTURE_DOC_ROOT}/escape.md"})
 
     def test_private_generated_and_credential_sources_refuse_before_filesystem_access(self):
         refused = (".git/config", "nested/.ssh/key", ".aws/config", ".codex/session.json",
@@ -299,7 +302,7 @@ depends_on=["provider"]
     def test_graph_json_roundtrip_is_defensive_and_mentions_has_no_authority(self):
         attrs = {"path": "src/fixture.py", "nested": ["before"]}
         source = Node("plurx:artifact:fixture", "artifact", "Fixture", ("src/fixture.py",), (), attrs, PROV)
-        target = Node("plurx:artifact:policy", "artifact", "Policy", ("docs/policy.md",), (), {}, PROV)
+        target = Node("plurx:artifact:policy", "artifact", "Policy", (f"{FIXTURE_DOC_ROOT}/policy.md",), (), {}, PROV)
         attrs["nested"].append("after")
         self.assertEqual(source.attributes["nested"], ("before",))
         graph = GraphData(nodes=(source, target), edges=(Edge(source.id, "mentions", target.id, PROV),),
@@ -314,7 +317,7 @@ depends_on=["provider"]
             validate_graph(replace(graph, edges=(Edge(source.id, "checked-by", target.id, PROV),)))
 
     def test_typed_multihop_intent_and_execution_paths_remain_distinct(self):
-        section = Node("plurx:section:fixture", "section", "Fixture section", ("docs/fixture.md",), (), {}, PROV)
+        section = Node("plurx:section:fixture", "section", "Fixture section", (f"{FIXTURE_DOC_ROOT}/fixture.md",), (), {}, PROV)
         code = Node("plurx:symbol:fixture", "symbol", "Fixture symbol", ("src/fixture.py",), (), {}, PROV)
         contract = Node("plurx:contract:fixture", "contract", "Fixture behavior", ("src/fixture.py",), (),
             {"behavior": "Required behavior", "authoritative_section": section.id,
@@ -347,7 +350,7 @@ depends_on=["provider"]
             Edge(code.id, "implements", contract.id, replace(PROV, method="candidate"))
 
     def test_disagreement_requires_registered_conflict_without_newest_wins(self):
-        node = Node("plurx:artifact:fixture", "artifact", "Fixture", ("docs/fixture.md",), (), {}, PROV)
+        node = Node("plurx:artifact:fixture", "artifact", "Fixture", (f"{FIXTURE_DOC_ROOT}/fixture.md",), (), {}, PROV)
         graph = GraphData(nodes=(node,), claims=(Claim(node.id, "lifecycle", "active", PROV), Claim(node.id, "lifecycle", "superseded", PROV)))
         with self.assertRaises(KnowledgeError):
             validate_graph(graph)
@@ -357,7 +360,7 @@ depends_on=["provider"]
             replace(conflict, disposition="resolved", resolution="newest date wins")
 
     def test_supersession_cycle_refuses_but_ordinary_dependency_cycle_is_allowed(self):
-        sections = tuple(Node("plurx:section:" + name, "section", name, ("docs/fixture.md",), (), {}, PROV)
+        sections = tuple(Node("plurx:section:" + name, "section", name, (f"{FIXTURE_DOC_ROOT}/fixture.md",), (), {}, PROV)
                          for name in ("first", "second", "third"))
         forward = tuple(Edge(sections[i].id, "supersedes", sections[i + 1].id, PROV) for i in range(2))
         validate_graph(GraphData(nodes=sections, edges=forward))
@@ -374,12 +377,12 @@ depends_on=["provider"]
     def test_reviewed_anchor_origin_binds_baseline_digest_in_every_claim_surface(self):
         spec = self.section("# Fixture\n## Policy\nRequired behavior.\n")
         anchor = resolve_anchor(self.root, spec)
-        self.write("docs/fixture.md", "# Fixture\n## Policy\nRequired behavior.\nNew constraint.\n")
+        self.write(f"{FIXTURE_DOC_ROOT}/fixture.md", "# Fixture\n## Policy\nRequired behavior.\nNew constraint.\n")
         anchor = resolve_anchor(self.root, spec)
         self.assertEqual(anchor.integrity, "changed")
         baseline = replace(PROV, origin=anchor.id, source_digest=anchor.digest)
         forged = replace(baseline, source_digest=anchor.current_digest)
-        section = Node(anchor.id, "section", "Policy", ("docs/fixture.md",), (anchor.id,), {}, replace(PROV, method="parsed"))
+        section = Node(anchor.id, "section", "Policy", (f"{FIXTURE_DOC_ROOT}/fixture.md",), (anchor.id,), {}, replace(PROV, method="parsed"))
         source = Node("plurx:artifact:fixture", "artifact", "Fixture", ("src/fixture.py",), (), {}, baseline)
         edge = Edge(source.id, "mentions", section.id, baseline)
         claim = Claim(source.id, "authority", "reviewed source claim", baseline)
@@ -438,7 +441,7 @@ revision="{REV}"
             replace(PROV, revision="main")
         with self.assertRaises(KnowledgeError):
             GraphData.from_dict({**GraphData().to_dict(), "authentication": True})
-        self.assertEqual(artifact_id("docs/fixture.md"), artifact_id("docs/fixture.md"))
+        self.assertEqual(artifact_id(f"{FIXTURE_DOC_ROOT}/fixture.md"), artifact_id(f"{FIXTURE_DOC_ROOT}/fixture.md"))
 
 
 if __name__ == "__main__":

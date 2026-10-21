@@ -11,6 +11,9 @@ from validation.knowledge.capture import changed_paths
 from validation.knowledge.lint import inspect_body
 from validation.knowledge.snapshot import SnapshotChanged
 
+# Paths below belong to disposable repositories, not this documentation tree.
+FIXTURE_DOC_ROOT = "docs"
+
 
 def sample_graph():
     """Small data-only graph for the capture boundary, not schema validation."""
@@ -19,7 +22,7 @@ def sample_graph():
                         attributes={"disposition": "open"}, scope=("src/**",)),
         SimpleNamespace(id="plurx:obligation:fixture-awaiting", kind="obligation",
                         attributes={"disposition": "implemented-awaiting-evidence"},
-                        scope=("docs/**",)),
+                        scope=(f"{FIXTURE_DOC_ROOT}/**",)),
         SimpleNamespace(id="plurx:obligation:fixture-closed", kind="obligation",
                         attributes={"disposition": "satisfied"}, scope=("src/**",)),
         SimpleNamespace(id="plurx:decision:fixture-choice", kind="decision",
@@ -30,7 +33,7 @@ def sample_graph():
 
 class KnowledgeCaptureTests(unittest.TestCase):
     def test_absent_body_is_unchecked_and_keeps_curated_obligations_visible(self):
-        result = inspect_body(sample_graph(), None, ("src/route.rs", "docs/guide.md"))
+        result = inspect_body(sample_graph(), None, ("src/route.rs", f"{FIXTURE_DOC_ROOT}/guide.md"))
 
         self.assertEqual(result["state"], "unchecked")
         self.assertEqual(result["matched_open_obligations"], [

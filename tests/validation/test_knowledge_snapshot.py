@@ -19,6 +19,9 @@ from validation.knowledge.evidence import assess
 from validation.knowledge.index import build, load
 from validation.knowledge.snapshot import SnapshotChanged, capture
 
+# Paths below belong to disposable repositories, not this documentation tree.
+FIXTURE_DOC_ROOT = "docs"
+
 ENV = {"runtime": "synthetic-fixture", "check_kind": "behavioral"}
 
 
@@ -37,18 +40,18 @@ class KnowledgeSnapshotTests(unittest.TestCase):
         self.write("src/input.rs", "fn route() {}\n")
         self.write("src/check.rs", "fn checked() {}\n")
         self.write("src/dependency.txt", "dependency v1\n")
-        self.write("docs/policy.md", "# Synthetic fixture\nNo real qualification.\n")
+        self.write(f"{FIXTURE_DOC_ROOT}/policy.md", "# Synthetic fixture\nNo real qualification.\n")
         self.write("cases/one.json", "{}\n")
         self.write("validation/knowledge/pilot.json", json.dumps({
             "schema_version": 1, "repository": "plurx", "source_commit": "a" * 40,
             "cohorts": {"routing": {"manifest": "tests/playback/routing-decisions.toml", "ids": ["fixture.route"]},
-                        "receipt": {"sources": ["src/input.rs"], "policy": "docs/policy.md"}},
-            "document_roles": {"docs/policy.md": "reference"}}))
+                        "receipt": {"sources": ["src/input.rs"], "policy": f"{FIXTURE_DOC_ROOT}/policy.md"}},
+            "document_roles": {f"{FIXTURE_DOC_ROOT}/policy.md": "reference"}}))
         for name, arrays in (("records", "anchors=[]\nrecords=[]\nedges=[]\nclaims=[]\n"),
                              ("coverage", "scopes=[]\n"), ("conflicts", "conflicts=[]\n")):
             self.write("validation/knowledge/" + name + ".toml",
                        'schema_version=1\nrepository="plurx"\n' + arrays)
-        self.write("validation/knowledge/records.toml", '''schema_version=1
+        self.write("validation/knowledge/records.toml", f'''schema_version=1
 repository="plurx"
 anchors=[]
 edges=[]
@@ -62,7 +65,7 @@ anchors=[]
 [records.attributes]
 check_kind="static"
 governed_ids=[]
-reference="docs/policy.md"
+reference="{FIXTURE_DOC_ROOT}/policy.md"
 [records.provenance]
 method="reviewed"
 author="Synthetic fixture author"

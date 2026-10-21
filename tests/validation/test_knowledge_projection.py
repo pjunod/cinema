@@ -7,15 +7,18 @@ import unittest
 from validation.knowledge.evaluation_projection import project
 from validation.knowledge.model import Anchor, Claim, Edge, KnowledgeError, Node, Provenance, canonical_json, content_digest, digest_bytes
 
+# Paths below belong to disposable repositories, not this documentation tree.
+FIXTURE_DOC_ROOT = "docs"
+
 REVISION = 'a' * 40
 
 
 def fixture(content, *, kind='section', selector=('Rule',), line=1, end=2):
     raw = content.encode()
-    expected = digest_bytes(raw) if kind == 'section' else content_digest({'docs/rule.md': digest_bytes(raw)})
+    expected = digest_bytes(raw) if kind == 'section' else content_digest({f'{FIXTURE_DOC_ROOT}/rule.md': digest_bytes(raw)})
     aid = 'plurx:' + kind + ':fixture'
-    anchor = Anchor(aid, 'docs/rule.md', kind, selector, expected, expected,
-                    'docs/rule.md', ('docs/rule.md',), 'valid', line, end)
+    anchor = Anchor(aid, f'{FIXTURE_DOC_ROOT}/rule.md', kind, selector, expected, expected,
+                    f'{FIXTURE_DOC_ROOT}/rule.md', (f'{FIXTURE_DOC_ROOT}/rule.md',), 'valid', line, end)
     provenance = Provenance('reviewed', 'author', 'reviewer', aid, expected, REVISION)
     node = Node('plurx:contract:fixture', 'contract', 'Synthetic rule', ('src/code.py',),
                 (aid,), {'behavior': 'Synthetic visible rule.'}, provenance)
@@ -24,8 +27,8 @@ def fixture(content, *, kind='section', selector=('Rule',), line=1, end=2):
 
 
 def views(content, ranges):
-    return {'docs/rule.md': {'content': content, 'mode': 33188}}, {
-        'docs/rule.md': {'line_ranges': ranges,
+    return {f'{FIXTURE_DOC_ROOT}/rule.md': {'content': content, 'mode': 33188}}, {
+        f'{FIXTURE_DOC_ROOT}/rule.md': {'line_ranges': ranges,
                          'content_sha256': hashlib.sha256(content.encode()).hexdigest()}}
 
 
@@ -65,11 +68,11 @@ class KnowledgeProjectionTests(unittest.TestCase):
                           contract.anchors, {'action': 'PRISTINE_ONLY_ACTION'}, provenance)
         decision = Node('plurx:decision:fixture', 'decision', 'Decision', contract.scope,
                         contract.anchors, {'rationale': 'PRISTINE_ONLY_RATIONALE'}, provenance)
-        section = Node(anchor.id, 'section', 'Rule', ('docs/rule.md',), (anchor.id,),
-                       {'path': 'docs/rule.md', 'integrity': 'valid'}, provenance)
-        artifact = Node('plurx:artifact:fixture', 'artifact', 'Artifact', ('docs/rule.md',), (),
-                        {'path': 'docs/rule.md', 'digest': digest_bytes(original.encode()), 'role': 'reference'},
-                        replace(provenance, method='parsed', origin='docs/rule.md', source_digest=digest_bytes(original.encode())))
+        section = Node(anchor.id, 'section', 'Rule', (f'{FIXTURE_DOC_ROOT}/rule.md',), (anchor.id,),
+                       {'path': f'{FIXTURE_DOC_ROOT}/rule.md', 'integrity': 'valid'}, provenance)
+        artifact = Node('plurx:artifact:fixture', 'artifact', 'Artifact', (f'{FIXTURE_DOC_ROOT}/rule.md',), (),
+                        {'path': f'{FIXTURE_DOC_ROOT}/rule.md', 'digest': digest_bytes(original.encode()), 'role': 'reference'},
+                        replace(provenance, method='parsed', origin=f'{FIXTURE_DOC_ROOT}/rule.md', source_digest=digest_bytes(original.encode())))
         graph.nodes = (contract, obligation, decision, section, artifact)
         graph.anchors = (anchor,)
         graph.claims = (Claim(contract.id, 'authority', 'PRISTINE_ONLY_CLAIM', provenance),)
@@ -120,7 +123,7 @@ class KnowledgeProjectionTests(unittest.TestCase):
         with self.assertRaises(KnowledgeError):
             project(graph, files, visibility)
         files, visibility = views('# Rule\nSynthetic.\n', [[1, 2]])
-        visibility['docs/rule.md']['content_sha256'] = '0' * 64
+        visibility[f'{FIXTURE_DOC_ROOT}/rule.md']['content_sha256'] = '0' * 64
         with self.assertRaises(KnowledgeError):
             project(graph, files, visibility)
 
@@ -128,9 +131,9 @@ class KnowledgeProjectionTests(unittest.TestCase):
         original = '# Rule\nSynthetic.\n'
         graph = fixture(original)
         files, visibility = views(original, [[1, 2]])
-        files['docs/rule.md']['mode'] = 0o644
+        files[f'{FIXTURE_DOC_ROOT}/rule.md']['mode'] = 0o644
         self.assertEqual(len(project(graph, files, visibility).nodes), 1)
-        files['docs/rule.md']['mode'] = 0o120000
+        files[f'{FIXTURE_DOC_ROOT}/rule.md']['mode'] = 0o120000
         with self.assertRaises(KnowledgeError):
             project(graph, files, visibility)
 
@@ -138,7 +141,7 @@ class KnowledgeProjectionTests(unittest.TestCase):
         original = '# Rule\nSynthetic.\n'
         graph = fixture(original)
         node = graph.nodes[0]
-        hidden = Provenance('reviewed', 'author', 'reviewer', 'docs/private-rule.md',
+        hidden = Provenance('reviewed', 'author', 'reviewer', f'{FIXTURE_DOC_ROOT}/private-rule.md',
                             digest_bytes(b'hidden'), REVISION)
         graph.nodes = (Node(node.id, node.kind, node.title, node.scope, node.anchors,
                             node.attributes, hidden),)
