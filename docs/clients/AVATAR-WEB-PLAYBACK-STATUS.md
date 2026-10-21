@@ -8,13 +8,107 @@ Vision delivery.
 
 ## Current state
 
-The presentation observer repair is deployed in `c7d78b119`. The October 21
-enhancement investigation below identifies a separate encoder-selection
-defect: a Quick Sync preference silently selected single-thread x265 for
-reconstructed pictures despite a usable VAAPI output graph. The source fix
-and focused Linux regression are complete. Complete private windows pass;
-[PR #1250](http://forge.lan:3000/noirr/plurx/pulls/1250) carries the fix;
-deployment and enhanced client/display acceptance remain open.
+The presentation observer repair is deployed in `c7d78b119`. The Intel
+completed-picture encoder repair landed in [PR #1250](http://forge.lan:3000/noirr/plurx/pulls/1250)
+and was deployed as `168fe74fb` on October 21. Paul confirmed enhanced
+playback on Apple TV. Safari then exposed two downstream contract defects:
+processed admission misread the original-DV transport requirement, and the
+native readiness reader refused valid full-film playlists above 64 KiB.
+The follow-up corrects those shared contracts; Paul retains deployment.
+
+The original three Safari drops are now located in retained macOS media
+logs: they occurred after decoding, during two display-reporting intervals
+that also contain screenshot/window activity. The exact presentation trigger
+is still unproved. A separate pending-native-callback fault is reproduced;
+no callback or dropped-frame correction is included in the DV follow-up.
+
+## October 21 — processed delivery capability and complete timelines
+
+After deployment, Safari's 18:47 UTC processed qualification took
+2,123/2,065 ms and refused with `the processed recipe is not one this client
+can decode`. The completed-picture timeout was no longer the blocker.
+`processed_client_compatible` treated `dv_transport: "progressive"` as an
+exclusive prohibition on HLS. Its documented meaning is an original
+preserved-DV delivery requirement: `"hls"` forces that envelope; progressive
+capability does not exclude another transport in `transports`. Safari
+advertises both progressive and HLS; Apple TV requires HLS. The correction
+retains HLS, MP4 and the same decoder entry's Main10/P8/PQ, raster, cadence
+and bitrate checks. HDR10 output still requires the HLS `hvc1` claim.
+
+An isolated Safari tab changed only the original-DV requirement to HLS,
+leaving its decoder claims intact. The deployed server admitted FEL/RPU/DYN
+in 1,834 ms, then native startup refused `Native readiness body exceeds its
+byte limit`. `nativeHlsFetch` bounded both master and complete media documents
+at 65,536 bytes. Avatar's processed timeline has 5,915 approximately 2.002 s
+segments, about 183.5 KiB; its coarser copy timeline fits the former bound.
+The client must consume the entire media timeline for seek-boundary evidence.
+
+The follow-up gives successful media playlists a finite 4 MiB + 72-byte
+readiness budget, using the retained-manifest budget and bounded acquisition
+start-tag size as precedent. This is an explicit client support bound, not
+an assertion of a universal producer duration limit. Actual master playlists
+and HTTP error bodies retain 64 KiB bounds; initialization retains 1 MiB.
+The initial URL may itself be media, so grammar identifies a master before
+its smaller byte bound is applied. Full timelines and ENDLIST are retained;
+overflow, reader cancellation, deadlines and ownership fences remain.
+
+Pinned Rust 1.97.1 all-target check passed. The focused
+`processed_profile81_caps_require_one_actual_main10_pq_raster_and_audio_contract`
+regression passed once, including progressive/HLS/absent original-DV
+requirements, missing actual HLS/MP4/P8/PQ and HDR10 sample-entry controls.
+`node --test tests/playback/native-hls-startup.test.js` passed 38 tests,
+including complete 5,915-entry child/scalar media, exact body limits,
+overflows and cancellation. Explicit `gpt-6-astra` adversarial review approved
+the implementation with zero blocking findings.
+
+A final isolated-tab replay used the reviewed readiness reader and the
+HLS-required original-DV claim against deployed `168fe74fb`, without changing
+the server. It reported FEL/RPU/DYN, displayed the picture, decoded 3,010
+frames with zero browser-reported drops, and delivered 2,988 accepted native
+callbacks without manual rearming. Intentional pause/info interactions and
+a prepared secondary element occurred during the capture. Startup took
+24.9 s; initial seek-to-loadeddata accounted for 22.3 s and remains a latency
+investigation, not passing fast-start evidence. Display fidelity/HDR output
+is unqualified. Diagnostic progress reporting was suppressed and the tab
+closed; this is injected-client evidence, not deployment acceptance.
+
+## October 21 — original dropped frames recovered from system logs
+
+The original application traces retained no nonzero drop transition. macOS
+unified logs do retain the hardware decoder and image-queue reports for the
+same 4K Avatar item and resume timeline. Times below are America/New_York;
+report endpoints are aggregate dump times, not individual dropped-frame times.
+
+| Display reporting interval | Image-queue drops | Matching hardware decoder |
+|---|---:|---|
+| 11:14:31.507–11:14:37.524 | 1 | 144 decoded, zero dropped/late, 13 ms mean / 20 ms maximum decode |
+| 11:14:37.524–11:14:43.530 | 2 | 144 decoded, zero dropped/late, 13 ms mean / 22 ms maximum decode |
+
+Both intervals report no compressed-frame-queue starvation, image-queue
+flush, eviction or post-sampling drop. Display refresh stays 16.667 ms.
+Later reports through 11:15:55 contain no additional drops. This locates
+these three losses after decoding; it does not establish a server timeout,
+callback omission or decode-throughput cause.
+
+The first interval contains native screenshot selection beginning 11:14:33
+and capture at 11:14:36.772–36.783. The second contains Codex foreground and
+window changes around 11:14:38.934, CoreAnimation image-function errors, and
+a computer-use window screenshot at 11:14:43.486–43.502. These are specific
+presentation disturbances, but the aggregate reports lack individual
+missing PTS/reasons. A controlled capture replay has not established
+causality: a targeted shortcut/drag selected page text, and opening native
+Screenshot controls timed out. Neither attempt is a successful reproduction.
+
+An independent passive native-boundary replay also reproduced zero callback
+delivery while raw decoding advanced with zero browser drops. Its first
+request was armed at loadeddata/readiness 2, 1 ms before seeked, and remained
+pending while focused for about 8.5 s, then through automatic recovery.
+Renewing the successor's request yielded a callback 20 ms later and 834
+accepted receipts over 35 s. Focus returned only 5 ms before renewal, so
+renewal alone is not yet isolated. This confirms native silence before app
+filtering, but it cannot explain or be counted as the original three drops.
+No observer patch is included. Private raw JSON and system-log receipts are
+retained outside the repository; no media or private infrastructure is added.
 
 ## October 21 — Quick Sync preference selected software FEL output
 
