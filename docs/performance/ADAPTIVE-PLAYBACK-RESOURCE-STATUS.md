@@ -22,24 +22,23 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest runtime `50e082555` adds the custodied producer launcher/slot bridge over
-`cad6f18ae`'s core ownership. The exclusive physical reservation enters core BEFORE
-spawn. Slots signal/status/wait only the actual retained root, rejecting cross-graph
-and already-waited signal targets. Core joins the actual registered writer task
-before the narrow producer event; cancellation/panic cannot refund its physical
-reservation. UnknownHeld remains distinct from completed producer retirement.
-Graph-owned retained-role borrows grant no acquisition/release authority; the
-atomic family transaction checks live ownership, current epoch and invalid ledger
-even when every requested role is already retained. Shared roles stay counted once.
+Latest runtime `71b405efb` migrates ordinary VOD to exclusive slot reservation
+BEFORE spawn, with child/job/admission and the ACTUAL stdout/diagnostic JoinHandle
+installed synchronously before registration awaits. Completion metadata runs outside
+that joined writer, so it cannot wait on its own reap. Registration/caller
+cancellation, factory panic and slot drop retain the task and narrow producer
+resources through actual wait/join. Abandoned old-generation reports are fenced.
 
-IMPORTANT: current VOD/rolling production callers still supply legacy opaque
-EncodeWorkerPermits, not these new physical demands. The real launch/slot bridge
-has authored call-site fixtures, but production demand/caller wiring is NOT done.
-Unsupported containment refuses trials before launch; possible acquisition stays
-UnknownHeld after actual waits/joins. Positive containment, concrete nonprocess
-adapters and restart-persistent reconciliation are NOT implemented. In-memory
-custody is not a journal. Controller owns the requested Windows compiler transport
-and exact local-journal ownership/transaction design; these are not human gates.
+Retained `50e082555`/`cad6f18ae` supply the physical-reservation launcher/slot bridge,
+actual root controls/joins and graph-owned retained-role borrow. Atomic families
+recheck live ownership/current epoch/invalid state even for all-retained roles.
+IMPORTANT: VOD still uses legacy EncodeWorkerPermit capacity, NOT physical demands;
+rolling and other adapters remain. Unsupported graphs refuse trials before launch,
+then retain UnknownHeld after actual waits/joins. No positive containment, concrete
+nonprocess closure or restart journal exists. Connecting finite physical capacity
+without a valid closure would permanently exhaust it; no fake refund is introduced.
+Controller owns real Windows compiler transport and the exact local-journal
+ownership/transaction design, ordinary agent logistics rather than human gates.
 
 Retained `5160af863`/`8ddae0e39` capacity snapshots bind raw four-key intent and exact
 same-statement catalog/marker readiness. Verified Automatic alone ignores rollback
@@ -51,12 +50,12 @@ already had coherent transactions; Hiqlite split authority reads were repaired.
 Earlier `e213a4c83` bounded instance-owned priors and `740f4f30a` advisory trial
 policy remain, not production growth authority. `ebf46fa55` generic provenance
 replay guards and independent settings/CAS/import installation remain intact.
-Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS79s (`153922`),
-SHA `8bb4302b4ee64d1e965fcfc7116fb4a1a0d124c011ff1385531b9199c7d0e3ac`.
-Six new bridge/borrow/root regressions and retained fixtures COMPILED, NOT RUN.
-Initial unused-bridge compile (`152857`) failed before fixtures were authored;
-the subsequent PASS157s (`153445`) predates final epoch guards/readiness assertions.
-Older M3 passes remain source-scoped evidence, never runtime acceptance or replays.
+Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS118s (`162722`),
+SHA `263948a79a41b970353cb900fcfdc11755ff52a16e94847869d868ec1a358656`.
+Four new owned-task leaves plus strengthened actual VOD registration/panic bodies
+COMPILED, NOT RUN. Test-only Debug/lifetime compile failures (`162152`/`162523`)
+were corrected. Prior `50e082555` PASS79s (`153922`) remains source-scoped evidence
+in private `evidence/compile-run51.json`; successful checks were not replayed.
 Targeted rustfmt binds edition2021/skip_children. Native Linux e9 receipts remain
 e9-only; no new Linux or Windows containment qualification. M0–M7 remain incomplete.
 PR1248 stays draft; controller owns publication/status and review, then coordinates
