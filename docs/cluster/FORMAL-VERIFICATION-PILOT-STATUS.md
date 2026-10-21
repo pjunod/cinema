@@ -1,6 +1,6 @@
 # Formal verification pilot — status
 
-**Status:** implementation and bounded-source qualification complete · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Base:** `2c0e8b14df` · **Delivery and live merge gate:** [PR #1241](http://forge.lan:3000/noirr/plurx/pulls/1241)
+**Status:** implementation and bounded-source qualification complete · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **Integrated main:** `a06be68b9` · **Delivery and live merge gate:** [PR #1241](http://forge.lan:3000/noirr/plurx/pulls/1241)
 
 M0–M3 artifacts and local qualification are complete. The PR records the current candidate, final CI gate and delivery state; a local result alone does not authorize promotion. GPT-6.1 Sol implemented the model and contract; GPT-6 Luna implemented tooling and mechanical fixes. Fable 5.1 supplied design advice and the independent final adversarial review, with no coding after Paul's clarification. Earlier authorship remains intact. All work used agent-owned clones; the owner's checkout was untouched.
 

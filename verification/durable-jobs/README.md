@@ -157,7 +157,7 @@ requires precheck0, successor2 and backend1 in an actual path; it cannot be
 true at Init or be satisfied by a disabled clock-transition counter. Rebased
 or clamped time from the inherited draft is not used.
 
-`ModelView` in the two positive safety configs quotients publication
+`ModelView` in the positive safety configurations quotients publication
 **diagnostics**: precheck/successor/backend sample history and bind-refusal
 sample values. Every guard and checked safety/action property ignores those
 fields. The computed predecessor/successor, retry `left`, outcome, commit
