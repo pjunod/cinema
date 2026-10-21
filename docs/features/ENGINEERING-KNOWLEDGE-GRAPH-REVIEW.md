@@ -153,3 +153,28 @@ Actual R2 report SHA-256
 verdict `4b0592c76b5eb2a740e72177ef2fd1919542a6ee54fd6870f5d74b6bb12c0ce5`.
 R9's exact refreshed source commitments require the same Astra task's narrow
 recheck before any implementation imports, units or capability witness.
+
+## Implementation recheck — Astra R3 and qualification corrections
+
+Astra R3 **APPROVE** binds head `54ef1c02c86b5bd10df6ac1458b19aad6935d919`,
+tree `bceb9feecaf3fa3d3a573dfac57d8a6be73473ad` and the exact six-source map.
+R9 is closed. Actual report SHA-256
+`169873e94221bdd9a261bfb9a767341ca537036d6921960a37b234eaf1f98a10`;
+verdict `7892501e1f3b5d34b965cc6fe59ae286be4bd6045f5fc0674463076a63b4cbf0`.
+
+Post-review qualification produced three bounded corrections for a same-task
+recheck, preserving all historical results:
+
+| ID | Observed cause and prepared correction |
+|---|---|
+| Q1 | Warm CLI queries rebuilt the graph and repeatedly globbed membership, taking 2.045–2.103 seconds. Cache authenticated graph/selection recipes locally, revalidate every live source/identity dimension, and handle literal membership without whole-tree globbing. Draft stale/forged/concurrent/race controls; no execution-proof authority added. |
+| Q2 | One of nine private synthetic checks errored on an undeclared Mock admission method. Supply the actual interface, retaining the graph-mismatch and no-spend assertions. Retry only this failed check. |
+| Q3 | Actual capability refusal found zero of four supported bundles: frozen commands kept nested grader paths while generic export/dispatch flattened them. Preserve safe relative identities across all three layers; reject ambiguous, unsafe and symlink layouts. Strict inert-byte grammar, frozen artifacts, commands and Gold stay unchanged. |
+
+Seven unaffected private passes retain exact test/behavior AST commitments.
+One protocol pass is genuinely invalidated; the failed check and three new
+layout controls yield five selected checks after approval. A fresh capability
+witness is required by the changed source/approval binding. New supported
+counts remain unset; no partial favorable study or token-saving claim follows.
+The refreshed source commitments and warm-cache correction are prepared,
+unexecuted, for the same Astra task's exact-content recheck.

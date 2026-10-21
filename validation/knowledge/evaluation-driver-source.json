@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "scope": "Generic trusted evaluator and synthetic contract source frozen for same-task independent recheck; private gold remains separate.",
-  "source_metadata_sha256": "983aa9d5efc9ebc30f46d35575d3ddb567479eab524f78560e8ba76924485edc",
+  "source_metadata_sha256": "a26ae4e15cedfc84004b56e0b10f6c8f0fde1b8c3972bcf48404a844ecfad918",
   "sources": {
-    "isolation_adapter.py": "3d9d2d85dba0bcd82e23d8d09b414d21504a0e35d104fc8fec5db9fb06f86b33",
+    "isolation_adapter.py": "e63bb56dc3bf7f7427ed931aea46869a4e456b9d8a909beb6e676d0ef82aa1fb",
     "prerequisite_only.py": "81c79aae6781860776eeea7cc32399dedfd7e2af8e138d031c89cfde24d8d48b",
-    "private_contract_tests.py": "e5caf8e65dc817f176046a05180f2b37ed731ea682c9d5aec2a03a93bc50cfbd",
-    "python_byte_outcome_driver.py": "3abcfec23be7e60426899eeb7428b2271d6cf12e0db269e8bbe6ef8d2147c14f",
-    "runtime_bindings.py": "c66bda9e0c9083561171729acbe4c079f67459401159be7fc73f536b32e4b251",
+    "private_contract_tests.py": "b89ef1e55f9c3363ea6e7c80ddf1a6b4b51b5caab939fdb3a60ffd9424d27b25",
+    "python_byte_outcome_driver.py": "20eef66f85d92c49df86166d929c458b2fd24ec893d3afaf6da5db85577b7748",
+    "runtime_bindings.py": "40830831d4226200a35ff50e4945d2e85c1c4f83283f980ba0a2799ac71f14f5",
     "trusted_launcher.py": "5290da17e0d7f0995f96dd66eafa8e8cabf91d9524fe1abb6c5d017ec446a1fe"
   },
   "acceptance_capability_counts": {
@@ -15,14 +15,16 @@
     "frozen_bundles": 4,
     "full_study_prerequisites_available": false,
     "model_spend_refused_until_all_qualify": true,
-    "statically_supported_bundle_shapes": 1,
     "supported_mechanism": "immutable AST-recognized inert file bytes only",
-    "unsupported_bundle_shapes": 3,
     "unsupported_mechanisms": [
       "candidate Python imports",
       "candidate Rust compile/test"
-    ]
+    ],
+    "actual_prior_witness_supported_shapes": 0,
+    "actual_prior_witness_unsupported_shapes": 4,
+    "revised_source_supported_shapes": null,
+    "revised_source_unsupported_shapes": null
   },
-  "qualification": "not-run; source commitments confer no approval, actual family qualification or runtime evidence",
+  "qualification": "R3 source approved; prior capability-only witness unavailable (0/4 supported), no runtime qualification; revised source pending same-task review and fresh witness",
   "prerequisite_only_witness": "Review-gated capability refusal only; no OS/dependency qualification or paid study evidence."
 }
