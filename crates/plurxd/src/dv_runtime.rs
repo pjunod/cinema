@@ -512,6 +512,9 @@ impl PrivateWindow {
 }
 
 #[cfg(target_os = "linux")]
+// `vaapi_upload_proved` is supplied by the host-level HDR10 passthrough
+// probe; it is not a device-bound reconstructed-upload proof. The completed
+// private window must still validate the actual upload/encode before serving.
 pub(crate) fn completed_window_encoder(
     preferred: plurx_core::transcode::Encoder,
     vaapi_upload_proved: bool,

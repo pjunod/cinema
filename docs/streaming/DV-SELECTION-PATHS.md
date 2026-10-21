@@ -121,8 +121,8 @@ blanket permission for every processed graph.
 |---|---|---|
 | Software | Software HEVC/x265 | Explicit software is retained; completed output still must validate |
 | NVENC | NVENC HEVC | Typed reconstructed contract and actual verified window; selection itself does not require the VAAPI proof |
-| QSV | VAAPI HEVC when proved; otherwise Software | Independent VAAPI upload proof and a matching reconstructed output contract. PR #1250 adds this mapping; it does not add a reconstructed QSV contract |
-| VAAPI | VAAPI HEVC when proved; otherwise Software | Same VAAPI proof and contract |
+| QSV | VAAPI HEVC when proved; otherwise Software | Host-level VAAPI HDR10 passthrough probe and a matching reconstructed output contract; actual window validation still required. PR #1250 adds this mapping, not a reconstructed QSV contract |
+| VAAPI | VAAPI HEVC when proved; otherwise Software | Same host-level VAAPI proof and contract |
 | VideoToolbox | Software if this enum reaches this Linux function | This fallback is not a macOS reconstruction implementation |
 
 The software completed-picture graph explicitly bounds x265 pools/frame
@@ -142,6 +142,29 @@ fallback does not change the frozen pixel-policy identity. macOS processing
 has its own context-bound, proved graph selection, including SDR/HDR10 and
 strict Profile 5 paths; it does not execute this Linux FEL selector. See
 [the Mac implementation](MACOS-VIDEO-PROCESSING-IMPLEMENTATION.md).
+
+## Open proof and contract work
+
+The argument currently named `vaapi_upload_proved` is populated from
+`hdr10_passthrough_vaapi`, a host-level passthrough capability probe. It is
+neither a per-render-node proof nor a direct proof of the completed graph's
+system-memory P010 upload. The private window's actual execution and
+fail-closed output validation remain necessary. The retained timing evidence
+covers the measured single-render-node Intel configuration; it does not
+qualify multi-GPU selection or every VAAPI upload path.
+
+Additional Fable 5.1 review of PR #1250 approved the source delta and recorded
+two separate follow-ups:
+
+- Bind capability evidence to the actual execution device and surface entry
+  path, then qualify multi-GPU configurations. The current host boolean
+  cannot establish that association.
+- Gate the pre-existing unconditional NVENC selection on
+  `completed_reconstructed_output(Nvenc).is_some()`. The contract exists
+  today, but a future contract removal must not reach the downstream
+  `expect("verified reconstructed output encoder")`.
+
+These are open work, not completed protections or deployment acceptance.
 
 ## Output validation and failure determine what the viewer receives
 
