@@ -1,9 +1,10 @@
 # Worker refinement — run two complete workers against one domain
 
 **Status:** reviewed candidate with corrections; exhaustive qualification is
-incomplete. The first `progress.cfg` run timed out at 300 seconds, with
-678,415 distinct states and 51,612 states still queued. It found no property
-counterexample, but did not establish a pass.
+incomplete. Before observation-state factoring, `progress.cfg` timed out at
+300 seconds (678,415 distinct states; 51,612 queued) and again at 900 seconds
+(4,162,006 distinct states; 151,968 queued). Neither run established a pass.
+The factored model requires all fourteen configured expected outcomes.
 
 This separate finite TLA+ package models two distinct library jobs, each with
 its complete admission, claim, token mutex, publication lock, scan, item,
@@ -81,8 +82,16 @@ The `renewal-livelock` control name denotes heartbeat activity continuing while
 `w1` scan-finish scheduling is unfair; the mutation changes only that fairness
 premise.
 
-`TimeObserved(w)` remains enabled and toggles only that worker's time marker
-while making its backoff/expiry barrier eligible. Global deadlock detection
-cannot establish operation progress in this model. The temporal controls
-check their own named properties and therefore do not use unrelated clock
-activity as evidence of useful progress.
+The unused per-worker `tick` and `item` observation fields were removed
+under the fair-execution projection argument in [CONTRACT.md](CONTRACT.md).
+The item dispatch/application/return milestone, both complete pipelines,
+all guards, fairness clauses, properties and fourteen configuration bytes
+remain unchanged. This contingent design advice is not a review approval or
+a runtime feasibility guarantee; the 900-second budget remains unchanged.
+
+`TimeObserved(w)` now only makes that worker's backoff/expiry barrier
+eligible. It generates an identical successor once the barrier is already
+eligible. The pinned TLC checker counts generated successors, including
+identical ones, so default deadlock checking remains vacuous and enabled.
+The temporal properties carry the progress claims; neither clock activity
+nor a self-loop is useful completion evidence.

@@ -185,8 +185,12 @@ in-flight heartbeat writer and awaiting its return. Revocation is not a
 cleanup deadline. No bounded cleanup latency is established. A filesystem
 call or backend can stall indefinitely if its explicit return premise is
 removed; the external-stall and lock/livelock controls demonstrate that limit.
-`TimeObserved` is always enabled, so TLC global deadlock checking cannot
-substitute for any operation-local temporal property.
+`TimeObserved` always generates a successor and stutters once eligibility
+is already true. The pinned TLC 1.7.4 checker counts generated successors,
+including identical-state successors, for its global deadlock check. That
+check therefore remains vacuous and cannot substitute for any
+operation-local temporal property. The checker invocation and every
+configuration's bytes remain unchanged.
 
 ## Cancellation observes work polls, not arbitrary await interruption
 
@@ -220,3 +224,51 @@ concurrent faults, item timeout enumeration and a pre-application ambiguous
 renewal remain unqualified. Conformance schedules and hash-checked source
 anchors support particular boundaries; they do not prove full Rust
 refinement or arbitrary-cluster deadlock freedom.
+
+## Removing unused observations preserves the configured fair language
+
+Fable's contingent ghost-factor design (`t_336dc863`, sections 1–3) supplies
+the state projection and fair-execution lifting argument below. The
+coordinator's inspection of the exact pinned TLC jar established that
+identical generated successors count for deadlock checking; the design's
+amendment withdraws its initial proposal to disable that check. This is
+bounded feasibility design advice with a checker-semantics correction, not
+another adversarial approval or a qualification result.
+
+Let the projection delete only each worker's old `tick` and `item` record
+fields. Neither appeared in an action guard, a retained-state update
+expression, `TypeOK` or any configured invariant, temporal property or
+witness predicate. The old `item` field was only a monotone observation of
+`StoreApply` with kind `item`; that application still changes `call` from
+`sent` to `applied`. `ItemSend`, `StoreApply`, `StoreReply` and `CallerReturn`
+continue to model the complete item milestone for both workers.
+
+Every action except `TimeObserved` preserves its retained updates and its
+nonstuttering enabledness under this projection. Old `TimeObserved` steps
+project either to eligibility becoming true or to a retained-state stutter.
+Conversely every new finite path lifts by restoring the deterministic old
+observation updates. Reachable retained states and all configured invariant
+and witness predicates are therefore preserved.
+
+The fairness argument additionally retains `WF_vars(TimeObserved(w))` for
+each worker. In the old model that action toggled `tick`, so fairness forced
+infinitely many observations, each leaving eligibility true. Their
+projection satisfies the new fairness obligation: once eligibility is
+false, observation eventually makes it true. Conversely, a new fair
+execution has infinitely many positions with eligibility true. Insert old
+tick-only observations at those positions to satisfy old observation
+fairness. Those insertions change no retained state or other action's
+enabledness, and preserve all other fair-action occurrences. Thus fair
+executions project and lift modulo stuttering. Every configured temporal
+formula uses retained state and is stuttering invariant, including useful
+completion parity and all expected temporal-control violations.
+
+The unchanged `TimeObserved` action now generates an explicit identical
+successor when eligibility is true. Under the pinned checker semantics it
+both preserves the documented deadlock-check vacuity and supplies the
+self-loop corresponding to projected old tick-only activity. No checker
+flag, state constraint, `VIEW`, symmetry declaration, horizon, fault bound,
+pipeline, property or fairness clause was removed or weakened. This
+preservation argument does not predict runtime, complete exploration or
+property satisfaction. Both prior timeouts remain incomplete evidence;
+all fourteen expected outcomes are still required for qualification.
