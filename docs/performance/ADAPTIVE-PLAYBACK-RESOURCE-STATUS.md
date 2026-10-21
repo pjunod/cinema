@@ -21,16 +21,28 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest source `a4098f09540e13d3689012b39de658f2d709ab75` includes bounded
-64-graph diagnostics with explicitly Unknown descendant coverage, shared-audio
-useful service that cannot mint video recipe evidence, and a read-only four-state
-stored-limit report separate from resolved defaults. Exact-code pinned all-target
-daemon Clippy passed 170 s (`221512.log`); message-only amendment preserves its
-tree `1e63dbed06a090d8d332f6e0abfe7e277974c198`. M2's parser/report is partial:
-transactional mode writers, persistent invalidation/import/restore, controls and
-adaptive vector/policy remain absent. No admission behavior has changed. New
-fixtures are authored/compiled, not executed. PR1248 remains draft at published
-`e9f4af52d`, whose paperwork passed, not runtime qualification. Coordinator-owned
+Latest source `cb7bc758841d64a1108a2ce81285069fe8075902` includes the node-local
+physical-vector ledger: atomic dimensions/epochs, exclusive no-spawn refund,
+post-spawn UnknownHeld and same-owner receipt-bound reconciliation. Its bounded
+two-family overlap validates ledger-minted identities, at most three roles each,
+actual retained guards/costs and aggregate caps without partial debits; shared
+roles count once, trial custody lasts through every unclosed role. Exact-source
+pinned core all-target Hiqlite Clippy passed 49 s (`111704.log`), compiling core
+fixtures too. Initial fixture unwrap lint failure (`223356.log`) is preserved;
+repair `555331231` passed 55 s (`223601.log`). No implementation tests executed.
+Settings now have independent canonical-shape v1 installation, persistent legacy
+numeric invalidation (including same-value UPSERT/REPLACE), revision-CAS typed
+writers and normal dirty-only System controls. Automatic preserves rollback
+cache/absence. Recognized imports bind companions and load them last; unversioned
+or corrupt companions are omitted with explicit receipt flags/normalized parity.
+New admin `/settings/transcode-capacity` isolates its CAS from aggregate saves;
+unchanged old numeric echoes preserve mode and omission. Partial/future schema
+refuses typed writes without deleting data or disabling ordinary playback.
+Exact-source pinned core Hiqlite-contract all-target Clippy PASS18s (`114401`),
+daemon all-target Clippy PASS164s (`114419`); test bodies NOT RUN. No production
+physical-receipt minting, history/controller or adapter/policy integration yet;
+M2/M3 remain incomplete. PR1248 draft published32c lags local; no qualification.
+Coordinator-owned
 native Linux compile-only checks passed on exact e9: daemon check/Clippy and core
 Hiqlite check/Clippy, all-targets, actual Rust 1.97.1, zero units executed. Private
 verified receipt SHA-256 is
@@ -350,12 +362,14 @@ transition, implementation units or qualification before the manager handoff.
 ### Database enforcement, including old SQL and retention
 
 Implement shared schema SQL in `store/adaptive_resource_schema.sql`, installed
-atomically with its triggers in a new SQLite migration and replicated migration
-after current AUTH schema 82. Both current layouts already have principal
-`owner_key`; adaptive transactions require the rebuilt principal layout (sharing
-source layout 71), otherwise return protocol unavailable without spawning.
-Fresh installs and upgrades use the same SQL. No daemon-local Rust check is
-substituted for these persistent guards.
+atomically with an independent versioned marker and verified object shapes.
+Manager supersedes the unimplemented AUTH83 proposal: support Hiqlite baseline81
+and Source82 without bumping AUTH or implicitly activating Source. SQLite uses
+its own independent installation convention, not a shared ordinal. Verify actual
+principal/route columns; frozen private Source layout71 is not composed ordinal71.
+Fresh/install/import/restore parity, partial/restart and unknown-future refusal
+are required. No adaptive advertisement before complete shape/hash verification;
+ordinary playback remains supported. Rust checks do not replace persistent guards.
 
 `media_resource_requests` primary key `(owner_key, request_id)` stores immutable
 `claim_incarnation`, `playback_id`, `fingerprint`, `principal_json`, `deadline_ms`,
