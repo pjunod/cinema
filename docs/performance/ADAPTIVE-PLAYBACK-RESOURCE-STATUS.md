@@ -1,9 +1,11 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · M0/M1 partial; M2 capacity and M3 custody slices compiled.
-**Owner:** Sol 6.1 (`hdr-sol`, `gpt-6.1-sol`, `openai-codex`), task
-`t_161f6652`. Controller owns coordination and final review scheduling. One writer,
-one integration branch `effort/adaptive-playback-resources`, one final PR.
+**Integration owner:** Sol 6.1 (`hdr-sol`, `gpt-6.1-sol`, `openai-codex`),
+`t_161f6652`. Owner-authorized isolated Sol lanes deliver journal and M4 Store
+authority; integration retains runtime, shared registrations/docs/catalog and
+serialized adoption. Controller coordinates scope/review. One integration branch
+`effort/adaptive-playback-resources`, one final PR; no overlapping writers.
 No deployment. No implementation units, integration campaigns or qualification
 have run. Complete implementation, actual independent Fable 5.1 review and fixes
 precede qualification and landing. The owner confirms management transfer is
@@ -22,44 +24,42 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`71b405efb` migrates ordinary VOD to exclusive slot reservation
-BEFORE spawn, with child/job/admission and the ACTUAL stdout/diagnostic JoinHandle
-installed synchronously before registration awaits. Completion metadata runs outside
-that joined writer, so it cannot wait on its own reap. Registration/caller
-cancellation, factory panic and slot drop retain the task and narrow producer
-resources through actual wait/join. Abandoned old-generation reports are fenced.
+`68287923c` preserves rolling's early actor process exit but makes published and
+prepublication cleanup JOIN the actual supervisor/diagnostic drain before clearing
+its slot or returning legacy permits. Cancel/timeout retains the same JoinHandle;
+failed joins remain failures. Drop transfers the actual join, not a receipt.
+Six new regression bodies COMPILED NOT RUN; pinned combined daemon/core all-target
+Hiqlite-contract Clippy PASS88s (`165333`), SHA
+`236faaabaafcaca94b2e5a3ba4c2877547ac7fa864f01b575ebe85e0ce68b8a0`.
+Initial production hook-field dead-code error (`165010`) fixed without suppression.
+`5b6330c43` aborts AND retains actual reader joins on abandonment/unwind, keeps
+the owning runtime for off-runtime reader/supervisor Drop, and adds the core-private
+read-only receipt-binding seam. Three more bodies COMPILED NOT RUN. Current combined
+pinned Clippy PASS464.726s, log SHA
+`6d12bcb312f2e4f358f5da522ad489b12bd17c95c0542ab19ef07a64e79ed16d`;
+private `evidence/compile-run55-final.json` binds source hashes and true exit0.
+Interrupted `165805` has no exit receipt and is INVALID, not passing evidence.
 
-Latest `0c50b9593` makes diagnostic drain cancellation independent, keeps the
-original evidence deadline and joins actual aborted readers before settlement.
-Failed progress marks real diagnostics incomplete, never silently clean; absent
-optional progress stays valid. Rolling's earlier process-terminal latch is NOT
-full physical closure; its retirement/resource integration still remains.
+Retained `71b405efb` owns the VOD slot BEFORE spawn and actual writer before any
+registration await; completion metadata cannot self-join. `0c50b9593` owns diagnostic
+drain across cancellation and actually joins timed-out readers; lost progress is
+incomplete evidence. `50e082555`/`cad6f18ae` supply graph/slot/retained-role custody.
+None is a descendant-containment or physical-ledger close proof.
 
-Retained `50e082555`/`cad6f18ae` supply the physical-reservation launcher/slot bridge,
-actual root controls/joins and graph-owned retained-role borrow. Atomic families
-recheck live ownership/current epoch/invalid state even for all-retained roles.
-IMPORTANT: VOD still uses legacy EncodeWorkerPermit capacity, NOT physical demands;
-rolling and other adapters remain. Unsupported graphs refuse trials before launch,
-then retain UnknownHeld after actual waits/joins. No positive containment, concrete
-nonprocess closure or restart journal exists. Connecting finite physical capacity
-without a valid closure would permanently exhaust it; no fake refund is introduced.
-Controller owns real Windows compiler transport and the exact local-journal
-ownership/transaction design, ordinary agent logistics rather than human gates.
+Ordinary production remains legacy capacity, not finite physical demands.
+Unsupported backends cannot be migrated into permanent slot exhaustion, and an
+existing physical hold cannot be bypassed by relabelling a replacement legacy.
+Astra R2 supplies the dedicated node-local SQLite/write-ahead/settle-before-refund
+contract. Isolated journal `t_5034245a` owns resource_custody plus one lib registration;
+integration owns startup/ledger/physical_graph. M4 Store authority has separate
+backend-session ownership; shared registrations remain integration-owned. No new
+runtime persistence, positive containment or external-resource closure claimed.
+Controller found no Windows-labelled runner in its inventory: that is not proof
+no machine exists or a waiver of Windows qualification; no compiler supplied yet.
 
-Retained `5160af863`/`8ddae0e39` bind raw intent/catalog readiness coherently;
-verified Automatic alone ignores rollback cache. Unknown installs keep numeric
-policy; optional-schema fallback drops the entire failed snapshot. Admission v2
-fences installation changes/old peers. Baseline/transport/step errors propagate.
-
-Earlier `e213a4c83` bounded instance-owned priors and `740f4f30a` advisory trial
-policy remain, not production growth authority. `ebf46fa55` generic provenance
-replay guards and independent settings/CAS/import installation remain intact.
-Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS77s (`163417`),
-SHA `c91522032f204fc2d76d1b9c9f5f38d60ae85edadf09213020a748799ea32f17`.
-Eight new task/drain leaves and strengthened VOD/panic/deadline bodies COMPILED,
-NOT RUN. Earlier VOD PASS118s (`162722`) predates drain changes; test-only compile
-errors (`162152`/`162523`) were fixed. Private `evidence/compile-run52.json`
-retains receipts; no passing behavioral suite was run/replayed.
+Capacity/provenance `5160af863`/`8ddae0e39`, bounded priors `e213a4c83`, advisory
+trials `740f4f30a` and independent settings/CAS/import guards remain intact.
+Earlier compile receipts stay source-scoped; no passing behavioral check replayed.
 Targeted rustfmt binds edition2021/skip_children. Native Linux e9 receipts remain
 e9-only; no new Linux or Windows containment qualification. M0–M7 remain incomplete.
 PR1248 stays draft; controller owns publication/status and review, then coordinates
