@@ -64,6 +64,16 @@ class KnowledgeProjectionTests(unittest.TestCase):
         with self.assertRaises(KnowledgeError):
             project(graph, files, visibility)
 
+    def test_sealed_permission_modes_are_regular_and_symlink_modes_refuse(self):
+        original = '# Rule\nSynthetic.\n'
+        graph = fixture(original)
+        files, visibility = views(original, [[1, 2]])
+        files['docs/rule.md']['mode'] = 0o644
+        self.assertEqual(len(project(graph, files, visibility).nodes), 1)
+        files['docs/rule.md']['mode'] = 0o120000
+        with self.assertRaises(KnowledgeError):
+            project(graph, files, visibility)
+
     def test_hidden_origin_prunes_record_even_when_its_anchor_is_visible(self):
         original = '# Rule\nSynthetic.\n'
         graph = fixture(original)

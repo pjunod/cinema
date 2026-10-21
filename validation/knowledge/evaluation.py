@@ -57,7 +57,9 @@ def _path(value: Any) -> str:
     _require(not any(c in value for c in "\\:*?[]") and all(ord(c) >= 32 and ord(c) != 127 for c in value), "unsafe corpus path")
     _require(not value.startswith(("/", "~")), "absolute paths forbidden")
     parts = value.split("/")
-    _require(all(part and not part.startswith(".") for part in parts), "hidden/traversal path forbidden")
+    _require(all(part and (not part.startswith(".") or index == 0 and part in
+                           {".github", ".agents", ".ignore", ".gitignore"})
+                 for index, part in enumerate(parts)), "hidden/traversal path forbidden")
     _require(not ({"evaluation-private", "node_modules", "target"} & set(parts)), "private/generated path forbidden")
     return value
 

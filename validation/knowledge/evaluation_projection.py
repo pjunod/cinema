@@ -40,7 +40,7 @@ def project(graph: GraphData, files: Mapping, visibility: Mapping) -> QueryProje
     ranges = {}
     for raw_path, row in files.items():
         path = safe_source_relative(raw_path)
-        if not isinstance(row, Mapping) or set(row) != {'content', 'mode'} or not isinstance(row['content'], str):
+        if not isinstance(row, Mapping) or set(row) != {'content', 'mode'} or not isinstance(row['content'], str) or type(row['mode']) is not int or row['mode'] not in {0o644, 0o755, 0o100644, 0o100755}:
             raise KnowledgeError('invalid visible file')
         raw = row['content'].encode('utf-8')
         declaration = visibility[path]
