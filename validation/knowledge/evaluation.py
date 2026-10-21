@@ -118,6 +118,7 @@ class CaseSpec:
     def __post_init__(self) -> None:
         _require(all(isinstance(v, str) and bool(v) for v in
                      (self.id, self.cohort, self.type, self.prompt)), "case identity/prompt required")
+        _require(self.type in {"investigation", "planning-review", "patch", "small-patch"}, "unknown case type")
         object.__setattr__(self, "files", tuple(self.files))
         object.__setattr__(self, "allowed_edits", tuple(self.allowed_edits))
         files = {file.path: file for file in self.files}
@@ -680,7 +681,7 @@ def analyze(batch: BatchLog, scores: Sequence[Score], *, bootstrap_samples: int 
                 "completed": sum(run.status == "completed" for run in selected),
                 "scored": len(arm_scores),
                 "correct": sum(consensus[run.spec.id].correct
-                               and (run.spec.case_type != "patch" or consensus[run.spec.id].patch_accepted is True)
+                               and (run.spec.case_type not in {"patch", "small-patch"} or consensus[run.spec.id].patch_accepted is True)
                                for run in selected if run.spec.id in consensus),
                 "zero_gold_runs": sum(score.gold_count == 0 for score in arm_scores),
                 "false_obligations": sum(score.false_obligations for score in arm_scores),

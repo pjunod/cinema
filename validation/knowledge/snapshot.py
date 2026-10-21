@@ -22,7 +22,8 @@ BASE_PATHS = ("validation/knowledge/pilot.json", "validation/knowledge/records.t
               "validation/knowledge/coverage.toml", "validation/knowledge/conflicts.toml",
               "tests/playback/routing-decisions.toml", "validation/points.toml",
               "validation/main-preflight-inputs.json")
-MODULES = ("model.py", "adapters.py", "snapshot.py", "index.py", "evidence.py")
+MODULES = ("__init__.py", "model.py", "adapters.py", "snapshot.py", "index.py",
+           "evidence.py", "queries.py", "capture.py", "lint.py", "cli.py")
 
 
 class SnapshotChanged(KnowledgeError):
@@ -243,7 +244,9 @@ def _read(root: Path, relative: str) -> CapturedInput:
 def versions() -> dict[str, str | int]:
     parent = Path(__file__).parent
     return {"schema": model.SCHEMA_VERSION, "snapshot": VERSION,
-            **{name: digest_bytes((parent / name).read_bytes()) for name in MODULES}}
+            **{name: digest_bytes((parent / name).read_bytes()) for name in MODULES},
+            **{"validation/" + name: digest_bytes((parent.parent / name).read_bytes())
+               for name in ("runner.py", "rust_modules.py", "main_preflight_adoption.py")}}
 
 
 @dataclass(frozen=True)

@@ -50,7 +50,7 @@ the public record after independent cross-adjudication.
 | M2 | Snapshot isolation, rebuildable SQLite index and separate evidence dimensions implemented | Final review and qualification pending. Canonical proof closure remains independent of retrieval scope. |
 | M3 | Bounded traversal, continuation binding and CLI drafted | Final review, boundary tests and latency measurements pending. |
 | M4 | Advisory capture, preflight body wiring and repository skill drafted | Final review and fast lane pending. Maintained personal-skill installation remains unknown; amendment supplied. |
-| M5 | Generic harness under construction; source-only projection required for scoped cases | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
+| M5 | Generic harness/provider and mechanical graph projection drafted; exact clean corpus export independently approved | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
 
 Timing is recorded as shared agent-session wall intervals, including waits,
@@ -114,6 +114,22 @@ synthetic transformations. Neither whole source files nor pristine repair
 versions may widen them. Graph excerpts must match actual visible bytes.
 Candidate Python/Rust patch execution requires verified filesystem/network
 isolation; a separate folder or an instruction alone does not establish it.
+
+**D09, 2026-10-21:** The clean solver export has twelve cases and 71 file
+instances (43 whole views, 26 scoped views and two visible overlays), with
+independent exact-hash approval. [Projection metadata](../../validation/knowledge/evaluation-projection-seal.json)
+records commitments without gold or private paths. Four patch bundles need
+real execution; the Rust bundle requires pinned 1.97.1, offline dependencies
+and `hiqlite-store`. This Mac's 1.98 is not qualification. Candidate execution
+requires verified container containment; a process group cannot prove that
+escaped descendants are gone. No new engine/service is installed.
+
+**D10, 2026-10-21:** Evaluation uses a closed source proxy over the sealed
+passages. Actual Ripwire execution is unavailable in this owned environment;
+common literal search/read/outline tools are an explicit study limitation,
+not a claim of full-workflow parity. No outside source, new case constraint
+or future answer is introduced to compensate. Model/settings, dry-run usage
+and a finite ceiling must be frozen before runtime.
 
 ## Publication — one owner and an honest landing state
 
