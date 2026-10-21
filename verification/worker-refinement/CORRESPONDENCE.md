@@ -65,7 +65,7 @@ membership. The mapping and any unchecked transition remain visible in
 | W4 | `library_worker_queue_loss_joins_before_release_and_retirement` in `library_work.rs` | Local queue-loss notification while processing is held at the pre-scan checkpoint; the processing future returns before release and cleanup. The durable job is queued after retirement. |
 | W5 | `library_worker_admission_pressure_joins_before_release_and_drop` in `library_work.rs` | Test-only pressure selection while processing is held at the pre-scan checkpoint; the processing future returns before release and admission drop. |
 | W6/S4 | `library_worker_reconciles_lost_completion_acknowledgement` in `library_work.rs` | The real worker commits completion, loses its acknowledgement, rereads durable state and observes `completed`. |
-| S1 | `formal_publication_library_late_completion_after_local_revoke_before_release_commits` in `formal_publication.rs` | A captured token is submitted directly to Store after local revocation and succeeds while durable ownership remains live. |
+| S1 | `formal_publication_library_captured_token_completes_while_durable_owners_current` in `formal_publication.rs` | A captured token is submitted directly to Store and succeeds while both durable owners remain live. |
 | S2/S3 | `formal_publication_library_completion_after_release_and_rebind_is_rejected` in `formal_publication.rs` | Store rejects the old captured token after release and after a distinct job binds a higher domain fence; the new owner can complete its own request. |
 
 W1 uses two different durable jobs, matching the production dedupe identities.
@@ -82,9 +82,10 @@ blocking-walker/child-join behavior is source-traced only (`PRM-fs`) and is
 not a tested cancellation schedule.
 
 S1 is a backend-authority schedule, not an in-flight dispatch schedule. It
-captures the queue token and domain lease, locally revokes a
-`PublicationFence`, then calls Store. It does not pause a production facade
-write after dispatch and before revocation. That history remains unchecked.
+captures the queue token and domain lease, then calls Store while both durable
+owners remain current. It does not locally revoke a fence or pause a production
+facade write after dispatch and before revocation. That late-apply history
+remains model-only and unchecked by Rust.
 
 ## Unchecked paths — where the schedule stops
 
@@ -96,14 +97,24 @@ rolls back a detached write.
 S5 (renewal committed with its acknowledgement lost), renewal deadlines and
 heartbeat ordering are unchecked. The heartbeat runs in a spawned task and
 does not inherit the task-local test barrier. Ambiguous release acknowledgement
-and exact-token retry, the fifth release failure, and domain expiry are also
+and exact-token retry, repeated release failure, domain expiry, detached
+release application, injected work faults, and lost settlement are also
 unchecked. The correspondence file marks these rows explicitly; storage-only
 coverage is not worker coverage.
 
+The model's single settlement transition does not distinguish retry from yield
+or represent the production `failed_attempts` increment. Its cancel schedule
+also abstracts over cancellation-versus-settlement timing: the worker tests
+observe release before settlement on cancellation, while completion may have
+been dispatched before cancellation. Those differences are recorded as model
+abstractions, not Rust refinement claims.
+
 ## Commands — compile now, execute schedules only after review
 
-These pinned compile and static checks passed for source commit
-`9adc50ca320244e2368803db33edbcdd17183545`:
+The pinned daemon compile and Clippy checks passed for source commit
+`9adc50ca320244e2368803db33edbcdd17183545`. The feature-gated core contract
+compile and canonical formatting check also passed after the F1/F3 correspondence
+update; no unit or model tests have been executed:
 
 ```bash
 CARGO_TARGET_DIR=target-worker-refinement rustup run 1.97.1 cargo check -p plurxd --all-targets

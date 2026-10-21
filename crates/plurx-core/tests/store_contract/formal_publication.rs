@@ -41,7 +41,7 @@ use plurx_core::store::background_jobs_library::{
     LibraryTrigger, LibraryWorkInput, LibraryWorkQuery, LibraryWorkResult, NewLibraryWork,
 };
 use plurx_core::store::background_jobs_resources::StorageDomainMapping;
-use plurx_core::store::{PublicationFence, Store};
+use plurx_core::store::Store;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -966,10 +966,10 @@ async fn formal_publication_resolved_claim_keeps_attempt_identity_through_insert
     .await;
 }
 
-/// S1: a captured completion token remains usable after local revocation
-/// while the durable queue/domain owner remains current.
+/// S1: a captured completion token remains usable while both durable owners
+/// remain current.
 #[tokio::test]
-async fn formal_publication_library_late_completion_after_local_revoke_before_release_commits() {
+async fn formal_publication_library_captured_token_completes_while_durable_owners_current() {
     for_each_backend(|store, backend| async move {
         let now = unix_now_ms();
         let library_id = create_library(store.as_ref(), "formal-late-completion").await;
@@ -984,11 +984,9 @@ async fn formal_publication_library_late_completion_after_local_revoke_before_re
         )
         .await;
         let scan = bind_library_work(store.as_ref(), backend, work, "node-a", now).await;
-        let local = PublicationFence::new(scan.lease.clone());
-        local.revoke();
-
-        // This direct Store call isolates the authority predicate after local
-        // revoke. It does not schedule an in-flight Production facade write.
+        // This direct Store call isolates the positive durable-authority
+        // predicate. It does not schedule local revocation or an in-flight
+        // production facade write.
         assert!(
             store
                 .complete_library_work(CompleteLibraryWork {

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "status": "reviewed",
   "model_file": "verification/worker-refinement/WorkerRefinement.tla",
-  "model_sha256": "1d7f6370e91ed3a57a088b49b132e02a64e84ac0bf41d944591aa2c308ee6905",
+  "model_sha256": "c3e5f8bce35504020bb93c87fcbf3bd6315945250331923bb240316f813ba370",
   "tests": [
     {
       "id": "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_share_domain_and_both_complete",
@@ -30,9 +30,9 @@
       "name": "library_worker_reconciles_lost_completion_acknowledgement"
     },
     {
-      "id": "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_late_completion_after_local_revoke_before_release_commits",
+      "id": "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_captured_token_completes_while_durable_owners_current",
       "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
-      "name": "formal_publication_library_late_completion_after_local_revoke_before_release_commits"
+      "name": "formal_publication_library_captured_token_completes_while_durable_owners_current"
     },
     {
       "id": "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected",
@@ -63,17 +63,15 @@
       "worker": "shared",
       "source": {
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
-        "symbol": "formal_publication_library_late_completion_after_local_revoke_before_release_commits",
-        "anchor": "async fn formal_publication_library_late_completion_after_local_revoke_before_release_commits()",
-        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22"
+        "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
+        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
       "trust": "abstraction",
-      "schedules": [
-        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected"
-      ],
-      "gap": "Storage schedules exercise captured tokens against durable ownership predicates after local revoke and after durable release/rebind; they do not pause an already-dispatched production facade write before revocation."
+      "schedules": "unchecked",
+      "gap": "No schedule pauses a dispatched release and observes its detached durable application."
     },
     {
       "kind": "action",
@@ -250,18 +248,18 @@
       "worker": "shared",
       "source": {
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
-        "symbol": "formal_publication_library_late_completion_after_local_revoke_before_release_commits",
-        "anchor": "async fn formal_publication_library_late_completion_after_local_revoke_before_release_commits()",
-        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22"
+        "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
+        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
       "trust": "abstraction",
       "schedules": [
-        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_late_completion_after_local_revoke_before_release_commits",
+        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_captured_token_completes_while_durable_owners_current",
         "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected"
       ],
-      "gap": "Storage schedules exercise captured tokens against durable ownership predicates after local revoke and after durable release/rebind; they do not pause an already-dispatched production facade write before revocation."
+      "gap": "The S1 direct Store call checks that the captured token is accepted while durable owners remain current; it does not exercise local revocation or an in-flight dispatched write."
     },
     {
       "kind": "action",
@@ -303,18 +301,15 @@
       "worker": "shared",
       "source": {
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
-        "symbol": "formal_publication_library_late_completion_after_local_revoke_before_release_commits",
-        "anchor": "async fn formal_publication_library_late_completion_after_local_revoke_before_release_commits()",
-        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22"
+        "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
+        "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
+        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
       "trust": "abstraction",
-      "schedules": [
-        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_late_completion_after_local_revoke_before_release_commits",
-        "crates/plurx-core/tests/store_contract/formal_publication.rs::formal_publication_library_completion_after_release_and_rebind_is_rejected"
-      ],
-      "gap": "Storage schedules exercise captured tokens against durable ownership predicates after local revoke and after durable release/rebind; they do not pause an already-dispatched production facade write before revocation."
+      "schedules": "unchecked",
+      "gap": "The test checks the backend durable-owner predicate directly; it does not create an already-dispatched write paused across local revocation."
     },
     {
       "kind": "action",
@@ -527,10 +522,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No deterministic schedule injects a processing fault; this transition is model-only."
     },
     {
       "kind": "action",
@@ -562,10 +556,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
     },
     {
       "kind": "action",
@@ -579,10 +572,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
     },
     {
       "kind": "action",
@@ -612,10 +604,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; dispatch is not observed by a Rust schedule."
     },
     {
       "kind": "action",
@@ -629,10 +620,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; durable heartbeat application is not observed."
     },
     {
       "kind": "action",
@@ -646,10 +636,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned domain-heartbeat task is outside the task-local test barrier; heartbeat response handling is unchecked."
     },
     {
       "kind": "action",
@@ -663,10 +652,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule controls or observes stopping and joining the spawned domain-heartbeat task."
     },
     {
       "kind": "action",
@@ -696,10 +684,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
     },
     {
       "kind": "action",
@@ -713,10 +700,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; this heartbeat transition is unchecked."
     },
     {
       "kind": "action",
@@ -730,10 +716,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; durable authority return is unchecked."
     },
     {
       "kind": "action",
@@ -747,10 +732,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; dispatch is not observed by a Rust schedule."
     },
     {
       "kind": "action",
@@ -764,10 +748,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; durable heartbeat application is not observed."
     },
     {
       "kind": "action",
@@ -781,10 +764,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The spawned queue-heartbeat task is outside the task-local test barrier; heartbeat response handling is unchecked."
     },
     {
       "kind": "action",
@@ -798,10 +780,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_queue_loss_joins_before_release_and_retirement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule controls or observes stopping and joining the spawned queue-heartbeat task."
     },
     {
       "kind": "action",
@@ -832,10 +813,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule injects a release failure or observes its ambiguous durable outcome."
     },
     {
       "kind": "action",
@@ -849,10 +829,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_domain_loss_joins_before_release_and_admission_drop"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "No schedule injects a failed release and observes retry behavior."
     },
     {
       "kind": "action",
@@ -882,10 +861,9 @@
       },
       "held_across_await": [],
       "completed_by": "worker task",
-      "trust": "code-fact",
-      "schedules": [
-        "crates/plurxd/src/library_work.rs::tests::library_worker_reconciles_lost_completion_acknowledgement"
-      ]
+      "trust": "abstraction",
+      "schedules": "unchecked",
+      "gap": "The lost-settlement transition is distinct from lost completion acknowledgement; no schedule injects it."
     },
     {
       "kind": "action",
@@ -1295,7 +1273,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_completion_after_release_and_rebind_is_rejected",
         "anchor": "async fn formal_publication_library_completion_after_release_and_rebind_is_rejected()",
-        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22"
+        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
       },
       "held_across_await": [],
       "completed_by": "store trigger",
