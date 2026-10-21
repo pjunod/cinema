@@ -1,10 +1,11 @@
 //! Authored regression bodies. Execute only after integrated review/fixes.
 use super::*;
 mod faults;
+mod invariants;
 use crate::adaptive_resources::{ResourceLedger, WorkloadDemand};
 use crate::process::observation::Metric;
 
-fn owner() -> OwnerIdentity {
+pub(super) fn owner() -> OwnerIdentity {
     OwnerIdentity {
         owner_id: Uuid::new_v4(),
         node_id: "fixture-node".into(),
@@ -27,7 +28,7 @@ fn owner() -> OwnerIdentity {
         },
     }
 }
-fn options(
+pub(super) fn options(
     root: &std::path::Path,
     identity: OwnerIdentity,
     installation: InstallationContext,
@@ -71,7 +72,7 @@ fn manifest(owner: Uuid) -> Manifest {
         }],
     }
 }
-fn vector(value: u64) -> ResourceVector {
+pub(super) fn vector(value: u64) -> ResourceVector {
     ResourceVector {
         cpu_ns_per_second: value,
         peak_memory_bytes: value,
@@ -82,7 +83,7 @@ fn vector(value: u64) -> ResourceVector {
         scratch_bytes: value,
     }
 }
-fn deadline() -> Instant {
+pub(super) fn deadline() -> Instant {
     Instant::now() + std::time::Duration::from_secs(30)
 }
 
@@ -228,7 +229,7 @@ fn symlink_hardlink_and_directory_replacement_refuse_without_empty_fallback() {
 
 // These fixtures obtain the actual process-local binding through the main-owned
 // read-only registration seam; they never mint a PhysicalCloseReceipt.
-fn new_obligation(
+pub(super) fn new_obligation(
     identity: Uuid,
     resources: ResourceVector,
 ) -> (

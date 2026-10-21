@@ -5,10 +5,14 @@ use std::collections::BTreeMap;
 use std::sync::{mpsc, Mutex};
 use tokio::sync::oneshot;
 
+#[cfg(test)]
+mod tests;
+
 const MAX_OWNED_OPERATIONS: usize = 2048;
 struct OwnedOperation {
     operation: QueuedOperation,
     result: Option<Result<OperationResult, CustodyError>>,
+    queued: bool,
 }
 struct Book {
     operations: BTreeMap<Uuid, Arc<Mutex<OwnedOperation>>>,
@@ -220,6 +224,7 @@ impl CustodyJournal {
         let owned = Arc::new(Mutex::new(OwnedOperation {
             operation,
             result: None,
+            queued: true,
         }));
         let (reply, receiver) = oneshot::channel();
         match self.sender.try_send(Work {
@@ -262,14 +267,10 @@ impl CustodyJournal {
         id: Uuid,
         deadline: Instant,
     ) -> Result<PendingOperation, CustodyError> {
-        let owned = self
-            .book
-            .lock()
-            .map_err(|_| unavailable())?
-            .operations
-            .get(&id)
-            .cloned()
-            .ok_or_else(unavailable)?;
+        // Registration and queued-state change are atomic with forgetting/taking
+        // an operation; no detached retry may execute after proof was returned.
+        let book = self.book.lock().map_err(|_| unavailable())?;
+        let owned = book.operations.get(&id).cloned().ok_or_else(unavailable)?;
         {
             let mut operation = owned.lock().map_err(|_| unavailable())?;
             if operation.result.as_ref().is_some_and(Result::is_ok) {
@@ -278,35 +279,43 @@ impl CustodyJournal {
                 let _ = reply.send(result);
                 return Ok(PendingOperation { id, receiver });
             }
-            if operation.result.is_none() {
+            if operation.queued {
                 return Err(CustodyError::new(
                     ErrorKind::Conflict,
                     "custody operation still executing",
                 ));
             }
             operation.operation.deadline = deadline;
+            operation.queued = true;
         }
+        drop(book);
         let (reply, receiver) = oneshot::channel();
-        self.sender
-            .try_send(Work {
-                operation: owned,
-                reply,
-            })
-            .map_err(|error| match error {
+        if let Err(error) = self.sender.try_send(Work {
+            operation: owned.clone(),
+            reply,
+        }) {
+            owned.lock().map_err(|_| unavailable())?.queued = false;
+            return Err(match error {
                 mpsc::TrySendError::Full(_) => {
                     CustodyError::new(ErrorKind::QueueFull, "custody retry queue full")
                 }
                 mpsc::TrySendError::Disconnected(_) => unavailable(),
-            })?;
+            });
+        }
         Ok(PendingOperation { id, receiver })
     }
-    /// Main may forget only a positively acknowledged non-settlement command.
+    /// Main may forget a completed non-settlement command, including a definitive
+    /// failure with no possible commit. Unknown results must retain exact retry.
     /// Durable operation history remains on disk; late UUID reuse still refuses.
     pub(crate) fn acknowledge(&self, id: Uuid) -> Result<(), CustodyError> {
         let mut book = self.book.lock().map_err(|_| unavailable())?;
         let owned = book.operations.get(&id).ok_or_else(unavailable)?;
         let operation = owned.lock().map_err(|_| unavailable())?;
-        if operation.result.as_ref().is_none_or(|r| r.is_err())
+        if operation.queued
+            || operation
+                .result
+                .as_ref()
+                .is_none_or(|r| matches!(r, Err(e) if e.certainty == CommitCertainty::Unknown))
             || matches!(
                 operation.operation.command,
                 Command::Change {
@@ -323,6 +332,47 @@ impl CustodyJournal {
         drop(operation);
         book.operations.remove(&id);
         Ok(())
+    }
+    /// Recover the exact mutation (including actual proof) after a definitive
+    /// failed transition so the cleanup owner can correct invalid facts/sequence.
+    /// Unknown COMMIT can only use retry; it cannot abandon operation custody.
+    pub(crate) fn take_failed_transition(
+        &self,
+        id: Uuid,
+    ) -> Result<RejectedTransition, CustodyError> {
+        let mut book = self.book.lock().map_err(|_| unavailable())?;
+        let owned = book.operations.get(&id).ok_or_else(unavailable)?;
+        let mut operation = owned.lock().map_err(|_| unavailable())?;
+        let error = match &operation.result {
+            Some(Err(error))
+                if !operation.queued && error.certainty != CommitCertainty::Unknown =>
+            {
+                error.clone()
+            }
+            _ => {
+                return Err(CustodyError::new(
+                    ErrorKind::Conflict,
+                    "custody result remains owned",
+                ))
+            }
+        };
+        if !matches!(operation.operation.command, Command::Change { .. }) {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "custody operation is not a transition",
+            ));
+        }
+        let command = std::mem::replace(&mut operation.operation.command, empty_command());
+        drop(operation);
+        book.operations.remove(&id);
+        match command {
+            Command::Change { key, mutation } => Ok(RejectedTransition {
+                error,
+                key,
+                mutation,
+            }),
+            _ => unreachable!("validated transition"),
+        }
     }
     /// Private post-COMMIT bridge. Only the exact runtime binding may take the
     /// original receipt for the matching in-memory refund. No receipt is reminted.
@@ -353,16 +403,7 @@ impl CustodyJournal {
         // Worker releases its Arc before sending the reply; however it may still
         // be returning. Replace command under mutex, not Arc::try_unwrap racing.
         let mut operation = owned.lock().map_err(|_| unavailable())?;
-        let replacement = Command::Prepare {
-            batch: PrepareBatch {
-                obligations: Vec::new(),
-                families: Vec::new(),
-                trial: false,
-            },
-            handles: Vec::new(),
-            trial: None,
-        };
-        match std::mem::replace(&mut operation.operation.command, replacement) {
+        match std::mem::replace(&mut operation.operation.command, empty_command()) {
             Command::Change {
                 mutation: Mutation::Settle(proof),
                 ..
@@ -378,6 +419,18 @@ impl CustodyJournal {
             worker.join().map_err(|_| unavailable())?;
         }
         Ok(())
+    }
+}
+
+fn empty_command() -> Command {
+    Command::Prepare {
+        batch: PrepareBatch {
+            obligations: Vec::new(),
+            families: Vec::new(),
+            trial: false,
+        },
+        handles: Vec::new(),
+        trial: None,
     }
 }
 
@@ -400,26 +453,38 @@ fn run(
     if let Some(Ok(result)) = &operation.result {
         return Ok(result.clone());
     }
+    let prior_unknown =
+        matches!(&operation.result, Some(Err(e)) if e.certainty == CommitCertainty::Unknown);
     let affected = obligations(&operation.operation.command);
     for other in others {
         let other = other.lock().map_err(|_| unavailable())?;
         if matches!(&other.result,Some(Err(e)) if e.certainty==CommitCertainty::Unknown)
-            && (matches!(operation.operation.command, Command::Prepare { .. })
-                || obligations(&other.operation.command)
-                    .iter()
-                    .any(|id| affected.contains(id)))
+            && (matches!(
+                operation.operation.command,
+                Command::Prepare { .. }
+                    | Command::Change {
+                        mutation: Mutation::Arm { .. },
+                        ..
+                    }
+            ) || obligations(&other.operation.command)
+                .iter()
+                .any(|id| affected.contains(id)))
         {
-            let error = CustodyError::new(
+            let mut error = CustodyError::new(
                 ErrorKind::Conflict,
                 "resolve exact uncertain operation before advancing custody",
             )
             .bind(operation.operation.id, affected);
+            if prior_unknown {
+                error.certainty = CommitCertainty::Unknown;
+            }
             operation.result = Some(Err(error.clone()));
+            operation.queued = false;
             return Err(error);
         }
     }
     let result = transaction::execute(storage, &operation.operation, owner).map_err(|mut e| {
-        if e.kind == ErrorKind::Storage {
+        if prior_unknown || e.kind == ErrorKind::Storage {
             e.certainty = CommitCertainty::Unknown;
         } else if e.certainty == CommitCertainty::NotStarted {
             e.certainty = CommitCertainty::RolledBack;
@@ -427,5 +492,6 @@ fn run(
         e.bind(operation.operation.id, affected)
     });
     operation.result = Some(result.clone());
+    operation.queued = false;
     result
 }

@@ -105,6 +105,7 @@ pub(super) fn snapshot(
     }
     let mut obligations = Vec::new();
     let mut all_ids = BTreeMap::new();
+    let mut last_operations = BTreeMap::new();
     let mut graphs = BTreeSet::new();
     let mut total = ResourceVector::default();
     let mut trials = BTreeSet::new();
@@ -127,6 +128,10 @@ pub(super) fn snapshot(
         let manifest: Manifest = codec::decode(&row.get::<_, String>(9)?)?;
         let reason: Option<String> = row.get(10)?;
         let settlement: Option<String> = row.get(11)?;
+        let settlement = settlement
+            .as_deref()
+            .map(codec::decode::<SettlementRecord>)
+            .transpose()?;
         codec::validate_manifest(&manifest)?;
         if !owners.contains(&owner)
             || graph != manifest.graph_id
@@ -146,14 +151,7 @@ pub(super) fn snapshot(
         if let Some(reason) = &reason {
             codec::text(reason)?;
         }
-        let operation_exists: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM operations WHERE operation_id=?1)",
-            [operation.as_bytes()],
-            |r| r.get(0),
-        )?;
-        if !operation_exists {
-            return Err(codec::invalid());
-        }
+        last_operations.insert(id, (operation, graph, sequence, phase, trial));
         let mut member_stmt = connection.prepare("SELECT member_id,kind,adapter,adapter_version,phase,identity_json,proof_json FROM members WHERE obligation_id=?1 ORDER BY member_id")?;
         let mut member_rows = member_stmt.query([id.as_bytes()])?;
         let mut members = Vec::new();
@@ -183,6 +181,7 @@ pub(super) fn snapshot(
                 .contains(&member_phase.as_str())
                 || (member_phase == "acquired" && envelope.observed.is_none())
                 || (member_phase == "planned" && envelope.observed.is_some())
+                || (member_phase == "acquisition_possible" && envelope.observed.is_some())
                 || (member_phase == "closed") != proof.is_some()
             {
                 return Err(codec::invalid());
@@ -197,7 +196,10 @@ pub(super) fn snapshot(
                 return Err(codec::invalid());
             }
             if let Some(proof) = proof {
-                let _: SettlementRecord = codec::decode(&proof)?;
+                let proof: SettlementRecord = codec::decode(&proof)?;
+                if settlement.as_ref() != Some(&proof) {
+                    return Err(codec::invalid());
+                }
             }
             members.push(MemberRecord {
                 plan: plan.clone(),
@@ -211,9 +213,11 @@ pub(super) fn snapshot(
         if members.len() != manifest.members.len() {
             return Err(codec::invalid());
         }
-        if let Some(settlement) = settlement {
-            let settlement: SettlementRecord = codec::decode(&settlement)?;
-            validate_settlement_record(&manifest, &members, &settlement)?;
+        if phase == Phase::AcquisitionPossible && members.iter().all(|m| m.phase == "planned") {
+            return Err(codec::invalid());
+        }
+        if let Some(settlement) = &settlement {
+            validate_settlement_record(&manifest, &members, settlement)?;
         }
         all_ids.insert(id, phase);
         if phase != Phase::Settled {
@@ -283,8 +287,10 @@ pub(super) fn snapshot(
     let mut stmt =
         connection.prepare("SELECT operation_id,request_json,result_json FROM operations")?;
     let mut rows = stmt.query([])?;
+    let mut operation_sequences = BTreeSet::new();
+    let mut validated_last = BTreeSet::new();
     while let Some(row) = rows.next()? {
-        codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
+        let operation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let fingerprint: String = codec::decode(&row.get::<_, String>(1)?)?;
         if fingerprint.len() != 64 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(codec::invalid());
@@ -294,26 +300,60 @@ pub(super) fn snapshot(
             DiskResult::Prepared {
                 sequence,
                 obligations,
-                ..
+                trial,
             } => {
+                let unique: BTreeSet<_> = obligations.iter().copied().collect();
                 if sequence < 1
                     || sequence > next
                     || obligations.is_empty()
                     || obligations.len() > 6
+                    || unique.len() != obligations.len()
                     || obligations.iter().any(|id| !all_ids.contains_key(id))
+                    || !operation_sequences.insert(sequence)
                 {
                     return Err(codec::invalid());
+                }
+                for id in obligations {
+                    let (last, _, last_seq, last_phase, group) = last_operations[&id];
+                    if group != trial || last_seq < sequence {
+                        return Err(codec::invalid());
+                    }
+                    if last == operation_id {
+                        if last_seq != sequence || last_phase != Phase::Prepared {
+                            return Err(codec::invalid());
+                        }
+                        validated_last.insert(id);
+                    }
                 }
             }
             DiskResult::Changed(ack) => {
                 if ack.sequence < 1
                     || ack.sequence > next
                     || !all_ids.contains_key(&ack.obligation_id)
+                    || ack.operation_id != operation_id
+                    || !operation_sequences.insert(ack.sequence)
                 {
                     return Err(codec::invalid());
                 }
+                let (last, graph, last_seq, last_phase, _) = last_operations[&ack.obligation_id];
+                if graph != ack.graph_id || last_seq < ack.sequence {
+                    return Err(codec::invalid());
+                }
+                if last == operation_id {
+                    if last_seq != ack.sequence || last_phase != ack.phase {
+                        return Err(codec::invalid());
+                    }
+                    validated_last.insert(ack.obligation_id);
+                }
             }
         }
+    }
+    // v1 retains all operation history; a gap is missing authority, not a
+    // pruned diagnostic. A future pruning format needs an explicit checkpoint.
+    if validated_last.len() != all_ids.len()
+        || i64::try_from(operation_sequences.len()).ok() != Some(next)
+    {
+        return Err(codec::invalid());
     }
     let pending_owners = owner_records
         .into_values()
@@ -759,7 +799,7 @@ fn prepare(
             [family.family.family_id.as_bytes()],
             |r| r.get(0),
         )?;
-        if count > 3 {
+        if count != family.roles.len() as i64 {
             return Err(codec::invalid());
         }
     }
