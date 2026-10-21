@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from validation.knowledge import (Claim, Conflict, Coverage, Edge, GraphData,
     KnowledgeError, Node, Provenance, content_digest, digest_bytes,
-    resolve_anchor, validate_graph)
+    load_graph, resolve_anchor, validate_graph)
 from validation.knowledge.adapters import (artifact_id, import_catalog,
     import_routing, input_descriptor, normalize_receipt, route_check_id,
     route_id, symbol_id)
@@ -100,6 +101,25 @@ class KnowledgeModelTests(unittest.TestCase):
         next_graph = import_routing(self.root, ["fixture.route"], REV, manifest="routes.toml")
         next_anchor = next(a for a in next_graph.anchors if a.id == anchor.id)
         self.assertNotEqual(anchor.current_digest, next_anchor.current_digest)
+
+    def test_routes_sharing_symbol_deduplicate_source_but_keep_row_identity(self):
+        self.routing_fixture()
+        self.write("src/tests.rs", "fn route_is_checked() {}\nfn other_route_is_checked() {}\n")
+        with (self.root / "routes.toml").open("a") as stream:
+            stream.write('[[decisions]]\nid="fixture.other"\nsource="src/owner.rs"\nsource_anchor="fn route("\ntest="src/tests.rs"\ntest_anchor="fn other_route_is_checked("\n')
+        graph = import_routing(self.root, ["fixture.route", "fixture.other"], REV, manifest="routes.toml")
+        validate_graph(graph)
+        sid = symbol_id("src/owner.rs", "fn route(")
+        self.assertEqual(sum(n.id == sid for n in graph.nodes), 1)
+        self.assertEqual(sum(a.id == sid for a in graph.anchors), 1)
+        routes = {n.id: n for n in graph.nodes if n.kind == "route"}
+        self.assertEqual(set(routes), {route_id("fixture.route"), route_id("fixture.other")})
+        self.assertNotEqual(routes[route_id("fixture.route")].provenance.source_digest,
+                            routes[route_id("fixture.other")].provenance.source_digest)
+        symbol = next(n for n in graph.nodes if n.id == sid)
+        self.assertEqual(symbol.provenance.origin, "src/owner.rs")
+        self.assertEqual(symbol.provenance.source_digest, next(a.digest for a in graph.anchors if a.id == sid))
+        self.assertEqual({e.source for e in graph.edges if e.relation == "mentions" and e.target == sid}, set(routes))
 
     def test_routing_missing_ambiguous_anchor_and_new_row_field_refuse(self):
         self.routing_fixture()
@@ -240,6 +260,80 @@ depends_on=["provider"]
         validate_graph(replace(graph, conflicts=(conflict,)))
         with self.assertRaises(KnowledgeError):
             replace(conflict, disposition="resolved", resolution="newest date wins")
+
+    def test_supersession_cycle_refuses_but_ordinary_dependency_cycle_is_allowed(self):
+        sections = tuple(Node("plurx:section:" + name, "section", name, ("docs/fixture.md",), (), {}, PROV)
+                         for name in ("first", "second", "third"))
+        forward = tuple(Edge(sections[i].id, "supersedes", sections[i + 1].id, PROV) for i in range(2))
+        validate_graph(GraphData(nodes=sections, edges=forward))
+        for extra in (Edge(sections[-1].id, "supersedes", sections[0].id, PROV),
+                      Edge(sections[-1].id, "supersedes", sections[-1].id, PROV)):
+            with self.assertRaisesRegex(KnowledgeError, "supersession cycle"):
+                validate_graph(GraphData(nodes=sections, edges=forward + (extra,)))
+        symbols = tuple(Node("plurx:symbol:" + name, "symbol", name, ("src/fixture.py",), (), {}, PROV)
+                        for name in ("first", "second"))
+        dependencies = (Edge(symbols[0].id, "depends-on", symbols[1].id, PROV),
+                        Edge(symbols[1].id, "depends-on", symbols[0].id, PROV))
+        validate_graph(GraphData(nodes=symbols, edges=dependencies))
+
+    def test_reviewed_anchor_origin_binds_baseline_digest_in_every_claim_surface(self):
+        spec = self.section("# Fixture\n## Policy\nRequired behavior.\n")
+        anchor = resolve_anchor(self.root, spec)
+        self.write("docs/fixture.md", "# Fixture\n## Policy\nRequired behavior.\nNew constraint.\n")
+        anchor = resolve_anchor(self.root, spec)
+        self.assertEqual(anchor.integrity, "changed")
+        baseline = replace(PROV, origin=anchor.id, source_digest=anchor.digest)
+        forged = replace(baseline, source_digest=anchor.current_digest)
+        section = Node(anchor.id, "section", "Policy", ("docs/fixture.md",), (anchor.id,), {}, replace(PROV, method="parsed"))
+        source = Node("plurx:artifact:fixture", "artifact", "Fixture", ("src/fixture.py",), (), {}, baseline)
+        edge = Edge(source.id, "mentions", section.id, baseline)
+        claim = Claim(source.id, "authority", "reviewed source claim", baseline)
+        coverage = Coverage("plurx:coverage:fixture", ("src/fixture.py",), "curated", "fixture owner", REV, baseline)
+        graph = GraphData(nodes=(section, source), edges=(edge,), claims=(claim,), anchors=(anchor,), coverage=(coverage,))
+        validate_graph(graph)
+        variations = (replace(graph, nodes=(section, replace(source, provenance=forged))),
+                      replace(graph, edges=(replace(edge, provenance=forged),)),
+                      replace(graph, claims=(replace(claim, provenance=forged),)),
+                      replace(graph, coverage=(replace(coverage, provenance=forged),)))
+        for candidate in variations:
+            with self.assertRaisesRegex(KnowledgeError, "reviewed anchor digest"):
+                validate_graph(candidate)
+
+    def test_load_graph_refuses_changed_reviewed_file_origin_without_anchor(self):
+        self.write("src/fixture.py", "value = 1\n")
+        source_digest = digest_bytes(b"value = 1\n")
+        self.write("validation/knowledge/pilot.json", json.dumps({"schema_version": 1, "repository": "plurx", "source_commit": REV}))
+        self.write("validation/knowledge/coverage.toml", 'schema_version=1\nrepository="plurx"\nscopes=[]\n')
+        self.write("validation/knowledge/conflicts.toml", 'schema_version=1\nrepository="plurx"\nconflicts=[]\n')
+        self.write("validation/knowledge/records.toml", f'''schema_version=1
+repository="plurx"
+anchors=[]
+edges=[]
+claims=[]
+[[records]]
+id="plurx:check:fixture"
+kind="check"
+title="Fixture check definition"
+scope=["src/fixture.py"]
+anchors=[]
+[records.attributes]
+check_kind="static"
+governed_ids=[]
+reference="existing-check"
+[records.provenance]
+method="reviewed"
+author="Fixture author"
+reviewer="Fixture reviewer"
+origin="src/fixture.py"
+source_digest="{source_digest}"
+revision="{REV}"
+''')
+        with patch("validation.knowledge.adapters.import_pilot", return_value=GraphData()):
+            graph = load_graph(self.root, revision=REV)
+            self.assertTrue(any(n.id == "plurx:check:fixture" for n in graph.nodes))
+            self.write("src/fixture.py", "value = 2\n")
+            with self.assertRaisesRegex(KnowledgeError, "source-file origin changed; needs-review"):
+                load_graph(self.root, revision=REV)
 
     def test_id_namespace_revision_and_unknown_fields_refuse(self):
         for bad in ("route:fixture", "plurx:route:../escape", "other:route:fixture"):

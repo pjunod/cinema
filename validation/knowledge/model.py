@@ -549,11 +549,46 @@ def _authored(node: Node) -> None:
         Receipt(id=node.id, **attrs)
 
 
+def _provenances(graph: GraphData):
+    for collection in (graph.nodes, graph.edges, graph.claims, graph.coverage):
+        for item in collection:
+            yield item.provenance
+
+
+def _validate_supersession(edges: tuple[Edge, ...]) -> None:
+    """Accepted precedence is acyclic; ordinary dependency relations may cycle."""
+    successors = {}
+    for edge in edges:
+        if edge.relation == "supersedes":
+            successors.setdefault(edge.source, []).append(edge.target)
+    state = {}
+    for origin in successors:
+        if state.get(origin) == 2:
+            continue
+        stack = [(origin, False)]
+        while stack:
+            identity, exiting = stack.pop()
+            if exiting:
+                state[identity] = 2
+                continue
+            require(state.get(identity) != 1, "supersession cycle")
+            if state.get(identity) == 2:
+                continue
+            state[identity] = 1
+            stack.append((identity, True))
+            stack.extend((target, False) for target in successors.get(identity, ()))
+
+
 def validate_graph(graph: GraphData) -> None:
     nodes = {node.id: node for node in graph.nodes}
     require(len(nodes) == len(graph.nodes), "duplicate node id")
     anchors = {anchor.id: anchor for anchor in graph.anchors}
     require(len(anchors) == len(graph.anchors), "duplicate anchor id")
+    for provenance in _provenances(graph):
+        if provenance.origin.startswith("plurx:"):
+            require(provenance.origin in nodes or provenance.origin in anchors, "unknown provenance origin")
+        if provenance.method == "reviewed" and provenance.origin in anchors:
+            require(provenance.source_digest == anchors[provenance.origin].digest, "reviewed provenance digest must match reviewed anchor digest")
     for field in ("coverage", "conflicts", "receipts"):
         items = getattr(graph, field)
         require(len({item.id for item in items}) == len(items), f"duplicate {field} id")
@@ -604,6 +639,7 @@ def validate_graph(graph: GraphData) -> None:
         require(allowed[edge.relation], f"invalid {left} --{edge.relation}--> {right}")
         if edge.provenance.origin.startswith("plurx:"):
             require(edge.provenance.origin in nodes or edge.provenance.origin in anchors, "unknown edge provenance origin")
+    _validate_supersession(graph.edges)
     for node in graph.nodes:
         if node.kind == "obligation" and node.attributes.get("disposition") == "satisfied":
             supporting = {e.target for e in graph.edges if e.source == node.id and e.relation == "resolved-by"}
@@ -704,4 +740,7 @@ def load_graph(root: Path, *, revision: str | None = None, records_path: str = "
     from .adapters import import_pilot
     graph = merge_graphs(authored, import_pilot(root, pilot_path=pilot_path, reviewed_revision=reviewed_revision))
     validate_graph(graph)
+    for provenance in _provenances(graph):
+        if provenance.method == "reviewed" and not provenance.origin.startswith("plurx:"):
+            require(digest_bytes(read_source(root, provenance.origin)) == provenance.source_digest, "reviewed source-file origin changed; needs-review")
     return graph

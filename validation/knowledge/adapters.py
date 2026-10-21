@@ -91,8 +91,9 @@ def import_routing(root: Path, ids: tuple[str, ...] | list[str], reviewed_revisi
             anchor = Anchor(**{**anchor.__dict__, "digest": anchor.current_digest, "integrity": "valid"})
             anchors.append(anchor)
             selected.append(sid)
+            symbol_provenance = Provenance("parsed", "", "", owner, anchor.current_digest, revision(reviewed_revision))
             nodes.append(Node(sid, "symbol", row[needle_key], anchor.physical_paths, (sid,),
-                              {"path": anchor.path, "owner_module": owner, "selector": row[needle_key], "physical_paths": anchor.physical_paths, "line": anchor.line}, prov))
+                              {"path": anchor.path, "owner_module": owner, "selector": row[needle_key], "physical_paths": anchor.physical_paths, "line": anchor.line}, symbol_provenance))
             for physical in anchor.physical_paths:
                 artifacts[physical] = _artifact(root, physical, reviewed_revision)
         descriptor = {"source_manifest": manifest, "row_id": original,
