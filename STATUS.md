@@ -21,11 +21,9 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
   deployment paths. Focused fixture validation is recorded in its PR; real
   desktop/engine acceptance and custom Pi ownership migration remain open.
 
-
 ## macOS source installation and the missing tray
 
 **Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
-
 
 ## Native server tray, startup policy and release upgrades
 
