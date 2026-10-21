@@ -512,6 +512,9 @@ impl PrivateWindow {
 }
 
 #[cfg(target_os = "linux")]
+// `vaapi_upload_proved` is supplied by the host-level HDR10 passthrough
+// probe; it is not a device-bound reconstructed-upload proof. The completed
+// private window must still validate the actual upload/encode before serving.
 pub(crate) fn completed_window_encoder(
     preferred: plurx_core::transcode::Encoder,
     vaapi_upload_proved: bool,
@@ -521,12 +524,14 @@ pub(crate) fn completed_window_encoder(
     use plurx_core::transcode::Encoder;
     if preferred == Encoder::Nvenc {
         Encoder::Nvenc
-    } else if preferred == Encoder::Vaapi
+    } else if matches!(preferred, Encoder::Qsv | Encoder::Vaapi)
         && vaapi_upload_proved
         && plan
             .completed_reconstructed_output(Encoder::Vaapi)
             .is_some()
     {
+        // An Intel Quick Sync preference can use the independently proved
+        // VAAPI upload/encode graph for these reconstructed pictures.
         // Any raster and cadence: the window's HEVC level follows them.
         Encoder::Vaapi
     } else {
