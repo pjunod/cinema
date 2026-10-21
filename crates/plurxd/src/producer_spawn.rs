@@ -182,19 +182,7 @@ pub(crate) fn spawn(
     args: &[String],
     options: SpawnOptions<'_>,
 ) -> Result<Spawned, String> {
-    let mut command = tokio::process::Command::new(program);
-    command.args(producer_args(options.progress, args));
-    configure_ffmpeg_runtime(&mut command, options.runtime_cache);
-    for (key, value) in options.env {
-        command.env(key, value);
-    }
-    options.descriptors.configure(&mut command);
-    options.descriptors.verify()?;
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+    let mut command = producer_command(program, args, &options)?;
     let (mut child, child_job) =
         crate::process_control::spawn_job_owned(&mut command, options.work)
             .map_err(|error| format!("spawning job-owned producer: {error}"))?;
@@ -212,6 +200,53 @@ pub(crate) fn spawn(
         stdout,
         stderr,
     })
+}
+
+/// Actual graph-owned launch; no raw child or pipe ownership is exported.
+/// The reservation enters core custody BEFORE the launcher can run.
+#[cfg(unix)]
+pub(crate) struct CustodiedSpawned {
+    pub(crate) graph: plurx_core::adaptive_resources::physical_graph::OwnedPhysicalGraph,
+    pub(crate) root: plurx_core::adaptive_resources::physical_graph::GraphRoot,
+}
+
+#[cfg(unix)]
+pub(crate) async fn spawn_custodied(
+    program: &Path,
+    args: &[String],
+    options: SpawnOptions<'_>,
+    reservation: plurx_core::adaptive_resources::ResourceReservation,
+) -> Result<CustodiedSpawned, String> {
+    let mut graph = reservation
+        .into_physical_graph()
+        .map_err(|error| format!("transferring producer reservation: {error:?}"))?;
+    let mut command = producer_command(program, args, &options)?;
+    let root = graph
+        .spawn_root(&mut command, options.work)
+        .await
+        .map_err(|error| format!("spawning custodied producer: {error}"))?;
+    Ok(CustodiedSpawned { graph, root })
+}
+
+fn producer_command(
+    program: &Path,
+    args: &[String],
+    options: &SpawnOptions<'_>,
+) -> Result<tokio::process::Command, String> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(producer_args(options.progress, args));
+    configure_ffmpeg_runtime(&mut command, options.runtime_cache);
+    for (key, value) in options.env {
+        command.env(key, value);
+    }
+    options.descriptors.configure(&mut command);
+    options.descriptors.verify()?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    Ok(command)
 }
 
 fn producer_args(progress: Progress, args: &[String]) -> Vec<String> {

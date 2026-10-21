@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use super::{
     AdmissionRefusal, ReservationBinding, ReservationState, ResourceLedger, ResourceReservation,
+    RetainedRole,
 };
 use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, UnknownReason};
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
@@ -63,6 +64,7 @@ struct Root {
     _job: Option<ChildJob>,
     process: Metric<ProcessIdentity>,
     waited: bool,
+    exit_status: Option<std::process::ExitStatus>,
     pipes_claimed: bool,
 }
 
@@ -228,6 +230,10 @@ impl OwnedPhysicalGraph {
         self.custody().identity
     }
 
+    pub fn retained_role(&self) -> RetainedRole<'_> {
+        retained_role(self.custody())
+    }
+
     /// Spawn directly under custody. Mark uncertainty BEFORE the shared launcher
     /// can partially succeed, and retain the actual Child and ChildJob together.
     pub async fn spawn_root(
@@ -335,6 +341,7 @@ fn retain_root(
         _job: job,
         process,
         waited: false,
+        exit_status: None,
         pipes_claimed: false,
     });
     root
@@ -424,6 +431,67 @@ impl Drop for SealedPhysicalGraph {
 }
 
 impl SealedPhysicalGraph {
+    pub fn retained_role(&self) -> RetainedRole<'_> {
+        retained_role(&self.custody)
+    }
+
+    /// An exited leader does NOT close its job, writers or reservation.
+    pub async fn try_wait_root(
+        &self,
+        root: GraphRoot,
+    ) -> io::Result<Option<std::process::ExitStatus>> {
+        let mut members = self.custody.members.lock().await;
+        let member = root_member(&self.custody, &mut members, root)?;
+        if let Some(status) = member.exit_status {
+            return Ok(Some(status));
+        }
+        let status = member.child.try_wait()?;
+        if status.is_some() {
+            member.waited = true;
+            member.exit_status = status;
+        }
+        Ok(status)
+    }
+
+    /// Signal under the actual un-reaped child handle's lock, not a supplied
+    /// PID. Completion invalidates signalling even if the OS recycles its PID.
+    pub async fn signal_root(
+        &self,
+        root: GraphRoot,
+        signal: crate::process::ProcessSignal,
+    ) -> io::Result<bool> {
+        let mut members = self.custody.members.lock().await;
+        let member = root_member(&self.custody, &mut members, root)?;
+        let pid = member
+            .child
+            .id()
+            .filter(|_| !member.waited)
+            .ok_or_else(|| io::Error::other("physical root already waited"))?;
+        crate::process::signal(pid, signal)
+    }
+
+    pub async fn start_kill_root(&self, root: GraphRoot) -> io::Result<()> {
+        let mut members = self.custody.members.lock().await;
+        let member = root_member(&self.custody, &mut members, root)?;
+        if member.waited {
+            return Ok(());
+        }
+        member.child.start_kill()
+    }
+
+    /// Narrow producer-root wait. Custody retains child/job and all charges.
+    pub async fn wait_root(&self, root: GraphRoot) -> io::Result<std::process::ExitStatus> {
+        let mut members = self.custody.members.lock().await;
+        let member = root_member(&self.custody, &mut members, root)?;
+        if let Some(status) = member.exit_status {
+            return Ok(status);
+        }
+        let status = member.child.wait().await?;
+        member.waited = true;
+        member.exit_status = Some(status);
+        Ok(status)
+    }
+
     pub async fn snapshot(&self) -> GraphCustodySnapshot {
         let members = self.custody.members.lock().await;
         GraphCustodySnapshot {
@@ -467,10 +535,14 @@ impl SealedPhysicalGraph {
         }
         for root in &mut members.roots {
             if !root.waited {
-                if root.child.wait().await.is_err() {
-                    return GraphCloseOutcome::UnknownHeld(GraphHoldReason::RootWaitFailed);
-                }
+                let status = match root.child.wait().await {
+                    Ok(status) => status,
+                    Err(_) => {
+                        return GraphCloseOutcome::UnknownHeld(GraphHoldReason::RootWaitFailed)
+                    }
+                };
                 root.waited = true;
+                root.exit_status = Some(status);
             }
         }
         while members.joined_writers < members.writers.len() {
@@ -481,6 +553,28 @@ impl SealedPhysicalGraph {
         }
         GraphCloseOutcome::UnknownHeld(GraphHoldReason::ContainmentUnavailable)
     }
+}
+
+fn retained_role(custody: &GraphCustody) -> RetainedRole<'_> {
+    RetainedRole {
+        binding: custody.binding,
+        owner: std::marker::PhantomData,
+    }
+}
+
+fn root_member<'a>(
+    custody: &GraphCustody,
+    members: &'a mut Members,
+    root: GraphRoot,
+) -> io::Result<&'a mut Root> {
+    if root.generation != custody.identity.generation {
+        return Err(io::Error::other("root belongs to another physical graph"));
+    }
+    members
+        .roots
+        .get_mut(root.index)
+        .filter(|member| member.process == root.process)
+        .ok_or_else(|| io::Error::other("physical graph root unavailable"))
 }
 
 #[cfg(target_os = "linux")]

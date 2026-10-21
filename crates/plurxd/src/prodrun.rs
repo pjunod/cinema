@@ -62,6 +62,9 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::prodexec::{after, Producer, Step, Termination};
 
+mod physical;
+use physical::ProducerChild;
+
 /// Identity minted only while attaching an actual job-owned producer.
 /// It has no wire representation and cannot be constructed from an epoch.
 #[derive(Clone)]
@@ -178,7 +181,7 @@ impl ProducerReapHooks for ActualProducerWait {
 }
 
 fn owned_reap(
-    mut child: Child,
+    mut child: ProducerChild,
     child_job: Option<crate::process_control::ChildJob>,
     resources: Option<Box<dyn Send>>,
     generation: Option<ProducerRegistration>,
@@ -194,20 +197,20 @@ fn owned_reap(
     if let Some(generation) = generation.as_ref() {
         generation.0.retirement.cancel();
     }
-    let _ = child.start_kill();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
         runtime.spawn(async move{
             // One owned task retains admission and descendant ownership across
             // retries and cancellation. Errors never mint a reap receipt.
+            let _ = child.start_kill().await;
             let mut failures=0u64;
             loop {
-                match hooks.wait(&mut child).await {
+                match child.wait(hooks.as_ref()).await {
                     Ok(_)=>break,
                     Err(error)=>{
                         if failures==0 {tracing::warn!(target:"plurxd::prodrun",%error,"producer wait failed; admission retained");}
                         failures=failures.saturating_add(1);
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let _=child.start_kill();
+                        let _=child.start_kill().await;
                     }
                 }
             }
@@ -223,6 +226,27 @@ fn owned_reap(
                     if receiver.await.is_err(){
                         tracing::error!(target:"plurxd::prodrun","producer writer task ended without confirming settlement; releasing its reaped generation");
                         writers=WriterSettlement::Abandoned;
+                    }
+                }
+            }
+            // Graph-backed generations require the ACTUAL registered task joins,
+            // independently of any sender's settlement/drop. Physical capacity
+            // remains core-owned UnknownHeld even after this narrow event.
+            let mut join_failures = 0u64;
+            loop {
+                match child.join_graph_writers().await {
+                    Ok(settlement) => {
+                        if settlement == WriterSettlement::Abandoned {
+                            writers = settlement;
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        if join_failures == 0 {
+                            tracing::warn!(target:"plurxd::prodrun",%error,"producer graph joins unfinished; custody retained");
+                        }
+                        join_failures = join_failures.saturating_add(1);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -246,6 +270,9 @@ fn owned_reap(
     } else {
         // Runtime shutdown cannot confirm a wait. Retain the bounded owner's
         // resources until process exit; never advertise an unproven release.
+        if let ProducerChild::Legacy(child) = &mut child {
+            let _ = child.start_kill();
+        }
         std::mem::forget((child, child_job, resources, generation));
     }
     operation
@@ -276,7 +303,7 @@ impl EmptyProducerSlot {
         resources: Box<dyn Send>,
     ) -> (ProducerRegistration, ProducerWriters) {
         let (registration, writers) = registered_generation();
-        self.0.child = Some(child);
+        self.0.child = Some(ProducerChild::Legacy(child));
         self.0.child_job = Some(child_job);
         self.0.resources = Some(resources);
         self.0.registration = Some(registration.clone());
@@ -287,18 +314,21 @@ impl EmptyProducerSlot {
 
 fn registered_generation() -> (ProducerRegistration, ProducerWriters) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    let registration = ProducerRegistration(Arc::new(GenerationLifetime {
+    (new_registration(Some(receiver)), ProducerWriters(sender))
+}
+
+fn new_registration(writers: Option<tokio::sync::oneshot::Receiver<()>>) -> ProducerRegistration {
+    ProducerRegistration(Arc::new(GenerationLifetime {
         identity: Arc::new(()),
-        writers: Mutex::new(Some(receiver)),
+        writers: Mutex::new(writers),
         receipt: StdMutex::new(None),
         settled: Notify::new(),
         retirement: tokio_util::sync::CancellationToken::new(),
-    }));
-    (registration, ProducerWriters(sender))
+    }))
 }
 
 struct Inner {
-    child: Option<Child>,
+    child: Option<ProducerChild>,
     /// Windows descendant ownership follows the exact child through reap.
     /// On Unix this is a zero-sized proof that the shared spawn path was used.
     child_job: Option<crate::process_control::ChildJob>,
@@ -474,7 +504,7 @@ impl ProducerSlot {
                 inner.child.is_none(),
                 "attach expects the empty slot NeedsSpawn left behind"
             );
-            inner.child = Some(child);
+            inner.child = Some(ProducerChild::Legacy(child));
             inner.child_job = child_job;
             inner.resources = resources;
             inner.registration = registration;
@@ -534,7 +564,7 @@ impl ProducerSlot {
         {
             return Err(no_child());
         }
-        state.child.as_mut().ok_or_else(no_child)?.try_wait()
+        state.child.as_mut().ok_or_else(no_child)?.try_wait().await
     }
     /// Storage deletion needs a settled child and every registered writer.
     /// An empty slot is accepted only when no registration or reap is pending.
@@ -688,10 +718,12 @@ impl ProducerSlot {
                     inner.belief = after(inner.belief, step);
                     return Ok(Performed::Done);
                 }
-                crate::process_control::signal(
-                    attached_pid(&inner)?,
-                    crate::process_control::ProcessSignal::Suspend,
-                )?;
+                inner
+                    .child
+                    .as_ref()
+                    .ok_or_else(no_child)?
+                    .signal(crate::process_control::ProcessSignal::Suspend)
+                    .await?;
                 touch();
                 inner.belief = after(inner.belief, step);
                 Ok(Performed::Done)
@@ -703,10 +735,12 @@ impl ProducerSlot {
                     inner.belief = after(inner.belief, step);
                     return Ok(Performed::Done);
                 }
-                crate::process_control::signal(
-                    attached_pid(&inner)?,
-                    crate::process_control::ProcessSignal::Resume,
-                )?;
+                inner
+                    .child
+                    .as_ref()
+                    .ok_or_else(no_child)?
+                    .signal(crate::process_control::ProcessSignal::Resume)
+                    .await?;
                 // Clock first, belief second, exactly as `apply_ahead_window`
                 // resumes: the watchdog must never observe "running" beside a
                 // motion clock that still spans the suspension.
@@ -756,17 +790,6 @@ impl Default for ProducerSlot {
     fn default() -> ProducerSlot {
         ProducerSlot::new()
     }
-}
-
-/// The pid of the attached child, or the error every signalling step answers
-/// when the slot is empty. `Child::id` is `None` once the child has been
-/// waited, which for this slot means the same thing: nothing to signal.
-fn attached_pid(inner: &Inner) -> io::Result<u32> {
-    inner
-        .child
-        .as_ref()
-        .and_then(|child| child.id())
-        .ok_or_else(no_child)
 }
 
 fn no_child() -> io::Error {

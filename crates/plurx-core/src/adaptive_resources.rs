@@ -136,7 +136,16 @@ pub struct FamilyRoleDemand<'a> {
     pub demand: WorkloadDemand,
     /// A retained physical role is checked against this ledger under its lock.
     /// It is counted once even if shared by both requested families.
-    pub retained: Option<&'a ResourceReservation>,
+    pub retained: Option<RetainedRole<'a>>,
+}
+
+/// Borrowed identity of an actual reservation owner, including a graph that
+/// consumed the original reservation. This grants neither acquisition nor
+/// release authority. The accounting transaction still verifies the live entry.
+#[derive(Clone, Copy)]
+pub struct RetainedRole<'a> {
+    binding: ReservationBinding,
+    owner: std::marker::PhantomData<&'a ()>,
 }
 
 /// Complete requested role set, not only the missing roles. At most three
@@ -401,7 +410,7 @@ impl ResourceLedger {
         roles: &[(
             Option<(FamilyIdentity, FamilyRole)>,
             WorkloadDemand,
-            Option<&ResourceReservation>,
+            Option<RetainedRole<'_>>,
         )],
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         let mut state = self
@@ -409,7 +418,13 @@ impl ResourceLedger {
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
         let mut missing = Vec::new();
+        if state.invalid {
+            return Err(AdmissionRefusal::Unavailable);
+        }
         for (family_role, demand, retained) in roles {
+            if demand.limit_epoch != state.epoch {
+                return Err(AdmissionRefusal::StaleEpoch);
+            }
             if let Some(held) = retained {
                 if held.binding.ledger != self.id {
                     return Err(AdmissionRefusal::ReceiptMismatch);
@@ -573,6 +588,13 @@ impl ResourceLedger {
 }
 
 impl ResourceReservation {
+    pub fn retained_role(&self) -> RetainedRole<'_> {
+        RetainedRole {
+            binding: self.binding,
+            owner: std::marker::PhantomData,
+        }
+    }
+
     /// Must happen before calling any launcher, including a launcher that can
     /// fail after creating a child. This consumes exclusive no-spawn certainty.
     pub fn mark_spawn_possible(&mut self) -> Result<(), AdmissionRefusal> {
@@ -975,7 +997,7 @@ mod tests {
             FamilyRoleDemand {
                 role: FamilyRole::Audio,
                 demand: demand(1, false),
-                retained: Some(audio),
+                retained: Some(audio.retained_role()),
             },
         ];
         let owned = ledger
@@ -1044,7 +1066,7 @@ mod tests {
         let changed = [FamilyRoleDemand {
             role: FamilyRole::Video,
             demand: demand(2, false),
-            retained: Some(&_reservation),
+            retained: Some(_reservation.retained_role()),
         }];
         assert!(matches!(
             ledger.reserve_families(&[FamilyDemand {

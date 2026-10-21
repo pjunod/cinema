@@ -1,5 +1,7 @@
 use super::*;
-use crate::adaptive_resources::{ResourceVector, WorkloadDemand};
+use crate::adaptive_resources::{
+    FamilyDemand, FamilyRole, FamilyRoleDemand, ResourceVector, WorkloadDemand,
+};
 
 const TEST_WORK: ChildWork = ChildWork::background("physical graph custody fixture");
 
@@ -34,6 +36,179 @@ fn graph(ledger: &ResourceLedger) -> OwnedPhysicalGraph {
     reservation(ledger, false)
         .into_physical_graph()
         .expect("move exclusive custody")
+}
+
+#[tokio::test]
+async fn graph_owned_role_borrow_is_counted_once_and_sealed_cleanup_cannot_share() {
+    let ledger = ledger();
+    let family = ledger.new_family().expect("owner family");
+    let successor = ledger.new_family().expect("successor family");
+    let demand = WorkloadDemand {
+        resources: Metric::Known(vector(1)),
+        limit_epoch: 1,
+        trial: false,
+    };
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Audio,
+        demand,
+        retained: None,
+    }];
+    let mut owned = ledger
+        .reserve_families(&[FamilyDemand {
+            identity: family,
+            roles: &roles,
+        }])
+        .expect("family reservation");
+    let (reservation, cleanup) = owned.pop().expect("owned role");
+    let mut graph = reservation.into_physical_graph().expect("exclusive graph");
+    graph
+        .spawn_root(&mut child("sleep"), TEST_WORK)
+        .await
+        .expect("actual root");
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Audio,
+        demand,
+        retained: Some(graph.retained_role()),
+    }];
+    assert!(ledger
+        .reserve_families(&[FamilyDemand {
+            identity: successor,
+            roles: &roles
+        }])
+        .expect("same retained physical role")
+        .is_empty());
+    assert_eq!(ledger.snapshot().expect("counted once").used, vector(1));
+    cleanup.mark_reaping().expect("seal via cleanup");
+    assert!(ledger
+        .reserve_families(&[FamilyDemand {
+            identity: successor,
+            roles: &roles
+        }])
+        .is_err());
+    let sealed = graph.seal();
+    assert_eq!(
+        sealed.close().await,
+        GraphCloseOutcome::UnknownHeld(GraphHoldReason::ContainmentUnavailable)
+    );
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Audio,
+        demand,
+        retained: Some(sealed.retained_role()),
+    }];
+    assert!(ledger
+        .reserve_families(&[FamilyDemand {
+            identity: successor,
+            roles: &roles
+        }])
+        .is_err());
+    assert_eq!(ledger.snapshot().expect("not refunded").held, 1);
+}
+
+#[tokio::test]
+async fn root_control_rejects_cross_graph_and_waited_root_signal_without_refund() {
+    let ledger = ledger();
+    let mut first = graph(&ledger);
+    let mut second = graph(&ledger);
+    let root = first
+        .spawn_root(&mut child("sleep"), TEST_WORK)
+        .await
+        .expect("root");
+    let other = second
+        .spawn_root(&mut child("sleep"), TEST_WORK)
+        .await
+        .expect("other root");
+    let sealed = first.seal();
+    assert!(sealed.start_kill_root(other).await.is_err());
+    assert!(sealed.try_wait_root(other).await.is_err());
+    assert!(sealed.wait_root(other).await.is_err());
+    sealed.start_kill_root(root).await.expect("kill owned root");
+    let status = sealed.wait_root(root).await.expect("wait owned root");
+    assert_eq!(
+        sealed.try_wait_root(root).await.expect("cached status"),
+        Some(status)
+    );
+    assert!(sealed
+        .signal_root(root, crate::process::ProcessSignal::Resume)
+        .await
+        .is_err());
+    assert_eq!(ledger.snapshot().expect("still charged").held, 2);
+    sealed.close().await;
+    second.seal().close().await;
+    assert_eq!(
+        ledger
+            .snapshot()
+            .expect("physical uncertainty")
+            .unknown_held,
+        2
+    );
+}
+
+#[test]
+fn retained_graph_role_rechecks_epoch_and_invalid_ledger_even_without_new_roles() {
+    let ledger = ledger();
+    let family = ledger.new_family().expect("family");
+    let demand = WorkloadDemand {
+        resources: Metric::Known(vector(1)),
+        limit_epoch: 1,
+        trial: false,
+    };
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Audio,
+        demand,
+        retained: None,
+    }];
+    let (reservation, _) = ledger
+        .reserve_families(&[FamilyDemand {
+            identity: family,
+            roles: &roles,
+        }])
+        .expect("owned role")
+        .pop()
+        .expect("one role");
+    let graph = reservation.into_physical_graph().expect("graph owner");
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Audio,
+        demand,
+        retained: Some(graph.retained_role()),
+    }];
+    ledger
+        .update_hard_cap(2, Metric::Known(vector(100)))
+        .expect("new epoch");
+    assert!(matches!(
+        ledger.reserve_families(&[FamilyDemand {
+            identity: family,
+            roles: &roles
+        }]),
+        Err(AdmissionRefusal::StaleEpoch)
+    ));
+    let roles = [FamilyRoleDemand {
+        role: FamilyRole::Audio,
+        demand: WorkloadDemand {
+            limit_epoch: 2,
+            ..demand
+        },
+        retained: Some(graph.retained_role()),
+    }];
+    assert!(ledger
+        .reserve_families(&[FamilyDemand {
+            identity: family,
+            roles: &roles
+        }])
+        .expect("fresh view")
+        .is_empty());
+    ledger
+        .inner
+        .lock()
+        .expect("simulate invalid accounting")
+        .invalid = true;
+    assert!(matches!(
+        ledger.reserve_families(&[FamilyDemand {
+            identity: family,
+            roles: &roles
+        }]),
+        Err(AdmissionRefusal::Unavailable)
+    ));
+    assert_eq!(ledger.snapshot().expect("still counted").held, 1);
 }
 
 // The existing portable process fixture re-execs the actual test binary. No
