@@ -43,9 +43,11 @@ pub(crate) async fn dropping<F: Future>(points: u8, future: F) -> (F::Output, u8
     (result, replies.dropped.load(Ordering::SeqCst))
 }
 
-/// Test-only barriers for observing the real library worker's lifecycle. The
-/// task-local deliberately does not flow into spawned heartbeat tasks; those
-/// transitions remain covered by storage schedules or explicitly unchecked.
+/// Test-only barriers for observing the real library worker's lifecycle. Pause
+/// at `BeforeScan`, outside the select arms; pausing at `QueueLoss`, `DomainLoss`
+/// or `Pressure` stalls an arm that has already been selected. The task-local
+/// deliberately does not flow into spawned heartbeat tasks; those transitions
+/// remain covered by storage schedules or explicitly unchecked.
 #[cfg(test)]
 pub(crate) mod worker {
     use std::sync::atomic::{AtomicBool, Ordering};
