@@ -2,7 +2,7 @@
 
 **Updated:** 2026-10-20 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-- **2026-10-21 · Adaptive playback resources:** Sol 6.1 owns [the implementation ledger](docs/performance/ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md). `66291c562` retains durable family/root/settlement operations through cancellation and commit-before-refund; actual-lock startup retains full cleanup-only holds. Pinned core+daemon all-target Hiqlite-contract compile passes95.955s; private APIs still warn, not production composition or -Dwarnings. M0–M7 incomplete; twelve new protocol contracts compiled NOT RUN. Draft PR1248; final independent review/fixes then once-only qualification/merge, no extra handoff gate or deployment.
+- **2026-10-21 · Adaptive playback resources:** Sol 6.1 owns [the implementation ledger](docs/performance/ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md). `92dd41a48` adds journal-armed audited pipe tasks; released M4 authority is adopted through `5d7eba0f1` with real SQLite/Hiqlite installers and Source guards. Current pinned core+daemon all-target compile passes128.03s; 38 new/integrated bodies compiled NOT RUN. M0–M7 incomplete: physical/restart closure, production/worker wiring and remaining policies open. Draft PR1248; final independent review/fixes then once-only qualification/merge, no extra handoff gate or deployment.
 - **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
 - **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 

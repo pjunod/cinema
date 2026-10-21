@@ -6,7 +6,7 @@ PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 
-## What exists at 66291c562
+## What exists through 92dd41a48 / 5d7eba0f1
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -42,8 +42,12 @@ actual graph generations and pending journal receivers. Dropping a waiter cannot
 refund or replay a named root. Prepare commits before current epoch/drain/deadline
 recheck; every root slot arms before the actual retained launcher and enriches
 its identity afterward. Ambiguous failure seals/holds rather than retrying a slot.
-Task/typed-resource durable adapters remain absent and cannot use legacy graph
-entry points to bypass write-ahead custody.
+The concrete discard-root-pipes task now arms before creation, retains its actual
+JoinHandle and enriches exact graph/member identity. It takes no arbitrary future
+or callback, exports no pipe, and uses two fixed read buffers. Sealed abort plus
+actual join closes ONLY those pipes, not descendants or external work. Generic
+legacy writers remain non-certifying; other typed-resource adapters are still
+absent and cannot bypass write-ahead custody through legacy entry points.
 
 Private cleanup consumes the original nonclone proof, retains it on queue refusal
 or uncertain commit, and refunds only after exact durable settlement. A public
@@ -53,6 +57,12 @@ fence owner retirement until users close or transfer. Corrected data-only facts
 require definite rollback; unknown operations retain their exact payload/UUID.
 
 ## Current refusal and platform behavior
+
+Released M4 Store authority is also integrated: exact request/Prepared/winner/
+adoption transactions and migration/old-writer fences are coordination, NOT
+physical proof. Its normal API cannot mark Closed or refund a local reservation;
+fixture history erasure exists only under the contract-test compilation feature.
+Worker RPC/admission/publication composition remains open, not advertised ready.
 
 No positive old-owner/whole-graph recovery backend is implemented yet. The interim
 startup path therefore refuses pending custody BEFORE cleanup or legacy competing
