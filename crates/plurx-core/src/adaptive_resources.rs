@@ -596,9 +596,15 @@ impl ResourceLedger {
 }
 
 impl ResourceReservation {
+    /// Identity for core-owned durable registration, never acquisition or
+    /// settlement authority. This does not transfer the reservation's custody.
+    pub(crate) fn custody_binding(&self) -> ReservationBinding {
+        self.binding
+    }
+
     pub fn retained_role(&self) -> RetainedRole<'_> {
         RetainedRole {
-            binding: self.binding,
+            binding: self.custody_binding(),
             owner: std::marker::PhantomData,
         }
     }
