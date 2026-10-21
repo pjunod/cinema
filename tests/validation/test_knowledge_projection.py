@@ -1,10 +1,11 @@
 """Visible-corpus isolation: synthetic passages only, never sealed gold."""
+from dataclasses import replace
 import hashlib
 from types import SimpleNamespace
 import unittest
 
 from validation.knowledge.evaluation_projection import project
-from validation.knowledge.model import Anchor, KnowledgeError, Node, Provenance, content_digest, digest_bytes
+from validation.knowledge.model import Anchor, Claim, Edge, KnowledgeError, Node, Provenance, canonical_json, content_digest, digest_bytes
 
 REVISION = 'a' * 40
 
@@ -53,6 +54,65 @@ class KnowledgeProjectionTests(unittest.TestCase):
         result = project(graph, *views('def rule():\n\n', [[1, 1]]))
         self.assertEqual(result.anchors[0].integrity, 'changed')
         self.assertEqual(result.anchors[0].excerpt, '')
+
+    def test_changed_sentence_outside_unchanged_excerpt_retracts_pristine_semantics(self):
+        original = '# Rule\nUnchanged excerpt.\nPristine governing sentence.\n'
+        graph = fixture(original, end=3)
+        anchor = replace(graph.anchors[0], excerpt='Unchanged excerpt.')
+        provenance = graph.nodes[0].provenance
+        contract = replace(graph.nodes[0], title='PRISTINE_ONLY_TITLE', attributes={'behavior': 'PRISTINE_ONLY_BEHAVIOR'})
+        obligation = Node('plurx:obligation:fixture', 'obligation', 'Obligation', contract.scope,
+                          contract.anchors, {'action': 'PRISTINE_ONLY_ACTION'}, provenance)
+        decision = Node('plurx:decision:fixture', 'decision', 'Decision', contract.scope,
+                        contract.anchors, {'rationale': 'PRISTINE_ONLY_RATIONALE'}, provenance)
+        section = Node(anchor.id, 'section', 'Rule', ('docs/rule.md',), (anchor.id,),
+                       {'path': 'docs/rule.md', 'integrity': 'valid'}, provenance)
+        artifact = Node('plurx:artifact:fixture', 'artifact', 'Artifact', ('docs/rule.md',), (),
+                        {'path': 'docs/rule.md', 'digest': digest_bytes(original.encode()), 'role': 'reference'},
+                        replace(provenance, method='parsed', origin='docs/rule.md', source_digest=digest_bytes(original.encode())))
+        graph.nodes = (contract, obligation, decision, section, artifact)
+        graph.anchors = (anchor,)
+        graph.claims = (Claim(contract.id, 'authority', 'PRISTINE_ONLY_CLAIM', provenance),)
+        graph.edges = (Edge(contract.id, 'constrained-by', decision.id, provenance),)
+        modified = '# Rule\nUnchanged excerpt.\nDifferent governing sentence.\n'
+        result = project(graph, *views(modified, [[1, 3]]))
+        serialized = canonical_json(result)
+        self.assertNotIn('PRISTINE_ONLY', serialized)
+        self.assertEqual(result.claims, ())
+        self.assertEqual(result.edges, ())
+        rebuilt = {node.id: node for node in result.nodes}
+        self.assertEqual(rebuilt[artifact.id].attributes['digest'], digest_bytes(modified.encode()))
+        self.assertNotEqual(rebuilt[artifact.id].attributes['digest'], artifact.attributes['digest'])
+        self.assertEqual(rebuilt[section.id].attributes['integrity'], 'changed')
+
+    def test_visible_signature_cannot_reveal_invisible_body_summary(self):
+        original = 'def rule():\n    return "hidden original body"\n'
+        graph = fixture(original, kind='symbol', selector='def rule():', end=1)
+        graph.nodes = (replace(graph.nodes[0], attributes={'behavior': 'PRISTINE_ONLY_BODY_ACTION'}),)
+        result = project(graph, *views('def rule():\n\n', [[1, 1]]))
+        self.assertEqual(result.nodes, ())
+        self.assertNotIn('PRISTINE_ONLY_BODY_ACTION', canonical_json(result))
+        self.assertEqual(result.anchors[0].integrity, 'changed')
+
+    def test_unchanged_visible_policy_survives_changed_implementation(self):
+        policy = '# Rule\nAn independently visible policy still applies.\n'
+        graph = fixture(policy)
+        code = 'def rule():\n    return 1\n'
+        code_digest = content_digest({'src/code.py': digest_bytes(code.encode())})
+        code_anchor = Anchor('plurx:symbol:implementation', 'src/code.py', 'symbol', 'def rule():',
+                             code_digest, code_digest, 'src/code.py', ('src/code.py',), 'valid', 1, 1)
+        graph.anchors += (code_anchor,)
+        graph.nodes = (replace(graph.nodes[0], anchors=graph.nodes[0].anchors + (code_anchor.id,),
+                               attributes={'behavior': 'The independently visible policy still applies.'}),)
+        files, visibility = views(policy, [[1, 2]])
+        changed_code = 'def rule():\n    return 2\n'
+        files['src/code.py'] = {'content': changed_code, 'mode': 33188}
+        visibility['src/code.py'] = {'line_ranges': [[1, 2]], 'content_sha256': hashlib.sha256(changed_code.encode()).hexdigest()}
+        result = project(graph, files, visibility)
+        self.assertEqual(len(result.nodes), 1)
+        self.assertEqual(result.nodes[0].attributes['behavior'], 'The independently visible policy still applies.')
+        self.assertEqual(result.nodes[0].anchors, (graph.anchors[0].id,))
+        self.assertEqual(next(anchor for anchor in result.anchors if anchor.id == code_anchor.id).integrity, 'changed')
 
     def test_hidden_source_and_digest_tampering_refuse(self):
         graph = fixture('# Rule\nSynthetic.\n')

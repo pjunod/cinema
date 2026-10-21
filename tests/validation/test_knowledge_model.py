@@ -13,7 +13,7 @@ from validation.knowledge import (Claim, Conflict, Coverage, Edge, GraphData,
 from validation.knowledge.adapters import (artifact_id, import_catalog,
     import_routing, input_descriptor, normalize_receipt, route_check_id,
     route_id, symbol_id)
-from validation.knowledge.model import read_source, source_path
+from validation.knowledge.model import read_source, read_source_file, source_path
 
 REV = "a" * 40
 SHA = "sha256:" + "b" * 64
@@ -108,7 +108,7 @@ class KnowledgeModelTests(unittest.TestCase):
 
     def test_split_child_private_path_refuses_before_module_expansion_reads(self):
         self.write("src/owner.rs", '// split: begin body\n#[path = "auth.json"]\nmod body;\n// split: end body\n')
-        with patch("validation.rust_modules._child_body", side_effect=AssertionError("unsafe child reached expansion")):
+        with patch("validation.knowledge.model.normalize_child_source", side_effect=AssertionError("unsafe child reached normalization")):
             with self.assertRaisesRegex(KnowledgeError, "credential source path refused"):
                 resolve_anchor(self.root, {"id": "plurx:symbol:private-child", "path": "src/owner.rs",
                     "kind": "symbol", "selector": "fn route(", "digest": SHA})
@@ -140,8 +140,38 @@ class KnowledgeModelTests(unittest.TestCase):
         self.write(".aws/config", "synthetic private bytes\n")
         (self.root / "public.rs").symlink_to(self.root / ".aws/config")
         with patch.object(Path, "open", side_effect=AssertionError("private bytes opened")):
-            with self.assertRaisesRegex(KnowledgeError, "private/generated"):
+            with self.assertRaisesRegex(KnowledgeError, "source refused"):
                 read_source(self.root, "public.rs")
+
+    def test_descriptor_reader_refuses_final_symlink_replacement_before_open(self):
+        self.write('src/allowed.py', 'visible fixture\n')
+        outside = self.write('outside.py', 'never disclose these synthetic bytes\n')
+        actual_open = os.open
+        swapped = False
+        def swap_before_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if path == 'allowed.py' and kwargs.get('dir_fd') is not None and not swapped:
+                swapped = True
+                (self.root / 'src/allowed.py').unlink()
+                (self.root / 'src/allowed.py').symlink_to(outside)
+            return actual_open(path, flags, *args, **kwargs)
+        with patch('validation.knowledge.model.os.open', side_effect=swap_before_open):
+            with self.assertRaises(KnowledgeError):
+                read_source(self.root, 'src/allowed.py')
+        self.assertTrue(swapped)
+
+    def test_descriptor_reader_refuses_intermediate_symlink_and_preserves_missing(self):
+        self.write('actual/file.py', 'visible fixture\n')
+        (self.root / 'link').symlink_to(self.root / 'actual', target_is_directory=True)
+        with self.assertRaises(KnowledgeError):
+            read_source(self.root, 'link/file.py')
+        absent = read_source_file(self.root, 'missing/file.py', allow_missing=True)
+        self.assertIsNone(absent.data)
+        self.assertEqual(absent.signature, ())
+        current = read_source_file(self.root, 'actual/file.py')
+        self.assertEqual(current.data, b'visible fixture\n')
+        self.assertEqual(current.mode, 0o100644)
+        self.assertEqual(len(current.signature), 6)
 
     def routing_fixture(self):
         self.write("src/owner.rs", '// split: begin body\n#[path = "child.rs"]\nmod body;\n// split: end body\n')

@@ -10,7 +10,7 @@ import json
 import re
 from typing import Any
 
-from .model import GraphData, KnowledgeError, canonical_json, identifier, safe_relative
+from .model import GraphData, KnowledgeError, canonical_json, effective_lifecycle, identifier, safe_relative
 
 MAX_DEPTH = 8
 MAX_RESPONSE = 1024 * 1024
@@ -70,22 +70,25 @@ def _direct(graph: GraphData, paths: tuple[str, ...], symbol: str | None):
     return starts, ('not-requested' if not symbol else 'resolved' if symbol_ids else 'unknown')
 
 
-def _walk(graph: GraphData, starts: set[str], depth: int):
+def _walk(graph: GraphData, starts: set[str], depth: int, lifecycle):
     """Bounded undirected discovery retains actual edge direction and authority."""
     adjacency = defaultdict(list)
     for edge in graph.edges:
         adjacency[edge.source].append((edge.target, edge, 'outgoing'))
         adjacency[edge.target].append((edge.source, edge, 'incoming'))
     paths = {key: [] for key in starts}
-    governing = {key: True for key in starts}
-    queue = deque((key, True, []) for key in sorted(starts))
-    visited = {(key, True) for key in starts}
+    governing = {key: lifecycle[key].state == "current" for key in starts}
+    queue = deque((key, governing[key], []) for key in sorted(starts))
+    visited = {(key, governing[key]) for key in starts}
     while queue:
         current, current_authority, prefix = queue.popleft()
         if len(prefix) >= depth:
             continue
         for target, edge, direction in sorted(adjacency[current], key=lambda v: (v[1].relation, v[0], v[2])):
-            authority = current_authority and edge.relation != 'mentions'
+            origin_state = lifecycle.get(edge.provenance.origin)
+            authority = (current_authority and edge.relation != 'mentions'
+                         and lifecycle[target].state == 'current'
+                         and (origin_state is None or origin_state.state == 'current'))
             state = (target, authority)
             if state in visited:
                 continue
@@ -100,18 +103,17 @@ def _walk(graph: GraphData, starts: set[str], depth: int):
     return paths, governing
 
 
-def _record(node, anchors, conflicts, governing, claims):
+def _record(node, anchors, conflicts, governing, claims, lifecycle):
     linked = [anchors[a] for a in node.anchors if a in anchors]
     integrity = 'changed' if any(a.integrity != 'valid' for a in linked) else 'valid' if linked else 'unknown'
     conflicted = any(node.id in c.subjects and c.disposition == 'unresolved' for c in conflicts)
-    applicability = ('conflicted' if conflicted else 'needs-review' if integrity == 'changed'
+    applicability = ('conflicted' if conflicted or lifecycle.state == 'conflicted' else 'needs-review' if integrity == 'changed' or lifecycle.state == 'needs-review'
                      else 'reviewed' if node.provenance.method == 'reviewed' else 'unknown')
     attributes = {key: plain(node.attributes[key]) for key in ATTRIBUTES.get(node.kind, ()) if key in node.attributes}
-    historical = (node.attributes.get('status') in {'superseded', 'withdrawn'}
-                  or node.attributes.get('disposition') in {'superseded', 'waived', 'rejected', 'resolved'})
     return {'id': node.id, 'kind': node.kind, 'title': node.title, 'scope': list(node.scope),
             'attributes': attributes, 'metadata_omitted_fields': len(node.attributes) - len(attributes),
-            'governing_path': governing and not historical, 'anchor_integrity': integrity,
+            'governing_path': governing and lifecycle.state == 'current', 'anchor_integrity': integrity,
+            'effective_lifecycle': plain(lifecycle),
             'claims': [plain(c) for c in claims if c.subject == node.id],
             'semantic_applicability': applicability, 'provenance': plain(node.provenance),
             'evidence': {'origin': attributes.get('origin', 'unavailable'),
@@ -190,13 +192,13 @@ def answer(graph: GraphData, snapshot: Mapping[str, Any], *, command: str,
         scope = tuple(p for c in graph.coverage if c.id in permitted for p in c.scope)
         starts = {n.id for n in graph.nodes if any(_matches(p, s) for p in n.scope for s in scope)}
         paths = scope
-    walk, governing = _walk(graph, starts, max_depth)
+    lifecycle = effective_lifecycle(graph)
+    walk, governing = _walk(graph, starts, max_depth, lifecycle)
     if command == 'obligations':
         walk = {k: v for k, v in walk.items() if nodes[k].kind in {'obligation', 'finding', 'decision', 'contract'} and governing[k]}
     relevant_conflicts = tuple(c for c in graph.conflicts if set(c.subjects) & set(walk))
     anchors = {a.id: a for a in graph.anchors}
-    ordered = sorted(walk, key=lambda key: (nodes[key].attributes.get('status') in {'superseded', 'withdrawn'}
-                       or nodes[key].attributes.get('disposition') in {'superseded', 'waived', 'resolved', 'rejected'},
+    ordered = sorted(walk, key=lambda key: (lifecycle[key].state == 'historical',
                        PRIORITY.get(nodes[key].kind, 99), key))
     mandatory_snapshot = {k: plain(snapshot[k]) for k in ('key', 'head', 'tree', 'worktree_id', 'repository_dirty', 'input_count', 'knowledge_view', 'change_view') if k in snapshot}
     key = str(snapshot.get('key', 'unknown'))
@@ -222,7 +224,7 @@ def answer(graph: GraphData, snapshot: Mapping[str, Any], *, command: str,
             raise KnowledgeError('budget-too-small: minimum error envelope cannot fit')
         return refusal
     for index, node_id in enumerate(ordered[offset:], offset):
-        item = _record(nodes[node_id], anchors, relevant_conflicts, governing[node_id], graph.claims)
+        item = _record(nodes[node_id], anchors, relevant_conflicts, governing[node_id], graph.claims, lifecycle[node_id])
         result['records'].append(item)
         if walk[node_id]:
             result['relationship_paths'].append({'to': node_id, 'steps': walk[node_id]})

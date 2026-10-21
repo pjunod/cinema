@@ -218,7 +218,52 @@ class KnowledgeQueryTests(unittest.TestCase):
         for identity in (CONTRACT, DECISION):
             self.assertFalse(indexed[identity]["governing_path"])
             self.assertIn(indexed[identity]["attributes"]["status"], {"superseded", "withdrawn"})
-        self.assertTrue(indexed[successor.id]["governing_path"])
+        self.assertFalse(indexed[successor.id]["governing_path"])
+        self.assertEqual(indexed[successor.id]["effective_lifecycle"]["state"], "current")
+
+    def test_historical_intermediate_cannot_govern_old_only_descendants(self):
+        graph = fixture_graph()
+        successor = replace(next(node for node in graph.nodes if node.id == CONTRACT),
+                            id='plurx:contract:independently-current')
+        graph = replace(graph, nodes=tuple(replace(node, attributes={**node.attributes, 'status': 'superseded'})
+                        if node.id == CONTRACT else node for node in graph.nodes) + (successor,),
+                        edges=graph.edges + (Edge(successor.id, 'supersedes', CONTRACT, PROV),))
+        validate_graph(graph)
+        historical = self.query(graph, paths=(CODE,))
+        indexed = records(historical)
+        self.assertIn(OBLIGATION, indexed)
+        self.assertFalse(indexed[CONTRACT]['governing_path'])
+        self.assertFalse(indexed[OBLIGATION]['governing_path'])
+        self.assertNotIn(OBLIGATION, records(self.query(graph, paths=(CODE,), command='obligations')))
+        # The same obligation may regain authority through a separately current
+        # route. Traversal cannot promote the historical route itself.
+        alternate = replace(graph, edges=graph.edges + (
+            Edge(SYMBOL, 'implements', successor.id, PROV),
+            Edge(successor.id, 'constrained-by', DECISION, PROV)))
+        validate_graph(alternate)
+        current = self.query(alternate, paths=(CODE,))
+        self.assertTrue(records(current)[OBLIGATION]['governing_path'])
+        self.assertFalse(records(current)[CONTRACT]['governing_path'])
+        self.assertEqual(relationship_paths(current)[OBLIGATION][0]['target'], successor.id)
+        self.assertIn(OBLIGATION, records(self.query(alternate, paths=(CODE,), command='obligations')))
+
+    def test_superseded_section_without_status_cannot_confer_downstream_authority(self):
+        graph = fixture_graph()
+        replacement = Node('plurx:section:replacement', 'section', 'Replacement section',
+                           (POLICY,), (), {'path': POLICY}, PROV)
+        graph = replace(graph, nodes=graph.nodes + (replacement,),
+                        edges=graph.edges + (Edge(replacement.id, 'supersedes', SECTION, PROV),))
+        validate_graph(graph)
+        result = self.query(graph, paths=(CODE,))
+        indexed = records(result)
+        self.assertNotIn('status', indexed[SECTION]['attributes'])
+        self.assertEqual(indexed[SECTION]['effective_lifecycle']['state'], 'historical')
+        self.assertFalse(indexed[SECTION]['governing_path'])
+        self.assertFalse(indexed[CONTRACT]['governing_path'])
+        self.assertFalse(indexed[OBLIGATION]['governing_path'])
+        direct = records(self.query(graph, identity=SECTION, max_depth=0))[SECTION]
+        self.assertFalse(direct['governing_path'])
+        self.assertNotIn(OBLIGATION, records(self.query(graph, paths=(CODE,), command='obligations')))
 
     def test_empty_uncurated_answers_expose_limits_and_unknown_selectors_refuse(self):
         empty = self.query(GraphData(), paths=(CODE,))

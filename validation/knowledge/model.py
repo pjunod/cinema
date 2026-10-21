@@ -9,9 +9,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import stat
 from types import MappingProxyType
 import tomllib
 from typing import Any
@@ -134,13 +136,71 @@ def source_path(root: Path, relative: str, *, exists: bool = True) -> Path:
     return path
 
 
+@dataclass(frozen=True)
+class SourceFile:
+    data: bytes | None
+    mode: int
+    signature: tuple[int, ...]
+
+
+class SourceReadChanged(KnowledgeError):
+    """A descriptor-relative source changed while its bytes were read."""
+
+
+def _source_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
+def read_source_file(root: Path, relative: str, *, allow_missing: bool = False) -> SourceFile:
+    """Read beneath one directory descriptor; never follow raced symlinks.
+
+    Shared discovery/capture primitive. Scope selection remains the caller's
+    responsibility; this additionally enforces the common lexical privacy rule.
+    """
+    relative = safe_source_relative(relative)
+    directory = None
+    started = False
+    try:
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        components = relative.split("/")
+        for component in components[:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        before = os.stat(components[-1], dir_fd=directory, follow_symlinks=False)
+        started = True
+        require(stat.S_ISREG(before.st_mode), "symlink/nonregular source refused: " + relative)
+        require(before.st_size <= MAX_BYTES, "source exceeds byte bound: " + relative)
+        descriptor = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            require(stat.S_ISREG(opened.st_mode), "nonregular opened source refused: " + relative)
+            raw = stream.read(MAX_BYTES + 1)
+            after = os.fstat(stream.fileno())
+        final = os.stat(components[-1], dir_fd=directory, follow_symlinks=False)
+        require(len(raw) <= MAX_BYTES, "source exceeds byte bound: " + relative)
+        signature = _source_signature(before)
+        if any(_source_signature(info) != signature for info in (opened, after, final)):
+            raise SourceReadChanged("source changed during descriptor read: " + relative)
+        return SourceFile(raw, 0o100755 if before.st_mode & 0o111 else 0o100644, signature)
+    except FileNotFoundError as error:
+        if started:
+            raise SourceReadChanged("source disappeared during descriptor read: " + relative) from error
+        if allow_missing:
+            return SourceFile(None, 0, ())
+        raise KnowledgeError("missing source: " + relative) from error
+    except OSError as error:
+        raise KnowledgeError("descriptor-relative source read refused: " + relative) from error
+    finally:
+        if directory is not None:
+            os.close(directory)
+
+
 def read_source(root: Path, relative: str) -> bytes:
-    path = source_path(root, relative)
-    require(path.stat().st_size <= MAX_BYTES, f"source exceeds byte bound: {relative}")
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_BYTES + 1)
-    require(len(raw) <= MAX_BYTES, f"source exceeds byte bound: {relative}")
-    return raw
+    result = read_source_file(root, relative)
+    require(result.data is not None, "missing source: " + relative)
+    return result.data
 
 
 def _freeze(value: Any) -> Any:
@@ -472,6 +532,20 @@ def _sections(raw: bytes):
         yield path, "".join(lines[start:stop]).encode("utf-8"), start + 1, stop
 
 
+def normalize_child_source(raw: bytes, owner: str) -> str:
+    """Canonical inventory normalization over already safely acquired bytes."""
+    from validation.rust_modules import CHILD_HEADER, _RESTATED, _RELOCATED
+    source = raw.decode("utf-8")
+    if source.startswith(CHILD_HEADER):
+        source = source[len(CHILD_HEADER):]
+    source = source.replace("pub(super) ", "")
+    for spelling in _RESTATED.get(owner, ()):
+        source = source.replace(spelling, "pub(super) ")
+    if owner in _RELOCATED:
+        source = source.replace(*_RELOCATED[owner])
+    return source
+
+
 def _logical_module_source(root: Path, owner: str, owner_text: str) -> tuple[str, tuple[str, ...]]:
     """Expand an inventory module using its logical path, not process REPO_ROOT.
 
@@ -479,7 +553,7 @@ def _logical_module_source(root: Path, owner: str, owner_text: str) -> tuple[str
     normalizer receives the explicit owner key so frozen corpora and worktrees
     retain HLS visibility/path rewrites without changing upstream globals.
     """
-    from validation.rust_modules import _product_blocks, _child_body
+    from validation.rust_modules import _product_blocks
     blocks = list(_product_blocks(owner_text))
     relatives = [owner]
     child_paths = {}
@@ -487,13 +561,12 @@ def _logical_module_source(root: Path, owner: str, owner_text: str) -> tuple[str
     for _, children in blocks:
         for child in children:
             relative = (PurePosixPath(owner).parent / safe_relative(child)).as_posix()
-            read_source(root, relative)
-            child_paths[child] = source_path(root, relative)
+            child_paths[child] = read_source(root, relative)
             relatives.append(relative)
     pieces = []
     last = 0
     for block, children in blocks:
-        bodies = [_child_body(child_paths[child], owner) for child in children]
+        bodies = [normalize_child_source(child_paths[child], owner) for child in children]
         if len(bodies) == 1:
             expanded = bodies[0]
         else:
@@ -530,7 +603,6 @@ def resolve_anchor(root: Path, raw: Mapping[str, Any]) -> Anchor:
         require("\n" not in selector, "symbol selector must be one line")
         # Existing inventories normalize split children. Track every expansion
         # input and locate the physical match independently of display offsets.
-        from validation.rust_modules import _child_body
         owner_text = read_source(root, owner).decode("utf-8")
         if owner.endswith(".rs"):
             expanded, relatives = _logical_module_source(root, owner, owner_text)
@@ -540,7 +612,7 @@ def resolve_anchor(root: Path, raw: Mapping[str, Any]) -> Anchor:
         candidates = []
         for relative in relatives:
             original = read_source(root, relative).decode("utf-8")
-            normalized = _child_body(source_path(root, relative), owner) if relative != owner else original
+            normalized = normalize_child_source(original.encode("utf-8"), owner) if relative != owner else original
             if selector in normalized:
                 candidates.append((relative, original, normalized))
         require(len(candidates) == 1, f"ambiguous physical symbol anchor: {raw['id']}")
@@ -732,6 +804,77 @@ def validate_graph(graph: GraphData) -> None:
     for receipt in graph.receipts:
         require(receipt.id in nodes and nodes[receipt.id].kind == "receipt", "receipt node missing")
         require(receipt.check_id in nodes, "receipt check missing")
+
+
+@dataclass(frozen=True)
+class EffectiveLifecycle:
+    state: str
+    reasons: tuple[str, ...] = ()
+
+
+_HISTORICAL = frozenset({"superseded", "withdrawn", "waived", "rejected", "resolved"})
+
+
+def effective_lifecycle(graph: GraphData) -> dict[str, EffectiveLifecycle]:
+    """Resolve accepted precedence once; discovery must not manufacture authority.
+
+    Accepted supersession applies to sections too. Source assertions remain
+    claims, and unresolved disagreement prevents choosing a governing claim.
+    """
+    nodes = {n.id: n for n in graph.nodes}
+    anchors = {a.id: a for a in graph.anchors}
+    reasons = {identity: set() for identity in nodes.keys() | anchors.keys()}
+    historical, conflicted, changed = set(), set(), set()
+    for node in graph.nodes:
+        if node.attributes.get("status") in _HISTORICAL or node.attributes.get("disposition") in _HISTORICAL:
+            historical.add(node.id)
+            reasons[node.id].add("authored lifecycle is historical")
+        if any(anchors[a].integrity != "valid" for a in node.anchors if a in anchors):
+            changed.add(node.id)
+            reasons[node.id].add("supporting anchor needs review")
+    for anchor in graph.anchors:
+        if anchor.integrity != "valid":
+            changed.add(anchor.id)
+            reasons[anchor.id].add("anchor source changed")
+    for edge in graph.edges:
+        if edge.relation == "supersedes":
+            historical.add(edge.target)
+            reasons[edge.target].add("explicitly superseded by " + edge.source)
+    for claim in graph.claims:
+        if claim.dimension in {"lifecycle", "applicability"} and claim.value in _HISTORICAL:
+            historical.add(claim.subject)
+            reasons[claim.subject].add("reviewed historical source claim")
+    for conflict in graph.conflicts:
+        if conflict.disposition == "unresolved":
+            conflicted.update(conflict.subjects)
+            for identity in conflict.subjects:
+                reasons[identity].add("unresolved registered conflict")
+    # A record sourced from a retired section does not regain authority merely
+    # because its own authored status still says active/open.
+    while True:
+        before = (len(historical), len(conflicted), len(changed))
+        for node in graph.nodes:
+            origins = [node.provenance.origin]
+            origins.extend(node.attributes[key] for key in ("authoritative_section", "source_section")
+                           if isinstance(node.attributes.get(key), str))
+            for origin in origins:
+                if origin == node.id:
+                    continue
+                if origin in historical:
+                    historical.add(node.id)
+                    reasons[node.id].add("governing origin is historical: " + origin)
+                if origin in conflicted:
+                    conflicted.add(node.id)
+                    reasons[node.id].add("governing origin is conflicted: " + origin)
+                if origin in changed:
+                    changed.add(node.id)
+                    reasons[node.id].add("governing origin needs review: " + origin)
+        if before == (len(historical), len(conflicted), len(changed)):
+            break
+    return {identity: EffectiveLifecycle("conflicted" if identity in conflicted else
+                                        "historical" if identity in historical else
+                                        "needs-review" if identity in changed else "current",
+                                        tuple(sorted(reasons[identity]))) for identity in reasons}
 
 
 def _document(root: Path, path: str, collections: set[str]) -> Mapping:
