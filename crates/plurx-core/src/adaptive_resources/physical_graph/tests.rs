@@ -9,7 +9,9 @@ fn vector(value: u64) -> ResourceVector {
     ResourceVector {
         cpu_ns_per_second: value,
         peak_memory_bytes: value,
-        handles: value,
+        // Every possible root reserves all three stdio pipe slots, even when
+        // this fixture elects to use null stdio. This is not extinction proof.
+        handles: value * 3,
         processes: value,
         hardware_slots: value,
         tuner_slots: value,

@@ -44,6 +44,15 @@ pub(super) struct SourceFile {
 }
 
 impl SourceFile {
+    pub(super) fn retained_read_bytes(&self) -> u64 {
+        match self.pending.as_ref().map(|pending| pending.kind) {
+            // A finished JoinHandle can still retain its unconsumed Vec. Charge
+            // the full requested allocation until complete consumes the result.
+            Some(OperationKind::Read { length, .. }) => length as u64,
+            _ => 0,
+        }
+    }
+
     /// Await by reference: losing the waiter never detaches an unretained task
     /// or drops a result containing the sole actual File.
     async fn complete(&mut self) -> io::Result<Vec<u8>> {
@@ -121,6 +130,15 @@ impl OwnedPhysicalGraph {
                 "physical graph sealed or source bound reached",
             ));
         }
+        budgets::check(
+            &self.ledger,
+            custody,
+            &members,
+            budgets::BudgetDelta {
+                sources: 1,
+                ..Default::default()
+            },
+        )?;
         begin_acquisition(&self.ledger, custody, &mut members)?;
         let file = Arc::new(FileMutex::new(None));
         let owned_file = Arc::clone(&file);
@@ -194,8 +212,17 @@ impl OwnedPhysicalGraph {
             }
             return member.complete().await;
         }
-        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let owned_file = Arc::clone(&member.file);
+        budgets::check(
+            &self.ledger,
+            custody,
+            &members,
+            budgets::BudgetDelta {
+                read_bytes: length as u64,
+                ..Default::default()
+            },
+        )?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let task = runtime.spawn_blocking(move || {
             let mut owner = owned_file
                 .lock()
@@ -209,6 +236,7 @@ impl OwnedPhysicalGraph {
             bytes.truncate(read);
             Ok(bytes)
         });
+        let member = &mut members.source_files[source.index];
         member.pending = Some(PendingOperation { kind, task });
         member.complete().await
     }

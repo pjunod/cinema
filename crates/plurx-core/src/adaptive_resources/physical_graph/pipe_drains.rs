@@ -9,7 +9,7 @@ use super::*;
 use tokio::io::AsyncReadExt;
 
 const BUFFER_BYTES: usize = 8192;
-const TASK_BYTES: u64 = (BUFFER_BYTES * 2) as u64;
+pub(super) const TASK_BYTES: u64 = (BUFFER_BYTES * 2) as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::adaptive_resources) struct GraphPipeDrain {
@@ -67,30 +67,16 @@ impl OwnedPhysicalGraph {
         {
             return Err(io::Error::other("pipe drain unavailable or already owned"));
         }
-        // Check charged headroom BEFORE taking a pipe or creating a task. This
-        // conservative handle bound covers all three pipe slots per actual root.
-        {
-            let state = self
-                .ledger
-                .inner
-                .lock()
-                .map_err(|_| io::Error::other("resource ledger unavailable"))?;
-            let entry = state
-                .entries
-                .get(&custody.binding.reservation)
-                .filter(|entry| entry.binding == custody.binding)
-                .ok_or_else(|| io::Error::other("physical reservation unavailable"))?;
-            let memory = (members.writers.len() as u64 + 1)
-                .checked_mul(TASK_BYTES)
-                .ok_or_else(|| io::Error::other("pipe drain budget overflow"))?;
-            let handles = (members.roots.len() as u64)
-                .checked_mul(3)
-                .and_then(|value| value.checked_add(members.source_files.len() as u64))
-                .ok_or_else(|| io::Error::other("pipe handle budget overflow"))?;
-            if entry.resources.peak_memory_bytes < memory || entry.resources.handles < handles {
-                return Err(io::Error::other("pipe drain exceeds charged budget"));
-            }
-        }
+        // Share headroom with every retained source read, not just other tasks.
+        budgets::check(
+            &self.ledger,
+            custody,
+            &members,
+            budgets::BudgetDelta {
+                drains: 1,
+                ..Default::default()
+            },
+        )?;
         // Validation must precede begin_acquisition; an invalid foreign root
         // cannot consume this named member or acquire through another graph.
         root_member(custody, &mut members, root)?;

@@ -8,7 +8,8 @@ fn vector(value: u64) -> ResourceVector {
     ResourceVector {
         cpu_ns_per_second: value,
         peak_memory_bytes: value,
-        handles: value,
+        // Three possible pipe slots per admitted root before native launch.
+        handles: value * 3,
         processes: value,
         hardware_slots: value,
         tuner_slots: value,

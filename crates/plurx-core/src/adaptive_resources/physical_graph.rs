@@ -25,6 +25,7 @@ use super::{
 use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, UnknownReason};
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
+mod budgets;
 mod source_files;
 pub use source_files::GraphSourceFile;
 mod pipe_drains;
@@ -302,6 +303,15 @@ impl OwnedPhysicalGraph {
                 "physical graph sealed or root bound reached",
             ));
         }
+        budgets::check(
+            &self.ledger,
+            custody,
+            &members,
+            budgets::BudgetDelta {
+                roots: 1,
+                ..Default::default()
+            },
+        )?;
         begin_acquisition_with_arm(&self.ledger, custody, &mut members, arm.as_ref())?;
         // A returned spawn error is NOT no-spawn proof, including attach/resume
         // failures inside the shared launcher. Ledger custody remains held.

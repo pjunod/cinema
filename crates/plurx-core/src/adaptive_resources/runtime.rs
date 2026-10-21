@@ -28,6 +28,16 @@ pub(super) struct DurableArm {
     generation: Uuid,
 }
 impl DurableArm {
+    /// Unit fixtures exercise physical adapter bounds without claiming a journal
+    /// commit. Absent from every production build; never recovery evidence.
+    #[cfg(test)]
+    pub(super) fn adapter_fixture(binding: ReservationBinding, generation: Uuid) -> Self {
+        Self {
+            binding,
+            generation,
+        }
+    }
+
     pub(super) fn matches(&self, binding: ReservationBinding, generation: Uuid) -> bool {
         self.binding == binding && self.generation == generation
     }

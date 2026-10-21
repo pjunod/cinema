@@ -1,6 +1,8 @@
 use super::*;
 use crate::adaptive_resources::{ResourceVector, WorkloadDemand};
 
+mod mixed_budgets;
+
 fn graph(handles: u64, memory: u64) -> (ResourceLedger, OwnedPhysicalGraph) {
     let resources = ResourceVector {
         handles,
