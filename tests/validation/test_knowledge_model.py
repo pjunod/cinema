@@ -273,7 +273,7 @@ depends_on=["provider"]
 
     def test_input_descriptor_keeps_history_membership_and_node_script(self):
         self.write("inputs.json", json.dumps({"version": 1, "families": [
-            {"id_prefix": "node:", "inputs": ["common.js"], "pathsets": ["tests/**/*.js"], "history": True, "reason": "Reviewed fixture"}]}))
+            {"id_prefix": "node:tests/check.js", "inputs": ["common.js"], "pathsets": ["tests/**/*.js"], "history": True, "reason": "Reviewed fixture"}]}))
         descriptor = input_descriptor(self.root, "node:tests/check.js", manifest="inputs.json")
         self.assertEqual(descriptor["inputs"], ["common.js", "tests/check.js"])
         self.assertEqual(descriptor["pathsets"], ["tests/**/*.js"])

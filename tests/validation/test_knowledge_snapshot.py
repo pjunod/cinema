@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from validation.knowledge import GraphData, KnowledgeError, Receipt, content_digest
+from validation.knowledge import GraphData, KnowledgeError, Receipt, content_digest, digest_bytes
 from validation.knowledge import index as index_module, model, snapshot as snapshot_module
 from validation.knowledge.evidence import assess
 from validation.knowledge.index import build, load
@@ -40,7 +40,7 @@ class KnowledgeSnapshotTests(unittest.TestCase):
         self.write("src/input.rs", "fn route() {}\n")
         self.write("src/check.rs", "fn checked() {}\n")
         self.write("src/dependency.txt", "dependency v1\n")
-        self.write(f"{FIXTURE_DOC_ROOT}/policy.md", "# Synthetic fixture\nNo real qualification.\n")
+        policy = self.write(f"{FIXTURE_DOC_ROOT}/policy.md", "# Synthetic fixture\nNo real qualification.\n")
         self.write("cases/one.json", "{}\n")
         self.write("validation/knowledge/pilot.json", json.dumps({
             "schema_version": 1, "repository": "plurx", "source_commit": "a" * 40,
@@ -70,8 +70,8 @@ reference="{FIXTURE_DOC_ROOT}/policy.md"
 method="reviewed"
 author="Synthetic fixture author"
 reviewer="Synthetic fixture reviewer"
-origin="validation/knowledge/records.toml"
-source_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+origin="{FIXTURE_DOC_ROOT}/policy.md"
+source_digest="{digest_bytes(policy.read_bytes())}"
 revision="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ''')
         self.write("tests/playback/routing-decisions.toml", '''version=1
