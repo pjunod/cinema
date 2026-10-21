@@ -22,12 +22,18 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest runtime `71b405efb` migrates ordinary VOD to exclusive slot reservation
+`71b405efb` migrates ordinary VOD to exclusive slot reservation
 BEFORE spawn, with child/job/admission and the ACTUAL stdout/diagnostic JoinHandle
 installed synchronously before registration awaits. Completion metadata runs outside
 that joined writer, so it cannot wait on its own reap. Registration/caller
 cancellation, factory panic and slot drop retain the task and narrow producer
 resources through actual wait/join. Abandoned old-generation reports are fenced.
+
+Latest `0c50b9593` makes diagnostic drain cancellation independent, keeps the
+original evidence deadline and joins actual aborted readers before settlement.
+Failed progress marks real diagnostics incomplete, never silently clean; absent
+optional progress stays valid. Rolling's earlier process-terminal latch is NOT
+full physical closure; its retirement/resource integration still remains.
 
 Retained `50e082555`/`cad6f18ae` supply the physical-reservation launcher/slot bridge,
 actual root controls/joins and graph-owned retained-role borrow. Atomic families
@@ -40,22 +46,20 @@ without a valid closure would permanently exhaust it; no fake refund is introduc
 Controller owns real Windows compiler transport and the exact local-journal
 ownership/transaction design, ordinary agent logistics rather than human gates.
 
-Retained `5160af863`/`8ddae0e39` capacity snapshots bind raw four-key intent and exact
-same-statement catalog/marker readiness. Verified Automatic alone ignores rollback
-cache; unknown installations keep numeric/zero policy. Narrow optional-schema
-fallback discards the entire failed snapshot; baseline/transport/step errors
-propagate. Admission digest v2 fences installation changes and old peers. SQLite
-already had coherent transactions; Hiqlite split authority reads were repaired.
+Retained `5160af863`/`8ddae0e39` bind raw intent/catalog readiness coherently;
+verified Automatic alone ignores rollback cache. Unknown installs keep numeric
+policy; optional-schema fallback drops the entire failed snapshot. Admission v2
+fences installation changes/old peers. Baseline/transport/step errors propagate.
 
 Earlier `e213a4c83` bounded instance-owned priors and `740f4f30a` advisory trial
 policy remain, not production growth authority. `ebf46fa55` generic provenance
 replay guards and independent settings/CAS/import installation remain intact.
-Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS118s (`162722`),
-SHA `263948a79a41b970353cb900fcfdc11755ff52a16e94847869d868ec1a358656`.
-Four new owned-task leaves plus strengthened actual VOD registration/panic bodies
-COMPILED, NOT RUN. Test-only Debug/lifetime compile failures (`162152`/`162523`)
-were corrected. Prior `50e082555` PASS79s (`153922`) remains source-scoped evidence
-in private `evidence/compile-run51.json`; successful checks were not replayed.
+Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS77s (`163417`),
+SHA `c91522032f204fc2d76d1b9c9f5f38d60ae85edadf09213020a748799ea32f17`.
+Eight new task/drain leaves and strengthened VOD/panic/deadline bodies COMPILED,
+NOT RUN. Earlier VOD PASS118s (`162722`) predates drain changes; test-only compile
+errors (`162152`/`162523`) were fixed. Private `evidence/compile-run52.json`
+retains receipts; no passing behavioral suite was run/replayed.
 Targeted rustfmt binds edition2021/skip_children. Native Linux e9 receipts remain
 e9-only; no new Linux or Windows containment qualification. M0–M7 remain incomplete.
 PR1248 stays draft; controller owns publication/status and review, then coordinates
