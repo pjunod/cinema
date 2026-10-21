@@ -88,6 +88,7 @@ def safe_relative(value: Any, *, pattern: bool = False) -> str:
 
 _PRIVATE_OR_GENERATED_PARTS = frozenset({
     ".git", ".ssh", ".aws", ".codex", ".hermes", "target", "node_modules",
+    "__pycache__", "evaluation-private",
 })
 _CREDENTIAL_NAMES = frozenset({
     "forgejo_token", ".ssh-deploy-key", "auth.json", "credentials", "credentials.json",
@@ -111,9 +112,19 @@ def _source_access_policy(relative: str) -> None:
     require(name not in _CREDENTIAL_NAMES or fixture, "credential source path refused outside fixtures")
 
 
-def source_path(root: Path, relative: str, *, exists: bool = True) -> Path:
-    relative = safe_relative(relative)
+def safe_source_relative(value: Any, *, pattern: bool = False) -> str:
+    """Shared lexical source policy for discovery, capture and guarded reads.
+
+    Glob patterns are checked lexically; every expanded path still needs this
+    guard plus the caller's positive scope and untracked/cache restrictions.
+    """
+    relative = safe_relative(value, pattern=pattern)
     _source_access_policy(relative)
+    return relative
+
+
+def source_path(root: Path, relative: str, *, exists: bool = True) -> Path:
+    relative = safe_source_relative(relative)
     root = root.resolve()
     path = root / relative
     resolved = path.resolve()
