@@ -146,6 +146,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [HEVC-COLOR-CORRUPTION-REVIEW.md](HEVC-COLOR-CORRUPTION-REVIEW.md) | Independent adversarial review of the HEVC color diagnosis and implementation, with objections, amendments and remaining delivery gates. | open |
 | [DV-P5-APPLE-START-REPAIR.md](DV-P5-APPLE-START-REPAIR.md) | Why a P5 Apple TV start fails before publication, the matching-tuple header repair, per-sample rolling guard, adversarial findings and qualification limits. | built |
 | [DV-DELIVERY-FINDINGS.md](DV-DELIVERY-FINDINGS.md) | Why Dolby Vision titles arrive as HDR10 or lower. | open |
+| [DV-SELECTION-PATHS.md](DV-SELECTION-PATHS.md) | Current DV delivery, enhancement, decoder/encoder, proof and fallback decisions; source/test anchors and acceptance limits. | live |
 | [DV_HDR_PROCESSING_PLAN.md](DV_HDR_PROCESSING_PLAN.md) | FEL-aware DV to HDR10 and Profile 7 to 8.1 proposal: quality measurements, controls and fallbacks. | open |
 | [DV_HDR_PROCESSING_BUILD.md](DV_HDR_PROCESSING_BUILD.md) | Sol 6.1 implementation handoff: backend feasibility, integration contracts, benchmarks and qualification. | open |
 | [DV_HDR_PROCESSING_REVIEW.md](DV_HDR_PROCESSING_REVIEW.md) | Adversarial findings and dispositions for the DV processing proposal and build handoff; cleared for M0 feasibility only. | done |
