@@ -9,67 +9,67 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066"
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
       },
       {
         "table": "08 worker acquisition and cleanup",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438"
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
       },
       {
         "table": "09 domain lease acquisition",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "let lease = match self.acquire_job(format!(\"scan:library:{library_id}\")).await {",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438"
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
       },
       {
         "table": "10 work iteration bound",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "for _ in 0..8 {",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438"
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
       },
       {
         "table": "11 lost reply resolution",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438"
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
       },
       {
         "table": "12 domain lease ttl heartbeat",

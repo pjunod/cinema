@@ -11,10 +11,10 @@ No whole-cluster deadlock theorem or removal of existing tests is claimed.
 
 | Deliverable | Owner | State |
 |---|---|---|
-| Source transitions, held resources and real conformance schedules | GPT-6 Luna | Building real storage and worker schedules; pinned 1.97.1 all-target daemon compile passed |
+| Source transitions, held resources and real conformance schedules | GPT-6 Luna | Committed seven real schedules and explicit gaps; pinned daemon/core compiles, Clippy and formatting pass |
 | Model scope, assumptions and correspondence design | Fable 5.1 | Design delivered; authority split, real-worker schedules and correspondence obligations recorded |
-| Two complete workers, temporal properties and controls | GPT-6.1 Sol | Building two full pipelines with shared durable requests and separate local locks |
-| Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Building third-package selection, correspondence validation and CI integration |
+| Two complete workers, temporal properties and controls | GPT-6.1 Sol | Committed 596-line model and 17 configurations; static SANY passed |
+| Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Integrated strict 57-action/18-boundary checks; all three source mappings pass static validation |
 | Integration, ledger, PR and exact-tree qualification | Codex coordinator | Owned clone established at `c2d5aa257` |
 | Independent final adversarial review | Fresh Fable 5.1 session | Runs once the complete candidate is frozen |
 
@@ -96,3 +96,26 @@ separate the local signal from durable authority; an expiry-only schedule
 cannot stand in for an ambiguous notification. Worker lifecycle probes are
 compiled only for tests, following the existing task-local fault-seam pattern.
 Spawned-heartbeat scope limitations remain explicitly unchecked where relevant.
+
+## 7. Candidate acceptance distinguishes observations from assumptions
+
+Seven inventoried Rust tests cover five actual daemon schedules and two
+backend schedules. The paired-worker daemon test includes contention and
+retry. Local queue-loss, domain-loss and admission-pressure schedules await
+the real processing future before cleanup; their barrier is before scanner
+dispatch, so they do not demonstrate joining a blocked filesystem walker.
+The lost completion acknowledgement schedule uses the actual worker reread.
+The backend captured-token example checks durable guards after local revoke;
+it does not observe a facade dispatch before that revoke. Rejection after
+durable release and higher-fence rebinding is checked independently.
+
+Ambiguous renewal, repeated release failures, spawned heartbeat ordering,
+durable queue expiry in the worker, actual blocked-child joins, arbitrary
+cancellation sites, migration and general shutdown remain explicit gaps.
+No existing tests are removed or declared redundant by these schedules.
+
+The workspace check caught a test-only release hook referencing a daemon-only
+module from shared lease source compiled by the cluster checker. The unused
+hook was removed, rather than adding another conditional build mechanism.
+Pinned cluster-check compilation and Clippy now pass. The integration hook
+will check the exact candidate across the workspace before review.

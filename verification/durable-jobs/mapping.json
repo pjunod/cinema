@@ -457,55 +457,55 @@
       },
       {
         "anchor": "async fn formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_binding_survives_independent_renewals_and_rejects_exact_stale_tokens"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_allocator_conflict_retries_same_authority_fresh_candidate"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_lost_acknowledgement_retains_commit_and_clears_facade"
       },
       {
         "anchor": "async fn formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_hiqlite_statement_zero_missing_output_is_fence_rejected_and_rolled_back"
       },
       {
         "anchor": "async fn formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_live_bound_insertion_commits_and_cancellation_orders_around_commit"
       },
       {
         "anchor": "async fn formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_queue_expiry_with_live_domain_rejects_at_backend_sample"
       },
       {
         "anchor": "async fn formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_reservations_owner_removal_and_binding_lifetime_follow_code_semantics"
       },
       {
         "anchor": "async fn formal_publication_resolved_claim_keeps_attempt_identity_through_insertion",
-        "sha256": "219053b3137bba26a847b0d87a2ae268d30d98ce761953f4c4ebd91baf7812c2",
+        "sha256": "3043bbf4faf8a85574543daacc5ef228dce4ac11a197f375f6dc00c9ae14ce22",
         "source": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "table": "M2 conformance test formal_publication_resolved_claim_keeps_attempt_identity_through_insertion"
       },
       {
         "anchor": "struct JobFence",
-        "sha256": "9d9b53e39f3c5380ffc2b8421dc3c08c37b3236382fbd2d3767598ada42c1066",
+        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b",
         "source": "crates/plurxd/src/background_jobs.rs",
         "table": "proposal \u00a74.1 runtime fence"
       },
@@ -517,25 +517,25 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438",
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
       {
         "anchor": "        let publisher = lease.publisher(self.store.as_ref());",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438",
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:257"
       },
       {
-        "anchor": "            Ok(true) => {}\n            result => {\n                tracing::warn!(library_id, ?result, \"library publication binding refused\");",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438",
+        "anchor": "            result => {\n                tracing::warn!(library_id, ?result, \"library publication binding refused\");\n                drop(publisher);\n                if let Err(error) = lease.release().await {",
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:260"
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "52f7d1f1728e4eea150754f27662023689b065da62b6a9a35e59bc8a5b2c8438",
+        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },
