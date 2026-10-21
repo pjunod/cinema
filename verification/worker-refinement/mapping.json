@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "model_file": "verification/worker-refinement/WorkerRefinement.tla",
-  "model_sha256": "c3e5f8bce35504020bb93c87fcbf3bd6315945250331923bb240316f813ba370",
+  "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "correspondence": {
     "path": "verification/worker-refinement/correspondence.json",
-    "sha256": "8df9e00e02299201bf1642a8fc2d4552aec118291cbcebeaf98a88114f077243"
+    "sha256": "b4759df3fcf5ebe361ff7962c1b31280145bf618596623f3790e69dddb68e294"
   },
   "configs": {
     "progress.cfg": {

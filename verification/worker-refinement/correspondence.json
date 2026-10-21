@@ -2,7 +2,7 @@
   "schema_version": 1,
   "status": "reviewed",
   "model_file": "verification/worker-refinement/WorkerRefinement.tla",
-  "model_sha256": "c3e5f8bce35504020bb93c87fcbf3bd6315945250331923bb240316f813ba370",
+  "model_sha256": "abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0",
   "tests": [
     {
       "id": "crates/plurxd/src/library_work.rs::tests::library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete",

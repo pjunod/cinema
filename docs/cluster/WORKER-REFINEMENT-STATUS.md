@@ -1,6 +1,6 @@
 # Worker refinement — connecting Rust execution to two-worker progress
 
-**Status:** review findings addressed; qualification pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator · **Branch:** `codex/worker-progress-refinement` · **PR:** [#1251](http://forge.lan:3000/noirr/plurx/pulls/1251), draft; coordinator owns qualification and merge.
+**Status:** built; qualification and landing receipt in PR #1251 · **Updated:** 2026-10-21 · **Owner:** Codex coordinator · **Branch:** `codex/worker-progress-refinement` · **PR:** [#1251](http://forge.lan:3000/noirr/plurx/pulls/1251); coordinator owns qualification and merge.
 
 Companion to [the previous progress ledger](OPERATION-PROGRESS-STATUS.md).
 This phase connects the selected library worker model to production Rust
@@ -16,7 +16,7 @@ No whole-cluster deadlock theorem or removal of existing tests is claimed.
 | Two complete workers, temporal properties and controls | GPT-6.1 Sol | Committed two-worker model; duplicate cancellation witnesses consolidated after review |
 | Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Integrated strict 57-action/18-boundary checks; all three source mappings pass static validation |
 | Integration, ledger, PR and exact-tree qualification | Codex coordinator | Owned clone established at `c2d5aa257` |
-| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings addressed; qualification fixture corrections integrated |
+| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings addressed; finite corrections and execution receipts recorded below |
 
 ## 2. Implementation correspondence is an explicit obligation
 
@@ -152,7 +152,7 @@ remain under correction. Passing compile/link checks are separate evidence.
 | C2 · dead stale term | Retained as the documented by-construction ordinary apply guard; no unrelated rewrite. |
 | C3 · cancellation after dispatched completion | Recorded ordering abstraction: model can settle then release, while Rust loss/pressure releases then yields. |
 | C4 · Retry versus Yield | Recorded omitted settlement-kind and failed-attempt accounting; no claim about retry metrics. |
-| C5 · model feasibility | Qualification runs the exact smoke pair out of band before relying on CI; timeout is failure. |
+| C5 · model feasibility | Both bounded positive attempts timed out. After observer projection, twelve configurations run locally and CI owns the two smoke outcomes, avoiding duplicate successful runs; all fourteen remain mandatory. |
 | C6 · 5.1-second delay | A real yield requires the production clock; the corrected queue-refusal fixture does not yield or incur its five-second delay. |
 | C7 · renewal fault overlap | Retain named actions for separate source boundaries; overlap is documented and harmless. |
 | C8 · selected cancellation | Contract explicitly limits the abstract signal to worker one and assumes no fair cancellation. |
@@ -166,36 +166,55 @@ specified changes and preserves that verdict rather than relabelling it
 reviewer approval. The next gate is affected qualification on the corrected
 candidate. Existing successful static checks remain identified separately.
 
-## 10. Qualification is running on the corrected candidate
+## 10. Qualification receipts and remaining obligations
 
-On `2ffb56b86`, the first Rust batch passed the three domain-loss,
-queue-loss and admission-pressure ordering tests. The paired-worker test
-missed a checkpoint and the reread assertion expected a storage label where
-the API projects a success label. Both core tests stopped on in-memory SQLite
-before Hiqlite: one terminal-result label assertion and one refused claim.
-The four failed tests have concrete assertion/admission fixture corrections;
-three passing cases are preserved using byte-equivalence evidence. No replicated-backend evidence is claimed yet.
-Formal qualification awaits the corrected candidate source pins. The draft PR records live progress and
-will stay draft until qualification and required main-gate preparation permit
-promotion. No failing result is counted as a pass.
+The [PR receipt](http://forge.lan:3000/noirr/plurx/pulls/1251) records the
+current candidate, owner, gate state, configuration counts and landing.
+This ledger distinguishes delivered implementation from its acceptance;
+source changes and model results are never interchangeable evidence.
 
-Qualification correction: the initial `progress.cfg` run hit its 300-second cap
-with 678,415 distinct states and 51,612 queued; it is incomplete, not a pass.
-Same-root `source_io` admission also prevents the originally proposed paired
-library-job fixture. Fable design task `t_3aed651f` supplied reachable schedules and bounded
-TLC feasibility advice; production admission remains intact.
-The initial ready-event CI attempt refused units after draft conversion.
+All **seven Rust functions have passing evidence**. Three cancellation
+schedules retain their original `2ffb56b86` results: the functions, eight
+helpers and relevant production paths are byte-identical. The paired queue
+admission and completion-acknowledgement cases passed on `eeecacddf`.
+The current-owner backend case also passed there; the corrected yield and
+replacement case passed on `5b212518`. Both backend cases invoke memory
+SQLite, file SQLite and the real three-voter Hiqlite contract harness with
+`hiqlite-contract-tests`. The integrated Rust file hashes match the final
+tested source. Failed attempts and a zero-test filter are retained separately.
 
-Design recovery `t_3aed651f` confirms two independent physical pools with
-shared durable admission: the second claim is refused, remains uncharged,
-and can retry after the first settles. The proposed TLC retry defers
-liveness analysis until graph completion, retains all properties and both
-pipelines, and is capped at 900 seconds. Incomplete execution will remain
-a failed qualification; simulation or safety-only runs cannot replace it.
+Qualification found concrete fixture errors, rather than a runtime defect:
+the paired worker originally could not pass singleton physical admission or
+the durable `source_io` guard; successful request state is `succeeded`, and
+an explicitly failed result is `failed`. Cancelling a job also cancels its
+waiter, so the replacement fixture uses the production five-second queue
+yield to free reservations while retaining pending demand. S2 isolates
+release with the queue token still current; S3 deliberately combines an
+obsolete queue token and changed domain owner.
 
-Current main `168fe74fb` is integrated. The lower-model equivalence audit
-confirms all three passing test functions, eight common helpers and relevant
-production worker paths are unchanged. The new node constructor is test-only
-fixture setup. All three source mappings pass static validation after
-refreshing verified fixture file hashes. Four failed checks await targeted
-reruns; no passing cancellation case will be repeated.
+The unchanged model hit both bounded positive limits: 300 seconds at
+678,415 distinct states / 51,612 queued, and 900 seconds at 4,162,006 /
+151,968 queued. Neither is a pass or a counterexample. The second used
+final-only liveness analysis and retained all properties.
+
+Fable design `t_336dc863` supplies the state projection and both directions
+of fair-execution lifting for unread `tick` and `item` bookkeeping. Sol
+removed only those fields and their updates; all worker stages, 57 actions,
+14 configuration bytes, fairness clauses, eligibility barriers and properties
+remain. The configured model hash is
+`abe9667c462b6275445f5c488456c208885e143e10bb0d017c20870cee63b3b0`.
+The argument is documented in the verification contract; it is not a
+machine-checked refinement theorem.
+
+The coordinator rejected that advice's checker-disable recommendation:
+inspection of the pinned TLC jar shows that an identical-state successor
+counts before duplicate filtering. `TimeObserved` still emits that explicit
+self-loop, so the existing global checker remains enabled and vacuous.
+The temporal properties and negative controls carry the progress evidence.
+
+The revised execution plan requires twelve local outcomes, then the two
+existing CI smoke outcomes (`progress.cfg` and `witness-both-complete.cfg`)
+and the current-candidate Main promotion gate. The PR records their actual
+results; incomplete exploration never qualifies. CI owns those two outcomes
+to avoid executing a successful local smoke twice. No additional test gate,
+product switch, watchdog or test deletion was introduced.

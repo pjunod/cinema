@@ -1,7 +1,7 @@
 # Worker refinement — run two complete workers against one domain
 
-**Status:** reviewed candidate with corrections; exhaustive qualification is
-incomplete. Before observation-state factoring, `progress.cfg` timed out at
+**Status:** implementation built; current qualification and landing receipt:
+[PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Before observation-state factoring, `progress.cfg` timed out at
 300 seconds (678,415 distinct states; 51,612 queued) and again at 900 seconds
 (4,162,006 distinct states; 151,968 queued). Neither run established a pass.
 The factored model requires all fourteen configured expected outcomes.

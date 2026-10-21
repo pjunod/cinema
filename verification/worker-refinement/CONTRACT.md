@@ -1,6 +1,7 @@
 # Worker refinement contract — qualify conditional progress and authority
 
-**Status:** reviewed candidate with corrections; exhaustive qualification remains incomplete.
+**Status:** implementation built; review corrections and current qualification
+receipt are recorded in [the project ledger](../../docs/cluster/WORKER-REFINEMENT-STATUS.md).
 Companion to [README.md](README.md), which owns commands and the configuration
 registry. The correspondence files own production anchors and schedule gaps.
 
