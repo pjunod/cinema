@@ -3,6 +3,8 @@
 Build: 271
 Issue: #1245
 
+**Status:** built; physical Apple TV acceptance pending.
+
 Movie and show libraries scroll their title, summary, search and letter index
 with the results. Only the compact tools remain fixed. The previous fixed
 preamble left a viewport shorter than a complete focused card, so native focus
