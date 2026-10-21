@@ -178,3 +178,23 @@ witness is required by the changed source/approval binding. New supported
 counts remain unset; no partial favorable study or token-saving claim follows.
 The refreshed source commitments and warm-cache correction are prepared,
 unexecuted, for the same Astra task's exact-content recheck.
+
+## Implementation closure — Astra R4 and bounded qualification
+
+Actual R4 **APPROVE** binds head `ac0f247b5edfd455a53a3aa35999b9b89cb550ed`,
+tree `56669c330f1459444a8f694f2af9ac89d0d306e6`, unchanged integration
+base and all six refreshed generic source hashes. Q1/Q2/Q3 are addressed in
+source; no new blocking finding. Report SHA-256
+`912a062ce439ca2173b9d418bb29dabda03932d947e4e05e201f2044801c0cff`;
+verdict `b3c722b90e6d906dbb4bb7f58ec86fcc96390e4021e316408080e72cac5fc273`.
+The coordinator independently verified exact reviewer identity, source hashes,
+clean candidate and seven retained test/behavior AST commitments.
+
+After that approval, all five selected private synthetic checks passed; seven
+unchanged prior passes remain retained. Cold CLI indexing measured 1.296 seconds;
+five warm queries measured 0.639–0.696 seconds with identical bounded answers.
+The fresh capability-only witness observed one supported and three unsupported
+bundle shapes, refusing the full study with every spending/credential/container/
+staging/cache spy untouched. This is not OS/dependency qualification or a token
+comparison. The original 0/4 witness, warm failure and fixture error remain
+historical evidence. Public fast-lane and landing state belong to the owning PR.

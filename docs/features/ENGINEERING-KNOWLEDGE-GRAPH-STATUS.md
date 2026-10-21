@@ -8,7 +8,7 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — post-review qualification corrections ready for recheck
+## Current work — source approved; local qualification recorded
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
@@ -19,13 +19,13 @@ updates are implementation status, not a new claim of Fable approval.
 
 | Owner | Scope | State / next action |
 |---|---|---|
-| Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; graph-record author | R3 source approved; warm-cache and nested-path corrections await the same Astra recheck. No private gold access. |
+| Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; graph-record author | R4 source approved; local qualification recorded. Owns the batched main PR and its current CI/merge state. No private gold access. |
 | Sol 6.1 curator A | Private routing gold; no source or graph-record writes | Done. Six routing cases sealed; independent B/C approval. |
 | Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | Done. Six evidence cases sealed; independent A/C approval. |
-| Sol 6.1 scorer C | Independent gold/rubric adjudication, private corpus projection and trusted study driver; no record writes | Projection independently approved; six generic source files frozen for exact recheck. No gold enters record-author or solver context. |
-| Sol 6.1 model/snapshot/query authors | M1–M3 model, adapters, snapshots and boundary-test drafts | Source integrated; R3 source approved, qualification corrections pending recheck. No gold access. |
-| Luna CLI/capture/skill authors | Thin CLI, capture-test drafts and repository skill | Source integrated; R3 source approved, qualification corrections pending recheck. |
-| Sol 6.1 evaluation/executor authors | Closed corpus proxy, finite budgets, result analysis and OCI boundary | Source integrated with synthetic/mock test drafts; review and runtime qualification pending. |
+| Sol 6.1 scorer C | Independent gold/rubric adjudication, private corpus projection and trusted study driver; no record writes | Projection independently approved; six exact generic source files independently approved; five affected synthetic checks passed, seven prior passes retained. No gold enters record-author or solver context. |
+| Sol 6.1 model/snapshot/query authors | M1–M3 model, adapters, snapshots and boundary-test drafts | R4 source approved; affected qualification recorded. No gold access. |
+| Luna CLI/capture/skill authors | Thin CLI, capture-test drafts and repository skill | R4 source approved; affected qualification recorded. |
+| Sol 6.1 evaluation/executor authors | Closed corpus proxy, finite budgets, result analysis and OCI boundary | R4 source approved; synthetic checks recorded. Full study unavailable until every runtime prerequisite qualifies. |
 | Luna source lookup | Existing governing passage candidates, read-only | Done. Seven bounded citations; no accepted cohort-specific review finding found. |
 | Luna | Mechanical skill-source lookup, read-only | Done. Only installed cache located; maintained source/update path unverified. |
 
@@ -38,17 +38,27 @@ stale/disputed cases are frozen. Gold answers, hidden mutations and rubric conte
 record-author and future solver corpora. Only verified digests/counts enter
 the public record after independent cross-adjudication.
 
-Astra returned **REQUEST_CHANGES** on candidate `ac7a72c9e` in Hermes
-`t_ff338f21`: eight findings concern receipt byte coverage, sealed semantic
-visibility, actual graph identity, acceptance infrastructure classification,
-thinking protocol settings, per-obligation scorer agreement, historical path
-authority and public token evidence. All eight source corrections are prepared for a
-same-task exact-source recheck. This is implementation review; the earlier
-Fable approval remains specification-only. No test or study result is implied.
-Astra R2 subsequently confirmed all eight corrections, then found R9 in the
-capability-only source loader. Its verified-buffer execution fix and inert
-cache/replacement controls are now frozen for the same-task narrow recheck.
-No public graph/query or product source changed for R9.
+Astra R1 requested eight source corrections; R2 confirmed those and found
+R9 in the generic loader. R3 approved R9's exact-buffer execution fix.
+Post-review qualification then exposed warm rebuild cost, one Mock interface
+error and nested grader-path wiring. R4 independently approved all three
+corrections at `ac0f247b5edfd455a53a3aa35999b9b89cb550ed`, tree
+`56669c330f1459444a8f694f2af9ac89d0d306e6`, with all six generic sources
+verified. This is source approval, separate from runtime and merge evidence.
+
+Actual qualification after R4: five affected private synthetic checks passed;
+seven unaffected prior passes were retained by exact test/behavior AST
+commitments. Fresh-cache indexing took **1.296 seconds**; five warm CLI
+queries took **0.639–0.696 seconds**, each returning identical 7,991-byte
+answers. Both pilot latency targets were met in this bounded local sample;
+it does not establish a population P95. Historical failed timings and the
+original fixture error remain preserved, rather than overwritten.
+
+The fresh capability-only witness recognized **one of four bundle shapes**
+and refused the full study before provider, token-count, credential, container,
+staging or acceptance-cache use. The three imported-Python/Rust mechanisms
+remain unavailable. This verifies capability refusal, not actual dependency
+or OS isolation. No model study or token-saving claim follows.
 
 ## Milestone acceptance — distinguish source from qualification
 
@@ -58,11 +68,11 @@ No public graph/query or product source changed for R9.
 | M0 skill | Installed cache found, maintained source unknown | Carry repository-owned skill and small amendment; do not edit cache. |
 | M0 feasibility | Initial three approved by two nonauthor reviewers each, zero blockers | Complete. Initial authoring timestamp gaps are explicit; measured review effort is 5.965 minutes, initial authoring conservative wall-time bound is ten minutes. No execution occurred. |
 | M0 seal | Complete. Safe metadata SHA-256 `9c4c69510a157c6bd280c078515f395c258d1ec32d0a75c9600c69dafff23c51` | Runtime isolation and budget activation remain final-harness acceptance; the seal does not claim execution. |
-| M1 | Typed schema, read-only adapters and 27 reviewed semantic records authored independently of gold | Final adversarial review and focused checks pending. Actual review-finding/execution evidence gaps are explicit; no invented records. |
-| M2 | Snapshot isolation, rebuildable SQLite index and separate evidence dimensions implemented | R3 source approved; warm-cache correction awaiting recheck. Canonical proof closure remains independent of retrieval scope. |
-| M3 | Bounded traversal, continuation binding and CLI implemented | R3 source approved; warm latency failed and correction awaits recheck. |
-| M4 | Advisory capture, preflight body wiring and repository skill implemented | Final review and fast lane pending. Maintained personal-skill installation remains unknown; amendment supplied. |
-| M5 | Harness/provider, visibility projection, OCI executor and concrete trusted driver source prepared; clean corpus export independently approved | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
+| M1 | Typed schema, read-only adapters and 27 reviewed semantic records authored independently of gold | R4 source approved; actual review-finding/execution evidence gaps remain explicit. Public check evidence is recorded in the owning PR. |
+| M2 | Snapshot isolation, rebuildable SQLite index and separate evidence dimensions implemented | R4 warm-cache correction approved. Canonical proof closure remains independent of retrieval scope; check evidence is recorded in the owning PR. |
+| M3 | Bounded traversal, continuation binding and CLI implemented | R4 source approved; corrected cold/warm local timings meet pilot targets. Public boundary checks are recorded in the owning PR. |
+| M4 | Advisory capture, preflight body wiring and repository skill implemented | R4 source approved; capture remains advisory. Maintained personal-skill installation remains unknown; amendment supplied. |
+| M5 | Harness/provider, visibility projection, OCI executor and concrete trusted driver source prepared; clean corpus export independently approved | Capability-only refusal observed (1/4 supported); no provider, scored run or savings result. Full comparison is inconclusive while three families and runtime containment remain unavailable. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
 
 Timing is recorded as shared agent-session wall intervals, including waits,
@@ -70,24 +80,13 @@ not exclusive person-time or human labeling cost. Initial authoring lacks
 start timestamps; the conservative bound is retained without inventing a
 measurement. Later record curation must retain its own timing.
 
-Astra R3 approved exact candidate `54ef1c02c` and its six generic sources.
-The subsequent private synthetic batch passed eight of nine tests; one
-admission Mock interface error is corrected but not retried. Seven passes
-remain unaffected; a family-protocol pass is invalidated by the path correction.
-Cold indexing measured 2.562 seconds (five-second target); repeated queries
-measured 2.045–2.103 seconds, missing the one-second warm target. The profile
-identified repeated parsing and membership scans; the new authenticated local
-cache revalidates source, repository and environment identity before reuse.
-
-The actual capability-only witness observed zero of four supported bundles,
-with all spending, credential, container, staging and cache spies untouched.
-Its nested grader-path wiring bug is corrected consistently in export,
-dispatch and driver source. Frozen commands, artifacts and Gold are unchanged.
-Three other family mechanisms remain unimplemented; the full comparison is
-unavailable and establishes no savings. Revised sources require the same
-Astra task's approval before five affected private checks, a fresh capability
-witness and latency measurements. No public unit suite, CI workflow, container,
-provider call or hardware campaign has run. Toolchain/image identities were read only. The approved plan's earlier 28 doc
+No public unit suite or CI workflow had run at this qualification snapshot.
+The owning PR records current fast-lane results, exact candidate identity and
+landing state; those live results supersede this dated pre-publication snapshot.
+The repository skill format validator passed using an isolated YAML dependency;
+initial missing-dependency attempts ran no validation. No installed skill was edited.
+No container, provider call or hardware campaign has run.
+The approved plan's earlier 28 doc
 checks remain historical evidence for that reviewed document revision.
 
 ## Execution decisions — latest owner instructions govern
@@ -173,7 +172,7 @@ witnesses bind source bytes as well as membership. Acceptance requires an
 exact-family prerequisite and trusted completed outcome. An earlier static claim of one supported inert-byte bundle was overbroad:
 the actual witness observed zero of four because nested grader identities were
 flattened. Revised source preserves those identities; its actual supported
-count is unset pending a new approved witness. Three imported-Python/Rust
+count was unset at the source freeze; the subsequent R4 witness observed one supported shape. Three imported-Python/Rust
 mechanisms remain unsupported. The full frozen study refuses model spending until every family
 qualifies. A capability-refusal witness is separate from OS/dependency proof.
 This may yield an explicit inconclusive evaluation; it cannot yield savings.
@@ -181,19 +180,21 @@ Main remains `00c74cd8c` at recheck freeze; study baseline remains unchanged.
 
 ## Publication — one owner and an honest landing state
 
-Owner: Codex integrator. PR: not opened; this avoids spending draft-CI units
-before the owner's requested final review/test point. The branch will carry
-coherent commits and one batched main-bound PR, with owner, exact head,
-review state, failed/passing evidence and next action updated in its body
-and comments. The dated workflow correction in the current development pipeline confirms
-main-bound fast-lane promotion after review; older full-promotion prose is
-superseded there. The actual workflow still runs paperwork for drafts, so
-keeping the branch without a PR avoids that early expenditure.
+Owner: Codex integrator, branch `effort/engineering-knowledge-pilot`. One
+batched main-bound PR carries the current head, independent source-review
+identity, failed/passing evidence, next action and merge state in its body
+and comments. Its authenticated fast-lane journals are authoritative for
+public unit and compile evidence. Missing, ambiguous or stale receipts are
+not passes; only failed or genuinely invalidated checks repeat. The current
+development pipeline's dated correction selects main-bound fast-lane promotion.
+
 Generic study-driver sources are retained privately by exact
 [review-input commitments](../../validation/knowledge/evaluation-driver-source.json);
 they contain no gold literals, and runtime still requires reviewed source,
 queued admission, calibrated finite budget and observed isolation/toolchain
-proof. Same-task independent source recheck is the next action; the earlier R3
-approval applies only to its exact source, not these qualification corrections.
-No merge or deployment has occurred. Any pause after a PR
-exists must end with a current status update on that PR.
+proof. R4 source approval is exact-content; later qualification ledger updates do
+not imply an independent review of those historical facts. Runtime still
+requires every declared prerequisite; the unavailable study is not run.
+At this dated qualification snapshot no merge or deployment had occurred.
+The owning PR records subsequent landing state. Any pause with an open PR
+ends with its current status update.

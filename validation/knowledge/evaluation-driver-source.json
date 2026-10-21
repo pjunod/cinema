@@ -22,9 +22,23 @@
     ],
     "actual_prior_witness_supported_shapes": 0,
     "actual_prior_witness_unsupported_shapes": 4,
-    "revised_source_supported_shapes": null,
-    "revised_source_unsupported_shapes": null
+    "revised_source_supported_shapes": 1,
+    "revised_source_unsupported_shapes": 3
   },
-  "qualification": "R3 source approved; prior capability-only witness unavailable (0/4 supported), no runtime qualification; revised source pending same-task review and fresh witness",
-  "prerequisite_only_witness": "Review-gated capability refusal only; no OS/dependency qualification or paid study evidence."
+  "qualification": "Actual R4 capability-only witness: unavailable, one supported inert-byte shape and three unsupported shapes; zero provider/count/credential/container/staging/cache calls. No OS/dependency qualification or comparative savings.",
+  "prerequisite_only_witness": "Review-gated capability refusal only; no OS/dependency qualification or paid study evidence.",
+  "observed_qualification": {
+    "source_review_head": "ac0f247b5edfd455a53a3aa35999b9b89cb550ed",
+    "review_report_sha256": "912a062ce439ca2173b9d418bb29dabda03932d947e4e05e201f2044801c0cff",
+    "review_verdict_sha256": "b3c722b90e6d906dbb4bb7f58ec86fcc96390e4021e316408080e72cac5fc273",
+    "capability_report_sha256": "cda82ae7fbb2f7ede900e01e7543eb257b204fc01941d4da6c4a46b327ae8468",
+    "private_synthetic_current_passes": 5,
+    "private_synthetic_unchanged_prior_passes_retained": 7,
+    "cold_index_seconds": 1.295690790982917,
+    "warm_query_sample_max_seconds": 0.6964027499780059,
+    "warm_query_samples": 5,
+    "population_p95_established": false,
+    "full_comparison": "inconclusive: unavailable frozen acceptance families",
+    "token_savings_established": false
+  }
 }
