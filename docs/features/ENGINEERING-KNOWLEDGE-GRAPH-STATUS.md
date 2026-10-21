@@ -20,8 +20,9 @@ updates are implementation status, not a new claim of Fable approval.
 | Owner | Scope | State / next action |
 |---|---|---|
 | Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; later graph-record author | Active. Must not read private gold answers. |
-| Sol 6.1 curator A | Private routing gold; no source or graph-record writes | P02 feasibility case in progress. |
-| Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | E02/E06 feasibility cases in progress. |
+| Sol 6.1 curator A | Private routing gold; no source or graph-record writes | Initial P02 passed; expanding remaining five routing cases. |
+| Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | Initial E02/E06 passed; expanding remaining four evidence cases. |
+| Sol 6.1 scorer C | Independent static gold/rubric adjudication; no record writes | Initial three approved; will adjudicate all twelve. |
 | Luna | Mechanical skill-source lookup, read-only | Done. Only installed cache located; maintained source/update path unverified. |
 
 M0 manifest: [pilot.json](../../validation/knowledge/pilot.json). It contains
@@ -34,9 +35,9 @@ the public record after independent cross-adjudication.
 
 | Stage | Actual state | Remaining acceptance |
 |---|---|---|
-| M0 baseline | Current main pinned; 68 exact-schema routing rows and six selected IDs verified | Revalidate selected anchor/signature provenance; initial three gold lists, then all twelve independently sealed. |
+| M0 baseline | Current main pinned; 68 exact-schema routing rows and six selected IDs verified | Anchors/signatures revalidated against frozen source. All twelve cases must be independently sealed. |
 | M0 skill | Installed cache found, maintained source unknown | Carry repository-owned skill and small amendment; do not edit cache. |
-| M0 feasibility | Three cases assigned to independent curators | Cross-adjudication, measured curation effort and pass/fail feasibility receipt. |
+| M0 feasibility | Initial three approved by two nonauthor reviewers each, zero blockers | Complete. Initial authoring timestamp gaps are explicit; measured review effort is 5.965 minutes, initial authoring conservative wall-time bound is ten minutes. No execution occurred. |
 | M0 seal | Not sealed | Freeze all cases, corpus identities, gold/rubric commitments and evaluator-role isolation before M1. |
 | M1–M5 | Not started | M0 acceptance first; implementation then final review/fixes/fast lane. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
@@ -73,11 +74,27 @@ folder without tool isolation alone is not sufficient.
 run, finite aggregate ceiling and frozen model/budget. M0 does not purchase
 credits, use a reset, start a paid benchmark or treat unset budget as zero.
 
+**D05, 2026-10-21:** M0 freezes source, cases and scoring before graph authoring.
+The measured benchmark budget cannot be calibrated against a harness that does
+not exist until M5. Calibration and activation therefore occur on the final
+reviewed candidate, within an explicit finite envelope, before any scored
+run. This clarifies §9.2 timing without authorizing unset or unlimited spend;
+all runtime evaluation remains blocked until that receipt exists. Runtime
+files use durable owned storage and bytecode writes are disabled.
+
+**D06, 2026-10-21:** The refreshed main baseline already assigned P34 to
+operation-progress verification. This pilot uses P35; the existing project
+identity and row remain untouched.
+
 ## Publication — one owner and an honest landing state
 
 Owner: Codex integrator. PR: not opened; this avoids spending draft-CI units
 before the owner's requested final review/test point. The branch will carry
 coherent commits and one batched main-bound PR, with owner, exact head,
 review state, failed/passing evidence and next action updated in its body
-and comments. No merge or deployment has occurred. Any pause after a PR
+and comments. The dated workflow correction in the current development pipeline confirms
+main-bound fast-lane promotion after review; older full-promotion prose is
+superseded there. The actual workflow still runs paperwork for drafts, so
+keeping the branch without a PR avoids that early expenditure.
+No merge or deployment has occurred. Any pause after a PR
 exists must end with a current status update on that PR.

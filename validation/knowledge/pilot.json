@@ -2,7 +2,7 @@
   "schema_version": 1,
   "repository": "plurx",
   "milestone": "M0",
-  "state": "feasibility-in-progress",
+  "state": "expanding-after-feasibility",
   "source_commit": "168fe74fb2a47f3ccd56b795741dfe3422307b0d",
   "source_tree": "ea8c9c283a71b67bf773511144eb3ee7ab09ee9c",
   "approved_specification_sha256": "473d391e9b6a1e20ea1ecdd9d93b46339e69ba31923bd85f60bcc6a534d2821c",
@@ -143,7 +143,10 @@
     "rubric_commitment": null,
     "solver_model": "not-selected-before-seal",
     "aggregate_execution_ceiling": null,
-    "execution_state": "not-authorized-until-measured-dry-run-and-finite-ceiling"
+    "execution_state": "not-authorized-until-measured-dry-run-and-finite-ceiling",
+    "budget_activation_milestone": "final-candidate-after-adversarial-review",
+    "durable_runtime_directory_required": true,
+    "disable_bytecode_writes": true
   },
   "skill_integration": {
     "maintained_house_skill_source": "unverified",
@@ -162,5 +165,122 @@
     "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md": "4f31ed6a1a60805704293f0f57fb1a4f2b100141f3bef107e8eb7d10f5fda0d7",
     "docs/DEVELOPMENT_PIPELINE.md": "0315f39c6328f64d062c35b59469ae0e7c414c17514c28a071465018a6d0bdc5",
     "AGENTS.md": "b9cdc27e00ab26459505b289b6acfefe7c762aa51aa3f19d2f8dad2a9b74bb1d"
-  }
+  },
+  "source_archive": {
+    "format": "git-archive-tar-gzip",
+    "sha256": "47e8b056e8ba21450a5320aa7993c99ddb8c43df0fce94fa31d657882d323c19",
+    "bytes": 95311517,
+    "git_objects_included": false,
+    "credentials_included": false,
+    "solver_export": "allowlisted-source-with-fresh-history-required"
+  },
+  "feasibility": {
+    "state": "approved-static-only",
+    "cases": [
+      "P02",
+      "E02",
+      "E06"
+    ],
+    "independent_nonauthor_reviews_per_case": 2,
+    "blocking_findings": 0,
+    "second_reviewer_report_sha256": "d6ec453e9254d58e13ce8b8dc7bba3ff642649c200537fd239543b4c3ce95fda",
+    "author_a_cross_review_sha256": "dbcd0819e1eed40070c82426a311806d22c758808f8ba17b6b489a896d838ccd",
+    "author_b_cross_review_sha256": "3f1fec7f41e8ad305683789ba84b89751de38d866c2f85d1a643571c4c900885",
+    "initial_authoring_minutes": null,
+    "initial_authoring_wall_time_upper_bound_minutes": 10,
+    "authoring_measurement_limit": "Initial authors did not capture start timestamps; conservative wall-time bound includes coordinator overhead, not measured person-time.",
+    "measured_review_minutes": 5.9654,
+    "eight_person_hour_stop_cap_exceeded": false,
+    "acceptance_execution": "not-run"
+  },
+  "task_outlines": [
+    {
+      "id": "M0",
+      "owner": "integrator-and-independent-curators",
+      "output": [
+        "pilot.json",
+        "private-evaluator-seal",
+        "live-status"
+      ],
+      "gate": "twelve-cases-and-rubric-sealed-before-record-authoring"
+    },
+    {
+      "id": "M1",
+      "owner": "model-and-record-authors-independent-of-gold",
+      "output": [
+        "model",
+        "read-only-adapters",
+        "records.toml",
+        "coverage.toml",
+        "conflicts.toml",
+        "model-tests"
+      ],
+      "depends_on": [
+        "M0"
+      ]
+    },
+    {
+      "id": "M2",
+      "owner": "snapshot-and-index-author",
+      "output": [
+        "snapshot",
+        "sqlite-index",
+        "evidence-applicability",
+        "snapshot-tests"
+      ],
+      "depends_on": [
+        "M1"
+      ]
+    },
+    {
+      "id": "M3",
+      "owner": "query-and-cli-author",
+      "output": [
+        "bounded-query-api",
+        "scripts/knowledge",
+        "query-tests"
+      ],
+      "depends_on": [
+        "M2"
+      ]
+    },
+    {
+      "id": "M4",
+      "owner": "integrator",
+      "output": [
+        "advisory-capture",
+        "catalog-and-input-descriptors",
+        "repository-skill",
+        "house-skill-amendment",
+        "capture-tests"
+      ],
+      "depends_on": [
+        "M3"
+      ]
+    },
+    {
+      "id": "M5",
+      "owner": "independent-evaluators-and-integrator",
+      "output": [
+        "isolated-harness",
+        "comparative-result-or-explicitly-inconclusive",
+        "final-review-and-fast-lane"
+      ],
+      "depends_on": [
+        "M4"
+      ]
+    },
+    {
+      "id": "M5b",
+      "owner": "maintainer",
+      "output": [
+        "dated-post-landing-process-decision"
+      ],
+      "depends_on": [
+        "M4-landed",
+        "ten-eligible-prs",
+        "fourteen-days"
+      ]
+    }
+  ]
 }
