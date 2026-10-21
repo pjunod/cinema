@@ -16,9 +16,9 @@ Init ==
        stopH |-> FALSE, stopQ |-> FALSE, call |-> "none", kind |-> "none",
        waiting |-> FALSE, detached |-> "none", detachedCurrent |-> FALSE,
        detachedTrue |-> FALSE, detachedKind |-> "none", settled |-> FALSE, walk |-> "none",
-       afterSettle |-> "release_join", eligible |-> TRUE, tick |-> FALSE,
+       afterSettle |-> "release_join", eligible |-> TRUE,
        lostAck |-> FALSE, reconciled |-> FALSE, cleaned |-> FALSE,
-       item |-> FALSE, completedOnce |-> FALSE, cleanedOnce |-> FALSE,
+       completedOnce |-> FALSE, cleanedOnce |-> FALSE,
        overlapPhase |-> 0, overlapReached |-> FALSE, staleCommit |-> FALSE, lateBeforeRelease |-> FALSE, staleRejected |-> FALSE]]
   /\ domainOwner = "none"
   /\ request = [w \in Workers |-> "pending"]
@@ -100,7 +100,6 @@ StoreApply(w) ==
        !.relation = IF s.kind = "domain" /\ domainOwner = "none" THEN "current"
                     ELSE IF s.kind = "release" THEN "none" ELSE @,
        !.bound = IF s.kind = "bind" THEN s.domain /\ domainOwner = w /\ s.qlive ELSE @,
-       !.item = IF s.kind = "item" /\ DurableOwner(w) THEN TRUE ELSE @,
        !.overlapPhase = IF Scenario = "overlap" /\ w = "w1" /\ s.kind = "release" /\ domainOwner = w THEN 1
                         ELSE IF Scenario = "overlap" /\ w = "w1" /\ s.kind = "domain" /\ domainOwner = "none" /\ s.overlapPhase = 2 THEN 3 ELSE @,
        !.overlapReached = s.overlapReached \/ (Scenario = "overlap" /\ w = "w1" /\ s.kind = "domain" /\ domainOwner = "none" /\ s.overlapPhase = 2),
@@ -414,7 +413,7 @@ QueueExpiry(w) ==
   /\ UNCHANGED <<domainOwner, request, waiter, parity>>
 TimeObserved(w) ==
   LET s == workers[w] IN
-  /\ workers' = [workers EXCEPT ![w] = [s EXCEPT !.tick = ~@, !.eligible = TRUE]]
+  /\ workers' = [workers EXCEPT ![w] = [s EXCEPT !.eligible = TRUE]]
   /\ UNCHANGED <<domainOwner, request, waiter, parity>>
 Wake(w) ==
   LET s == workers[w] IN
