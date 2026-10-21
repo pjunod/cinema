@@ -1,6 +1,6 @@
 # Engineering knowledge graph — trace code to intent and evidence
 
-**Status:** M0 in progress, graph implementation not started · **Written:** 2026-10-21 ·
+**Status:** M0 frozen, graph implementation not started · **Written:** 2026-10-21 ·
 **Executes:** the owner's request for a bounded plurx pilot incorporating
 Astra's assessment and Fable 5.1's independent review · **Owner:** Codex integrator
 
@@ -598,7 +598,7 @@ them. Earlier percentage estimates remain unmeasured hypotheses.
 
 | Milestone | Implementation | Acceptance / remaining evidence |
 |---|---|---|
-| M0 | Active; Codex integrator, owned effort branch. | Main baseline pinned; private three-list feasibility underway. Twelve gold/rubric commitments pending. See [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md). |
+| M0 | Frozen; Codex integrator, owned effort branch. | Twelve gold/rubric commitments sealed with 24 independent approvals and zero blockers. Source, cases and scoring frozen; runtime budget/isolation remain M5 acceptance. See [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md). |
 | M1–M2 | Not started. | Schema/adapters, dependency-aware snapshots and honest evidence states. |
 | M3–M4 | Not started. | Multi-hop queries, bounded output, scoped capture, skill integration and current gate. |
 | M5 | Not started. | Frozen comparative runs and all-in cost; capture stays advisory. |
