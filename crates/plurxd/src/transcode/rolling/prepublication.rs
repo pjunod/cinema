@@ -531,12 +531,12 @@ pub(super) async fn terminate_exact_prepublication_child(
         .map_err(|error| format!("terminating producer attempt {producer_attempt}: {error}"))?;
     tokio::time::timeout(
         PREPUBLICATION_REAP_ATTEMPT_TIMEOUT,
-        child.wait_for_terminal(),
+        child.wait_for_settlement(),
     )
     .await
     .map_err(|_| {
         format!(
-            "producer attempt {producer_attempt} reap exceeded {:?}",
+            "producer attempt {producer_attempt} task settlement exceeded {:?}",
             PREPUBLICATION_REAP_ATTEMPT_TIMEOUT
         )
     })?
@@ -550,16 +550,10 @@ pub(super) async fn terminate_exact_prepublication_child(
             "producer attempt {producer_attempt} termination returned before confirmed reap"
         ));
     }
-    // The diagnostics are deliberately left alone here. The child's supervisor
-    // owns them: it is the one task that knows how the process actually ended,
-    // so it derives the disposition rather than assuming one, and it holds no
-    // session lock while it settles. Taking them here would be a race for the
-    // same handle — whoever won would decide whether the attempt got a receipt
-    // at all — and two of this function's callers hold `child_transition`
-    // across the call, whose own comment forbids sleeping under it.
-    //
-    // The child is confirmed reaped by this point, so the supervisor's own
-    // `wait` has already returned and its settle is imminent.
+    // The supervisor exclusively owns diagnostics and derives the actual exit
+    // disposition. Its task has now been joined, not merely scheduled to drain
+    // after root exit. An expired cleanup wait keeps the child slot and its
+    // join handle intact for retry; no competing caller takes the readers.
     *slot = None;
     Ok(())
 }

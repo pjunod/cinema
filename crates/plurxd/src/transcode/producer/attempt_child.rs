@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "attempt_child/settlement_tests.rs"]
+mod settlement_tests;
+
 /// Immutable publication identity for the cache location behind a session.
 ///
 /// Integrity failures remove the row with all five fields as a compare-and-
@@ -461,11 +465,40 @@ pub(super) struct AttemptChild {
     /// scoped to one attempt: a successor gets its own counters, and a
     /// predecessor's fault must not follow the attempt that replaced it.
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
+    #[cfg(test)]
     terminal_notify: Arc<tokio::sync::Notify>,
+    /// Actual supervisor ownership is separate from its early process latch.
+    /// Cleanup must join this task, including its diagnostic drain and job
+    /// lifetime, before dropping the slot or returning legacy admission.
+    supervisor: tokio::sync::Mutex<AttemptSupervisorJoin>,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
     /// The supervisor's pause points; see [`AttemptChildHooks`]. The supervisor
     /// task runs through a clone of this one.
+    #[cfg(test)]
     hooks: Arc<dyn AttemptChildHooks>,
+}
+
+enum AttemptSupervisorJoin {
+    Running(tokio::task::JoinHandle<()>),
+    Joined(Result<(), String>),
+}
+
+impl AttemptSupervisorJoin {
+    async fn settle(&mut self) -> std::io::Result<()> {
+        if let Self::Running(task) = self {
+            // Borrow, never take, across the await. A cancelled or timed-out
+            // cleanup leaves the same actual task available for the next try.
+            let result = task.await.map_err(|error| error.to_string());
+            *self = Self::Joined(result);
+        }
+        match self {
+            Self::Joined(Ok(())) => Ok(()),
+            Self::Joined(Err(error)) => Err(std::io::Error::other(format!(
+                "producer supervisor failed before task settlement: {error}"
+            ))),
+            Self::Running(_) => unreachable!("supervisor join has completed"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -566,16 +599,8 @@ impl AttemptChild {
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let supervisor_terminal = Arc::clone(&terminal);
         let supervisor_terminal_notify = Arc::clone(&terminal_notify);
-        let this = Self {
-            producer_attempt,
-            pid,
-            terminal,
-            terminal_notify,
-            commands,
-            hooks,
-        };
-        let supervisor_hooks = Arc::clone(&this.hooks);
-        tokio::spawn(async move {
+        let supervisor_hooks = Arc::clone(&hooks);
+        let supervisor = tokio::spawn(async move {
             let _child_job = child_job;
             let mut command_open = true;
             let mut terminate_replies = Vec::new();
@@ -719,7 +744,17 @@ impl AttemptChild {
                 supervisor_control.observe_producer_diagnostics_complete(producer_attempt, receipt);
             }
         });
-        this
+        Self {
+            producer_attempt,
+            pid,
+            terminal,
+            #[cfg(test)]
+            terminal_notify,
+            supervisor: tokio::sync::Mutex::new(AttemptSupervisorJoin::Running(supervisor)),
+            commands,
+            #[cfg(test)]
+            hooks,
+        }
     }
 
     /// How this attempt's process ended, in the receipt's vocabulary.
@@ -911,6 +946,7 @@ impl AttemptChild {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) async fn wait_for_terminal(&self) -> std::io::Result<()> {
         loop {
             let notified = self.terminal_notify.notified();
@@ -924,6 +960,14 @@ impl AttemptChild {
             }
             notified.await;
         }
+    }
+
+    /// Join the actual supervisor, not just its earlier process-exit notice.
+    /// This proves only task/drain settlement and the root's observed wait;
+    /// it is not a descendant-containment or physical-ledger close receipt.
+    pub(super) async fn wait_for_settlement(&self) -> std::io::Result<()> {
+        self.supervisor.lock().await.settle().await?;
+        self.terminal_result_or_broken_pipe("producer supervisor joined without a terminal result")
     }
 
     fn terminal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<()> {
@@ -982,6 +1026,19 @@ impl Drop for AttemptChild {
         let _ = self
             .commands
             .send(AttemptChildCommand::Terminate { reply: None });
+        // Abandonment transfers the actual join to a cancellation-independent
+        // owner; it never mints a settlement result or returns admission.
+        let supervisor = std::mem::replace(
+            self.supervisor.get_mut(),
+            AttemptSupervisorJoin::Joined(Err("producer owner dropped".to_owned())),
+        );
+        if let AttemptSupervisorJoin::Running(supervisor) = supervisor {
+            tokio::spawn(async move {
+                if let Err(error) = supervisor.await {
+                    tracing::error!(%error, "abandoned producer supervisor failed during join");
+                }
+            });
+        }
     }
 }
 

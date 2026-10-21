@@ -46,12 +46,12 @@ async fn settle_exact_published_child(
     }
     tokio::time::timeout(
         PREPUBLICATION_REAP_ATTEMPT_TIMEOUT,
-        child.wait_for_terminal(),
+        child.wait_for_settlement(),
     )
     .await
     .map_err(|_| {
         format!(
-            "producer attempt {producer_attempt} reap exceeded {:?}",
+            "producer attempt {producer_attempt} task settlement exceeded {:?}",
             PREPUBLICATION_REAP_ATTEMPT_TIMEOUT
         )
     })?
@@ -81,7 +81,9 @@ async fn settle_exact_published_child(
 /// must not publish `Session::fail`, clear the compatibility catalog or scratch
 /// directory, or send actor/session End: playlist/init/segment objects already
 /// admitted from this generation remain legitimate. Admission capacity is
-/// released only after this task confirms the exact supervised child reaped.
+/// released only after this task confirms the exact supervised child reaped
+/// AND joins its actual supervisor/diagnostic drain. Neither fact proves a
+/// descendant containment boundary for the adaptive physical ledger.
 async fn own_published_attempt_cleanup(
     session: Arc<Session>,
     producer_attempt: u64,

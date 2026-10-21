@@ -8,6 +8,10 @@ include!("tests/chunk_07.rs");
 include!("tests/chunk_08.rs");
 include!("tests/chunk_09.rs");
 
+#[cfg(unix)]
+#[path = "tests/attempt_settlement.rs"]
+mod attempt_settlement;
+
 #[cfg(all(feature = "cluster-integration-tests", unix))]
 #[path = "tests/rolling_grid_campaign.rs"]
 mod rolling_grid_campaign;
