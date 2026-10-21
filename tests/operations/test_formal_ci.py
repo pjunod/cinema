@@ -61,18 +61,29 @@ class FormalWorkflowContracts(unittest.TestCase):
                 map_at, mapping = step_block(source, "Check formal protocol source mapping")
                 fetch_at, fetch = step_block(source, "Provision the pinned formal toolchain")
                 smoke_at, smoke = step_block(source, "Complete the bounded formal smoke configuration")
+                progress_at, progress_smoke = step_block(source, "Complete operation-progress formal smoke configurations")
 
                 self.assertLess(map_at, fetch_at)
                 self.assertLess(fetch_at, smoke_at)
+                self.assertLess(fetch_at, progress_at)
                 self.assertIn("id: formal-inputs", mapping)
-                self.assertIn("check-formal check-mapping", mapping)
+                self.assertIn("check-formal check-mapping --package durable-jobs", mapping)
+                self.assertIn("check-formal check-mapping --package operation-progress", mapping)
                 self.assertIn("github.event.pull_request.base.sha", mapping)
                 self.assertIn("--affected-base", mapping)
                 self.assertIn("scripts/bootstrap-formal-toolchain fetch", fetch)
                 self.assertIn("--cache-dir target/formal-toolchain", fetch)
                 self.assertIn("steps.formal-inputs.outputs.affected", fetch)
                 self.assertIn("scripts/check-formal smoke", smoke)
-                self.assertIn("steps.formal-inputs.outputs.affected", smoke)
+                self.assertIn("steps.formal-inputs.outputs.affected_durable", smoke)
+                self.assertIn("scripts/check-formal smoke --package durable-jobs", smoke)
+                self.assertIn("steps.formal-inputs.outputs.affected_progress", progress_smoke)
+                self.assertIn("scripts/check-formal smoke --package operation-progress", progress_smoke)
+                if path.endswith("effort-ci.yml"):
+                    self.assertNotIn("compile_only", mapping)
+                    self.assertIn("!inputs.compile_only", fetch)
+                    self.assertIn("!inputs.compile_only", smoke)
+                    self.assertIn("!inputs.compile_only", progress_smoke)
 
     def test_artifact_upload_runs_after_failure_and_retains_receipts(self) -> None:
         for path in WORKFLOWS:
@@ -84,6 +95,7 @@ class FormalWorkflowContracts(unittest.TestCase):
                 self.assertIn("steps.formal-inputs.outcome != 'skipped'", condition.group(1))
                 self.assertIn("upload-artifact@", artifact)
                 self.assertIn("target/verification/durable-jobs/", artifact)
+                self.assertIn("target/verification/operation-progress/", artifact)
                 self.assertIn("if-no-files-found: error", artifact)
                 self.assertRegex(artifact, r"retention-days:\s*90\b")
 

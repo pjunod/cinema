@@ -266,26 +266,34 @@ jobs:
           PLURX_FORMAL_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           set -eu
-          mkdir -p target/verification/durable-jobs
+          mkdir -p target/verification/durable-jobs target/verification/operation-progress
           if [ -n "$PLURX_FORMAL_BASE" ]; then
-            python3 scripts/check-formal check-mapping --affected-base "$PLURX_FORMAL_BASE" > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package durable-jobs --affected-base "$PLURX_FORMAL_BASE" > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress --affected-base "$PLURX_FORMAL_BASE" > target/verification/operation-progress/ci-inputs.json
           else
-            python3 scripts/check-formal check-mapping > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package durable-jobs > target/verification/durable-jobs/ci-inputs.json
+            python3 scripts/check-formal check-mapping --package operation-progress > target/verification/operation-progress/ci-inputs.json
           fi
-          python3 -c 'import json, os; from pathlib import Path; result=json.loads(Path("target/verification/durable-jobs/ci-inputs.json").read_text()); assert type(result["affected"]) is bool; print("affected=" + str(result["affected"]).lower(), file=open(os.environ["GITHUB_OUTPUT"], "a"))'
+          python3 -c 'import json, os; from pathlib import Path; base=Path("target/verification"); durable=json.loads((base/"durable-jobs/ci-inputs.json").read_text()); progress=json.loads((base/"operation-progress/ci-inputs.json").read_text()); assert type(durable["affected"]) is bool and type(progress["affected"]) is bool; out=open(os.environ["GITHUB_OUTPUT"], "a"); print("affected_durable=" + str(durable["affected"]).lower(), file=out); print("affected_progress=" + str(progress["affected"]).lower(), file=out); print("affected=" + str(durable["affected"] or progress["affected"]).lower(), file=out)'
       - name: Provision the pinned formal toolchain
         if: steps.formal-inputs.outputs.affected == 'true'
         run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
       - name: Complete the bounded formal smoke configuration
         id: formal-smoke
-        if: steps.formal-inputs.outputs.affected == 'true'
-        run: python3 scripts/check-formal smoke --cache-dir target/formal-toolchain
+        if: steps.formal-inputs.outputs.affected_durable == 'true'
+        run: python3 scripts/check-formal smoke --package durable-jobs --cache-dir target/formal-toolchain
+      - name: Complete operation-progress formal smoke configurations
+        id: formal-progress-smoke
+        if: steps.formal-inputs.outputs.affected_progress == 'true'
+        run: python3 scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
       - name: Preserve formal model receipts and counterexamples
         if: always() && steps.formal-inputs.outcome != 'skipped'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: formal-model-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/verification/durable-jobs/
+          path: |
+            target/verification/durable-jobs/
+            target/verification/operation-progress/
           if-no-files-found: error
           retention-days: 90
       - name: Provision checksummed public K08 oracle sources
