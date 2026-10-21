@@ -1,7 +1,10 @@
 # Rust suite repair — preserve the 25 failures and qualify their corrections
 
-**Status:** open — implementation built; the current exact-source qualification
-receipt and acceptance state are recorded in [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
+**Status:** open — implementation built; two qualification attempts on
+`c81f3af25` failed during external native-package setup before compilation or
+tests. Isolated pinned-image installation now passes over HTTPS; integrated
+workflow validation and fresh exact-source acceptance remain owed. Receipts are
+recorded in [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
 `codex/full-pr-suite-m1`, based on `effort/full-pr-suite` at `c1c344132`
 and carrying M0 dependency `16d1a5003` locally; neither task PR is merged.
@@ -57,7 +60,7 @@ that task is not yet merged into the effort. Its workflow remains available as t
 diagnostic command; the new repair workflow owns M1 acceptance.
 
 The declared sequence is compile, inventory, static checks (including the
-26 evidence/controller controls), ten rounds of
+30 evidence/controller controls), ten rounds of
 the affected Core/daemon cohort, the complete ordinary Rust cell, and the
 two exact serial media cases. Each round runs the inventoried real
 binaries with 22 test threads and all original failed identities. Fifteen
@@ -130,6 +133,9 @@ not performance estimates or permission to drop cases.
 | Completed controlled resource comparison, run 5698 (internal 5727) | Old-source `ffbed0dd3` with four ordinary test threads finished in 2,563.040s (42m43s), exit 101, safe cleanup. Secondary strict accounting covers all 6,977 native cases: 6,927 passed, one failed, 49 ignored. All original 25 and the Source waiter control pass. The sole failure is `rolling_real_put_complete_ts_attaches_exact_new_owner`. Original red/incomplete evidence remains untouched; [§4.1](#41-four-threads-reduce-measured-cost-but-the-comparison-remains-red) records scope and resource limits. |
 | K06-only candidate disposition | `fef12d2f5` passed exact-source Linux all-target Clippy in 370s; run 5691 was cancelled while queued with no test execution after the older full run reproduced Source failures. The fresh follow-up qualification receipt is recorded in task PR #1244; previous source identities cannot substitute for it. |
 | Independent review | Earlier schema, proof and task-ownership changes reviewed. The old-source comparison now passes all original 25; one separate rolling case still fails. Follow-up writer, parser and F6 corrections, all repeated controls and complete current-source execution remain acceptance requirements. |
+| Published fixture checkpoint `c81f3af25` | Local 44-case rolling stress and 50 declared new-rolling bodies passed as detailed in §4.2. Source-only Linux all-daemon-target Clippy passed in 277s. Normal commit hooks passed in 53s, including 42.16s Clippy; paperwork passed 14/14 checks with 57 regression fields. These local/compiler/bookkeeping receipts do not replace exact-source native qualification. |
+| Qualification run 5710 (internal 5739), task 22223 | Failed in 80s during native GTK package setup: the pinned Debian snapshot returned HTTP 503 for three required archives despite `Acquire::Retries=3`. No Cargo compilation or test body executed. Original failed setup logs and artifacts remain retained. |
+| Qualification run 5711 (internal 5740), task 22224 | Failed in about 32s at the same native dependency setup, with the same three snapshot archives unavailable. No Cargo compilation or test body executed. This second setup failure supplies no source or test verdict. |
 | Exact-head effort gate | Pending. |
 
 ### 4.1 Four threads reduce measured cost, but the comparison remains red
@@ -253,6 +259,58 @@ filtered counts, executable and source hashes; no ignored or zero-match
 body qualifies. `RUST_MIN_STACK` is unset. The 52 evidence/workflow/vendor
 ledger/docs checks pass with one existing skip. These Mac checks do not
 replace complete current-source Linux qualification, which remains owed.
+
+### 4.3 Two package setup failures leave qualification open
+
+Published source `c81f3af2581ee79b2eea35c18aaff60fe5d3ec35` has completed the
+local fixture checks and Linux all-daemon-target Clippy above. Runs 5710
+and 5711 are terminal setup failures, not running qualifications. Their
+`rust-native-deps` action could not fetch three exact native GTK dependency
+archives from the pinned Debian snapshot, even after APT's three retries.
+Both stopped before Cargo compilation, inventory or native test execution.
+The ignored source-bound evidence directory retains
+`setup-failed-task-22223.log`, `setup-failed-task-22224.log`, their SHA-256
+receipts, step metadata and always-uploaded diagnostic artifacts. Earlier
+red native runs and incomplete accounting receipts remain unchanged.
+
+Isolated setup now passes in the same immutable image,
+`sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855`,
+with the same `20260928T000000Z` snapshot. Changing only the recognized APT
+source prefix from `http://snapshot.debian.org/` to
+`https://snapshot.debian.org/` fetched the signed package index (9.4 MB in
+one second). Normal APT then installed all 142 GTK/DBus dependency archives
+and OpenSSL without a failed fetch. `pkg-config` confirmed GTK 4.8.3,
+DBus 1.14.10 and OpenSSL 3.0.22. No archive fallback was needed or executed.
+`apt-tls-integration.json` binds that observation to the image, snapshot and
+four hashed logs: index update, GTK/DBus installation, OpenSSL installation
+and library version checks. The disposable container had no host mounts or
+transferred credentials. This successful installation is one observation;
+it does not guarantee future snapshot availability.
+
+The selected setup patch is transport-only: `prefer_snapshot_https` rewrites
+recognized snapshot HTTP prefixes in APT source files while preserving the
+snapshot date, package selection, trust configuration and file mode. It
+rejects source symlinks. A Docker-only action guard confines the setup step
+to the CI container. The original APT install with `Acquire::Retries=3`,
+signature verification and package hash verification remains unchanged.
+The uncommitted generic archive installer is excluded from the landing.
+The four focused TLS controls raise the declared static Python controls
+from 26 to 30 and the broader inherited checks from 52 to 56. All 56
+combined checks pass with one existing skip. The exact final helper and all
+three composite-action scripts also pass inside that immutable image:
+the source step changes one source file, the OpenSSL probe compiles and
+runs, and the GTK/DBus probes report their actual versions. The integration
+receipt retains the final helper/action hashes and per-step log hashes.
+The owned scratch container is stopped and removed. Fresh exact-source
+native qualification remains owed.
+
+This work changes neither Rust sources nor the pinned image, snapshot date,
+package versions, compiler profile or test deadline. The execution contract
+remains four ordinary test threads, 22-thread cohort cells, 400 declared
+cohort bodies, 20 vendor transaction bodies, the 6,977-case ordinary
+inventory plus seven separate doctest targets, and both exact serial media
+bodies. The setup follow-up must preserve those requirements before any
+acceptance or every-PR rollout claim.
 
 Closure requires every original failure to execute and pass, all declared
 repetitions and new ownership controls to pass, exact complete full-cell

@@ -360,7 +360,7 @@ jobs:
               if phase == 'static':
                   return ['bash', '-e', '-o', 'pipefail', '-c',
                           'make fmt-check spike-lock-check lint test-socket-permission-check\n'
-                          'python3 -m unittest tests.operations.test_rust_repair_evidence tests.operations.test_rust_repair_workflow tests.operations.test_rust_writer_evidence\n'
+                          'python3 -m unittest tests.operations.test_rust_repair_evidence tests.operations.test_rust_repair_workflow tests.operations.test_rust_writer_evidence tests.operations.test_apt_snapshot\n'
                           + writer_checks(output)]
               if phase == 'units':
                   return ['env', 'RUST_MIN_STACK=8388608', *LINEAGE, '--', '--test-threads=1'] if CELL == 'store-lineage' else NATIVE
