@@ -10,12 +10,12 @@ Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). Th
 |---|---|---|
 | Waits, resources and completing tasks | GPT-6 Luna | 45 source anchors across 19 files committed; map interpretation corrections being applied |
 | Property, fairness and abstraction design | Fable 5.1 | Advice and source-corrected addendum delivered; no coding or final review |
-| Repeated-operation model and contract | GPT-6.1 Sol | Explicit waits, lock intent and return actions being implemented |
-| Checker and existing CI integration | GPT-6 Luna | Separate package selection and fail-closed receipts being implemented |
+| Repeated-operation model and contract | GPT-6.1 Sol | Nine configurations authored; static TLA parse passed; one bounded development calibration pending |
+| Checker and existing CI integration | GPT-6 Luna | Committed and integrated; static Python parsing complete, unit checks await final review |
 | Final independent adversarial review | Fresh Fable 5.1 reviewer | Pending complete candidate |
 | Qualification, PR and merge | Codex coordinator | Pending review and fixes |
 
-All clones and working files are agent-owned; the owner's checkout is untouched. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
+Persistent work uses agent-owned clones. One accidental tooling write to the operator checkout was reversed with explicit approval and an exact captured patch; the affected file has no remaining diff. Subsequent editing is confined to explicit owned paths. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
 
 The source map is [WAIT-MAP.md](../../verification/operation-progress/WAIT-MAP.md). No concrete application lock cycle was established in the inspected path; the model will exercise a deliberate cycle as a coverage control. Filesystem return and unknown lower-layer dependencies remain explicit premises. Lease expiry revokes authority but still drains renewal; it is not itself a cleanup deadline.
 
