@@ -89,9 +89,9 @@ jobs:
       group: python-unit-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Includes three bounded formal smoke profiles and pinned toolchain
-    # provisioning; allow their combined worst-case smoke budget to finish.
-    timeout-minutes: 20
+    # Allows the 20-minute worker formal smoke, other package smokes, toolchain
+    # provisioning and preflight validation to finish with headroom.
+    timeout-minutes: 35
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

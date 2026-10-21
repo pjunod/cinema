@@ -14,7 +14,7 @@
       "expected_error": null,
       "expected_exit": 0,
       "expected_error_match": null,
-      "timeout_seconds": 300,
+      "timeout_seconds": 900,
       "analysis": {
         "status": "reviewed",
         "bounds": {

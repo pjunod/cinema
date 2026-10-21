@@ -25,12 +25,15 @@ scripts/check-formal smoke --package worker-refinement --cache-dir target/formal
 scripts/check-formal full --package worker-refinement --cache-dir target/formal-toolchain
 ```
 
-The shared toolchain pins TLC 1.7.4 and Temurin 21.0.12+8. Each configuration
-has a 300-second hard cap and the qualification heap is 4 GiB. Smoke runs
-`progress.cfg` and `witness-both-complete.cfg` under a 600-second aggregate
-cap. Fourteen full configurations have a maximum combined cap of 70 minutes.
-These are resource ceilings, not measured feasibility claims. A timeout
-fails qualification; both complete pipelines remain mandatory.
+The shared toolchain pins TLC 1.7.4 and Temurin 21.0.12+8. `progress.cfg`
+has a 900-second hard cap; the other thirteen configurations have 300 seconds
+each. The qualification heap is 4 GiB. Smoke runs `progress.cfg` and
+`witness-both-complete.cfg` under a 1,200-second aggregate cap. Fourteen full
+configurations have a maximum combined cap of 80 minutes. Worker-refinement
+uses TLC's `-lncheck final` strategy: all configured temporal properties remain
+checked, with liveness checking deferred until state exploration completes.
+These are resource ceilings, not completion guarantees. A timeout fails
+qualification; both complete pipelines remain mandatory.
 
 **How to read results:** positives need complete exploration, zero queued
 states and no errors. A temporal control needs its sole named property to

@@ -39,8 +39,17 @@ class WorkerCorrespondenceTests(unittest.TestCase):
         self.assertEqual(len(package["config_order"]), 14)
         self.assertIn("control-no-useful-progress.cfg", package["config_order"])
         self.assertEqual(package["smoke_configs"], ("progress.cfg", "witness-both-complete.cfg"))
-        self.assertEqual(package["smoke_wall_budget_seconds"], 600)
-        self.assertEqual(package["config_timeout_cap_seconds"], 300)
+        self.assertEqual(package["smoke_wall_budget_seconds"], 1200)
+        self.assertEqual(package["config_timeout_cap_seconds"], 900)
+        self.assertEqual(
+            package["smoke_config_timeouts"],
+            {"progress.cfg": 900, "witness-both-complete.cfg": 300},
+        )
+
+    def test_final_liveness_checking_is_worker_refinement_only(self) -> None:
+        self.assertEqual(formal.liveness_check_args("worker-refinement"), ["-lncheck", "final"])
+        self.assertEqual(formal.liveness_check_args("durable-jobs"), [])
+        self.assertEqual(formal.liveness_check_args("operation-progress"), [])
 
     def test_next_action_names_include_quantified_parameterized_operators(self) -> None:
         model = """\
