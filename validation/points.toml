@@ -28,6 +28,7 @@ audit_paths = [
   "scripts/**",
   "tests/**",
   "validation/**",
+  "verification/**",
   "vendor/**",
 ]
 audit_exclude = []
@@ -509,6 +510,7 @@ paths = [
   "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/store_contract/formal_publication.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
@@ -1411,6 +1413,9 @@ paths = [
   "scripts/ffmpeg-support-matrix.json",
   "crates/plurxd/src/ffmpeg_support.rs",
   "scripts/install-linux-source-runtime",
+  "scripts/bootstrap-formal-toolchain",
+  "scripts/check-formal",
+  "verification/durable-jobs/**",
   "scripts/install-compose-tray",
   "scripts/linux-tray-release",
   "scripts/package-macos",
