@@ -82,3 +82,38 @@ whitespace checks. These are author checks, not Fable approval.
 
 Plan approval closes this review only. It does not authorize a build, source
 changes, benchmark execution or broader rollout.
+
+## Implementation review — Astra R1, corrections in progress
+
+Independent Astra (`gpt-6-astra`, `openai-codex`, `hdr-astra`) returned
+**REQUEST_CHANGES** in Hermes task `t_ff338f21` on 2026-10-21. Reviewed
+integration head `ac7a72c9e1700d0a4e216ad901995378ffb03386`, tree
+`76f9b6a6c23f4929efe21f05e3d517922cf39d9b`, base
+`00c74cd8c5ebd9ff3c6957532c42854ddc3d671a`. The report separately confirmed
+all 27 authored records against governing sources; it found no fabricated
+review finding or execution receipt. This does not qualify runtime behavior.
+
+Actual R1 report SHA-256:
+`355fe6a02ff120884416d75af50bf746927f3a98e595ee82e6222774ac4eb70b`;
+verdict `77d77c96c4d3fba0ceee6d577d5003f265aed260d935d59d0ac4c889ae31e870`.
+Durable source-only review inputs and reports remain with that Hermes task.
+The private gold, case views, acceptance scripts and answers were withheld.
+
+| ID | Required correction / current disposition |
+|---|---|
+| R1 | Smoke receipt inputs now bind reviewed physical source/test and governing document bytes/modes, with membership retained separately. Draft regression covers in-place doc/split-child edits and unrelated bodies. |
+| R2 | Prune pristine semantic payloads unsupported by sealed visible bytes; regenerate structural metadata. Assigned to Sol graph author. |
+| R3 | Bind the actual launched graph to the frozen manifest knowledge identity before spending. Assigned to independent evaluator. |
+| R4 | Qualify frozen acceptance families and distinguish completed assertion failure from unavailable infrastructure. Assigned to executor/evaluator authors; unsupported families must remain unavailable and uncacheable. |
+| R5 | Enabled/adaptive thinking configurations now refuse before counting or spending; unexpected signed reasoning responses refuse instead of producing invalid tool history. |
+| R6 | Consensus now includes an opaque per-obligation judgment digest. Private scorers must supply it; equal counts with different judgments remain disagreement. |
+| R7 | Historical intermediates must not confer governing authority; preserve discovery and independent current routes. Assigned to Sol graph author. |
+| R8 | Publish the numeric eligibility, medians, intervals and uncertainty metadata supporting token decisions. Assigned to independent evaluator. |
+| O1 | Removed extra final blank lines in authored data. |
+| O2 | Descriptor-relative no-follow discovery reads assigned as source hardening. |
+| O3 | Cold-index/warm-query performance remains unmeasured; optional paperwork shortcut stays unused. |
+
+All source corrections require the same reviewer's exact-source recheck.
+No unit test, container, provider study or implementation approval is claimed
+by these dispositions. The [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md)
+records acceptance and publication as they occur.
