@@ -480,6 +480,8 @@ paths = [
   "crates/plurx-core/tests/store_contract/resource_settings.rs",
   "crates/plurxd/src/http/tests/resource_capacity.rs",
   "crates/plurx-core/src/adaptive_resources.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/tests.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/scan_identity_repair.rs",
   "crates/plurx-core/src/store/dv_conversion.rs",

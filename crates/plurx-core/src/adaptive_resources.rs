@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::process::observation::Metric;
 
+pub mod physical_graph;
+
 static NEXT_LEDGER: AtomicU64 = AtomicU64::new(1);
 const MAX_RESERVATIONS: usize = 1024;
 const MAX_FAMILY_ROLES: usize = 3;
@@ -190,7 +192,7 @@ pub struct ReservationBinding {
 /// There is deliberately no public "trust me, reaped" constructor.
 #[derive(Debug)]
 pub struct PhysicalCloseReceipt {
-    pub(crate) binding: ReservationBinding,
+    binding: ReservationBinding,
 }
 
 struct Entry {
@@ -198,6 +200,7 @@ struct Entry {
     family_role: Option<(FamilyIdentity, FamilyRole)>,
     resources: ResourceVector,
     state: ReservationState,
+    custody: Option<Arc<physical_graph::GraphCustody>>,
 }
 
 struct State {
@@ -220,6 +223,7 @@ pub struct ResourceLedger {
 pub struct ResourceReservation {
     ledger: ResourceLedger,
     binding: ReservationBinding,
+    transferred: bool,
 }
 
 /// Retained by the SAME cleanup owner outside potentially panicking work. It
@@ -505,6 +509,7 @@ impl ResourceLedger {
                     family_role,
                     resources,
                     state: ReservationState::Reserved,
+                    custody: None,
                 },
             );
             if trial {
@@ -514,6 +519,7 @@ impl ResourceLedger {
                 ResourceReservation {
                     ledger: self.clone(),
                     binding,
+                    transferred: false,
                 },
                 CleanupAuthority {
                     ledger: self.clone(),
@@ -589,6 +595,10 @@ impl ResourceReservation {
 
 impl Drop for ResourceReservation {
     fn drop(&mut self) {
+        if self.transferred {
+            // Core graph custody now owns acquisition and no-spawn certainty.
+            return;
+        }
         let Ok(mut state) = self.ledger.inner.lock() else {
             return;
         };
@@ -618,6 +628,9 @@ impl CleanupAuthority {
             .ok_or(AdmissionRefusal::UnknownReservation)?;
         if entry.state == ReservationState::Reserved {
             return Err(AdmissionRefusal::InvalidTransition);
+        }
+        if let Some(custody) = entry.custody.as_ref() {
+            custody.seal_entry();
         }
         entry.state = ReservationState::Reaping;
         Ok(())

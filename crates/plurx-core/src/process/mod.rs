@@ -2,9 +2,9 @@
 //! daemon's own inherited limits on how many descriptors it may hold.
 
 pub mod bounded;
-pub mod observation;
 #[cfg(test)]
 mod census;
+pub mod observation;
 pub mod priority;
 pub mod rlimit;
 
@@ -82,6 +82,22 @@ pub fn spawn_job_owned(
     command: &mut tokio::process::Command,
     work: ChildWork,
 ) -> io::Result<(tokio::process::Child, ChildJob)> {
+    spawn_job_custodied(command, work).map_err(|failure| failure.error)
+}
+
+/// The graph owner must retain partially successful launches too. Legacy
+/// callers still receive io::Error; physical custody consumes this internal
+/// result before any actual child/job handles can be dropped on failure.
+pub(crate) struct OwnedSpawnFailure {
+    pub error: io::Error,
+    pub child: Option<tokio::process::Child>,
+    pub job: Option<ChildJob>,
+}
+
+pub(crate) fn spawn_job_custodied(
+    command: &mut tokio::process::Command,
+    work: ChildWork,
+) -> Result<(tokio::process::Child, ChildJob), Box<OwnedSpawnFailure>> {
     priority::apply(command, work.class);
     configure_suspended(command);
     #[allow(clippy::disallowed_methods)] // the launcher itself
@@ -89,13 +105,33 @@ pub fn spawn_job_owned(
         command,
         || tokio::process::Command::new(""),
         |command| command.spawn(),
-    )?;
-    let mut job = ChildJob::attach(&child).inspect_err(|_| {
-        let _ = child.start_kill();
+    )
+    .map_err(|error| {
+        Box::new(OwnedSpawnFailure {
+            error,
+            child: None,
+            job: None,
+        })
     })?;
-    resume_suspended(&child).inspect_err(|_| {
+    let mut job = match ChildJob::attach(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.start_kill();
+            return Err(Box::new(OwnedSpawnFailure {
+                error,
+                child: Some(child),
+                job: None,
+            }));
+        }
+    };
+    if let Err(error) = resume_suspended(&child) {
         let _ = child.start_kill();
-    })?;
+        return Err(Box::new(OwnedSpawnFailure {
+            error,
+            child: Some(child),
+            job: Some(job),
+        }));
+    }
     job._registration = priority::register(child.id(), command.as_std().get_program(), work);
     Ok((child, job))
 }
