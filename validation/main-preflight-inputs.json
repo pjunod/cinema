@@ -4909,6 +4909,46 @@
         "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md"
       ],
       "reason": "Real pilot smoke reads the explicit data, route source/test expansion and governed references. Unreviewed closure is never reusable."
+    },
+    {
+      "id_prefix": "validation:test_knowledge_evaluation.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/knowledge/__init__.py",
+        "validation/knowledge/model.py",
+        "validation/knowledge/evaluation.py"
+      ],
+      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
+    },
+    {
+      "id_prefix": "validation:test_knowledge_provider.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/knowledge/__init__.py",
+        "validation/knowledge/model.py",
+        "validation/knowledge/evaluation_provider.py"
+      ],
+      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
+    },
+    {
+      "id_prefix": "validation:test_knowledge_projection.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/knowledge/__init__.py",
+        "validation/knowledge/model.py",
+        "validation/knowledge/evaluation_projection.py"
+      ],
+      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
+    },
+    {
+      "id_prefix": "validation:test_knowledge_isolation.",
+      "inputs": [
+        "validation/__init__.py",
+        "validation/knowledge/__init__.py",
+        "validation/knowledge/model.py",
+        "validation/knowledge/evaluation_isolation.py"
+      ],
+      "reason": "Reviewed synthetic or mocked evaluation boundaries; no private gold, provider calls or live executor is part of this unit family."
     }
   ]
 }

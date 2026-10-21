@@ -1731,6 +1731,7 @@ paths = [
   "tests/validation/test_knowledge_*.py",
   "tests/operations/test_knowledge_pilot.py",
   "docs/features/ENGINEERING-KNOWLEDGE-GRAPH-*.md",
+  "docs/ci/ENGINEERING-KNOWLEDGE.md",
 ]
 checks = ["knowledge-contract", "catalog-contract", "operations-contract"]
 depends_on = ["validation.framework"]

@@ -220,6 +220,7 @@ class QueryRequest:
     target: str
     max_depth: int
     max_bytes: int = MAX_TOOL_BYTES
+    continuation: str | None = None
 
 
 class QueryBackend(Protocol):
@@ -270,18 +271,23 @@ class CorpusProxy:
                     "search": {"text"}, "outline": {"path"},
                     "edit": {"path", "start_line", "end_line", "replacement"},
                     "knowledge_query": {"kind", "target"}}[name]
-        _require(set(args) == required, "unexpected/missing tool arguments")
+        optional = {"continuation"} if name == "knowledge_query" else set()
+        _require(required <= set(args) <= required | optional, "unexpected/missing tool arguments")
         if name == "list_files":
             return _bounded({"files": [{"path": file.path, "visible_line_ranges": file.visible_line_ranges,
                                         "source_identity": file.source_identity}
                                        for file in self._files.values()]})
         if name == "knowledge_query":
-            _require(args["kind"] in {"context", "impact", "explain", "search"}, "unknown query kind")
+            _require(args["kind"] in {"context", "obligations", "why", "evidence", "conflicts"}, "unknown query kind")
             _require(isinstance(args["target"], str) and len(args["target"]) <= 2048, "invalid query target")
-            request = QueryRequest(args["kind"], args["target"], 0 if self._arm == "B" else 6)
+            continuation = args.get("continuation")
+            _require(continuation is None or isinstance(continuation, str) and len(continuation) <= 512, "invalid continuation")
+            request = QueryRequest(args["kind"], args["target"], 0 if self._arm == "B" else 6, continuation=continuation)
             result = self._query(request)
             _require(isinstance(result, Mapping), "query must return an object")
-            return _bounded({"status": "ok", "result": dict(result)})
+            output = _json(dict(result))
+            _require(len(output.encode("utf-8")) <= MAX_TOOL_BYTES, "query violated frozen byte limit")
+            return output
         if name == "search":
             text = args["text"]
             _require(isinstance(text, str) and 0 < len(text) <= 1024, "search requires bounded literal text")
