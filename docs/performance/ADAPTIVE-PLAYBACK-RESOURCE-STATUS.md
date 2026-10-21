@@ -21,33 +21,32 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest runtime `c0ea531d0` consumes mode-aware settings in VOD/Source-copy admission;
-Automatic ignores rollback cache but uses existing conservative pools, not learned
-expansion. Rolling planning snapshots and other consumers remain. `e213a4c83`
-adds instance-locked bounded local cost priors; preceding
-`740f4f30a` adds advisory original-deadline/peer/cleanup budgeting, protected runway,
-phase-aware trials, real-failure cooldown and growth stability. History keys bind
-runtime, workload, exact recipe, phase and actual concurrent mix; restart restores
-priors only, never expansion proof or claims. Generic settings writers now reject
-provenance replay before mutation (`ebf46fa55`). Typed CAS/import authority remains
-separate; legacy numeric writes still invalidate mode, including same-value SQL.
-These build on the atomic physical ledger/UnknownHeld, bounded family overlap and
-independently installed settings schema/API/System controls. No AUTH bump/implicit
-Source activation; preserve unknown schema/data, numeric rollback cache and omission.
+Latest runtime `5160af863` verifies settings-only capacity in one statement;
+`8ddae0e39` carries raw intent, exact catalog/marker readiness and typed capacity
+through both backend planning snapshots and frozen rolling admission. Only verified
+Automatic ignores rollback cache; unknown installations retain numeric/zero rules.
+One optional-schema parse fallback discards the entire failed snapshot; baseline,
+transport and stepping errors propagate. Vendored owned/mapped/serde reads no
+longer return partial success on stepping failure. Planning admission digest v2
+binds raw four-key presence/bytes and installation identity; old bindings mismatch.
+Settings-only verification also protects VOD/copy, typed preflight and imports.
+SQLite already had transaction-coherent reads; Hiqlite's split-read race is fixed.
+No installed schema bytes, ordinals or recipe-content identities were changed.
 
-Pinned core all-target Hiqlite-contract Clippy PASS16s (`125413`) and daemon
-all-target Clippy PASS164s (`124616`) cover current runtime; test bodies NOT RUN.
-Restore/future/missing-marker fixtures (`8b1d95f96`) compile, NOT RUN.
-Earlier scoped passes remain in private task evidence. An edition2024 recursive
-formatter expansion was removed
-using sole-writer provenance; exact five-file guard compile PASS55s (`122819`).
-Targeted formatting now binds edition2021/skip_children. No production physical
-receipt minting or controller/adapter integration yet; M2/M3 remain incomplete.
-PR1248 is draft, coordinator-published6e6338dcc; local commits await transport.
-Management transferred to the designated Hermes controller, NOT final test handoff.
-Native Linux e9-only daemon/core checks/Clippy remain valid for e9, not newer code;
-verified result SHA `c0cc2c6c36bdc56da9af8a638f6e24992b08806f66839bf5da35f368f2a1ea05`.
-Keep warm owned targets; no repeated frozen native run or qualification claim.
+Earlier `e213a4c83` bounded instance-owned priors and `740f4f30a` advisory trial
+policy remain, not production growth authority. `ebf46fa55` generic provenance
+replay guards and independent settings/CAS/import installation remain intact.
+Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS100s (`133924`),
+SHA `fb80ae087e4e10111e7bedd43368d986eb66c67612a769791b7896efbea2d183`.
+New SQL/restore/mode/stepping/binding fixtures compile; bodies NOT RUN. Earlier
+source-scoped compiles and corrected type/placeholder failures remain in evidence.
+Targeted rustfmt binds edition2021/skip_children. No physical-close minting or
+production learning/controller integration yet. Astra's bounded M3 design requires
+core graph custody and real kernel containment; unprovable Unix stays UnknownHeld,
+not a leader-wait receipt or permission to expand. M0–M7 remain incomplete.
+PR1248 remains draft; controller owns newer-source transport/status and review.
+Management transfer is NOT final test handoff. Native Linux e9 receipts remain
+e9-only; no repeated frozen native run, implementation tests or qualification claim.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
