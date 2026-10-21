@@ -1,7 +1,8 @@
 # Rust suite repair — preserve the 25 failures and qualify their corrections
 
-**Status:** open — implementation and local verification in progress; Linux
-qualification remains owed. **Owner:** Codex. **Branch:**
+**Status:** open — implementation built; the current exact-source qualification
+receipt and acceptance state are recorded in [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
+The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
 `codex/full-pr-suite-m1`, based on `effort/full-pr-suite` at `c1c344132`
 and carrying M0 dependency `16d1a5003` locally; neither task PR is merged.
 
@@ -65,11 +66,13 @@ cancellation and registration-teardown controls. Three of those controls
 reside in the existing Linux-only processed-reuse module; Mac results cannot
 qualify those three. The newly surfaced K06 and Source waiter-cancellation cases are also repeated, making
 350 executions for the next candidate while the original 25 identities
-remain unchanged. The full cell also declares 22 threads;
-the baseline resource receipt reported 22 logical and affinity CPUs.
-This is recorded execution context, not a reduction in the case universe.
-The qualification job declares one Cargo build job to avoid concurrent
-large compiler processes; native execution still uses 22 test threads.
+remain unchanged. The complete ordinary cell admits four simultaneous
+cases; focused cohort invocations remain explicitly at 22 threads and the
+two serial cases remain at one. Internal test runtimes and scenario races
+are unchanged. The baseline and controlled comparison both reported 22
+logical and affinity CPUs. This bounds competing real-node/media fixtures,
+without dropping cases or increasing their deadlines. The qualification
+job keeps one Cargo build job to avoid concurrent large compiler processes.
 The pinned CI build profiles and debug-symbol settings remain unchanged.
 Every phase retains its original native return code and process cleanup
 receipt. An unsafe cleanup blocks later execution. A safe failed body may
@@ -120,8 +123,8 @@ not performance estimates or permission to drop cases.
 | Dropped transaction reply correction | Two real-writer regressions reproduce the old success/error reply panics deterministically, then pass after late reply delivery stops panicking the writer. Ten pairs pass with strict exact-body accounting. Actual commit, rollback and later writes are verified; strengthened regressions also require persisted applied-log metadata after real shutdown and reopen. Neither the Store deadline nor unknown-outcome semantics changes. Hiqlite generic patch 27 remains pending upstream tracking. The next Linux static phase repeats and accounts for both bodies ten times. |
 | Follow-up local native cohort | All 14 Core cases passed in 22.96s and all 18 platform-applicable daemon cases passed in 58.87s, including every original failed identity and the new waiter case. Default stack and 22 test threads were retained. Three additional controls remain Linux-only. Workspace strict Clippy passed in 214s; 47 evidence/workflow/ledger/docs checks passed with one existing skip. |
 | Cancellation boundary | The writer reply receiver belongs to Raft state-machine application, separately from the public client's timeout waiter. Failed-fixture teardown can abandon it after a timeout. The logs plus deterministic regression prove an internal abandoned-reply defect; they do not prove a client timeout alone directly cancels the SQL writer's waiter. |
-| Controlled resource comparison | Diagnostic branch `codex/full-pr-suite-contention`, commit `ffbed0dd3`, differs from failed `9971299d6` only by full-run `RUST_TEST_THREADS=4` instead of 22. Cohort invocations remain explicitly 22 threads; Rust source, assertions and deadlines are identical. Run 5698 is in progress. Its outcomes cannot qualify the newer repair candidate. |
-| K06-only candidate disposition | `fef12d2f5` passed exact-source Linux all-target Clippy in 370s; run 5691 was cancelled while queued with no test execution after the older full run reproduced Source failures. Fresh complete qualification remains owed after the follow-up corrections. |
+| Controlled resource comparison | Diagnostic branch `codex/full-pr-suite-contention`, commit `ffbed0dd3`, differs from failed `9971299d6` only by full-run `RUST_TEST_THREADS=4` instead of 22. Cohort invocations remain explicitly 22 threads; Rust source, assertions and deadlines are identical. Run 5698 completed Core (1,944 passed, five ignored) in 919.56s versus 1,388.11s at 22 threads, and Store (270 passed) in 385.32s versus 860.40s. All nine original Source/HTTP cases and the additional waiter-cancellation case pass unchanged at four threads; final daemon/full accounting is still in progress. This supports inter-test contention as the startup-timeout trigger, separately from the internal abandoned-reply bug. External host load is not controlled. Its results cannot qualify the newer repair candidate. The repair workflow now adopts the measured four-case full-run budget and requires fresh current-source execution. |
+| K06-only candidate disposition | `fef12d2f5` passed exact-source Linux all-target Clippy in 370s; run 5691 was cancelled while queued with no test execution after the older full run reproduced Source failures. The fresh follow-up qualification receipt is recorded in task PR #1244; previous source identities cannot substitute for it. |
 | Independent review | Earlier schema, proof and task-ownership changes reviewed. Follow-up writer, parser and F6 corrections are being verified; unresolved Source full-load failures block closure. |
 | Exact-head effort gate | Pending. |
 

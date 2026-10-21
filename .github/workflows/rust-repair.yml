@@ -30,7 +30,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CONTINUATION_CELL: rust
       CARGO_BUILD_JOBS: "1"
-      RUST_TEST_THREADS: "22"
+      RUST_TEST_THREADS: "4"
     steps:
       - name: Capture mounted runner workspace owner
         timeout-minutes: 1
