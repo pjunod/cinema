@@ -6,6 +6,73 @@ use super::SqliteStore;
 use crate::error::StoreError;
 use crate::store::background_jobs::QueueSql;
 
+#[async_trait]
+impl QueueSql for SqliteStore {
+    async fn queue_transaction(&self, statements: Vec<(String, String)>) -> Result<(), StoreError> {
+        self.with_conn(move |connection| {
+            #[cfg(test)]
+            let mut timing = QueueTransactionTiming::enabled();
+            let transaction = connection.unchecked_transaction()?;
+            for (sql, request) in statements {
+                let mut statement = {
+                    #[cfg(test)]
+                    let _prepare = timing.as_mut().map(|timing| {
+                        timing.statement_count += 1;
+                        timing.sql_bytes += sql.len();
+                        QueuePhaseTiming::new(&mut timing.prepare_ns)
+                    });
+                    transaction.prepare_cached(&sql)?
+                };
+                {
+                    #[cfg(test)]
+                    let _step = timing
+                        .as_mut()
+                        .map(|timing| QueuePhaseTiming::new(&mut timing.step_ns));
+                    let mut rows = statement.query([request])?;
+                    while rows.next()?.is_some() {}
+                }
+                #[cfg(test)]
+                if let Some(timing) = timing.as_mut() {
+                    timing.completed_statements += 1;
+                }
+            }
+            #[cfg(test)]
+            {
+                let result = {
+                    let _commit = timing.as_mut().map(|timing| {
+                        timing.commit_attempted = true;
+                        QueuePhaseTiming::new(&mut timing.commit_ns)
+                    });
+                    transaction.commit().map_err(StoreError::from)
+                };
+                if let Some(timing) = timing.as_mut() {
+                    timing.committed = result.is_ok();
+                }
+                result
+            }
+            #[cfg(not(test))]
+            transaction.commit().map_err(StoreError::from)
+        })
+        .await
+    }
+
+    async fn queue_sql(
+        &self,
+        sql: String,
+        request: String,
+        _mutation: bool,
+        _authoritative: bool,
+    ) -> Result<Vec<String>, StoreError> {
+        self.with_conn(move |connection| {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map([request], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)
+        })
+        .await
+    }
+}
+
 // Timing is test-only, opt-in, and never records SQL text or bindings.
 #[cfg(test)]
 struct QueueTransactionTiming {
@@ -85,73 +152,6 @@ impl<'a> QueuePhaseTiming<'a> {
 impl Drop for QueuePhaseTiming<'_> {
     fn drop(&mut self) {
         *self.elapsed_ns += self.started.elapsed().as_nanos();
-    }
-}
-
-#[async_trait]
-impl QueueSql for SqliteStore {
-    async fn queue_transaction(&self, statements: Vec<(String, String)>) -> Result<(), StoreError> {
-        self.with_conn(move |connection| {
-            #[cfg(test)]
-            let mut timing = QueueTransactionTiming::enabled();
-            let transaction = connection.unchecked_transaction()?;
-            for (sql, request) in statements {
-                let mut statement = {
-                    #[cfg(test)]
-                    let _prepare = timing.as_mut().map(|timing| {
-                        timing.statement_count += 1;
-                        timing.sql_bytes += sql.len();
-                        QueuePhaseTiming::new(&mut timing.prepare_ns)
-                    });
-                    transaction.prepare_cached(&sql)?
-                };
-                {
-                    #[cfg(test)]
-                    let _step = timing
-                        .as_mut()
-                        .map(|timing| QueuePhaseTiming::new(&mut timing.step_ns));
-                    let mut rows = statement.query([request])?;
-                    while rows.next()?.is_some() {}
-                }
-                #[cfg(test)]
-                if let Some(timing) = timing.as_mut() {
-                    timing.completed_statements += 1;
-                }
-            }
-            #[cfg(test)]
-            {
-                let result = {
-                    let _commit = timing.as_mut().map(|timing| {
-                        timing.commit_attempted = true;
-                        QueuePhaseTiming::new(&mut timing.commit_ns)
-                    });
-                    transaction.commit().map_err(StoreError::from)
-                };
-                if let Some(timing) = timing.as_mut() {
-                    timing.committed = result.is_ok();
-                }
-                result
-            }
-            #[cfg(not(test))]
-            transaction.commit().map_err(StoreError::from)
-        })
-        .await
-    }
-
-    async fn queue_sql(
-        &self,
-        sql: String,
-        request: String,
-        _mutation: bool,
-        _authoritative: bool,
-    ) -> Result<Vec<String>, StoreError> {
-        self.with_conn(move |connection| {
-            let mut statement = connection.prepare(&sql)?;
-            let rows = statement.query_map([request], |row| row.get::<_, String>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(StoreError::from)
-        })
-        .await
     }
 }
 

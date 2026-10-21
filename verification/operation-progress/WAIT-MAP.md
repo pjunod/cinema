@@ -4,6 +4,33 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Reviewed writer pin refresh — application still precedes observation
+
+On 2026-10-21, effort gate 5733 correctly refused source drift in mapped
+anchor 27, `Query::Transaction(req) => {`. Compared with main `00c74cd8`,
+repair candidate `6a6d55099` changes four transaction reply sends to tolerate
+an abandoned receiver and adds two real writer regressions. Transaction
+begin, SQL execution, rollback/commit, applied metadata, authority, deadlines
+and lock order are unchanged. The source hash changes from
+`1ab742f0eb9354d5a83d83a526f7d76184e7e94dbd421b44a11639d451b21440` to
+`2434c6058342dc8e9536017ad2abdd2331e903f29c57f21090268f76f1f360f3`.
+
+The existing model separates `StoreApply`, `StoreReply`, `CallerReturn`,
+`CompleteTimeout` and `DetachedApply`. This correction preserves that
+abstract protocol; it does not add a theorem about arbitrary internal
+receiver abandonment, lower-write cancellation or writer-wide resilience.
+The conditional backend premises and all nine configurations remain
+unchanged. Both source-pin inventories now identify the reviewed writer;
+the checker still refuses unreviewed hashes or missing/ambiguous anchors.
+The focused guard controls are in
+[test_operation_progress_runner.py](../../tests/operations/test_operation_progress_runner.py).
+Gate 5733 remains failed. Both package mapping checks and all 39 focused
+formal runner/CI controls pass after this refresh, including stale-hash and
+missing/ambiguous-anchor refusals. Earlier formal receipts retain their
+original source binding; new mapping acceptance does not reuse them as
+fresh TLC qualification. TLC has not been rerun for this refresh; obtain a
+new input-bound receipt for any such claim.
+
 ## Useful completion is the durable request reply
 
 ```text

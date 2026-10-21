@@ -13,18 +13,19 @@ checkout is not used for edits or tests. Preserve all assertions, identities,
 capacity boundaries, production deadlines and scenario concurrency.
 
 M1 exact-source qualification is recorded in
-[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). The user has now
-authorized its complete merge into `effort/full-pr-suite`. Required effort
-gate 5728 remains a retained red receipt: authenticated history binding
-refused the older effort/main ancestry. The committed repair refresh
-`6a6d55099f38095e7dd32ef7f042b9c5ce3f1f6e` integrates main
-`00c74cd8c5ebd9ff3c6957532c42854ddc3d671a`; its development-gate and fresh
-exact-source qualification are pending. M2 retains the profiling ancestry
-`3ce97c94e` and has prepared the local merge of that refresh, preserving the
-optimizations and both baseline receipts below. The combined M2 source is
-uncompiled and unqualified. No history guard is weakened. The old green
-result does not qualify this refreshed candidate, other platform lanes or
-automatic every-PR execution.
+[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). On 2026-10-21 the
+user authorized its complete merge into `effort/full-pr-suite`; M1 is not yet
+merged there. Failed gates 5728 and 5733 retain their original ancestry and
+writer-pin verdicts. The committed repair refresh
+`8de7499e5bcdbca76ed201b84d95e3f6e9d2a950` incorporates main
+`7f5af452476b6911ffb84e5fcf4fb3f95de054a6`, worker refinement and the
+reviewed writer binding repair `2107c648`. Current-source development-gate
+and complete native qualification remain pending. M2 retains profiling
+ancestry `3ce97c94e` and has prepared the local merge of that refresh,
+preserving its frozen Rust changes and both baseline receipts below. The
+combined M2 source is uncompiled and unqualified. No history guard is
+weakened. The older green result does not qualify this refreshed candidate,
+other platform lanes or automatic every-PR execution.
 
 ## 1. The green M1 run is the comparison baseline
 
@@ -120,6 +121,24 @@ success. Reverting the narrow cache call restores uncached preparation;
 rollback correctness is independently required by the new controls. Fixture
 copies cannot replace genuine empty/upgrade/backfill paths or discard
 connection-local PRAGMAs, ownership and WAL/sidecar lifecycle obligations.
+
+**Formal source review, 2026-10-21:** the durable-jobs mapping retains its
+model, configurations, authority anchors, bounds and fairness. Seven source
+hashes now bind the reviewed queue cache and fixture-module declaration,
+including relocation of the unchanged timing helpers below the production
+adapter. The five new copied-source controls reject byte drift, missing or
+duplicate anchors with fresh hashes, and a single stale module reference.
+All 33 Python runner controls and the durable-jobs mapping check pass. The
+earlier `b7644c04b` transaction-census failure remains retained: the root
+test-only helper declaration had hidden the production adapter from the
+existing scanner. Its file-order correction changes no scanner or expected
+count and still requires fresh native census acceptance. After integration
+of `8de7499e5`, all three package mapping checks report zero source drift and
+all 52 focused Python formal package, runner, CI and toolchain controls pass.
+The operation-progress writer bindings are incorporated from M1; worker
+refinement needs no new source-pin repair. No model checker was run for this
+integration. These guard results do not complete M2 qualification or
+establish a speed improvement.
 
 ## 4. Qualification must retain the work being measured
 

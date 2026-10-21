@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -115,6 +116,49 @@ class OperationProgressPackageTests(unittest.TestCase):
             mapping["model_file"] = "verification/durable-jobs/DurableJobs.tla"
             drift, _ = formal.mapping_inputs(mapping, "operation-progress")
             self.assertTrue(any("reviewed package model" in item for item in drift))
+
+    def test_reviewed_writer_hash_accepts_and_stale_hash_refuses(self) -> None:
+        mapping = json.loads((ROOT / "verification/operation-progress/mapping.json").read_text())
+        source = "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs"
+        rows = [row for row in mapping["source_mapping"]["tables"] if row["source"] == source]
+        self.assertEqual(len(rows), 1)
+        writer = rows[0]
+        actual = hashlib.sha256((ROOT / source).read_bytes()).hexdigest()
+        self.assertEqual(writer["sha256"], actual)
+        companion = json.loads((ROOT / "verification/operation-progress/source-anchors.json").read_text())
+        self.assertEqual([row for row in companion if row["source"] == source], [writer])
+        drift, _ = formal.mapping_inputs(mapping, "operation-progress")
+        self.assertEqual(drift, [])
+
+        # The old whole-file pin must still refuse this reviewed source;
+        # accepting the refresh does not exempt the writer from future review.
+        stale = "1ab742f0eb9354d5a83d83a526f7d76184e7e94dbd421b44a11639d451b21440"
+        self.assertNotEqual(stale, actual)
+        writer["sha256"] = stale
+        drift, _ = formal.mapping_inputs(mapping, "operation-progress")
+        self.assertEqual(drift, [f"authority source drift requires review: {source}"])
+
+    def test_reviewed_writer_transaction_anchor_remains_unique_and_required(self) -> None:
+        mapping = json.loads((ROOT / "verification/operation-progress/mapping.json").read_text())
+        source = "vendor/hiqlite/src/store/state_machine/sqlite/writer.rs"
+        rows = [row for row in mapping["source_mapping"]["tables"] if row["source"] == source]
+        self.assertEqual(len(rows), 1)
+        writer = rows[0]
+        text = (ROOT / source).read_text()
+        self.assertEqual(writer["anchor"], "Query::Transaction(req) => {")
+        self.assertEqual(text.count(writer["anchor"]), 1)
+        self.assertEqual(writer["sha256"], hashlib.sha256((ROOT / source).read_bytes()).hexdigest())
+        missing = writer["anchor"] + "__missing_reviewed_anchor__"
+        ambiguous = "req.tx"
+        self.assertEqual(text.count(missing), 0)
+        self.assertGreater(text.count(ambiguous), 1)
+        for anchor in (missing, ambiguous):
+            with self.subTest(anchor=anchor):
+                writer["anchor"] = anchor
+                drift, _ = formal.mapping_inputs(mapping, "operation-progress")
+                self.assertEqual(drift, [
+                    "authority anchor must occur exactly once: 27 vendor serial SQLite transaction",
+                ])
 
     def test_repository_path_guard_rejects_external_and_parent_paths(self) -> None:
         for candidate in ("/etc/passwd", "verification/operation-progress/../durable-jobs/DurableJobs.tla"):
