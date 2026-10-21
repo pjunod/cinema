@@ -89,9 +89,9 @@ jobs:
       group: python-unit-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Allows the 20-minute worker formal smoke, other package smokes, toolchain
+    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
     # provisioning and preflight validation to finish with headroom.
-    timeout-minutes: 35
+    timeout-minutes: 15
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

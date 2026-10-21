@@ -54,7 +54,7 @@ has a 1,800-second (30-minute) hard cap; each of the other thirteen
 configurations has a 300-second cap. The qualification heap remains 4 GiB.
 Smoke runs only `witness-both-complete.cfg` under a 300-second aggregate cap.
 The fourteen-case qualification has a maximum combined cap of 95 minutes; the
-CI preflight job has a 35-minute timeout.
+CI preflight job has a 15-minute timeout.
 
 These limits are ceilings, not completion guarantees. A positive timeout or
 incomplete final liveness check fails qualification. The witness smoke is

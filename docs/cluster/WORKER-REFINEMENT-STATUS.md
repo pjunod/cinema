@@ -152,7 +152,7 @@ remain under correction. Passing compile/link checks are separate evidence.
 | C2 · dead stale term | Retained as the documented by-construction ordinary apply guard; no unrelated rewrite. |
 | C3 · cancellation after dispatched completion | Recorded ordering abstraction: model can settle then release, while Rust loss/pressure releases then yields. |
 | C4 · Retry versus Yield | Recorded omitted settlement-kind and failed-attempt accounting; no claim about retry metrics. |
-| C5 · model feasibility | The two original bounds timed out. After projection, twelve local outcomes match; CI then timed out, and local exploration completed but its final temporal check exceeded 900 seconds. Full local qualification has an 1,800-second bound; CI owns the unrun completion witness only. All fourteen remain mandatory. |
+| C5 · model feasibility | The two original bounds timed out. After projection, twelve local outcomes match; CI then timed out, and local exploration completed but its final temporal check exceeded 900 seconds. The positive then completed under its measured 1,800-second bound; CI produced the completion witness. All fourteen expected outcomes are qualified. |
 | C6 · 5.1-second delay | A real yield requires the production clock; the corrected queue-refusal fixture does not yield or incur its five-second delay. |
 | C7 · renewal fault overlap | Retain named actions for separate source boundaries; overlap is documented and harmless. |
 | C8 · selected cancellation | Contract explicitly limits the abstract signal to worker one and assumes no fair cancellation. |
@@ -229,15 +229,20 @@ qualification from fast smoke; it is advice, not another adversarial review.
 
 Full `progress.cfg` qualification now has a bounded 1,800-second ceiling
 based on that measured exploration cost and the unfinished final check.
-Only that failed positive is retried locally. CI smoke owns the still-unrun
-`witness-both-complete.cfg` under 300 seconds; it checks wiring and supplies
-a reachability trace, rather than establishing temporal progress. The other
+Only that failed positive was retried locally. It completed on source
+`4a237918` in 1,392.359 seconds: 37,215,119 generated states, 5,631,576
+distinct, zero queued, depth 248. All five temporal branches finished
+checking in 6 minutes 12 seconds and TLC reported no error. CI produced
+the 117-state `witness-both-complete.cfg` trace on `c09237579` in 9.42 seconds;
+both requests finish, both workers clean up, and no ownership remains.
+The witness checks reachability and wiring; it does not prove liveness. The other
 thirteen configuration ceilings remain 300 seconds and the heap stays 4 GiB.
 No TLA, configuration bytes, fault bounds, fairness, actions or properties
 changed for this execution-policy correction.
 
-All fourteen expected outcomes remain mandatory before merge, composed from
-per-configuration receipts and the current-candidate Main promotion gate.
+All fourteen expected outcomes now have complete evidence: thirteen local
+per-configuration outcomes and the one CI completion witness. The
+current-candidate Main promotion gate remains a merge prerequisite.
 This does not assert one successful fourteen-config runner invocation. The
 PR records the actual positive, witness, gate and landing results. Historical
 receipts retain their distinct runner and mapping hashes; an explicit
@@ -245,3 +250,13 @@ model/configuration/JAR/governed-input bridge accounts for metadata changes
 without relabelling old results. Incomplete exploration or final temporal
 checking never qualifies. No product switch, watchdog or test deletion was
 introduced.
+
+CI also exposed four bookkeeping unit IDs: a model-hash assertion expected
+an output its lower-level helper does not return; the test now checks the
+actual model hash through the explicit worker mapping. The ownership
+inventory now records the one test-only spawn and event timeout with their
+fixture owners and cleanup limits. With full qualification outside smoke,
+the original preflight ceilings are restored (CI 10 minutes, effort/main
+15 minutes). The 1,862 passing unit outcomes are retained where their
+inputs remain applicable; only failed or invalidated cases rerun. The PR
+records the final gate and landing without claiming another review approval.

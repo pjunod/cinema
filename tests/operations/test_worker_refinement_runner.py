@@ -135,7 +135,9 @@ Spec == Next
 
                 hashes: dict[str, str] = {}
                 self.assertEqual(formal.worker_correspondence_inputs(mapping, hashes), [])
-                self.assertEqual(hashes[model_file], file_hash(model_file))
+                worker_package = formal.package_spec("worker-refinement")
+                self.assertEqual(mapping["model_file"], worker_package["model_file"])
+                self.assertEqual(mapping["model_sha256"], file_hash(worker_package["model_file"]))
                 self.assertEqual(hashes[source_file], file_hash(source_file))
 
                 candidate = copy.deepcopy(correspondence)
