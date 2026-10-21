@@ -1,6 +1,6 @@
 # Operation progress — wait mapping and model delivery
 
-**Status:** Fable approved; clarification batch and qualification pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** not opened; implementation and independent review precede qualification.
+**Status:** Fable approved; seven local configurations complete; CI smoke and affected gate pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** not opened; implementation and independent review precede qualification.
 
 Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). This phase extends the [completed bounded pilot](FORMAL-VERIFICATION-PILOT-STATUS.md) with a source-backed wait map and a finite-state model that permits repeated execution. It does not yet establish operation progress or cluster deadlock freedom.
 
@@ -13,7 +13,7 @@ Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). Th
 | Repeated-operation model and contract | GPT-6.1 Sol | Integrated; final static parse and 46 mapped anchors pass; no final qualification yet |
 | Checker and existing CI integration | GPT-6 Luna | Committed and integrated; static Python parsing complete, unit checks await final review |
 | Final independent adversarial review | Fresh Fable 5.1 reviewer | APPROVE on `3da7e0a34`; no blockers; 12 comments being recorded |
-| Qualification, PR and merge | Codex coordinator | After clarification batch; unit/formal/CI checks not yet run |
+| Qualification, PR and merge | Codex coordinator | Seven local configurations complete; PR publication, CI smoke/unit checks and merge remain |
 
 Persistent work uses agent-owned clones. One accidental tooling write to the operator checkout was reversed with explicit approval and an exact captured patch; the affected file has no remaining diff. Subsequent editing is confined to explicit owned paths. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
 
@@ -21,7 +21,7 @@ The source map is [WAIT-MAP.md](../../verification/operation-progress/WAIT-MAP.m
 
 ## Evidence and remaining acceptance
 
-A pre-review development calibration explored 13,514 states in 2.778 seconds on its recorded earlier model hash. A subsequent TTL fallback correction received static parsing only. No final model, runtime or unit qualification is claimed. The prior pilot's results retain their original scope. New acceptance requires reviewed wait edges, explicit external premises, repeated-execution progress checks, deliberate deadlock/livelock controls, interpretable receipts, final independent review dispositions and the current candidate's affected main gate. Passing evidence is retained only where its governed inputs remain unchanged.
+A pre-review development calibration explored 13,514 states in 2.778 seconds on its recorded earlier model hash. A subsequent TTL fallback correction received static parsing only. Seven current-model configurations now have valid local results; the two CI smoke configurations and affected unit/gate results remain pending. The prior pilot's results retain their original scope. New acceptance requires reviewed wait edges, explicit external premises, repeated-execution progress checks, deliberate deadlock/livelock controls, interpretable receipts, final independent review dispositions and the current candidate's affected main gate. Passing evidence is retained only where its governed inputs remain unchanged.
 
 ## Decisions and limits
 
@@ -53,3 +53,11 @@ Fresh non-author Fable 5.1 (`claude-fable-5-1`), Hermes task `t_09b0b514`, appro
 | C12 · item timeouts | WorkFault abstracts attempt control flow; no intermediate catalogue rollback claim. |
 
 The effort workflow now applies `compile_only` to toolchain fetch and both package smokes, including the existing pilot smoke that previously ran in that mode. Both offline mappings still run. This is an explicit compile-only CI behavior change; normal main qualification continues to run affected smokes.
+
+## Qualification started after review and clarifications
+
+The first paperwork batch passed 13 of 14 rules (76 of 77 methods); the status page length alone failed. Removing two surplus blank lines fixed it, and only `StatusPageShapeCase.test_status_md_stays_short` reran and passed. The remaining local paperwork passes are retained.
+
+`contention.cfg` passed complete exploration. The first lock-cycle control produced the correct temporal lasso, but the inherited runner rejected TLC's annotated `Back to state` line. Luna fixed the strict matcher and added positive/malformed-format regressions; only the failed control reran. The passing contention raw log was verified against identical model/config/source/mapping hashes and reclassified with the final runner without repeating TLC. The parser change touches only temporal-violation recognition, leaving the positive path unchanged.
+
+The four controls and reconciliation/cancellation witnesses then completed with their expected named outcomes. These are seven locally qualified configurations, including retained contention; CI will run the remaining positive and success witness. C2's temporal-translator concern is settled by the completed positive contention run. Full traces, original parser rejection, retry and retention receipt are preserved with qualification evidence. No product runtime source changed.
