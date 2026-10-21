@@ -40,8 +40,9 @@ Journal `t_5034245a` explicitly RELEASED READ_ONLY; author-preserving adoption
 10 new runtime/lock/namespace bodies COMPILED NOT RUN. Current pinned Rust1.97.1
 core+daemon all-target Hiqlite-contract cargo check exit0 PASS56.276s, log `182510`,
 source-stable receipt `evidence/compile-run66-182510.json`. This is NOT a current
-Clippy -Dwarnings pass: 15 private journal API warnings remain until write-ahead/
-settlement integration. Initial154.969s pass preceded the single-use refinement.
+Clippy -Dwarnings pass: 15 private journal API warnings await write-ahead wiring.
+Fixture-only `06e2282be` models a distinct prior daemon UUID; invalidated core test
+targets compile PASS63.378s, NOT RUN. Retained daemon/source checks were not replayed.
 
 R2/R3 are design clarifications, not final implementation review. The v1 Unix
 installation-location witness rejects detectable moves/replacements, not coherent
