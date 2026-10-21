@@ -206,7 +206,7 @@
  * @property {number} [controlSeekSequence]
  * @property {number} [controlIntentGeneration]
  * @property {number} [controlSequenceFloor]
- * @property {number} [controlPresentedFrames]
+ * @property {number} [controlPresentedFrames] attachment-owned frame callback receipts, independent of timestamp validity
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
  * @property {()=>void} [controlFrameRearm] renews observation for the current seek
