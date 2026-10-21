@@ -17,7 +17,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
-| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Integration and isolated-lane ownership, compiled accounting/capacity and VOD/rolling task custody, source receipts and remaining persistence/physical wiring/M0–M7 acceptance. | open |
+| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Integration/isolated-lane ownership, compiled accounting and VOD/rolling/source-file custody, receipts and remaining persistence/physical wiring/M0–M7 acceptance. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) | Required workload, lifecycle, cluster, platform and latency evidence for adaptive resource management. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) | Fable 5.1 findings, dispositions, reviewed hashes and remaining acceptance. | done |
 | [ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) | How every playback pipeline learns per-node capacity, preserves owned resources, and uses eligible cluster workers before quality fallback. | open |

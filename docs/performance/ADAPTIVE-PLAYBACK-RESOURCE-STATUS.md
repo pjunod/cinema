@@ -24,21 +24,22 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`68287923c` preserves rolling's early actor process exit but makes published and
-prepublication cleanup JOIN the actual supervisor/diagnostic drain before clearing
-its slot or returning legacy permits. Cancel/timeout retains the same JoinHandle;
-failed joins remain failures. Drop transfers the actual join, not a receipt.
-Six new regression bodies COMPILED NOT RUN; pinned combined daemon/core all-target
-Hiqlite-contract Clippy PASS88s (`165333`), SHA
-`236faaabaafcaca94b2e5a3ba4c2877547ac7fa864f01b575ebe85e0ce68b8a0`.
-Initial production hook-field dead-code error (`165010`) fixed without suppression.
-`5b6330c43` aborts AND retains actual reader joins on abandonment/unwind, keeps
-the owning runtime for off-runtime reader/supervisor Drop, and adds the core-private
-read-only receipt-binding seam. Three more bodies COMPILED NOT RUN. Current combined
-pinned Clippy PASS464.726s, log SHA
-`6d12bcb312f2e4f358f5da522ad489b12bd17c95c0542ab19ef07a64e79ed16d`;
-private `evidence/compile-run55-final.json` binds source hashes and true exit0.
-Interrupted `165805` has no exit receipt and is INVALID, not passing evidence.
+`936ea9490` owns actual read-only source files and blocking open/read/close tasks
+before waits. Cancellation retains the same operation; read retries bind exact
+offset/length. No File/raw handle escapes. The reserved-handle/64-member limit
+and copied-buffer budget cover retained operations, not a whole-pipeline memory
+bound. Close joins pending I/O then drops its own handle but remains UnknownHeld:
+no remote lease, descendant, filesystem durability or physical-release proof.
+Five new regression bodies COMPILED NOT RUN. Pinned core all-target Hiqlite-contract
+Clippy PASS67s (`175947`); updated daemon all-target Clippy PASS212s (`180157`).
+Private `evidence/compile-run61.json` binds source/log hashes and true terminal
+exit0. `e3898fa37` supplies the journal's private read-only reservation-binding
+accessor (core Clippy PASS90s). Neither accessor mints launch/refund authority.
+
+Retained `68287923c` joins rolling supervisors before returning legacy capacity;
+`5b6330c43` retains abandoned reader joins on their original runtime. Nine bodies
+COMPILED NOT RUN, previous combined Clippy PASS464.726s remains source-scoped in
+`evidence/compile-run55-final.json`. Interrupted `165805` is INVALID, not a pass.
 
 Retained `71b405efb` owns the VOD slot BEFORE spawn and actual writer before any
 registration await; completion metadata cannot self-join. `0c50b9593` owns diagnostic
@@ -52,8 +53,8 @@ existing physical hold cannot be bypassed by relabelling a replacement legacy.
 Astra R2 supplies the dedicated node-local SQLite/write-ahead/settle-before-refund
 contract. Isolated journal `t_5034245a` owns resource_custody plus one lib registration;
 integration owns startup/ledger/physical_graph. M4 Store authority has separate
-backend-session ownership; shared registrations remain integration-owned. No new
-runtime persistence, positive containment or external-resource closure claimed.
+backend-session ownership (`t_8c190a7a`); shared registrations stay integration-owned.
+Journal is not yet released/adopted. No runtime persistence or positive containment.
 Controller found no Windows-labelled runner in its inventory: that is not proof
 no machine exists or a waiver of Windows qualification; no compiler supplied yet.
 
