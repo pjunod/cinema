@@ -13,6 +13,7 @@ use zip::{CompressionMethod, ZipWriter};
 use super::*;
 
 mod public_copy_wire;
+mod resource_capacity;
 mod subtitle_generation;
 
 async fn slow_test_handler() -> &'static str {

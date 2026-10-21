@@ -253,6 +253,7 @@ mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
 pub mod replicated;
+mod resource_settings_schema;
 mod subtitle_managed_schema;
 mod subtitle_translation_schema;
 pub mod watched_drain;
@@ -2202,6 +2203,18 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// single snapshot keeps those values mutually consistent and, on a
     /// replicated backend, avoids paying one linearizable read per field.
     async fn settings_snapshot(&self) -> Result<BTreeMap<String, String>, StoreError>;
+    /// Exact revision and four stored capacity keys from one snapshot. None
+    /// means absent/partial/unknown schema: no adaptive typed write is allowed.
+    async fn resource_capacity_snapshot(
+        &self,
+    ) -> Result<Option<crate::resource_settings::CapacitySnapshot>, StoreError>;
+    /// Atomic operator mode/limit update. Every legacy numeric writer changes
+    /// this revision too, including a same-value UPSERT. False is a stale form,
+    /// not success; no key is written on that path.
+    async fn put_resource_capacity(
+        &self,
+        update: &crate::resource_settings::CapacityUpdate,
+    ) -> Result<bool, StoreError>;
     /// One setting as this node's own replica holds it, read without
     /// consensus and without a leader round trip.
     ///

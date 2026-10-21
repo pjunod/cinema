@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-19, plurx has 386 routes declared by the ordinary listener's
+As of 2026-10-21, plurx has 387 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,7 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 386 routes across the registered routers.
+plurx has 387 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -463,8 +463,9 @@ of never storing it.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
-| GET | `/api/v1/settings` | admin | Full settings snapshot, from one store read |
+| GET | `/api/v1/settings` | admin | Full settings snapshot; capacity provenance includes a separate atomic revision snapshot |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
+| PUT | `/api/v1/settings/transcode-capacity` | admin | Explicit Automatic/limit choices in one revision-CAS transaction; returns settings, or 409 on stale form/unavailable schema |
 | GET | `/api/v1/system` | admin | Environment diagnostics and counters |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
@@ -523,8 +524,24 @@ not leave an earlier policy change in force —
 `stored_value` and `provenance_valid` distinguish storage from defaults and
 malformed/binding-mismatched records. `zero_means` preserves hardware-disabled
 versus software-serialized semantics. GET performs no initialization or write.
-The existing two numeric DTO fields still report resolved legacy limits; this
-diagnostic does not itself enable an adaptive policy or implement a mode write.
+`transcode_capacity_revision` is the atomic revision for that report (null if
+the provenance schema cannot be verified); unverified companions cannot report
+Automatic. The two legacy numeric DTO fields still report resolved old limits.
+An unchanged numeric GET→PUT echo preserves absence and mode.
+
+`PUT /api/v1/settings/transcode-capacity` accepts `expected_revision` and only
+dirty `hardware_sessions` / `software_pool_threads` choices, each either
+`{"mode":"automatic"}` or `{"mode":"explicit","value":0}` (a nonnegative
+signed-storage integer). Unknown fields, empty choices and corrupt rollback
+caches are refused. Automatic preserves the stored numeric rollback cache; it
+never persists this node's resolved core count. Numeric legacy writes, even
+same-value raw UPSERT/REPLACE, invalidate old provenance and advance the revision.
+This mode writer does not itself prove measured capacity or authorize expansion.
+Recognized SQLite→cluster imports validate bound companions and load them last;
+unversioned/mismatched companions are omitted, numeric ceilings retained. The
+import receipt records hardware/software `capacity_provenance_preserved` flags;
+parity digests describe this explicitly normalized import. Intact versioned
+full-image restore retains matching records; schema-less restore is conservative.
 
 `macos_video_processing_enabled` and `macos_hevc_output_enabled` are
 admin-writable booleans, both defaulting to `false`. They independently choose

@@ -2509,6 +2509,9 @@ pub struct SettingsDto {
     /// Stored request/provenance, not the defaults resolved by the two legacy
     /// numeric fields. Reading never initializes or rewrites a mode.
     pub transcode_capacity_settings: plurx_core::resource_settings::ResourceSettings,
+    /// None means provenance guards cannot be verified. No adaptive typed
+    /// write is allowed, while ordinary legacy playback remains available.
+    pub transcode_capacity_revision: Option<i64>,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -2579,6 +2582,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // commits. `cache_bytes` below is one additional authoritative aggregate
     // for this node's cache ownership when a cache location is configured.
     let settings = state.store.settings_snapshot().await?;
+    let capacity_snapshot = state.store.resource_capacity_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
     let decoder_health_requested =
         setting(keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS).as_deref() == Some("1");
@@ -2961,9 +2965,17 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
-        transcode_capacity_settings: plurx_core::resource_settings::ResourceSettings::from_snapshot(
-            &settings,
-        ),
+        transcode_capacity_settings: {
+            let mut values = capacity_snapshot
+                .as_ref()
+                .map_or_else(|| settings.clone(), |snapshot| snapshot.values.clone());
+            if capacity_snapshot.is_none() {
+                values.remove(keys::MAX_HW_SESSIONS_PROVENANCE);
+                values.remove(keys::SW_POOL_THREADS_PROVENANCE);
+            }
+            plurx_core::resource_settings::ResourceSettings::from_snapshot(&values)
+        },
+        transcode_capacity_revision: capacity_snapshot.map(|snapshot| snapshot.revision),
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,
@@ -3107,6 +3119,25 @@ pub async fn get_settings(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<SettingsDto>, ApiError> {
+    Ok(Json(settings_dto(&state).await?))
+}
+
+/// PUT /api/v1/settings/transcode-capacity. Separate transaction boundary:
+/// a stale capacity form cannot partially commit unrelated settings.
+pub async fn update_resource_capacity(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(update): Json<plurx_core::resource_settings::CapacityUpdate>,
+) -> Result<Json<SettingsDto>, ApiError> {
+    let snapshot = state.store.resource_capacity_snapshot().await?.ok_or_else(|| ApiError::Conflict("resource provenance schema unavailable; ordinary legacy playback remains supported".into()))?;
+    update
+        .validate(&snapshot)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if !state.store.put_resource_capacity(&update).await? {
+        return Err(ApiError::Conflict(
+            "resource limits changed; reload before choosing a mode".into(),
+        ));
+    }
     Ok(Json(settings_dto(&state).await?))
 }
 
@@ -4619,13 +4650,19 @@ pub async fn update_settings(
             .collect::<Vec<_>>();
         state.store.put_settings(&borrowed).await?;
     }
-    let capacity_values = [
-        (keys::MAX_HW_SESSIONS, req.transcode_max_hw_sessions),
-        (keys::SW_POOL_THREADS, req.transcode_software_pool_threads),
-    ]
-    .into_iter()
-    .filter_map(|(key, value)| value.map(|value| (key, value.to_string())))
-    .collect::<Vec<_>>();
+    let capacity_values = if req.transcode_max_hw_sessions.is_some()
+        || req.transcode_software_pool_threads.is_some()
+    {
+        plurx_core::resource_settings::legacy_capacity_patch(
+            &state.store.settings_snapshot().await?,
+            req.transcode_max_hw_sessions,
+            req.transcode_software_pool_threads,
+            crate::admission::DEFAULT_MAX_HW_SESSIONS as i64,
+            crate::admission::software_budget() as i64,
+        )
+    } else {
+        Vec::new()
+    };
     if !capacity_values.is_empty() {
         let borrowed = capacity_values
             .iter()

@@ -1813,6 +1813,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/settings", put(system::update_settings))
         .route(
+            "/settings/transcode-capacity",
+            put(system::update_resource_capacity),
+        )
+        .route(
             "/subtitle-provider",
             put(subtitle_downloads::update_settings),
         )

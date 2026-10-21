@@ -387,6 +387,52 @@ function transcoderCard(sys){
     <p class="system-pref-status muted" id="node-hwaccel-status" aria-live="polite">${!available?"The saved backend is unavailable. Choose and save an available option. ":""}${pending?"Saved choice is waiting for this node to restart.":"Changes take effect after restarting Cinema."}</p>
     ${systemGraphicsHtml(sys)}${rows}</section>`;
 }
+function systemCapacityCard(settings){
+  const report=settings?.transcode_capacity_settings;
+  if(!report)return "";
+  const rows=[["hardware_sessions","Hardware encoder sessions"],["software_pool_threads","Software service budget"]].map(([key,label])=>{
+    const limit=report[key]||{}, mode=["explicit","legacy_ambiguous"].includes(limit.state)?limit.state:"automatic";
+    const value=limit.stored_value==null?"":String(limit.stored_value);
+    const note=limit.state==="legacy_ambiguous"?"Legacy value: confirm this limit or switch to Automatic.":limit.state==="absent"?"Automatic; no node-local default has been saved as a cluster limit.":limit.state==="automatic"?"Automatic; any saved number is retained only for older readers.":"Saved explicit limit; learning cannot override it.";
+    return `<div class="system-preference" data-capacity-row="${key}" data-initial-mode="${mode}" data-initial-value="${esc(value)}"><label>${esc(label)}<select data-capacity-mode aria-label="${esc(label)} mode" onchange="capacityChoiceChanged()">${mode==="legacy_ambiguous"?'<option value="legacy_ambiguous" selected>Legacy value · confirm choice</option>':""}<option value="automatic"${mode==="automatic"?" selected":""}>Automatic</option><option value="explicit"${mode==="explicit"?" selected":""}>Explicit limit</option></select></label><label>Limit<input data-capacity-value type="number" min="0" step="1" value="${esc(value)}" aria-label="${esc(label)} limit" oninput="capacityChoiceChanged()"></label><p class="muted">${esc(note)} ${key==="hardware_sessions"?"Zero disables hardware sessions.":"Zero serializes one saturating idle-pool job; it does not ban software playback. Thread width is not measured CPU demand."}</p></div>`;
+  }).join("");
+  return `<section class="card system-card" id="system-capacity-card" data-revision="${esc(settings.transcode_capacity_revision??"")}"><h2>Resource limits</h2>${rows}<p class="muted">Physical safety limits always apply. These choices do not qualify a processing backend or move an existing viewer.</p><button onclick="saveResourceCapacity(this)">Save resource choices</button><p id="system-capacity-status" role="status" aria-live="polite">${settings.transcode_capacity_revision==null?"Provenance schema unavailable; saved legacy limits remain enforced. Reload after the store is upgraded.":"Only changed choices are sent."}</p></section>`;
+}
+function resourceCapacityChanges(rows){
+  const changes={};
+  for(const row of rows){
+    const mode=row.querySelector("[data-capacity-mode]").value;
+    const text=row.querySelector("[data-capacity-value]").value;
+    if(mode===row.dataset.initialMode&&(mode!=="explicit"||text===row.dataset.initialValue))continue;
+    if(mode==="automatic"){changes[row.dataset.capacityRow]={mode};continue;}
+    if(mode!=="explicit")continue;
+    const value=Number(text);
+    if(text.trim()===""||!Number.isSafeInteger(value)||value<0)throw new Error("Choose a nonnegative whole-number limit.");
+    changes[row.dataset.capacityRow]={mode,value};
+  }
+  return changes;
+}
+function capacityChoiceChanged(){
+  const status=document.getElementById("system-capacity-status");
+  if(status)status.textContent="Unsaved resource choice. Automatic never saves this node’s resolved core count.";
+}
+async function saveResourceCapacity(button){
+  const card=document.getElementById("system-capacity-card"), generation=PAGE_RENDER_GENERATION;
+  if(!card)return;
+  button.disabled=true;
+  try{
+    const changes=resourceCapacityChanges(card.querySelectorAll("[data-capacity-row]"));
+    if(!Object.keys(changes).length){toast("No resource choices changed");return;}
+    const revision=Number(card.dataset.revision);
+    if(card.dataset.revision===""||!Number.isSafeInteger(revision))throw new Error("Reload after the provenance schema is available; legacy limits remain enforced.");
+    const result=await api("/settings/transcode-capacity",{method:"PUT",body:{expected_revision:revision,...changes}});
+    if(!settingsCurrent(generation,"system"))return;
+    cacheSettings(result);
+    replaceSystemCard("system-capacity-card",systemCapacityCard(result));
+    toast("Resource choices saved");
+  }catch(error){if(settingsCurrent(generation,"system"))toast(error.message||"Could not save resource choices; reload before retrying.");}
+  finally{button.disabled=false;}
+}
 function systemToneMapDetails(tm){
   if(!tm)return "";
   const verdicts=(tm.verdicts||[]).filter(row=>row.pipeline!=="cpu");
@@ -506,5 +552,5 @@ function systemLogsToggled(details){
 }
 function systemPanel(sys){
   const platform=sys.platform==="macos"?"macOS":sys.platform==="linux"?"Linux":sys.platform||"";
-  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${systemLogsCard()}</div>`;
+  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemCapacityCard(typeof SETTINGS_DATA==="undefined"?null:SETTINGS_DATA.settings)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${systemLogsCard()}</div>`;
 }

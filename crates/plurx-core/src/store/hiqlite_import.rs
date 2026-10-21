@@ -92,6 +92,11 @@ pub struct SqliteImportReport {
     pub imported_rows: u64,
     pub search_rows: u64,
     pub tables: Vec<SqliteImportTableDigest>,
+    /// Hardware/software companion records accepted from a verified adjunct
+    /// schema. False means conservative normalized import, not lossless replay
+    /// of an untrusted Automatic record. Numeric limits are always retained.
+    #[serde(default)]
+    pub capacity_provenance_preserved: [bool; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -115,6 +120,19 @@ struct TablePlan {
 #[derive(Clone, Copy)]
 enum ImportFilter {
     ExcludeInstanceId,
+    SettingsProvenance { hardware: bool, software: bool },
+}
+
+impl TablePlan {
+    fn capacity_provenance(mut self, metadata: &SourceMetadata) -> Self {
+        if self.name == "settings" {
+            self.import_filter = Some(ImportFilter::SettingsProvenance {
+                hardware: metadata.hardware_provenance,
+                software: metadata.software_provenance,
+            });
+        }
+        self
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -166,6 +184,8 @@ struct SourceMetadata {
     schema_version: i64,
     instance_id: String,
     instance_updated_at: i64,
+    hardware_provenance: bool,
+    software_provenance: bool,
 }
 
 enum SourceChunk {
@@ -2387,7 +2407,12 @@ impl HiqliteAuthStore {
         self.import_instance_setting(&metadata).await?;
 
         for table in TABLES {
-            self.import_table(&source, schema_version, *table).await?;
+            self.import_table(
+                &source,
+                schema_version,
+                table.capacity_provenance(&metadata),
+            )
+            .await?;
         }
 
         // This CAS counter is derived coordination state, not application
@@ -2427,8 +2452,9 @@ impl HiqliteAuthStore {
         let mut tables = Vec::with_capacity(TABLES.len());
         let mut imported_rows = 0_u64;
         for table in TABLES {
-            let source_digest = source.digest(*table, schema_version).await?;
-            let target_digest = self.target_digest(*table).await?;
+            let table = table.capacity_provenance(&metadata);
+            let source_digest = source.digest(table, schema_version).await?;
+            let target_digest = self.target_digest(table).await?;
             if source_digest != target_digest {
                 return Err(import_error(format!(
                     "table {} failed SQLite-to-Hiqlite parity (source rows {}, target rows {}); discard the incoming target",
@@ -2473,6 +2499,10 @@ impl HiqliteAuthStore {
             imported_rows,
             search_rows,
             tables,
+            capacity_provenance_preserved: [
+                metadata.hardware_provenance,
+                metadata.software_provenance,
+            ],
         })
     }
 
@@ -2767,7 +2797,7 @@ fn target_parity_page(
     let keys = parity_key_columns(table);
     let cursor_projection = keys.join(", ");
     let mut query_params = cursor.to_vec();
-    let filter = if cursor.is_empty() {
+    let mut filter = if cursor.is_empty() {
         String::new()
     } else {
         if cursor.len() != keys.len() {
@@ -2784,6 +2814,13 @@ fn target_parity_page(
             .join(", ");
         format!(" WHERE ({cursor_projection}) > ({placeholders})")
     };
+    if let Some(provenance) = provenance_filter_sql(table) {
+        if filter.is_empty() {
+            filter = format!(" WHERE {provenance}");
+        } else {
+            filter.push_str(&format!(" AND {provenance}"));
+        }
+    }
     query_params.push(Param::Integer(PARITY_PAGE_ROWS));
     let limit = query_params.len();
     Ok((
@@ -2875,6 +2912,10 @@ fn open_validated_source(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| import_error(format!("reading source instance.id: {error}")))?;
+    // Only the recognized adjunct schema+marker and EXACT bound imported
+    // numeric bytes can preserve a companion. Unversioned/partial backups
+    // retain their legacy numeric ceilings, never replay stale Automatic.
+    let (hardware_provenance, software_provenance) = source_capacity_provenance(&source)?;
     Ok((
         source,
         SourceMetadata {
@@ -2882,8 +2923,27 @@ fn open_validated_source(
             schema_version,
             instance_id,
             instance_updated_at,
+            hardware_provenance,
+            software_provenance,
         },
     ))
+}
+
+fn source_capacity_provenance(source: &Connection) -> Result<(bool, bool), StoreError> {
+    let snapshot = super::resource_settings_schema::sqlite_snapshot(source)?;
+    Ok(snapshot.map_or((false, false), |snapshot| {
+        let report = crate::resource_settings::ResourceSettings::from_snapshot(&snapshot.values);
+        (
+            report.hardware_sessions.provenance_valid
+                && snapshot
+                    .values
+                    .contains_key(keys::MAX_HW_SESSIONS_PROVENANCE),
+            report.software_pool_threads.provenance_valid
+                && snapshot
+                    .values
+                    .contains_key(keys::SW_POOL_THREADS_PROVENANCE),
+        )
+    }))
 }
 
 fn source_schema_version(source: &Connection) -> Result<i64, StoreError> {
@@ -3058,7 +3118,13 @@ fn import_select_sql(table: TablePlan, schema_version: i64) -> String {
     let filter = import_filter_sql(table)
         .map(|filter| format!(" WHERE {filter}"))
         .unwrap_or_default();
-    let order_by = source_order_by(table, schema_version);
+    // Numeric keys precede all companions, including across chunk boundaries.
+    // Parity hashing deliberately retains canonical key ordering instead.
+    let order_by = if table.name == "settings" {
+        "CASE WHEN key IN ('transcode.max_hw_sessions.provenance','transcode.software_pool_threads.provenance') THEN 1 ELSE 0 END,key"
+    } else {
+        source_order_by(table, schema_version)
+    };
     format!(
         "SELECT {projection} FROM {}{filter} ORDER BY {order_by} LIMIT ?1 OFFSET ?2",
         table.name
@@ -3073,9 +3139,39 @@ fn source_order_by(table: TablePlan, schema_version: i64) -> &'static str {
     }
 }
 
+fn provenance_filter_sql(table: TablePlan) -> Option<String> {
+    let Some(ImportFilter::SettingsProvenance { hardware, software }) = table.import_filter else {
+        return None;
+    };
+    let excluded = [
+        (hardware, keys::MAX_HW_SESSIONS_PROVENANCE),
+        (software, keys::SW_POOL_THREADS_PROVENANCE),
+    ]
+    .into_iter()
+    .filter_map(|(keep, key)| (!keep).then_some(format!("'{key}'")))
+    .collect::<Vec<_>>();
+    (!excluded.is_empty()).then(|| format!("key NOT IN ({})", excluded.join(",")))
+}
+
 fn import_filter_sql(table: TablePlan) -> Option<String> {
-    table.import_filter.map(|ImportFilter::ExcludeInstanceId| {
-        format!("key <> '{}'", keys::INSTANCE_ID.replace('\'', "''"))
+    table.import_filter.map(|filter| {
+        let mut excluded = vec![keys::INSTANCE_ID];
+        if let ImportFilter::SettingsProvenance { hardware, software } = filter {
+            if !hardware {
+                excluded.push(keys::MAX_HW_SESSIONS_PROVENANCE);
+            }
+            if !software {
+                excluded.push(keys::SW_POOL_THREADS_PROVENANCE);
+            }
+        }
+        format!(
+            "key NOT IN ({})",
+            excluded
+                .iter()
+                .map(|key| format!("'{}'", key.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     })
 }
 
@@ -3193,8 +3289,11 @@ fn source_digest(
     }
     let projection = json_projection(table, schema_version, false);
     let order_by = source_order_by(table, schema_version);
+    let filter = provenance_filter_sql(table)
+        .map(|filter| format!(" WHERE {filter}"))
+        .unwrap_or_default();
     let sql = format!(
-        "SELECT json_array({projection}) AS value FROM {} ORDER BY {order_by}",
+        "SELECT json_array({projection}) AS value FROM {}{filter} ORDER BY {order_by}",
         table.name
     );
     let mut statement = source
@@ -3508,5 +3607,8 @@ impl From<&mut Row<'_>> for ParityPageRow {
     }
 }
 
+#[cfg(test)]
+#[path = "hiqlite_import/resource_settings_tests.rs"]
+mod resource_settings_tests;
 #[cfg(test)]
 mod tests;

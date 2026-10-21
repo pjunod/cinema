@@ -1850,6 +1850,7 @@ impl SqliteStore {
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
+        super::resource_settings_schema::install_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn
@@ -2276,6 +2277,51 @@ impl MetricsStore for SqliteStore {
 
 #[async_trait]
 impl SettingsStore for SqliteStore {
+    async fn resource_capacity_snapshot(
+        &self,
+    ) -> Result<Option<crate::resource_settings::CapacitySnapshot>, StoreError> {
+        self.with_read_txn(super::resource_settings_schema::sqlite_snapshot)
+            .await
+    }
+
+    async fn put_resource_capacity(
+        &self,
+        update: &crate::resource_settings::CapacityUpdate,
+    ) -> Result<bool, StoreError> {
+        let update = update.clone();
+        self.with_conn(move |conn| {
+            use super::resource_settings_schema as schema;
+            let tx = conn.unchecked_transaction()?;
+            let snapshot = schema::sqlite_snapshot(&tx)?.ok_or_else(|| {
+                StoreError::Migration("adaptive resource settings schema unavailable".into())
+            })?;
+            if snapshot.revision != update.expected_revision {
+                return Ok(false);
+            }
+            let writes = update.writes(&snapshot)?;
+            let claim = uuid::Uuid::new_v4().to_string();
+            let now: i64 = tx.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            if tx.execute(schema::CLAIM_SQL, params![claim, update.expected_revision])? != 1 {
+                return Ok(false);
+            }
+            for (key, value) in writes {
+                if tx.execute(schema::WRITE_SQL, params![key, value, now, claim])? != 1 {
+                    return Err(StoreError::Database(
+                        "resource settings guarded write did not apply".into(),
+                    ));
+                }
+            }
+            if tx.execute(schema::CLEAR_CLAIM_SQL, [claim])? != 1 {
+                return Err(StoreError::Database(
+                    "resource settings claim did not settle".into(),
+                ));
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn ping(&self) -> Result<(), StoreError> {
         self.with_conn(|conn| {
             conn.query_row("SELECT 1", [], |_| Ok(()))?;

@@ -2043,6 +2043,7 @@ impl HiqliteAuthStore {
         store.install_subtitle_managed_schema(None).await?;
         store.install_subtitle_translation_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
+        store.install_resource_settings_schema(None).await?;
         Ok(store)
     }
 
@@ -2228,7 +2229,8 @@ impl HiqliteAuthStore {
                     self.install_invitation_schema(admission).await?;
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
-                    return self.install_library_annotations_schema(admission).await;
+                    self.install_library_annotations_schema(admission).await?;
+                    return self.install_resource_settings_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4090,6 +4092,47 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn install_resource_settings_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        use super::resource_settings_schema as schema;
+        admit_schema_migration(admission)?;
+        // authority: adjunct shape is read consistently before replicated DDL.
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(schema::SHAPE_SQL, params!())
+            .await?;
+        let shape = rows
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect::<Vec<_>>();
+        match schema::verify_shape(&shape) {
+            Ok(true) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(%error,"preserving unknown resource settings installation; legacy playback remains available");
+                return Ok(());
+            }
+            Ok(false) => {}
+        }
+        let mut statements = schema::OBJECTS
+            .iter()
+            .map(|(_, sql)| (*sql, params!()))
+            .collect::<Vec<_>>();
+        statements.push((schema::CLEAR_UNVERSIONED, params!()));
+        statements.push((schema::INSERT_MARKER, params!()));
+        admit_schema_migration(admission)?;
+        let attempt = self.schema_migration_transaction(statements).await;
+        // Consistent settlement handles concurrent installers/unknown commit.
+        if self.resource_capacity_snapshot().await?.is_some() {
+            return Ok(());
+        }
+        attempt?;
+        Err(StoreError::Migration(
+            "resource settings installation did not settle".into(),
+        ))
+    }
+
     async fn invitation_schema_version(&self) -> Result<Option<i64>, StoreError> {
         let rows = self
             .client()
@@ -5723,6 +5766,82 @@ const CANONICAL_SETTINGS_GENERATION_PREDICATE: &str = "(\
 
 #[async_trait]
 impl SettingsStore for HiqliteAuthStore {
+    async fn resource_capacity_snapshot(
+        &self,
+    ) -> Result<Option<crate::resource_settings::CapacitySnapshot>, StoreError> {
+        use super::resource_settings_schema as schema;
+        // authority: schema integrity and exact revision fence typed settings writes.
+        let shape = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(schema::SHAPE_SQL, params!())
+            .await?
+            .into_iter()
+            .map(|row| (row.name, row.sql))
+            .collect::<Vec<_>>();
+        if !matches!(schema::verify_shape(&shape), Ok(true)) {
+            return Ok(None);
+        }
+        // authority: revision and all four keys come from ONE replicated snapshot.
+        let rows = self
+            .client()
+            .query_consistent_map::<ResourceCapacityRow, _>(schema::SNAPSHOT_SQL, params!())
+            .await?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        Ok(Some(crate::resource_settings::CapacitySnapshot {
+            revision: first.revision,
+            values: rows
+                .into_iter()
+                .filter_map(|row| row.key.zip(row.value))
+                .collect(),
+        }))
+    }
+
+    async fn put_resource_capacity(
+        &self,
+        update: &crate::resource_settings::CapacityUpdate,
+    ) -> Result<bool, StoreError> {
+        use super::resource_settings_schema as schema;
+        let snapshot = self.resource_capacity_snapshot().await?.ok_or_else(|| {
+            StoreError::Migration("adaptive resource settings schema unavailable".into())
+        })?;
+        if snapshot.revision != update.expected_revision {
+            return Ok(false);
+        }
+        let writes = update.writes(&snapshot)?;
+        let now = self.now()?;
+        let claim = uuid::Uuid::new_v4().to_string();
+        let mut statements = vec![(
+            schema::CLAIM_SQL,
+            params!(claim.clone(), update.expected_revision),
+        )];
+        statements.extend(
+            writes
+                .into_iter()
+                .map(|(key, value)| (schema::WRITE_SQL, params!(key, value, now, claim.clone()))),
+        );
+        statements.push((schema::CLEAR_CLAIM_SQL, params!(claim)));
+        let results = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        // Failed revision CAS leaves ALL conditional writes/clear at zero.
+        // Transport failure remains unknown, never a fresh overwrite retry.
+        if results.iter().all(|changed| *changed == 0) {
+            return Ok(false);
+        }
+        if !results.iter().all(|changed| *changed == 1) {
+            return Err(StoreError::Database(
+                "resource settings transaction postconditions disagree".into(),
+            ));
+        }
+        Ok(true)
+    }
+
     async fn ping(&self) -> Result<(), StoreError> {
         self.client().is_healthy_db().await?;
         let sql = "SELECT 1 AS healthy";
@@ -7097,6 +7216,22 @@ struct SettingValueRow {
 impl From<&mut Row<'_>> for SettingValueRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
+            value: row.get("value"),
+        }
+    }
+}
+
+struct ResourceCapacityRow {
+    revision: i64,
+    key: Option<String>,
+    value: Option<String>,
+}
+
+impl From<&mut Row<'_>> for ResourceCapacityRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            revision: row.get("revision"),
+            key: row.get("key"),
             value: row.get("value"),
         }
     }

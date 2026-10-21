@@ -7,7 +7,127 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::keys;
+use crate::{error::StoreError, store::keys};
+
+#[derive(Clone, Debug)]
+pub struct CapacitySnapshot {
+    pub revision: i64,
+    pub values: BTreeMap<String, String>,
+}
+
+/// Explicit operator intent only. Omitted fields are not rewritten. Automatic
+/// preserves the stored conservative rollback cache, never a resolved local
+/// core count; selecting a mode is not a capacity permit.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LimitChoice {
+    Automatic,
+    Explicit { value: u64 },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityUpdate {
+    pub expected_revision: i64,
+    pub hardware_sessions: Option<LimitChoice>,
+    pub software_pool_threads: Option<LimitChoice>,
+}
+
+impl CapacityUpdate {
+    pub fn validate(&self, snapshot: &CapacitySnapshot) -> Result<(), StoreError> {
+        self.writes(snapshot).map(|_| ())
+    }
+
+    pub(crate) fn writes(
+        &self,
+        snapshot: &CapacitySnapshot,
+    ) -> Result<Vec<(String, String)>, StoreError> {
+        if self.expected_revision < 0
+            || (self.hardware_sessions.is_none() && self.software_pool_threads.is_none())
+        {
+            return Err(StoreError::Task(
+                "capacity update requires a nonnegative revision and explicit dirty choice".into(),
+            ));
+        }
+        let mut numeric = Vec::new();
+        let mut provenance = Vec::new();
+        for (key, provenance_key, choice) in [
+            (
+                keys::MAX_HW_SESSIONS,
+                keys::MAX_HW_SESSIONS_PROVENANCE,
+                self.hardware_sessions,
+            ),
+            (
+                keys::SW_POOL_THREADS,
+                keys::SW_POOL_THREADS_PROVENANCE,
+                self.software_pool_threads,
+            ),
+        ] {
+            let Some(choice) = choice else {
+                continue;
+            };
+            let (mode, bound_value) = match choice {
+                LimitChoice::Automatic => {
+                    let bound = snapshot.values.get(key).cloned();
+                    if bound.as_deref().is_some_and(|value| {
+                        value.len() > 32
+                            || !value.trim().parse::<i64>().is_ok_and(|value| value >= 0)
+                    }) {
+                        return Err(StoreError::Task(
+                            "invalid rollback numeric cache; save a valid explicit limit first"
+                                .into(),
+                        ));
+                    }
+                    ("automatic", bound)
+                }
+                LimitChoice::Explicit { value } => {
+                    if i64::try_from(value).is_err() {
+                        return Err(StoreError::Task(
+                            "capacity limit exceeds signed storage range".into(),
+                        ));
+                    }
+                    let value = value.to_string();
+                    numeric.push((key.to_owned(), value.clone()));
+                    ("explicit", Some(value))
+                }
+            };
+            provenance.push((
+                provenance_key.to_owned(),
+                serde_json::json!({"schema":1,"mode":mode,"bound_value":bound_value}).to_string(),
+            ));
+        }
+        // Every numeric mutation invalidates old provenance in the database.
+        // Typed provenance is installed LAST in the same guarded transaction.
+        numeric.extend(provenance);
+        Ok(numeric)
+    }
+}
+
+/// Equal fields from a capability-unaware GET/PATCH echo are not new operator
+/// intent. Actual changed numbers remain legacy writes, invalidated by SQL.
+pub fn legacy_capacity_patch(
+    values: &BTreeMap<String, String>,
+    hardware: Option<i64>,
+    software: Option<i64>,
+    hardware_default: i64,
+    software_default: i64,
+) -> Vec<(&'static str, String)> {
+    [
+        (keys::MAX_HW_SESSIONS, hardware, hardware_default),
+        (keys::SW_POOL_THREADS, software, software_default),
+    ]
+    .into_iter()
+    .filter_map(|(key, requested, default)| {
+        let requested = requested?;
+        let current = values
+            .get(key)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(default);
+        (requested != current).then(|| (key, requested.to_string()))
+    })
+    .collect()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +231,23 @@ fn read(numeric: Option<&str>, provenance: Option<&str>, zero_means: ZeroMeaning
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untouched_roundtrip_preserves_absence_and_node_local_defaults() {
+        let mut values = BTreeMap::new();
+        assert!(legacy_capacity_patch(&values, Some(2), Some(15), 2, 15).is_empty());
+        assert!(legacy_capacity_patch(&values, Some(2), Some(3), 2, 3).is_empty());
+        values.insert(keys::MAX_HW_SESSIONS.into(), "0".into());
+        values.insert(
+            keys::MAX_HW_SESSIONS_PROVENANCE.into(),
+            record("automatic", Some("0")),
+        );
+        assert!(legacy_capacity_patch(&values, Some(0), None, 2, 15).is_empty());
+        assert_eq!(
+            legacy_capacity_patch(&values, Some(1), None, 2, 15),
+            vec![(keys::MAX_HW_SESSIONS, "1".into())]
+        );
+    }
 
     fn record(mode: &str, bound_value: Option<&str>) -> String {
         serde_json::json!({"schema":1,"mode":mode,"bound_value":bound_value}).to_string()

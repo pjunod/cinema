@@ -8,6 +8,31 @@ const ROOT=path.resolve(__dirname,'../..');
 const WEB=path.join(ROOT,'crates/plurxd/src/web');
 const fixture=name=>JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures/system-settings',name+'.json'),'utf8'));
 const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+test('Capacity controls preserve untouched fields and send explicit dirty choices only',()=>{
+  const h=harness();
+  const row=(key,initialMode,initialValue,mode,value)=>({
+    dataset:{capacityRow:key,initialMode,initialValue},
+    querySelector:selector=>({value:selector==='[data-capacity-mode]'?mode:value})
+  });
+  const untouched=row('hardware_sessions','legacy_ambiguous','2','legacy_ambiguous','2');
+  assert.equal(JSON.stringify(h.resourceCapacityChanges([untouched])), '{}');
+  const automatic=row('software_pool_threads','legacy_ambiguous','15','automatic','15');
+  assert.equal(JSON.stringify(h.resourceCapacityChanges([untouched,automatic])), '{"software_pool_threads":{"mode":"automatic"}}');
+  const zero=row('hardware_sessions','legacy_ambiguous','2','explicit','0');
+  assert.equal(JSON.stringify(h.resourceCapacityChanges([zero])), '{"hardware_sessions":{"mode":"explicit","value":0}}');
+  for(const value of ['', '-1', '1.5', '9007199254740992'])assert.throws(()=>h.resourceCapacityChanges([row('hardware_sessions','automatic','','explicit',value)]),/nonnegative whole-number/);
+});
+test('Capacity presentation distinguishes legacy intent and kind-specific zero without a feature switch',()=>{
+  const h=harness();
+  const html=h.systemCapacityCard({transcode_capacity_revision:7,transcode_capacity_settings:{
+    hardware_sessions:{state:'legacy_ambiguous',stored_value:0},software_pool_threads:{state:'absent',stored_value:null}
+  }});
+  assert.match(html,/Legacy value: confirm this limit or switch to Automatic/);
+  assert.match(html,/Zero disables hardware sessions/);
+  assert.match(html,/does not ban software playback/);
+  assert.match(html,/no node-local default has been saved/);
+  assert.doesNotMatch(html,/type="checkbox"|disabled|benchmark required/i);
+});
 function harness(extra={}){
   const context={esc,fmtAgo:()=>"just now",systemAttentionHtml:()=>"",...extra};
   vm.createContext(context);

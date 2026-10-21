@@ -109,7 +109,7 @@ const SETTINGS_MANIFEST={
   analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
-  system:{required:["sys"],secondary:[]},
+  system:{required:["sys","settings"],secondary:[]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
   sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},

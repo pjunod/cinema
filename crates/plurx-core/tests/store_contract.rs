@@ -33,6 +33,8 @@ mod jellyfin_login;
 mod jellyfin_play;
 #[path = "store_contract/remote.rs"]
 mod remote;
+#[path = "store_contract/resource_settings.rs"]
+mod resource_settings;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;
