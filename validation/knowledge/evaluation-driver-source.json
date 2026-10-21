@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "scope": "Generic trusted evaluator source frozen for independent source review; private gold remains separate.",
+  "source_metadata_sha256": "b2619daa9c31d78b24f43c8ce86a0dddddbf9ae4786520ff931795bf50ea1f3c",
+  "sources": {
+    "runtime_bindings.py": "67ed829aedaf1517f2b3f2a89ec531dee42805b94908ee1b9c370156e9b747e5",
+    "trusted_launcher.py": "83b04ab3d1c7e6f5fba31c948114548d814f512166f0d60280e135a5085b1409",
+    "isolation_adapter.py": "2fb9ab1adfa0ea3bfcb39543cc8e33da14010d8bfaeb8c3bd3c473cdfb7dbca7"
+  },
+  "qualification": "not-run; no approval or runtime evidence implied"
+}

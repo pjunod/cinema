@@ -1,6 +1,6 @@
 # Engineering knowledge graph — trace code to intent and evidence
 
-**Status:** M0 frozen; M1–M4 source drafted, qualification pending · **Written:** 2026-10-21 ·
+**Status:** M0 frozen; M1–M5 source prepared, qualification pending · **Written:** 2026-10-21 ·
 **Executes:** the owner's request for a bounded plurx pilot incorporating
 Astra's assessment and Fable 5.1's independent review · **Owner:** Codex integrator
 
@@ -600,8 +600,8 @@ them. Earlier percentage estimates remain unmeasured hypotheses.
 |---|---|---|
 | M0 | Frozen; Codex integrator, owned effort branch. | Twelve gold/rubric commitments sealed with 24 independent approvals and zero blockers. Source, cases and scoring frozen; runtime budget/isolation remain M5 acceptance. See [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md). |
 | M1–M2 | Implemented, unqualified. | Typed schema, 27 records, adapters, isolated snapshots and evidence dimensions; final review/checks pending. |
-| M3–M4 | Source drafted. | Bounded queries, scoped advisory capture and repository skill; final review/checks pending. |
-| M5 | Harness in progress. | Corpus projection/isolation, calibrated finite budget and frozen comparative runs remain; no savings established. |
+| M3–M4 | Implemented, unqualified. | Bounded queries, scoped advisory capture and repository skill; final review/checks pending. |
+| M5 | Source prepared. | Corpus projection/isolation, calibrated finite budget and frozen comparative runs remain; no savings established. |
 | M5b | Process window not started. | Begins when advisory M4 reaches main; enforcement/expansion decision after §6 window. Does not block M5 landing. |
 
 Implementation and evidence live on the [status page](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md); this ledger does not claim runtime qualification or savings. On task landing, update this ledger and

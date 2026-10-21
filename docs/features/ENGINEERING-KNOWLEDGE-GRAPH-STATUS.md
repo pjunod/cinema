@@ -8,7 +8,7 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — M1–M4 source integrated; M5 isolation and harness
+## Current work — source prepared for final independent review
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
@@ -22,10 +22,10 @@ updates are implementation status, not a new claim of Fable approval.
 | Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; later graph-record author | Active. Must not read private gold answers. |
 | Sol 6.1 curator A | Private routing gold; no source or graph-record writes | Done. Six routing cases sealed; independent B/C approval. |
 | Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | Done. Six evidence cases sealed; independent A/C approval. |
-| Sol 6.1 scorer C | Independent gold/rubric adjudication and private corpus projection; no record writes | Gold sealed; scoped projection normalization and independent hash review in progress. |
+| Sol 6.1 scorer C | Independent gold/rubric adjudication, private corpus projection and trusted study driver; no record writes | Projection independently approved; generic driver source frozen for final review. No gold enters record-author or solver context. |
 | Sol 6.1 model/snapshot/query authors | M1–M3 model, adapters, snapshots and boundary-test drafts | Source integrated; final review and qualification pending. No gold access. |
 | Luna CLI/capture/skill authors | Thin CLI, capture-test drafts and repository skill | Source integrated; final review and qualification pending. |
-| Sol 6.1 evaluation author | Closed corpus proxy, finite budgets and result analysis | Active in isolated owned clone; synthetic fixtures only, no gold access or execution. |
+| Sol 6.1 evaluation/executor authors | Closed corpus proxy, finite budgets, result analysis and OCI boundary | Source integrated with synthetic/mock test drafts; review and runtime qualification pending. |
 | Luna source lookup | Existing governing passage candidates, read-only | Done. Seven bounded citations; no accepted cohort-specific review finding found. |
 | Luna | Mechanical skill-source lookup, read-only | Done. Only installed cache located; maintained source/update path unverified. |
 
@@ -48,9 +48,9 @@ the public record after independent cross-adjudication.
 | M0 seal | Complete. Safe metadata SHA-256 `9c4c69510a157c6bd280c078515f395c258d1ec32d0a75c9600c69dafff23c51` | Runtime isolation and budget activation remain final-harness acceptance; the seal does not claim execution. |
 | M1 | Typed schema, read-only adapters and 27 reviewed semantic records authored independently of gold | Final adversarial review and focused checks pending. Actual review-finding/execution evidence gaps are explicit; no invented records. |
 | M2 | Snapshot isolation, rebuildable SQLite index and separate evidence dimensions implemented | Final review and qualification pending. Canonical proof closure remains independent of retrieval scope. |
-| M3 | Bounded traversal, continuation binding and CLI drafted | Final review, boundary tests and latency measurements pending. |
-| M4 | Advisory capture, preflight body wiring and repository skill drafted | Final review and fast lane pending. Maintained personal-skill installation remains unknown; amendment supplied. |
-| M5 | Generic harness/provider, mechanical graph projection and OCI executor source drafted; exact clean corpus export independently approved | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
+| M3 | Bounded traversal, continuation binding and CLI implemented | Final review, boundary tests and latency measurements pending. |
+| M4 | Advisory capture, preflight body wiring and repository skill implemented | Final review and fast lane pending. Maintained personal-skill installation remains unknown; amendment supplied. |
+| M5 | Harness/provider, visibility projection, OCI executor and concrete trusted driver source prepared; clean corpus export independently approved | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
 
 Timing is recorded as shared agent-session wall intervals, including waits,
@@ -149,5 +149,10 @@ and comments. The dated workflow correction in the current development pipeline 
 main-bound fast-lane promotion after review; older full-promotion prose is
 superseded there. The actual workflow still runs paperwork for drafts, so
 keeping the branch without a PR avoids that early expenditure.
+Generic study-driver sources are retained privately by exact
+[review-input commitments](../../validation/knowledge/evaluation-driver-source.json);
+they contain no gold literals, and runtime still requires reviewed source,
+queued admission, calibrated finite budget and observed isolation/toolchain
+proof. Final independent source review is the next action.
 No merge or deployment has occurred. Any pause after a PR
 exists must end with a current status update on that PR.
