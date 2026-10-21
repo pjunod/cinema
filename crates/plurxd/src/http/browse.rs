@@ -1967,6 +1967,46 @@ mod tests {
         result
     }
 
+    async fn k04_expired_proof_falls_back<T: serde::Serialize, F>(
+        metrics: &plurx_core::cluster::migration::status::PassiveRaftMetrics,
+        applied: u64,
+        sampler: tokio::task::JoinHandle<()>,
+        handler: impl FnOnce() -> F,
+    ) where
+        F: std::future::Future<Output = Result<Json<T>, super::ApiError>>,
+    {
+        // A real expired proof cannot satisfy the same echo. Stop the actual
+        // sampler, retain the original capability, and observe its own expiry;
+        // do not manufacture a clock or retry the measured fallback request.
+        let (_, original) = k04_wait_for_echo(metrics, applied, "expiry setup").await;
+        sampler.abort();
+        assert!(sampler
+            .await
+            .expect_err("sampler was aborted")
+            .is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while metrics.serving_proof_remains_valid(&original) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the original real proof must expire without refreshing");
+        assert!(
+            metrics.eligible_serving_proof().is_none(),
+            "expired sampler cannot qualify a new echo proof: {:?}",
+            metrics.snapshot()
+        );
+        let (expired_echo, _) = route_reads_of(handler()).await;
+        // Expiry removes bounded catalogue reads too: list_libraries,
+        // home_preview_pages, watch_summary and item_max_heights each issue
+        // one actual Authority query. This one-movie fixture has no folders,
+        // so child_counts([]) returns without a query. AuthUser is pre-resolved.
+        assert_eq!(
+            expired_echo, [0, 4, 0],
+            "the single expired-proof request must perform exactly its four Authority queries and no local reads or writes"
+        );
+    }
+
     /// K-04's M4 bar (BOUNDED-REPLICA-READS-ROLLOUT.md §5.5: library and item
     /// at most one Authority read per request, home at most two) measured on a
     /// real replicated voter with the route accounting the daemon exports. The
@@ -2094,37 +2134,40 @@ mod tests {
         let echo = Some(applied);
         let metrics = selected.replication_monitor().metrics_handle();
 
+        // Keep each real handler on the heap before the accounting helpers
+        // retain it across awaits. Otherwise nested generic futures copy the
+        // full handler state into construction/poll frames on the test stack.
         let item = |read_after| {
-            super::item_detail(
+            Box::pin(super::item_detail(
                 AuthUser(user.clone()),
                 State(state.clone()),
                 ReadAfter(read_after),
                 Path(movie),
-            )
+            ))
         };
         let library_grid = |read_after| {
-            super::list_items(
+            Box::pin(super::list_items(
                 AuthUser(user.clone()),
                 State(state.clone()),
                 ReadAfter(read_after),
                 Path(library.id),
                 Query(serde_json::from_value(serde_json::json!({})).expect("default query")),
-            )
+            ))
         };
         let previews = |read_after| {
-            super::home_previews(
+            Box::pin(super::home_previews(
                 AuthUser(user.clone()),
                 State(state.clone()),
                 ReadAfter(read_after),
-            )
+            ))
         };
         let hubs = |read_after| {
-            super::hubs(
+            Box::pin(super::hubs(
                 AuthUser(user.clone()),
                 State(state.clone()),
                 ReadAfter(read_after),
                 Query(serde_json::from_value(serde_json::json!({})).expect("default query")),
-            )
+            ))
         };
 
         // [local, authority, write]
@@ -2180,36 +2223,15 @@ mod tests {
             hubs_bare[AUTHORITY], 2,
             "hubs without an echo: {hubs_bare:?}"
         );
-        // A real expired proof cannot satisfy the same echo. Stop the actual
-        // sampler, retain the original capability, and observe its own expiry;
-        // do not manufacture a clock or retry the measured fallback request.
-        let (_, original) = k04_wait_for_echo(&metrics, applied, "expiry setup").await;
-        sampler.abort();
-        assert!(sampler
-            .await
-            .expect_err("sampler was aborted")
-            .is_cancelled());
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while metrics.serving_proof_remains_valid(&original) {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("the original real proof must expire without refreshing");
-        assert!(
-            metrics.eligible_serving_proof().is_none(),
-            "expired sampler cannot qualify a new echo proof: {:?}",
-            metrics.snapshot()
-        );
-        let (expired_echo, _) = route_reads_of(previews(echo)).await;
-        // Expiry removes bounded catalogue reads too: list_libraries,
-        // home_preview_pages, watch_summary and item_max_heights each issue
-        // one actual Authority query. This one-movie fixture has no folders,
-        // so child_counts([]) returns without a query. AuthUser is pre-resolved.
-        assert_eq!(
-            expired_echo, [0, 4, 0],
-            "the single expired-proof request must perform exactly its four Authority queries and no local reads or writes"
-        );
+        // Poll expiry independently rather than embedding its state in the
+        // already populated fixture/route-measurement future.
+        Box::pin(k04_expired_proof_falls_back(
+            &metrics,
+            applied,
+            sampler,
+            || previews(echo),
+        ))
+        .await;
         selected.shutdown().await.expect("drain replicated voter");
     }
 
