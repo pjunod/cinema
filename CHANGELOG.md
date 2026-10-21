@@ -19,6 +19,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web playback counts delivered frame callbacks independently of suspicious
+  timestamps, preventing metadata diagnostics from retaining a buffering
+  overlay or triggering false stall recovery while the picture advances.
+
+
 - Web prepared quality switches reattach selected subtitles without cancelling
   the pending quality request or sending a contradictory commit to the server.
   Visible successors retain HLS failure recovery; established retries and

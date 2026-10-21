@@ -344,8 +344,8 @@ function playbackProgressTick(v,p,frameSample=false){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Callback support is itself the observation contract. Zero presented
-      // callbacks is real evidence and must not fall through to a decoded-frame
+      // Count delivered callbacks independently of their timestamp quality.
+      // Zero callbacks is real evidence and must not fall through to a decoded-frame
       // counter that can advance while the compositor remains frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
     }else try{
