@@ -300,7 +300,7 @@
         "line": "Invariant NoStaleCommit is violated.",
         "attribution": "named_property",
         "allowed_error_lines": [
-          "The following behavior constitutes a counter-example:"
+          "The behavior up to this point is:"
         ]
       },
       "timeout_seconds": 300,
