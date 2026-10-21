@@ -11,10 +11,16 @@ passed history/catalog checks and correctly refused the operation-progress
 model's old whole-file writer pin. Reviewed pin refresh `2107c648` preserves
 the application/reply/timeout abstraction; [the wait map](../../verification/operation-progress/WAIT-MAP.md)
 records its scope. New main `7f5af452476b6911ffb84e5fcf4fb3f95de054a6`,
-including worker-refinement, is incorporated in committed M1 refresh
-`8de7499e5bcdbca76ed201b84d95e3f6e9d2a950`; M1 is not yet merged into
-the effort. At that refresh all three package mapping checks reported no
-source drift, and all 43 focused formal package/runner/CI controls passed, including
+including worker-refinement, is integrated in `8de7499e5`. Gate 5736 then
+refused seven corrective commits from PR #1251 because its real merge uses
+the unsupported subject form `Merge pull request #1251: ...`. Its two ordered
+parents and all 15 own-tree regression fields are valid. One existing
+`[[landings]]` recognition record now binds that exact immutable merge;
+no parser, waiver or audit boundary is changed. The failed gate remains red,
+and replacement gate 5740 passed on `761b371c3`. Full Rust qualification
+5743 is in progress on that frozen source; M1 is not yet merged.
+All three package mapping checks report no source
+drift, and all 43 focused formal package/runner/CI controls pass, including
 the existing stale-writer-hash and missing/ambiguous-anchor negatives. The
 reviewed writer pin still matches; no additional pin repair is needed.
 
@@ -23,20 +29,19 @@ and local revocation versus durable authority. Its conditional model result
 is not a general Rust refinement or internal-receiver cancellation theorem.
 The writer correction does not change that protocol, transaction ordering or
 those limits. No model, configuration, checker or premise is changed by this
-integration review, and TLC has not been rerun for it. Both failed gates and
+integration review, and TLC has not been rerun for it. Failed gates and
 old formal receipts retain their original verdicts and source bindings.
 Fresh exact-source compiler, focused, full native and development-gate
 acceptance remain required before merge; any fresh TLC qualification claim
 needs a new input-bound formal receipt.
-
 Current receipts are recorded in
 [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
 `codex/full-pr-suite-m1`, carrying the M0 dependency `16d1a5003`; neither
-old successful outcomes nor the failed development gate are replaced.
+old successful outcomes nor the failed development gates are replaced.
 M2 retains the profiling ancestry at `3ce97c94e` and continues in the
 [setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md);
-its refreshed integration and optimizations require their own qualification.
+its measured source and optimizations require their own full qualification.
 
 Companion to [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md)
 (the current execution policy) and [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)

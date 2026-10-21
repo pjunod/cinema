@@ -1,8 +1,8 @@
 # Full-suite setup performance — measure fixture cost before optimizing it
 
-**Status:** open — two focused baselines measured; optimizations implemented
-but uncompiled and unqualified · **Written:** 2026-10-21 · **Owner:** Codex ·
-**Branch:** `codex/full-pr-suite-m2`
+**Status:** open — integrated candidate compiled; focused controls and matched
+local measurements passed; full M2 qualification pending ·
+**Written:** 2026-10-21 · **Owner:** Codex · **Branch:** `codex/full-pr-suite-m2`
 
 Companion to the [canonical every-PR plan](FULL-SUITE-EVERY-PR-PLAN.md)
 (the complete execution contract) and the
@@ -13,21 +13,25 @@ checkout is not used for edits or tests. Preserve all assertions, identities,
 capacity boundaries, production deadlines and scenario concurrency.
 
 M1 exact-source qualification is recorded in
-[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). On 2026-10-21 the
-user authorized its complete merge into `effort/full-pr-suite`; M1 is not yet
-merged there. Failed gates 5728 and 5733 retain their original ancestry and
-writer-pin verdicts. The committed repair refresh
-`8de7499e5bcdbca76ed201b84d95e3f6e9d2a950` incorporates main
-`7f5af452476b6911ffb84e5fcf4fb3f95de054a6`, worker refinement and the
-reviewed writer binding repair `2107c648`. Current-source development-gate
-and complete native qualification remain pending. M2 retains profiling
-ancestry `3ce97c94e` and has prepared the local merge of that refresh,
-preserving its frozen Rust changes and both baseline receipts below. The
-combined M2 source is uncompiled and unqualified. No history guard is
-weakened. The older green result does not qualify this refreshed candidate,
-other platform lanes or automatic every-PR execution.
+[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). At 2026-10-21
+23:26 UTC, the user-authorized M1 merge into `effort/full-pr-suite` remains
+pending: development gate 5740 is green and refreshed full qualification
+5743 is in progress. The M1 source is
+`761b371c3ddd136ba7a724fd244dd91746acac73`. Earlier failed gates 5728 and
+5733 retain their original ancestry and writer-pin verdicts; gate 5736
+retains its unsupported-landing-title refusal.
 
-## 1. The green M1 run is the comparison baseline
+Measured M2 source `45ffd5434162b0f448e670073a19595e90d5e4a1` incorporates
+M1 `8de7499e5`. M1 `761b371c` changes only history metadata and its ledger,
+so its Rust base is identical; M2 differs in exactly eight Rust paths. It has passed the pinned
+compiler loop, focused controls and the paired measurements in §2.2. Those
+local observations do not qualify its complete native suite, doctests,
+other platform lanes or automatic every-PR execution. M2 retains the older
+`3ce97c94e` measurements as bottleneck reconnaissance; only the new
+current-base pair is used to attribute the measured improvements. No history
+guard is weakened.
+
+## 1. The earlier green M1 run supplies whole-suite context
 
 | Measure | Frozen observation |
 |---|---|
@@ -49,7 +53,9 @@ cases separately; other isolated costs remain unknown. The 49 ignored
 statuses remain ignored; serial passes are separate observations. M2 must
 retain every baseline identity and seven doctest targets.
 
-## 2. Two local baselines identify different dominant phases
+## 2. Focused measurements separate bottleneck discovery from comparison
+
+### 2.1 The earlier baselines identify dominant phases
 
 Both `baseline-01` and `baseline-02` executed committed source
 `3ce97c94e6168012425781360267a04f85448fc0`, tree
@@ -90,7 +96,8 @@ its insert loop; it does not isolate preparation alone. The migration path
 explicitly times preparation while the writer lock is held. Catalogue
 construction dominates that case, while its production and oracle queries
 still perform substantial real work. The candidate targets these measured
-costs; no post-change improvement is claimed yet.
+costs. These older observations establish the optimization targets; the
+current-base comparison in §2.2 measures the changes.
 
 Raw native logs, phase rows, source and executable bindings, and cleanup
 receipts remain in ignored `target/rust-performance-local/` sample folders.
@@ -99,12 +106,111 @@ The two `summary.json` SHA-256 digests are:
 - Baseline 01: `31558d22bdc9f08a99d1eab1639361b909db877dd608d2009acb062f09136b27`.
 - Baseline 02: `c14399e6a626efd698d8d94f720686b3c5ebaec646566ab02914c292d1bb21c0`.
 
+### 2.2 The current-base paired samples retain all measured work
+
+The timing-only baseline is source
+`9acf0c5dc1a5c417dffbdfb4b14ebd65d710b33f`, tree
+`1b45f4b3c444a7992a861ebfdb46d9f5b9365896`, based on M1
+`761b371c3ddd136ba7a724fd244dd91746acac73`. That base has identical Rust
+source to `8de7499e5`, incorporated by optimized source
+`45ffd5434162b0f448e670073a19595e90d5e4a1`, tree
+`e77b6a5c256a49f574fc153fa592616dfb55e109`. The baseline retains uncached
+preparation, all 200 cold `open_in_memory` calls and all 8,193 actual
+history inserts. The new pre-cap assertion is mirrored in that baseline,
+so both variants prove the threshold was exceeded before applying the cap.
+
+Each variant has two fresh-process observations, interleaved baseline 01,
+optimized 01, baseline 02, optimized 02. All use local Linux ARM64, Rust
+`1.97.1 (8bab26f4f 2026-07-14)`, `hiqlite-store`, optimization level zero,
+no debug information, enabled debug assertions and overflow checks, and
+16 logical/16 affinity CPUs. Each native command explicitly unsets
+`RUST_MIN_STACK` and uses `--exact --test-threads=1 --nocapture` with
+`PLURX_TEST_SETUP_TIMING=1`. The raw argv, source and executable hashes,
+phase rows, CPU deltas, native verdicts and owned process-group cleanup
+receipts are retained with each sample.
+
+| Exact case suffix | Baseline 01 / 02 seconds | Optimized 01 / 02 seconds | Baseline median seconds | Optimized median seconds | Ratio of medians |
+|---|---:|---:|---:|---:|---:|
+| `terminal_analysis_history_has_a_hard_global_cap` | 120.523 / 112.459 | 0.483 / 0.464 | 116.491 | 0.4735 | 246.02× |
+| `migration_overflow_retains_all_accepted_work_until_capacity_frees` | 88.710 / 91.440 | 19.235 / 19.221 | 90.075 | 19.228 | 4.68× |
+| `recently_added_matches_the_whole_catalogue_ranking` | 48.962 / 48.885 | 7.589 / 7.894 | 48.9235 | 7.7415 | 6.32× |
+
+**How to read it:** these are three isolated case command durations, with
+only two observations per variant. The displayed pairs are also their
+observed ranges. They establish focused improvements under this compiler
+and scheduling contract; they do not predict whole-suite or Forgejo job
+durations. All 12 native bodies passed, returned zero, retained an owned
+leader through cleanup, and left no live or unknown process group.
+
+| Case | Unchanged actual work verified in all four raw profiles | Dominant phase median, baseline → optimized seconds |
+|---|---|---:|
+| History | 8,193 real loop executions; one queued insert, cap update, commit and final read; unchanged native cap assertions | Insert loop 116.20772 → 0.21134 |
+| Overflow | 4,100 accepted; initially 3,840 materialized/260 pending; 260 cancellations; drained 4,100 materialized/zero pending/zero failed; 257 completed and committed queue transactions with all 4,100 statements completed | Queue preparation 62.88632 → 0.16743 |
+| Catalogue | 200 independent Store opens/seeds, 9,339 rows, 5,000 production and 5,000 oracle queries; all paired assertions retained | Opens 43.02420 → 2.07961 |
+
+The overflow SQL volume is identical at 121,401,000 bytes. Its 257
+transaction statement counts remain 256 groups of 16 and one group of four.
+Queue timing is nested inside the overflow phases; adding both would double
+count time. Catalogue production-query medians remain 3.26090 → 3.13003
+seconds and oracle-query medians 2.14417 → 2.06570 seconds: the measured
+construction reduction preserves the real queries.
+
+| Case | Baseline median CPU seconds | Optimized median CPU seconds | Baseline / optimized median CPU seconds per wall second |
+|---|---:|---:|---:|
+| History | 116.46236 | 0.46153 | 0.99976 / 0.97516 |
+| Overflow | 89.77905 | 18.85278 | 0.99672 / 0.98049 |
+| Catalogue | 48.79928 | 7.61006 | 0.99746 / 0.98299 |
+
+CPU values are measured user-plus-system child CPU deltas. The nearly
+one-core baseline consumption supports preparation/construction CPU cost
+for these isolated observations; it does not diagnose the earlier shared
+CI slowdown. The recorded child maximum RSS values span 46,576–61,540 KiB
+and are cumulative process-child high-water marks. They are neither
+per-case memory peaks nor peak deltas and establish no memory improvement.
+
+**Freshness guard:** restoring an older source archive initially produced a
+0.35-second Cargo result after the baseline build, which could have reused
+the baseline executable because archive mtimes were older. It was rejected
+before recording any optimized profile. Changed-file source synchronization
+now refreshes mtimes while preserving identical-file mtimes. A forced fresh
+optimized compilation then passed all 15 native controls and recorded a
+distinct executable. Both optimized repeats and the fresh control receipt
+share that executable. Both baseline repeats share their different
+executable. The saved listings preserve the entire 1,951-case baseline set
+and add exactly the ten named M2 controls, yielding 1,961 identities.
+`--list` does not establish ignored dispositions; complete qualification
+must verify those separately.
+
+**Evidence bindings:** the strict local comparison helper validated the
+raw native and timing logs against every summary, all work metrics and the
+fresh 15-control receipt. Its ignored report is
+`target/rust-performance-local/current-base-comparison.json`, SHA-256
+`eb46aaffcca02e324b32953da019ccb549ab405cc8505a78447e6671fb07b589`.
+Executable hashes are receipt bindings; the local analysis did not rehash
+executable bytes from the compiler host. Source ancestry and patch scope
+are separately reviewed, rather than inferred from timing metadata.
+
+| Binding | Baseline | Optimized |
+|---|---|---|
+| Source archive SHA-256 | `c16c02eb9456ff5578253bcf872041b2b98f6d4bc6ef83df3ac2580b92a0a8bb` | `084ebfd20b538152a980c2d37c8fc790d451067d5b7174814c209a64441a6162` |
+| Executable SHA-256, same within both repeats | `cd3352fcc088917a81cc9fedc63a40b08f45af4f54a66288c8956b198c4973bd` | `384ee8dcd68e2ea7aa8275cff8ddf3756d2f75f4c0e8f607f6acf66857f440f0` |
+| Saved listing SHA-256, same within both repeats | `1c3789fe1a020026b9f40c30ed8abace5784bf09bf15bbab59805b1e55e3966f` | `45c0388e009847da28e5cebdd569c667810d4345a3dd721f75b125aa098c2016` |
+
+The four raw `summary.json` digests are:
+
+- Current baseline 01: `cee3d1a26cc9b3c2bbb02bf05779035b576c6bd093fe38b7b099b20bc46402ca`.
+- Current baseline 02: `c9c7776e75be040fd801b4b03528e5891de7127c5c5c32f7ca79e617be508d2d`.
+- Current optimized 01: `eb912c3869dd47cd7bc3f4b6cd1b19531006568c41f57abe2803029fba04e0f3`.
+- Current optimized 02: `2e48e4c85a8bec23a743a8835b181074b2ac1f3720a8d48f467ffd4359569b85`.
+- Fresh 15-control receipt: `df06a210cf6e1e9e6bdc3928389d841a6dc1b15e63feb45ba34e4891a5b4e0b5`.
+
 ## 3. The candidate keeps implementation ownership narrow
 
-The following changes are implemented in the working tree, **not compiled,
-executed or qualified**. The overall performance work is authorized; the
-production queue extension has a measured preparation basis and requires
-its substantive controls, rather than another optional-feature approval.
+The following changes are committed in `45ffd5434162b0f448e670073a19595e90d5e4a1`,
+compiled and exercised by the focused controls and measurements above.
+Complete M2 qualification is pending. Measured queue preparation costs
+motivated the bounded cache; its real controls exercise bindings, row
+draining, schema changes, isolation and rollback.
 
 | Owned surface | Exact files and implemented boundary |
 |---|---|
@@ -113,6 +219,7 @@ its substantive controls, rather than another optional-feature approval.
 | Explicit initialized fixture | New [fixture.rs](../../crates/plurx-core/src/store/sqlite/fixture.rs), gated by [sqlite/mod.rs](../../crates/plurx-core/src/store/sqlite/mod.rs), copies an immutable initialized template into a private memory database, reapplies initialization and regenerates dynamic settings. Five controls cover cold equivalence, dynamic state/PRAGMAs, mutation/rollback/FTS isolation, parallel connections and the real cold-file backfill/reopen path. Cold constructors are unchanged. |
 | Single helper caller | Only `recently_added_matches_the_whole_catalogue_ranking` in [media/tests.rs](../../crates/plurx-core/src/store/sqlite/media/tests.rs) adopts the explicit fixture helper. Its 200 independent Stores, 9,339 rows and 5,000 production/oracle comparisons remain. No general Source or migration-fixture conversion is claimed. |
 | Source inventory | [placeholder_census.rs](../../crates/plurx-core/src/store/placeholder_census.rs) and [replicated.rs](../../crates/plurx-core/src/store/replicated.rs) register the new fixture module in their exact source inventories. The transaction total remains unchanged. Unchecked SQLite arity remains 103; the [consistent-read census](../../crates/plurx-core/src/store/consistent_read_census.rs) ceiling remains 237. |
+| Overflow instrumentation | [background_jobs_migration.rs](../../crates/plurx-core/src/store/background_jobs_migration.rs) records opt-in setup phase counts and timings; accepted/materialized/pending work and all assertions remain. Together with the seven paths above, this makes exactly eight changed Rust paths against M1 `761b371c`. |
 | Integration and evidence | Root owns Rust integration, compiler sequencing and commits; this ledger records measurements and acceptance. No mutable Store is shared between cases. |
 
 Preparation caching must never retain previous request values, skip streamed
@@ -132,13 +239,13 @@ All 33 Python runner controls and the durable-jobs mapping check pass. The
 earlier `b7644c04b` transaction-census failure remains retained: the root
 test-only helper declaration had hidden the production adapter from the
 existing scanner. Its file-order correction changes no scanner or expected
-count and still requires fresh native census acceptance. After integration
-of `8de7499e5`, all three package mapping checks report zero source drift and
+count and subsequently passed the five fresh native censuses. After
+integration of `8de7499e5`, all three package mapping checks report zero source drift and
 all 52 focused Python formal package, runner, CI and toolchain controls pass.
 The operation-progress writer bindings are incorporated from M1; worker
 refinement needs no new source-pin repair. No model checker was run for this
-integration. These guard results do not complete M2 qualification or
-establish a speed improvement.
+integration. These guard results do not complete M2 qualification. The later
+focused measurements in §2.2 establish only their stated local improvements.
 
 ## 4. Qualification must retain the work being measured
 
@@ -146,14 +253,24 @@ establish a speed improvement.
   exact source/tree and process cleanup.
 - [x] Assign the narrow helper and measured queue preparation surfaces; retain
   all existing assertions and add real isolation/schema/rollback controls.
-- [ ] Compile the exact integrated candidate and run all added controls through
-  the established pinned compiler loop. Implementation alone is not a pass.
-- [ ] Repeat matched local measurements with unchanged case identities,
+- [x] Compile the measured source `45ffd543` and run all ten added controls
+  plus five retained native censuses through the pinned compiler loop.
+- [x] Repeat matched local measurements with unchanged case identities,
   assertions, resources and scheduling; record actual improvement and limits.
 - [ ] Obtain fresh source-bound complete native and doctest evidence after
   integration. Retain all failures; later passes cannot erase earlier results.
 - [ ] Preserve other platform and automatic ready-PR cutover obligations in
   the [canonical plan](FULL-SUITE-EVERY-PR-PLAN.md).
+
+**Focused compiler evidence:** all 15 native controls passed with
+`hiqlite-store` and again with `hiqlite-store,fixtures,scratch-fault-injection`.
+The pinned Linux production Clippy check passed in 39.64 seconds and the
+fixture-feature Core compilation passed in 66 seconds. The normal Mac
+commit hook passed in 424 seconds, including its 412-second Clippy check.
+These checks compile and exercise affected paths; they do not substitute
+for the pending complete M2 native/doctest run. The development gate's
+`compile_only` formal mode preserves `ci-inputs` checks and provides no new
+TLC execution claim.
 
 M2 does not remove expensive cases, adopt old outcomes as fresh execution,
 increase deadlines, change ignore dispositions or weaken assertions.
