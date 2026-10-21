@@ -5,6 +5,7 @@ an actual acceptance result. Temporary fixtures use durable owned target paths.
 """
 from dataclasses import replace
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -130,6 +131,88 @@ class KnowledgeIsolationTests(unittest.TestCase):
         receipt = isolation.probe(config)
         self.assertEqual(receipt.status, "verified")
         self.assertEqual(isolation.execute(config, self.argv, receipt).status, "passed")
+
+    def test_archive_bound_quiet_wrapper_preserves_exact_argv_and_rejects_changes(self):
+        wrapper = self.config.candidate_root / "scripts/quiet"
+        wrapper.parent.mkdir()
+        wrapper.write_text('#!/bin/sh\nexec "$@"\n')
+        wrapper.chmod(0o755)
+        trusted = isolation.TrustedSourceFile("scripts/quiet", hashlib.sha256(wrapper.read_bytes()).hexdigest())
+        argv = ("/work/scripts/quiet", self.config.cargo_executable, "test", "--locked", "--offline")
+        config = replace(self.config, require_rust=True, acceptance_argv=(argv,), trusted_wrappers=(trusted,),
+                         source_commit="a" * 40, source_archive_sha256="c" * 64)
+        receipt = isolation.probe(config)
+        self.assertEqual(receipt.status, "verified")
+        self.assertEqual(isolation.execute(config, argv, receipt).status, "passed")
+        callback = [args for args, _ in self.engine.calls if args[0] == "exec" and isolation._PROBE_CODE not in args][-1]
+        self.assertEqual(tuple(callback[3:]), argv)
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(replace(config, source_archive_sha256=""))
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(replace(config, acceptance_argv=(("/work/scripts/quiet", "/bin/sh", "-c", "arbitrary"),)))
+        wrapper.write_text("changed wrapper")
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(config)
+
+    def test_only_exact_archive_bound_rust_source_exceptions_are_permitted(self):
+        relative = "crates/plurx-core/src/secrets.rs"
+        path = self.config.candidate_root / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("// tracked public Rust source, not credentials\n")
+        trusted = isolation.TrustedSourceFile(relative, hashlib.sha256(path.read_bytes()).hexdigest())
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(self.config)
+        config = replace(self.config, trusted_source_files=(trusted,), source_commit="a" * 40,
+                         source_archive_sha256="c" * 64)
+        self.assertEqual(isolation.probe(config).status, "verified")
+        path.write_text("// changed file must require a new verified archive declaration\n")
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(config)
+        for forbidden in (".cargo/config.toml", ".cargo/credentials.toml", "auth.json"):
+            with self.assertRaises(isolation.IsolationError):
+                isolation.probe(replace(config, trusted_source_files=(isolation.TrustedSourceFile(forbidden, "d" * 64),)))
+
+    def test_runtime_cache_caps_are_finite_bound_and_stream_hashing_is_chunked(self):
+        runtime_file = self.config.runtime_root / "large-fixture.bin"
+        runtime_file.write_bytes(b"x" * (2 * 1024 * 1024 + 17))
+        config = replace(self.config, runtime_max_bytes=4 * 1024 * 1024)
+        receipt = isolation.probe(config)
+        self.assertEqual(receipt.status, "verified")
+        raw = json.loads(receipt.private_path.read_text())
+        self.assertIn(config.runtime_max_bytes, raw["configuration"]["limits"])
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(replace(config, runtime_max_bytes=1))
+        for maximum in (0, 129 * 1024**3):
+            with self.assertRaises(isolation.IsolationError):
+                isolation.probe(replace(config, runtime_max_bytes=maximum))
+            with self.assertRaises(isolation.IsolationError):
+                isolation.probe(replace(config, cache_max_bytes=maximum))
+        sizes = []
+        real_fdopen = isolation.os.fdopen
+        class ObservedStream:
+            def __init__(self, stream):
+                self.stream = stream
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.stream.close()
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                sizes.append(size)
+                return self.stream.read(size)
+        with patch("validation.knowledge.evaluation_isolation.os.fdopen", side_effect=lambda *args, **kwargs: ObservedStream(real_fdopen(*args, **kwargs))):
+            actual = isolation._read_member(self.config.runtime_root, runtime_file, runtime_file.lstat(), max_bytes=config.runtime_max_bytes)
+        self.assertEqual(actual, hashlib.sha256(runtime_file.read_bytes()).hexdigest())
+        self.assertTrue(sizes and max(sizes) <= 1024 * 1024)
+
+    def test_engine_symlink_is_resolved_once_and_bound_to_actual_executable(self):
+        alias = self.root / "engine-alias"
+        alias.symlink_to(self.config.engine)
+        config = replace(self.config, engine=alias)
+        self.assertEqual(config.engine, self.config.engine)
+        receipt = isolation.probe(config)
+        self.assertEqual(json.loads(receipt.private_path.read_text())["configuration"]["engine"], str(self.config.engine))
 
     def test_required_container_flags_are_fixed_and_no_socket_mount_or_shell(self):
         isolation.probe(self.config)

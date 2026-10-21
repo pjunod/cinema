@@ -51,6 +51,13 @@ class ReadonlyCache:
 
 
 @dataclass(frozen=True)
+class TrustedSourceFile:
+    """Exact tracked archive member declared by the trusted source stager."""
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class IsolationConfig:
     engine: Path
     endpoint: str
@@ -73,10 +80,19 @@ class IsolationConfig:
     pids_limit: int = 64
     uid: int = 65534
     gid: int = 65534
+    source_commit: str = ""
+    source_archive_sha256: str = ""
+    trusted_source_files: tuple[TrustedSourceFile, ...] = ()
+    trusted_wrappers: tuple[TrustedSourceFile, ...] = ()
+    runtime_max_bytes: int = 32 * 1024**3
+    cache_max_bytes: int = 32 * 1024**3
 
     def __post_init__(self):
         for name in ("engine", "owned_root", "candidate_root", "grader_root", "runtime_root"):
             object.__setattr__(self, name, Path(getattr(self, name)))
+        object.__setattr__(self, "engine", self.engine.resolve())
+        object.__setattr__(self, "trusted_source_files", tuple(self.trusted_source_files))
+        object.__setattr__(self, "trusted_wrappers", tuple(self.trusted_wrappers))
         object.__setattr__(self, "acceptance_argv", tuple(tuple(argv) for argv in self.acceptance_argv))
         object.__setattr__(self, "environment", tuple(tuple(pair) for pair in self.environment))
         object.__setattr__(self, "readonly_caches", tuple(self.readonly_caches))
@@ -127,6 +143,10 @@ class _Cleanup:
 _ISSUED: dict[int, tuple[ProbeReceipt, dict[str, Any]]] = {}
 _OWNED_CONTAINERS: set[str] = set()
 _IMAGE = re.compile(r"(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}\Z")
+# These are tracked Rust sources, never credential stores. Adding an exception
+# or wrapper family requires a source change and review, not a model tool flag.
+_SOURCE_EXCEPTIONS = frozenset({"crates/plurx-core/src/secrets.rs", "crates/plurx-compat-jellyfin/src/credentials.rs"})
+_WRAPPERS = frozenset({"scripts/quiet"})
 _SUPERVISOR = "import time; time.sleep(86400)"
 _PROBE_CODE = r'''
 import errno,json,os,platform,socket,subprocess,sys
@@ -185,7 +205,7 @@ def _private_name(name: str):
             or name.startswith((".env", "credentials", "secret")) or name.endswith((".pem", ".key", ".fleet.json")))
 
 
-def _read_member(root: Path, path: Path, expected):
+def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 1024):
     """Open through no-follow directory descriptors, including race windows."""
     parts = path.relative_to(root).parts
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -197,8 +217,13 @@ def _read_member(root: Path, path: Path, expected):
         descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
         with os.fdopen(descriptor, "rb") as stream:
             before = os.fstat(stream.fileno())
-            _require(stat.S_ISREG(before.st_mode) and before.st_size <= 512 * 1024 * 1024, "bounded regular mount file required")
-            raw = stream.read(512 * 1024 * 1024 + 1)
+            _require(stat.S_ISREG(before.st_mode) and before.st_size <= max_bytes, "bounded regular mount file required")
+            digest = hashlib.sha256()
+            count = 0
+            while chunk := stream.read(1024 * 1024):
+                count += len(chunk)
+                _require(count <= max_bytes, "mount byte bound exceeded during capture")
+                digest.update(chunk)
             after = os.fstat(stream.fileno())
         current = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
     finally:
@@ -206,13 +231,15 @@ def _read_member(root: Path, path: Path, expected):
     def identity(value):
         return (value.st_dev, value.st_ino, value.st_size, value.st_mode, value.st_mtime_ns, value.st_ctime_ns)
     _require(identity(expected) == identity(before) == identity(after) == identity(current), "mount source changed during capture")
-    return raw
+    return digest.hexdigest()
 
 
-def _manifest(root: Path, *, candidate=False):
+def _manifest(root: Path, *, candidate=False, max_bytes=512 * 1024 * 1024, exceptions=None):
     rows = []
     total = 0
     members = 0
+    exceptions = exceptions or {}
+    seen_exceptions = set()
     for directory, folders, files in os.walk(root, followlinks=False):
         if candidate and Path(directory) == root and ".runtime" in folders:
             runtime = root / ".runtime"
@@ -222,14 +249,20 @@ def _manifest(root: Path, *, candidate=False):
             members += 1
             _require(members <= 100000, "mount path count bound exceeded")
             path = Path(directory) / name
-            _require(not _private_name(name) and not path.is_symlink(), "private or symlink mount member refused")
+            relative = path.relative_to(root).as_posix()
+            permitted_source = candidate and relative in exceptions and relative in _SOURCE_EXCEPTIONS
+            _require((not _private_name(name) or permitted_source) and not path.is_symlink(), "private or symlink mount member refused")
             info = path.lstat()
             _require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "special mount member refused")
             if stat.S_ISREG(info.st_mode):
                 total += info.st_size
-                _require(total <= 512 * 1024 * 1024 and len(rows) < 100000, "mount corpus bound exceeded")
-                raw = _read_member(root, path, info)
-                rows.append((path.relative_to(root).as_posix(), stat.S_IMODE(info.st_mode), _bytes_digest(raw)))
+                _require(total <= max_bytes and len(rows) < 100000, "mount corpus bound exceeded")
+                digest = _read_member(root, path, info, max_bytes=max_bytes)
+                if relative in exceptions:
+                    _require(digest == exceptions[relative], "trusted source exception content changed")
+                    seen_exceptions.add(relative)
+                rows.append((relative, stat.S_IMODE(info.st_mode), digest))
+    _require(seen_exceptions == set(exceptions), "trusted source exception missing")
     return _digest(sorted(rows))
 
 
@@ -256,17 +289,39 @@ def _prepare(config: IsolationConfig):
     _require(config.endpoint.startswith("unix:///") and "\n" not in config.endpoint and "\0" not in config.endpoint, "local Unix engine endpoint required")
     _require(type(config.uid) is int and type(config.gid) is int and 0 < config.uid < 2**31 and 0 < config.gid < 2**31, "unprivileged numeric user required")
     for value, lower, upper in ((config.timeout_seconds, 1, 1800), (config.max_output_bytes, 1024, 16 * 1024 * 1024),
-                                (config.memory_bytes, 64 * 1024 * 1024, 16 * 1024**3), (config.pids_limit, 8, 256)):
+                                (config.memory_bytes, 64 * 1024 * 1024, 16 * 1024**3), (config.pids_limit, 8, 256),
+                                (config.runtime_max_bytes, 1, 128 * 1024**3), (config.cache_max_bytes, 1, 128 * 1024**3)):
         _require(type(value) is int and lower <= value <= upper, "finite execution bounds required")
     _require(type(config.cpus) in {int, float} and 0.1 <= config.cpus <= 16, "finite CPU bound required")
     _require(type(config.require_rust) is bool, "explicit Rust requirement required")
     for path in (config.python_executable, config.rustc_executable, config.cargo_executable):
         _container_executable(path)
+    trusted = (*config.trusted_source_files, *config.trusted_wrappers)
+    if trusted:
+        _require(re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", config.source_commit)
+                 and re.fullmatch(r"[a-f0-9]{64}", config.source_archive_sha256), "verified source archive provenance required")
+    _require(len(config.trusted_source_files) <= len(_SOURCE_EXCEPTIONS) and len(config.trusted_wrappers) <= len(_WRAPPERS), "trusted source allowlist bound exceeded")
+    exceptions = {}
+    wrappers = {}
+    for entries, allowed, destination in ((config.trusted_source_files, _SOURCE_EXCEPTIONS, exceptions),
+                                          (config.trusted_wrappers, _WRAPPERS, wrappers)):
+        for entry in entries:
+            _require(isinstance(entry, TrustedSourceFile) and entry.path in allowed
+                     and re.fullmatch(r"[a-f0-9]{64}", entry.sha256) and entry.path not in destination, "exact trusted source member required")
+            destination[entry.path] = entry.sha256
+    wrapper_commands = {"/work/" + relative for relative in wrappers}
+    for relative, expected in wrappers.items():
+        path = config.candidate_root / relative
+        _no_symlinks(path)
+        info = path.lstat()
+        _require(info.st_mode & 0o111 and _read_member(config.candidate_root, path, info) == expected, "trusted wrapper content/mode changed")
     _require(0 < len(config.acceptance_argv) <= 32, "fixed acceptance argv required")
     for argv in config.acceptance_argv:
-        _require(0 < len(argv) <= 256 and argv[0] in {config.python_executable, config.cargo_executable, config.rustc_executable}, "trusted runtime callback required")
+        _require(0 < len(argv) <= 256 and argv[0] in {config.python_executable, config.cargo_executable, config.rustc_executable} | wrapper_commands, "trusted runtime callback required")
         _require(all(isinstance(arg, str) and "\0" not in arg for arg in argv) and sum(map(len, argv)) <= 32768, "bounded literal argv required")
         _require(config.require_rust or argv[0] == config.python_executable, "Rust callbacks require pinned Rust verification")
+        if argv[0] in wrapper_commands:
+            _require(len(argv) >= 2 and argv[1] == config.cargo_executable, "trusted wrapper must invoke the fixed Cargo executable")
     _require(len(config.readonly_caches) <= 8, "readonly cache count bound exceeded")
     targets = set()
     for cache in config.readonly_caches:
@@ -311,14 +366,17 @@ def _prepare(config: IsolationConfig):
         engine_digest = _bytes_digest(config.engine.read_bytes())
     for mount in mounts:
         _no_symlinks(mount, directory=True)
-    sources = {"candidate": _manifest(config.candidate_root, candidate=True), "grader": _manifest(config.grader_root),
-               "runtime": _manifest(config.runtime_root),
-               "caches": [_manifest(Path(cache.source)) for cache in config.readonly_caches]}
+    sources = {"candidate": _manifest(config.candidate_root, candidate=True, exceptions=exceptions), "grader": _manifest(config.grader_root),
+               "runtime": _manifest(config.runtime_root, max_bytes=config.runtime_max_bytes),
+               "caches": [_manifest(Path(cache.source), max_bytes=config.cache_max_bytes) for cache in config.readonly_caches]}
     payload = {"engine": str(config.engine), "engine_digest": engine_digest, "endpoint": config.endpoint,
                "image": config.image, "root": str(root), "mounts": [(str(p), target, ro) for p, target, ro in _mounts(config)],
                "mount_identity": [(path.stat().st_dev, path.stat().st_ino) for path in mounts],
                "sources": sources, "argv": config.acceptance_argv, "environment": sorted(_environment(config).items()),
-               "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit],
+               "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit,
+                          config.runtime_max_bytes, config.cache_max_bytes],
+               "source_archive": {"commit": config.source_commit, "sha256": config.source_archive_sha256,
+                                  "exceptions": sorted(exceptions.items()), "wrappers": sorted(wrappers.items())},
                "user": [config.uid, config.gid], "runtimes": [config.python_executable, config.rustc_executable, config.cargo_executable, config.require_rust],
                "supervisor": _bytes_digest(_SUPERVISOR.encode()), "probe": _bytes_digest(_PROBE_CODE.encode())}
     return private, payload
