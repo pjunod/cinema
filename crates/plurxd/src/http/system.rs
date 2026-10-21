@@ -1002,9 +1002,13 @@ where
     Option::<FileId>::deserialize(deserializer).map(|id| id.map(|id| id.0))
 }
 
+mod frame_drop;
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
+    /// Bounded numeric frame-drop incident; retained in playback-event extra.
+    frame_drop: Option<frame_drop::ClientFrameDrop>,
     pub transport: Option<ClientTransportRecord>,
     /// "error" | "warn" — anything but "error" logs at WARN.
     pub level: String,
@@ -1737,6 +1741,11 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         (!context.is_empty()).then_some(serde_json::Value::Object(context))
     }
     let mut extra = serde_json::Map::new();
+    if ev.event == "frame_drop" {
+        if let Some(incident) = ev.frame_drop.as_ref().and_then(|value| value.value()) {
+            extra.insert("frame_drop".to_owned(), incident);
+        }
+    }
     if let Some(record) = ev.transport.as_ref().filter(|record| {
         record.command_id.len() <= 64
             && !record.command_id.is_empty()

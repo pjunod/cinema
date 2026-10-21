@@ -1999,6 +1999,7 @@ function armHitchDetector(v){
     // is unusable. Keep the receipt clock independent of the hitch diagnostic
     // filter; otherwise moving video can look stalled to playbackProgressTick.
     // Seek settlement below still requires trustworthy timestamped evidence.
+    if(typeof recordFrameDropFrame==="function")recordFrameDropFrame(v,p,now,meta);
     p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(!v.paused&&!v.seeking&&PlaybackPolicy.frameMetadataAheadOfClock(meta,{
       nowMs:now,currentTime:v.currentTime,playbackRate:v.playbackRate||1,nominalSeconds:nominal()||0
