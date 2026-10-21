@@ -1881,10 +1881,10 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
 /// generation. One list on purpose: every snapshot that reaches a
 /// `CandidateExecutionContext` is fetched with it, so a start bound to a
 /// candidate sees exactly the keys an unbound start reads instead of reading
-/// some of them as unset. Widening it changes no planning identity:
-/// `PlanningBinding::from_snapshot` hashes the file, probe, reorder flag and
-/// generation, never this map.
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 24] = [
+/// some of them as unset. Capacity's four raw keys and verified installation
+/// also participate in the versioned admission binding, without normalizing
+/// this map or changing recipe-content identities.
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 26] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
@@ -1909,6 +1909,8 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 24] = [
     keys::HLS_BURST_SECS,
     keys::SW_POOL_THREADS,
     keys::MAX_HW_SESSIONS,
+    keys::SW_POOL_THREADS_PROVENANCE,
+    keys::MAX_HW_SESSIONS_PROVENANCE,
     keys::CONTENT_AWARE_ENCODING,
     keys::HLS_AHEAD_MAX_SECS,
     keys::HLS_AHEAD_MAX_BYTES,

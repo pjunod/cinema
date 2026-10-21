@@ -464,6 +464,8 @@ struct PlanningSnapshotRow {
     generation: i64,
     settings: String,
     item_title: Option<String>,
+    capacity_catalog: String,
+    capacity_marker: Option<String>,
 }
 impl From<&mut Row<'_>> for PlanningSnapshotRow {
     fn from(row: &mut Row<'_>) -> Self {
@@ -473,6 +475,8 @@ impl From<&mut Row<'_>> for PlanningSnapshotRow {
             generation: row.get("planning_generation"),
             settings: row.get("planning_settings"),
             item_title: row.get("planning_item_title"),
+            capacity_catalog: row.get("planning_capacity_catalog"),
+            capacity_marker: row.get("planning_capacity_marker"),
         }
     }
 }
@@ -3076,25 +3080,46 @@ impl MediaStore for HiqliteAuthStore {
         file_id: i64,
         keys: &[&str],
     ) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
-        let keys = super::selected_settings_json(keys)?;
-        let rows = self.client()
-        // authority: all planning inputs and generation share one committed read.
-        .query_consistent_map::<PlanningSnapshotRow, _>(
-            format!("WITH input AS (SELECT $1 AS file_id, $2 AS keys) SELECT {FILE_COLS}, probe_json AS planning_probe, \
-                (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
-                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings, \
-                (SELECT title FROM items WHERE items.id = files.item_id) AS planning_item_title \
-                FROM files WHERE id = (SELECT file_id FROM input)"), params!(file_id, keys),
-        ).await.map_err(database_error)?;
+        use super::planning_capacity as capacity;
+        let keys = capacity::selected_keys(keys)?;
+        let statement = capacity::statement(FILE_COLS, false);
+        // authority: ALL planning inputs, catalog, marker and generation share
+        // ONE successful committed read. A failed optional-schema attempt is
+        // discarded in full; never join its values to the fallback snapshot.
+        let rows = match self
+            .client()
+            .query_planning_map::<PlanningSnapshotRow>(
+                statement.clone(),
+                params!(file_id, keys.clone()),
+            )
+            .await?
+        {
+            Some(rows) => rows,
+            None => self
+                .client()
+                .query_consistent_map::<PlanningSnapshotRow, _>(
+                    capacity::statement(FILE_COLS, true),
+                    params!(file_id, keys),
+                )
+                .await
+                .map_err(database_error)?,
+        };
         rows.into_iter()
             .next()
             .map(|row| {
+                let settings = serde_json::from_str(&row.settings)
+                    .map_err(|error| StoreError::Database(error.to_string()))?;
+                let capacity = super::PlanningCapacity::from_statement(
+                    &settings,
+                    &row.capacity_catalog,
+                    row.capacity_marker.as_deref(),
+                );
                 Ok(super::PlaybackPlanningSnapshot {
                     file: row.file.try_into()?,
                     probe_json: row.probe_json,
                     generation: row.generation,
-                    settings: serde_json::from_str(&row.settings)
-                        .map_err(|error| StoreError::Database(error.to_string()))?,
+                    settings,
+                    capacity,
                     item_title: row.item_title,
                 })
             })

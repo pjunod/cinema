@@ -252,8 +252,10 @@ pub mod classification_schedule;
 mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
+mod planning_capacity;
 pub mod replicated;
 mod resource_settings_schema;
+pub use planning_capacity::{CapacityInstallation, PlanningCapacity};
 mod subtitle_managed_schema;
 mod subtitle_translation_schema;
 pub mod watched_drain;
@@ -1628,6 +1630,9 @@ pub struct PlaybackPlanningSnapshot {
     pub file: crate::domain::MediaFile,
     pub probe_json: Option<String>,
     pub settings: BTreeMap<String, String>,
+    /// Saved intent and independently verified installation from this same
+    /// statement. Raw numeric/companion bytes remain unchanged in settings.
+    pub capacity: PlanningCapacity,
     pub generation: i64,
     /// The file's item title, sub-selected in the same statement, so a
     /// session start that names its item for attribution needs no

@@ -307,6 +307,7 @@ async fn cached_output_attachment_skips_preparation_but_cold_candidate_enqueues(
             file: facts.file.clone(),
             probe_json: None,
             settings: Default::default(),
+            capacity: plurx_core::store::PlanningCapacity::unverified(&Default::default()),
             generation: 1,
             item_title: None,
         },

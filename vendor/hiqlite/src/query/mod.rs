@@ -62,7 +62,7 @@ where
 
         let mut rows = stmt.raw_query();
         let mut rows_owned = Vec::new();
-        while let Ok(Some(row)) = rows.next() {
+        while let Some(row) = rows.next()? {
             rows_owned.push(RowOwned::from_row_column(row, &columns));
         }
 
@@ -102,7 +102,7 @@ where
 
         let mut rows = stmt.raw_query();
         let mut res = Vec::new();
-        while let Ok(Some(row)) = rows.next() {
+        while let Some(row) = rows.next()? {
             res.push(T::from(&mut rows::Row::Borrowed(row)));
         }
         Ok::<Vec<T>, Error>(res)
@@ -181,8 +181,8 @@ where
 
         let mut rows = serde_rusqlite::from_rows::<T>(stmt.raw_query());
         let mut res = Vec::new();
-        while let Some(Ok(ty)) = rows.next() {
-            res.push(ty);
+        for ty in rows.by_ref() {
+            res.push(ty.map_err(|error| Error::Sqlite(error.to_string().into()))?);
         }
         Ok::<Vec<T>, Error>(res)
     })

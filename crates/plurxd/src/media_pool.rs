@@ -323,10 +323,18 @@ impl PlanningBinding {
     pub(crate) fn from_snapshot(snapshot: &plurx_core::store::PlaybackPlanningSnapshot) -> Self {
         use sha2::{Digest, Sha256};
         let encoded = serde_json::to_vec(&(
-            "plurx:planning-source-reorder:v1",
+            "plurx:planning-source-reorder-capacity:v2",
             &snapshot.file,
             &snapshot.probe_json,
             crate::transcode::TranscodeManager::vod_reorder_from_snapshot(snapshot),
+            &snapshot.capacity.binding,
+            [
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+                plurx_core::store::keys::MAX_HW_SESSIONS_PROVENANCE,
+                plurx_core::store::keys::SW_POOL_THREADS_PROVENANCE,
+            ]
+            .map(|key| (key, snapshot.settings.get(key))),
         ))
         .expect("source snapshot serializes");
         Self {

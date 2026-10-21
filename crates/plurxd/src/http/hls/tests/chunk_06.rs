@@ -5522,6 +5522,7 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         file: staged_source_file(),
         probe_json: Some("{\"streams\":[]}".to_owned()),
         settings: Default::default(),
+        capacity: plurx_core::store::PlanningCapacity::unverified(&Default::default()),
         generation: 1,
         item_title: None,
     };
@@ -5538,6 +5539,30 @@ fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
         crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
     );
     assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+}
+
+#[test]
+fn planning_binding_versions_capacity_without_mutating_recipe_or_raw_settings() {
+    let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+        file: staged_source_file(), probe_json: None, settings: Default::default(),
+        capacity: plurx_core::store::PlanningCapacity::unverified(&Default::default()),
+        generation: 1, item_title: None,
+    };
+    let original = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+    snapshot.settings.insert(plurx_core::store::keys::MAX_HW_SESSIONS.into(), "0".into());
+    let zero = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+    assert_ne!(original, zero, "raw key presence is bound even with equal generation");
+    snapshot.settings.insert(plurx_core::store::keys::MAX_HW_SESSIONS.into(), "00".into());
+    assert_ne!(zero, crate::media_pool::PlanningBinding::from_snapshot(&snapshot), "not parsed-number normalization");
+    snapshot.settings.clear();
+    snapshot.capacity.binding[0] ^= 1;
+    assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot), "schema/marker-only identity is bound");
+    snapshot.capacity.binding[0] ^= 1;
+    use sha2::{Digest, Sha256};
+    let v1 = serde_json::to_vec(&("plurx:planning-source-reorder:v1", &snapshot.file, &snapshot.probe_json, crate::transcode::TranscodeManager::vod_reorder_from_snapshot(&snapshot))).expect("old tuple");
+    assert_ne!(original.source_digest, hex::encode(Sha256::digest(v1)), "old peers must mismatch safely");
+    assert_eq!(snapshot.file.id, staged_source_file().id);
+    assert!(snapshot.settings.is_empty());
 }
 
 /// Exercise the very helpers resolve_plan uses, then the real qualification
@@ -5571,6 +5596,7 @@ async fn reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection
     };
     let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
         file: file.clone(), probe_json: None, settings: Default::default(),
+        capacity: plurx_core::store::PlanningCapacity::unverified(&Default::default()),
         generation: 1, item_title: None,
     };
     for hdr in [false, true] {
@@ -5716,6 +5742,7 @@ async fn ordinary_copy_catalog_audio_matches_reconciled_execution() {
                 preserve_dolby_vision: Some(route != "dv-declined"), caps: Some(caps.clone()), ..bare_create() };
             let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
                 file: file.clone(), probe_json: None, settings: Default::default(), generation: 1, item_title: None,
+                capacity: plurx_core::store::PlanningCapacity::unverified(&Default::default()),
             };
             snapshot.settings.insert(keys::DV_FEL_REENCODE.into(), "1".into());
             snapshot.settings.insert(keys::DV_CONVERT.into(), "1".into());

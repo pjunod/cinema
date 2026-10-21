@@ -1937,6 +1937,45 @@ use crate::queue_fixture::QueueFixture;
         );
     }
 
+    #[tokio::test]
+    async fn rolling_capacity_uses_frozen_verified_modes_without_a_second_store_read() {
+        use plurx_core::resource_settings::{CapacityUpdate, LimitChoice};
+        use plurx_core::store::{CapacityInstallation, SqliteStore};
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        store.put_settings(&[(keys::MAX_HW_SESSIONS, "0"), (keys::SW_POOL_THREADS, "0")]).await.expect("legacy zeros");
+        let revision = store.resource_capacity_snapshot().await.expect("capacity").expect("installed").revision;
+        assert!(store.put_resource_capacity(&CapacityUpdate {
+            expected_revision: revision,
+            hardware_sessions: Some(LimitChoice::Automatic),
+            software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
+        }).await.expect("chosen modes"));
+        let snapshot = store.playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("one full read").expect("file");
+        assert!(matches!(snapshot.capacity.installation, CapacityInstallation::Ready { .. }));
+        let binding = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+        let candidate = plurx_core::playback::candidate::QualityCandidate {
+            processed_hdr10: false,
+            id: plurx_core::playback::candidate::CandidateId::for_recipe_digest([0x41; 32]),
+            recipe_digest: [0x41; 32],
+            route: plurx_core::playback::candidate::CandidateRoute::Encode,
+            planned_codec: None, normalized_geometry: false, width: 1280, height: 720,
+            target_height: 720, average_bps: None, peak_bps: None, grade: OutputGrade::Sdr,
+            decoder_compatible: true, complete_cache: false, sustainable: true,
+        };
+        let mut context = TranscodeManager::candidate_context(&candidate);
+        context.planning_snapshot = Some(Arc::new(snapshot));
+        // A later legacy write cannot alter a previously frozen candidate read.
+        store.put_setting(keys::MAX_HW_SESSIONS, "0").await.expect("later legacy write");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let inputs = mgr.rolling_start_inputs(file_id, Some(&context)).await.expect("frozen inputs");
+        assert_eq!(inputs.capacity_limits(), (DEFAULT_MAX_HW_SESSIONS, 0));
+        assert_eq!(inputs.settings[keys::MAX_HW_SESSIONS], "0", "rollback cache remains raw");
+        let current = mgr.rolling_start_inputs(file_id, None).await.expect("fresh single read");
+        assert_eq!(current.capacity_limits(), (0, 0));
+        let fresh = store.playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("snapshot").expect("file");
+        assert_ne!(binding, crate::media_pool::PlanningBinding::from_snapshot(&fresh));
+    }
+
     /// An unfinished run keeps its claim and its bytes — and is never
     /// serveable.
     ///

@@ -1366,6 +1366,47 @@ impl TimedClient {
             .await
     }
 
+    /// Preserve typed optional-schema failures before timeout_store erases the
+    /// vendor enum. None requests ONE baseline-only full planning read; every
+    /// unrelated failure keeps ordinary authority-read timeout/retry semantics.
+    pub(super) async fn query_planning_map<T>(
+        &self,
+        sql: String,
+        params: hiqlite::Params,
+    ) -> Result<Option<Vec<T>>, StoreError>
+    where
+        T: for<'a, 'r> From<&'a mut hiqlite::Row<'r>> + Send + 'static,
+    {
+        validate_sql(&sql)?;
+        time_scoped_authority_read_with_retry(
+            &STORE_OPERATION_METRICS,
+            AuthorityReadScope::Unattributed.metrics(self.takeover_authority_read_metrics()),
+            || async {
+                #[cfg(feature = "cluster-read-cost-validation")]
+                self.operations
+                    .consistent_query_calls
+                    .fetch_add(1, Ordering::Relaxed);
+                timeout_store(async {
+                    match self
+                        .inner()
+                        .query_consistent_map(sql.clone(), params.clone())
+                        .await
+                    {
+                        Ok(rows) => Ok(Some(rows)),
+                        Err(error)
+                            if super::planning_capacity::hiqlite_missing_optional(&error, &sql) =>
+                        {
+                            Ok(None)
+                        }
+                        Err(error) => Err(error),
+                    }
+                })
+                .await
+            },
+        )
+        .await
+    }
+
     async fn query_consistent_map_scoped<T, S>(
         &self,
         sql: S,

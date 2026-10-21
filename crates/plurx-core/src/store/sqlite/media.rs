@@ -1843,22 +1843,56 @@ impl MediaStore for SqliteStore {
         file_id: i64,
         keys: &[&str],
     ) -> Result<Option<crate::store::PlaybackPlanningSnapshot>, StoreError> {
-        self.note_settings_read(keys);
-        let keys = crate::store::selected_settings_json(keys)?;
+        use crate::store::planning_capacity as capacity;
+        let selected = capacity::CAPACITY_KEYS;
+        let mut observed = keys.to_vec();
+        observed.extend(selected);
+        observed.sort_unstable();
+        observed.dedup();
+        self.note_settings_read(&observed);
+        let keys = capacity::selected_keys(keys)?;
         self.with_read(move |conn| {
-            conn.query_row(&format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
-                (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
-                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each(?2))) AS planning_settings, \
-                (SELECT title FROM items WHERE items.id = files.item_id) AS planning_item_title \
-                FROM files WHERE id = ?1"), params![file_id, keys], |row| {
-                let encoded: String = row.get("planning_settings")?;
-                let settings = serde_json::from_str(&encoded).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
-                Ok(crate::store::PlaybackPlanningSnapshot { file: file_from_row(row)?,
-                    probe_json: row.get("planning_probe")?, settings,
-                    generation: row.get("planning_generation")?,
-                    item_title: row.get("planning_item_title")? })
-            }).optional().map_err(StoreError::from)
-        }).await
+            let read = |fallback| {
+                conn.query_row(
+                    &capacity::statement(FILE_COLS, fallback),
+                    params![file_id, keys],
+                    |row| {
+                        let encoded: String = row.get("planning_settings")?;
+                        let settings = serde_json::from_str(&encoded).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                        let catalog: String = row.get("planning_capacity_catalog")?;
+                        let marker: Option<String> = row.get("planning_capacity_marker")?;
+                        let capacity = crate::store::PlanningCapacity::from_statement(
+                            &settings,
+                            &catalog,
+                            marker.as_deref(),
+                        );
+                        Ok(crate::store::PlaybackPlanningSnapshot {
+                            file: file_from_row(row)?,
+                            probe_json: row.get("planning_probe")?,
+                            settings,
+                            capacity,
+                            generation: row.get("planning_generation")?,
+                            item_title: row.get("planning_item_title")?,
+                        })
+                    },
+                )
+                .optional()
+            };
+            match read(false) {
+                Ok(snapshot) => Ok(snapshot),
+                Err(error) if capacity::sqlite_missing_optional(&error) => {
+                    read(true).map_err(StoreError::from)
+                }
+                Err(error) => Err(StoreError::from(error)),
+            }
+        })
+        .await
     }
 
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {

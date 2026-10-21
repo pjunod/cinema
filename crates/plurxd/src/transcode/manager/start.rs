@@ -11,11 +11,25 @@ pub(super) struct RollingStartInputs {
     pub(super) file: plurx_core::domain::MediaFile,
     pub(super) probe_json: Option<String>,
     pub(super) settings: std::collections::BTreeMap<String, String>,
+    pub(super) capacity: plurx_core::store::PlanningCapacity,
     /// The file's item title from the same statement, for attribution only.
     pub(super) item_title: Option<String>,
 }
 
 impl RollingStartInputs {
+    pub(super) fn capacity_limits(&self) -> (usize, usize) {
+        let parse = |key, default| {
+            TranscodeManager::parse_num_setting(
+                self.capacity.admission_value(&self.settings, key),
+                default,
+            )
+        };
+        (
+            parse(keys::MAX_HW_SESSIONS, DEFAULT_MAX_HW_SESSIONS),
+            parse(keys::SW_POOL_THREADS, crate::admission::software_budget()),
+        )
+    }
+
     /// The stored encoder preference; empty is auto.
     pub(super) fn encoder_preference(&self) -> String {
         self.settings
@@ -59,6 +73,7 @@ impl TranscodeManager {
                 file: snapshot.file.clone(),
                 probe_json: snapshot.probe_json.clone(),
                 settings: snapshot.settings.clone(),
+                capacity: snapshot.capacity.clone(),
                 item_title: snapshot.item_title.clone(),
             });
         }
@@ -72,6 +87,7 @@ impl TranscodeManager {
             file: snapshot.file,
             probe_json: snapshot.probe_json,
             settings: snapshot.settings,
+            capacity: snapshot.capacity,
             item_title: snapshot.item_title,
         })
     }
@@ -662,19 +678,17 @@ impl TranscodeManager {
             .await?;
         let preference = inputs.encoder_preference();
         let content_aware = inputs.content_aware_encoding();
+        let (max_hw_sessions, sw_budget) = inputs.capacity_limits();
         let RollingStartInputs {
             mut file,
             probe_json,
             settings,
             item_title,
+            capacity: _,
         } = inputs;
         let retained_budget = Self::rolling_retained_budget_from(&settings);
         let pacing = Self::pacing_from_settings(&settings, false).await;
-        let sw_budget = Self::num_from(
-            &settings,
-            keys::SW_POOL_THREADS,
-            crate::admission::software_budget(),
-        );
+
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
@@ -1004,7 +1018,7 @@ impl TranscodeManager {
                 },
                 priority,
                 sw_budget,
-                Self::num_from(&settings, keys::MAX_HW_SESSIONS, DEFAULT_MAX_HW_SESSIONS),
+                max_hw_sessions,
             )
             .await?;
         encoder = admission.encoder;
@@ -1815,6 +1829,7 @@ impl TranscodeManager {
             probe_json: stored_probe,
             settings,
             item_title,
+            capacity: _,
         } = self.rolling_start_inputs(file_id, None).await?;
         let retained_budget = Self::rolling_retained_budget_from(&settings);
         // Same make-before-break rule as the transcode path. A takeover
