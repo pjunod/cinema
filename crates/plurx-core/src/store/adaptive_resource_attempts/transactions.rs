@@ -135,7 +135,7 @@ fn record_projection(alias: &str) -> String {
 }
 
 fn status_projection() -> String {
-    format!("json_object('binding',json(r.binding_json),'sequence',r.sequence,'next_ordinal',r.next_ordinal,'winner_attempt_id',r.winner_attempt_id,'disposition',r.disposition,'last_operation_id',r.last_operation_id,'last_payload_digest',r.last_payload_digest,'attempts',json((SELECT json_group_array(json(record)) FROM (SELECT {} AS record FROM media_resource_attempts a WHERE a.owner_key=r.owner_key AND a.request_id=r.request_id AND a.request_incarnation_id=r.request_incarnation_id ORDER BY a.ordinal))))",record_projection("a"))
+    format!("json_object('binding',json(r.binding_json),'relational_binding',json_array(r.owner_key,r.request_id,r.request_incarnation_id),'history_valid',EXISTS(SELECT 1 FROM media_resource_operations op WHERE op.operation_id=r.last_operation_id AND op.owner_key=r.owner_key AND op.request_id=r.request_id AND op.request_incarnation_id=r.request_incarnation_id AND op.payload_digest=r.last_payload_digest AND op.request_sequence=r.sequence),'sequence',r.sequence,'next_ordinal',r.next_ordinal,'winner_attempt_id',r.winner_attempt_id,'disposition',r.disposition,'last_operation_id',r.last_operation_id,'last_payload_digest',r.last_payload_digest,'attempts',json((SELECT json_group_array(json(record)) FROM (SELECT {} AS record FROM media_resource_attempts a WHERE a.owner_key=r.owner_key AND a.request_id=r.request_id AND a.request_incarnation_id=r.request_incarnation_id ORDER BY a.ordinal))))",record_projection("a"))
 }
 
 fn decode_record(value: &mut serde_json::Value) -> Result<(), StoreError> {
@@ -159,6 +159,11 @@ fn decode_status(encoded: &str) -> Result<RequestStatus, StoreError> {
         return Err(invalid());
     }
     let mut value: serde_json::Value = serde_json::from_str(encoded).map_err(|_| invalid())?;
+    let object = value.as_object_mut().ok_or_else(invalid)?;
+    let relational = object.remove("relational_binding").ok_or_else(invalid)?;
+    if object.remove("history_valid") != Some(serde_json::json!(1)) {
+        return Err(invalid());
+    }
     for attempt in value
         .get_mut("attempts")
         .and_then(serde_json::Value::as_array_mut)
@@ -168,6 +173,15 @@ fn decode_status(encoded: &str) -> Result<RequestStatus, StoreError> {
     }
     let status: RequestStatus = serde_json::from_value(value).map_err(|_| invalid())?;
     status.validate()?;
+    if relational
+        != serde_json::json!([
+            status.binding.principal.owner_key(),
+            status.binding.key.request_id,
+            status.binding.key.request_incarnation_id
+        ])
+    {
+        return Err(invalid());
+    }
     Ok(status)
 }
 
@@ -194,6 +208,33 @@ pub(crate) async fn readiness<B: Backend>(store: &B) -> Result<AttemptSchemaRead
     } else {
         AttemptSchemaReadiness::Unavailable
     })
+}
+
+/// New ordinary claim callers must not reacquire an expired adaptive root.
+/// Old binaries are independently fenced by the actual write triggers.
+pub(crate) async fn root_held<B: Backend>(
+    store: &B,
+    owner: &str,
+    request: &str,
+) -> Result<bool, StoreError> {
+    let present = store
+        .attempt_read(format!(
+            "SELECT json_quote(NOT({})) AS payload",
+            schema::absent_guard()
+        ))
+        .await?;
+    if present.as_slice() == ["0"] {
+        return Ok(false);
+    }
+    let layout = store.attempt_layout().await?;
+    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json_quote(EXISTS(SELECT 1 FROM media_resource_requests WHERE owner_key={} AND request_id={})) ELSE 'unavailable' END AS payload",schema::ready_guard(layout),quote(owner),quote(request))).await?;
+    match rows.as_slice() {
+        [value] if value == "1" => Ok(true),
+        [value] if value == "0" => Ok(false),
+        _ => Err(StoreError::Migration(
+            "adaptive root authority unavailable".into(),
+        )),
+    }
 }
 
 pub(crate) async fn status<B: Backend>(
@@ -248,7 +289,7 @@ pub(crate) async fn inventory<B: Backend>(
     let cursor = query
         .after_attempt_id
         .map_or_else(String::new, |id| id.to_string());
-    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json((SELECT json_group_array(json(entry)) FROM (SELECT json_object('binding',json(r.binding_json),'attempt',json({})) AS entry FROM media_resource_attempts a JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE a.worker_node_id={} AND a.phase!='closed' AND a.attempt_id>{} ORDER BY a.attempt_id LIMIT {}))) ELSE 'unavailable' END AS payload",schema::ready_guard(layout),record_projection("a"),quote(&query.worker_node_id),quote(&cursor),u32::from(query.limit)+1)).await?;
+    let rows=store.attempt_read(format!("SELECT CASE WHEN ({}) THEN json((SELECT json_group_array(json(entry)) FROM (SELECT json_object('binding',json(r.binding_json),'owner_key',a.owner_key,'attempt',json({})) AS entry FROM media_resource_attempts a LEFT JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE a.worker_node_id={} AND a.phase!='closed' AND a.attempt_id>{} ORDER BY a.attempt_id LIMIT {}))) ELSE 'unavailable' END AS payload",schema::ready_guard(layout),record_projection("a"),quote(&query.worker_node_id),quote(&cursor),u32::from(query.limit)+1)).await?;
     let [encoded] = rows.as_slice() else {
         return Err(invalid());
     };
@@ -267,7 +308,13 @@ pub(crate) async fn inventory<B: Backend>(
         let attempt: AttemptRecord = serde_json::from_value(record).map_err(|_| invalid())?;
         attempt.key.validate(&binding)?;
         validate_domains(&attempt.domains)?;
-        if attempt.key.worker_node_id != query.worker_node_id
+        if !binding.principal.local_user_id().is_some_and(|id| id > 0)
+            || value.get("owner_key").and_then(serde_json::Value::as_str)
+                != Some(binding.principal.owner_key().as_str())
+            || attempt.worker_instance_id.is_nil()
+            || attempt.last_operation_id.is_nil()
+            || attempt.updated_at_ms <= 0
+            || attempt.key.worker_node_id != query.worker_node_id
             || attempt.phase == AttemptPhase::Closed
             || attempt.key.attempt_id.to_string() <= previous
             || attempt.sequence <= 0
@@ -326,6 +373,8 @@ impl Operation<'_> {
         Ok(vec![schema::assertion(&schema::ready_guard(layout)),format!("UPDATE media_resource_schema SET mutation_claim={claim} WHERE singleton=1 AND revision<9223372036854775807 AND mutation_claim IS NULL"),schema::assertion(&format!("EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND mutation_claim={claim})"))])
     }
     fn finish(&self, statements: &mut Vec<String>) -> Result<(), StoreError> {
+        // SQL no-ops cannot mint history: both projections must advance.
+        statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_resource_requests r WHERE {} AND r.sequence={} AND r.last_operation_id={} AND r.last_payload_digest={}) AND EXISTS(SELECT 1 FROM media_resource_attempts a WHERE a.attempt_id={} AND a.key_json={} AND a.sequence={} AND a.last_operation_id={} AND a.last_payload_digest={})", request_predicate(self.binding,"r"),self.context.expected_request_sequence+1,quote(&self.context.operation_id.to_string()),quote(&self.payload),quote(&self.key.attempt_id.to_string()),quote(&encode(self.key)?),self.context.expected_attempt_sequence+1,quote(&self.context.operation_id.to_string()),quote(&self.payload))));
         statements.push(format!("INSERT INTO media_resource_operations(operation_id,owner_key,request_id,request_incarnation_id,attempt_id,action,payload_digest,request_sequence,attempt_sequence) VALUES({},{},{},{},{},{},{},{},{})",quote(&self.context.operation_id.to_string()),quote(&self.binding.principal.owner_key()),quote(&self.binding.key.request_id),quote(&self.binding.key.request_incarnation_id.to_string()),quote(&self.key.attempt_id.to_string()),quote(self.action),quote(&self.payload),self.context.expected_request_sequence+1,self.context.expected_attempt_sequence+1));
         let claim = quote(&self.claim()?);
         statements.push(format!("UPDATE media_resource_schema SET mutation_claim=NULL,revision=revision+1 WHERE singleton=1 AND mutation_claim={claim} AND revision<9223372036854775807"));
@@ -382,7 +431,7 @@ async fn admit<B: Backend>(
     if let Some(result) = replay(store, operation).await? {
         return Ok(Some(result));
     }
-    if operation.action != "fence"
+    if !matches!(operation.action, "fence" | "winner")
         && operation.context.now_ms >= operation.binding.original_deadline_ms
     {
         return Ok(Some(AttemptMutation::Refused(AttemptRefusal::Expired)));
@@ -404,6 +453,27 @@ fn advance_request(operation: &Operation<'_>, extra: &str) -> String {
 
 fn advance_attempt(operation: &Operation<'_>, extra: &str) -> String {
     format!("UPDATE media_resource_attempts SET sequence=sequence+1,last_operation_id={},last_payload_digest={},updated_at_ms={} {extra} WHERE attempt_id={} AND sequence={}",quote(&operation.context.operation_id.to_string()),quote(&operation.payload),operation.context.now_ms,quote(&operation.key.attempt_id.to_string()),operation.context.expected_attempt_sequence)
+}
+
+/// Assert before acquisition as well as adoption. Preserve ordinary semantics:
+/// an absent historical desired ask is tolerated, a different one is not.
+fn playback_context(binding: &RequestBinding, layout: Layout) -> Vec<String> {
+    let owner = quote(&binding.principal.owner_key());
+    let playback = quote(&binding.playback_id);
+    let predecessor = binding
+        .expected_predecessor_incarnation_id
+        .map_or_else(|| "NULL".into(), |id| quote(&id.to_string()));
+    let pointer_owner = layout.owner("pointer");
+    let mut statements = vec![schema::assertion(&format!("(SELECT current_incarnation_id FROM media_playback_pointers pointer WHERE {pointer_owner}={owner} AND pointer.playback_id={playback}) IS {predecessor}"))];
+    if let Some(epoch) = binding.expected_predecessor_owner_epoch {
+        let predecessor_owner = layout.owner("p");
+        statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_sessions p WHERE p.incarnation_id={predecessor} AND {predecessor_owner}={owner} AND p.user_id={} AND p.playback_id={playback} AND p.owner_epoch={epoch} AND p.state='active' AND p.publication_ready_at_ms=0)",binding.principal.local_user_id().unwrap_or(0))));
+    }
+    if let Some(revision) = binding.expected_desired_revision {
+        let desired_owner = layout.owner("desired");
+        statements.push(schema::assertion(&format!("NOT EXISTS(SELECT 1 FROM media_playback_desired desired WHERE {desired_owner}={owner} AND desired.playback_id={playback} AND desired.revision!={revision})")));
+    }
+    statements
 }
 
 async fn execute<B: Backend>(
@@ -479,6 +549,8 @@ pub(crate) async fn claim<B: Backend>(
     let key = &input.key;
     let user = binding.principal.local_user_id().ok_or_else(invalid)?;
     let owner = layout.owner("root");
+    statements.extend(playback_context(binding, layout));
+    statements.push(schema::assertion(&format!("(SELECT count(*) FROM media_sessions WHERE owner_node_id={} AND state IN('starting','active') AND lease_expires_at_ms>{})<4096",quote(&key.worker_node_id),input.context.now_ms)));
     statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_session_requests root WHERE {owner}={} AND root.request_id={} AND root.incarnation_id={} AND root.request_fingerprint={} AND root.playback_id={} AND root.state='starting' AND root.claim_expires_at_ms={} AND root.claim_expires_at_ms>{} AND EXISTS(SELECT 1 FROM users WHERE id={user}))",quote(&binding.principal.owner_key()),quote(&binding.key.request_id),quote(&binding.key.request_incarnation_id.to_string()),quote(&binding.request_fingerprint),quote(&binding.playback_id),binding.original_deadline_ms,input.context.now_ms)));
     statements.push(schema::assertion(&format!("(SELECT count(*) FROM media_resource_attempts WHERE owner_key={} AND phase!='closed')<128 AND (SELECT count(*) FROM media_resource_attempts WHERE worker_node_id={} AND phase!='closed')<4096 AND (SELECT count(*) FROM media_sessions WHERE user_id={user})<4096 AND (SELECT count(*) FROM media_sessions WHERE user_id={user} AND state IN('starting','active') AND lease_expires_at_ms>{})<64",quote(&binding.principal.owner_key()),quote(&key.worker_node_id),input.context.now_ms)));
     if current.is_some() {
@@ -501,6 +573,7 @@ pub(crate) async fn claim<B: Backend>(
     };
     statements.push(format!("INSERT INTO media_sessions(incarnation_id,session_id,user_id,playback_id,request_fingerprint,owner_node_id,owner_epoch,lease_expires_at_ms,state,recipe_json,response_json,publication_ready_at_ms,updated_at_ms,recovery_epoch{columns}) VALUES({},{},{user},{},{},{},{},{},'starting','{{}}','{{}}',{},{},{}{values})",quote(&key.route_incarnation_id.to_string()),quote(&key.session_id.to_string()),quote(&binding.playback_id),quote(&binding.request_fingerprint),quote(&key.worker_node_id),key.owner_epoch,binding.original_deadline_ms,crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,input.context.now_ms,quote(&binding.recovery_epoch.to_string())));
     statements.push(format!("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES({},{},{},1,{},{})",quote(&format!("session:{}",key.route_incarnation_id)),quote(&key.worker_node_id),key.owner_epoch,binding.original_deadline_ms,input.context.now_ms));
+    statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_sessions s JOIN job_leases l ON l.resource='session:'||s.incarnation_id WHERE s.incarnation_id={} AND s.session_id={} AND s.state='starting' AND s.owner_node_id={} AND s.owner_epoch={} AND s.publication_ready_at_ms={} AND s.lease_expires_at_ms={} AND l.owner_node_id=s.owner_node_id AND l.fence=s.owner_epoch AND l.expires_at_ms=s.lease_expires_at_ms)",quote(&key.route_incarnation_id.to_string()),quote(&key.session_id.to_string()),quote(&key.worker_node_id),key.owner_epoch,crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,binding.original_deadline_ms)));
     execute(store, &operation, statements).await
 }
 
@@ -579,12 +652,19 @@ pub(crate) async fn winner<B: Backend>(
     if current.binding != input.binding {
         return Ok(AttemptMutation::Refused(AttemptRefusal::Conflict));
     }
-    if current.winner_attempt_id.is_some() || current.disposition != RequestDisposition::Open {
-        return Ok(AttemptMutation::Refused(AttemptRefusal::WinnerLost));
-    }
     let Some(attempt) = current.attempts.iter().find(|a| a.key == input.key) else {
         return Ok(AttemptMutation::Refused(AttemptRefusal::StaleBinding));
     };
+    if current.winner_attempt_id == Some(input.key.attempt_id) {
+        return Ok(if attempt.worker.as_ref() == Some(&input.worker) {
+            AttemptMutation::Replay(current)
+        } else {
+            AttemptMutation::Refused(AttemptRefusal::Conflict)
+        });
+    }
+    if current.winner_attempt_id.is_some() || current.disposition != RequestDisposition::Open {
+        return Ok(AttemptMutation::Refused(AttemptRefusal::WinnerLost));
+    }
     if current.sequence != input.context.expected_request_sequence
         || attempt.sequence != input.context.expected_attempt_sequence
         || attempt.phase != AttemptPhase::Prepared
@@ -608,6 +688,7 @@ pub(crate) async fn winner<B: Backend>(
     statements.push(advance_attempt(&operation, ",phase='winner'"));
     // Losing is a retained cleanup obligation, not a resource refund.
     statements.push(format!("UPDATE media_resource_attempts AS a SET phase='losing',sequence=sequence+1,last_operation_id={},last_payload_digest={},updated_at_ms={} WHERE {} AND a.attempt_id!={} AND a.phase!='closed'",quote(&input.context.operation_id.to_string()),quote(&operation.payload),input.context.now_ms,request_predicate(&input.binding,"a"),quote(&input.key.attempt_id.to_string())));
+    statements.push(schema::assertion(&format!("NOT EXISTS(SELECT 1 FROM media_resource_attempts a WHERE {} AND a.attempt_id!={} AND a.phase NOT IN('losing','closed'))",request_predicate(&input.binding,"a"),quote(&input.key.attempt_id.to_string()))));
     execute(store, &operation, statements).await
 }
 

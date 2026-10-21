@@ -1607,9 +1607,13 @@ impl MediaSessionStore for SqliteStore {
                 expires,
             )) = existing
             {
+                let installed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_resource_requests')",[],|row|row.get(0))?;
+                let adaptive_held = installed && tx.query_row("SELECT EXISTS(SELECT 1 FROM media_resource_requests WHERE owner_key='local:'||?1 AND request_id=?2)",params![user_id,request_id],|row|row.get::<_,bool>(0))?;
                 let outcome =
                     if fingerprint != request_fingerprint || existing_playback != playback_id {
                         MediaSessionRequestClaim::Conflict
+                    } else if adaptive_held && state != "resolved" {
+                        MediaSessionRequestClaim::InFlight { incarnation_id: existing_incarnation, owner_node_id: owner, claim_expires_at_ms: expires }
                     } else if state == "failed" || (state == "starting" && expires <= now_ms) {
                         let reacquired = tx.execute(
                             &format!("UPDATE media_session_requests
@@ -4578,6 +4582,10 @@ impl MediaSessionStore for SqliteStore {
             let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
             let adaptive: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_resource_requests')", [], |row| row.get(0))?;
             let adaptive_layout = if owner_column == "owner_key" { attempt_schema::Layout::Principal } else { attempt_schema::Layout::Legacy };
+            let any_adaptive: bool = tx.query_row(&format!("SELECT NOT({})",attempt_schema::absent_guard()),[],|row|row.get(0))?;
+            if any_adaptive && (!adaptive || !attempt_schema::sqlite_ready(&tx,adaptive_layout)?) {
+                return Err(StoreError::Migration("adaptive maintenance authority unavailable".into()));
+            }
             let ordinary_request = attempt_schema::ordinary_request_filter(adaptive_layout,"media_session_requests",adaptive);
             let ordinary_request_alias = attempt_schema::ordinary_request_filter(adaptive_layout,"request",adaptive);
             let ordinary_route = attempt_schema::ordinary_route_filter("media_sessions",adaptive);

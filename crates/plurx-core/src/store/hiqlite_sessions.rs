@@ -2213,6 +2213,15 @@ async fn claim_existing_or_reacquire(
     if row.request_fingerprint != fingerprint || row.playback_id != playback_id {
         return Ok(MediaSessionRequestClaim::Conflict);
     }
+    if row.state != "resolved"
+        && attempts::root_held(store, &format!("local:{user_id}"), request_id).await?
+    {
+        return Ok(MediaSessionRequestClaim::InFlight {
+            incarnation_id: row.incarnation_id,
+            owner_node_id: row.owner_node_id,
+            claim_expires_at_ms: row.claim_expires_at_ms,
+        });
+    }
     if row.state == "failed" || (row.state == "starting" && row.claim_expires_at_ms <= now_ms) {
         let ownership = LocalSessionSql::load(store).await?;
         let owner = ownership.equals(4);
@@ -5956,6 +5965,11 @@ impl MediaSessionStore for HiqliteAuthStore {
         let ordinary_route = attempt_schema::ordinary_route_filter("media_sessions", adaptive);
         let ordinary_route_alias = attempt_schema::ordinary_route_filter("session", adaptive);
         let ordinary_lease = attempt_schema::ordinary_lease_filter("lease", adaptive);
+        let authority_guard = if adaptive {
+            attempt_schema::ready_guard(adaptive_layout)
+        } else {
+            attempt_schema::absent_guard().to_owned()
+        };
         let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
         let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
         let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
@@ -6000,11 +6014,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                     OR EXISTS (SELECT 1 FROM media_session_preparations
                       WHERE deadline_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
-                      WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= $2)
+                      WHERE {ordinary_request} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= $2)
                     OR EXISTS (SELECT 1 FROM media_session_requests
-                      WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < $3)
+                      WHERE {ordinary_request} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < $3)
                     OR EXISTS (SELECT 1 FROM media_session_requests request
-                      WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < $4
+                      WHERE {ordinary_request_alias} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
                           WHERE session.incarnation_id = request.incarnation_id
                             AND session.{owner_column} = request.{owner_column}
@@ -6012,7 +6026,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND session.state = 'active'
                             AND session.lease_expires_at_ms > $2))
                     OR EXISTS (SELECT 1 FROM media_sessions
-                      WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < $4)
+                      WHERE {ordinary_route} AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < $4)
                     OR EXISTS (SELECT 1 FROM quality_cancellation_receipts receipt
                       WHERE receipt.updated_at_ms < $5 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
                         WHERE parent.incarnation_id = receipt.generation AND parent.state = 'active'))
@@ -6028,7 +6042,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                               WHERE session.session_id = acknowledgement.session_id
                                 AND session.incarnation_id = acknowledgement.incarnation_id))
                     OR EXISTS (SELECT 1 FROM job_leases lease
-                      WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $4
+                      WHERE {ordinary_lease} AND lease.resource LIKE 'session:%' AND lease.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
                           WHERE lease.resource = 'session:' || session.incarnation_id))"
                 ),
@@ -6043,6 +6057,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(());
         }
         let statements = vec![
+            (format!("INSERT INTO sharing_source_dispatch_guard SELECT 1,0 WHERE NOT({authority_guard})"),params!()),
             // A preparation expires on its own deadline; see the SQLite
             // backend's maintenance for why this is the durable enforcement.
             // (It said "nothing else enforces it" until 2026-09-08; an

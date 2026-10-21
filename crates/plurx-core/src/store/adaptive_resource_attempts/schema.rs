@@ -83,7 +83,7 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
         // successful INSERT must never overwrite retained operation history.
         let key = match short {
             "request" => "owner_key=NEW.owner_key AND request_id=NEW.request_id",
-            "attempt" => "attempt_id=NEW.attempt_id OR route_incarnation_id=NEW.route_incarnation_id OR session_id=NEW.session_id OR (owner_key=NEW.owner_key AND request_id=NEW.request_id AND (ordinal=NEW.ordinal OR worker_node_id=NEW.worker_node_id))",
+            "attempt" => "attempt_id IN(NEW.attempt_id,NEW.route_incarnation_id,NEW.session_id) OR route_incarnation_id IN(NEW.attempt_id,NEW.route_incarnation_id,NEW.session_id) OR session_id IN(NEW.attempt_id,NEW.route_incarnation_id,NEW.session_id) OR (owner_key=NEW.owner_key AND request_id=NEW.request_id AND (ordinal=NEW.ordinal OR worker_node_id=NEW.worker_node_id))",
             _ => "operation_id=NEW.operation_id",
         };
         trigger(
@@ -106,7 +106,15 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
     }
     for (event, alias) in [("INSERT", "NEW"), ("UPDATE", "OLD"), ("DELETE", "OLD")] {
         let owner = layout.owner(alias);
-        let affected = format!("EXISTS(SELECT 1 FROM media_resource_requests r WHERE r.owner_key={owner} AND r.request_id={alias}.request_id)");
+        let proposed = if event == "UPDATE" {
+            format!(
+                " OR (r.owner_key={} AND r.request_id=NEW.request_id)",
+                layout.owner("NEW")
+            )
+        } else {
+            String::new()
+        };
+        let affected = format!("EXISTS(SELECT 1 FROM media_resource_requests r WHERE (r.owner_key={owner} AND r.request_id={alias}.request_id){proposed})");
         let permitted = claim(&format!(
             "{}={owner} AND {}={alias}.request_id AND {}='adopt'",
             field("owner_key"),
@@ -124,10 +132,20 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
     // adopted exact-owner renewal/publication/end is allowed, but takeover,
     // recipe rewriting, and deleting history cannot hide an obligation.
     for (event, alias) in [("INSERT", "NEW"), ("UPDATE", "OLD"), ("DELETE", "OLD")] {
-        let affected = format!("EXISTS(SELECT 1 FROM media_resource_attempts a WHERE a.route_incarnation_id={alias}.incarnation_id OR a.session_id={alias}.session_id)");
+        let proposed = if event == "UPDATE" {
+            " OR a.route_incarnation_id=NEW.incarnation_id OR a.session_id=NEW.session_id"
+        } else {
+            ""
+        };
+        let affected = format!("EXISTS(SELECT 1 FROM media_resource_attempts a WHERE a.route_incarnation_id={alias}.incarnation_id OR a.session_id={alias}.session_id{proposed})");
         let permitted = claim(&format!("{}={alias}.incarnation_id AND {}={alias}.session_id AND {} IN('claim','adopt','fence')",field("route_incarnation_id"),field("session_id"),field("action")));
         let ordinary = if event == "UPDATE" {
-            format!("EXISTS(SELECT 1 FROM media_resource_attempts a JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE a.route_incarnation_id=OLD.incarnation_id AND r.disposition='adopted' AND r.winner_attempt_id=a.attempt_id AND NEW.incarnation_id=OLD.incarnation_id AND NEW.session_id=OLD.session_id AND {}={} AND NEW.playback_id=OLD.playback_id AND NEW.request_fingerprint=OLD.request_fingerprint AND NEW.owner_node_id=OLD.owner_node_id AND NEW.owner_epoch=OLD.owner_epoch AND NEW.recipe_json=OLD.recipe_json AND NEW.recovery_epoch=OLD.recovery_epoch AND NEW.state IN('active','ended'))",layout.owner("NEW"),layout.owner("OLD"))
+            let principal = if layout == Layout::Principal {
+                " AND NEW.principal_kind IS OLD.principal_kind AND NEW.share_grant_id IS OLD.share_grant_id AND NEW.share_viewer_key IS OLD.share_viewer_key"
+            } else {
+                ""
+            };
+            format!("EXISTS(SELECT 1 FROM media_resource_attempts a JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE a.route_incarnation_id=OLD.incarnation_id AND r.disposition='adopted' AND r.winner_attempt_id=a.attempt_id AND NEW.incarnation_id=OLD.incarnation_id AND NEW.session_id=OLD.session_id AND {}={} AND NEW.user_id IS OLD.user_id{principal} AND NEW.playback_id=OLD.playback_id AND NEW.request_fingerprint=OLD.request_fingerprint AND NEW.owner_node_id=OLD.owner_node_id AND NEW.owner_epoch=OLD.owner_epoch AND NEW.recipe_json=OLD.recipe_json AND NEW.recovery_epoch=OLD.recovery_epoch AND NEW.state IN('active','ended') AND (OLD.state='active' OR NEW.state='ended'))",layout.owner("NEW"),layout.owner("OLD"))
         } else {
             "0".into()
         };
@@ -137,7 +155,12 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
             "media_sessions",
             format!("({affected}) AND NOT(({permitted}) OR ({ordinary}))"),
         );
-        let lease_affected = format!("EXISTS(SELECT 1 FROM media_resource_attempts a WHERE {alias}.resource='session:'||a.route_incarnation_id)");
+        let lease_proposed = if event == "UPDATE" {
+            " OR NEW.resource='session:'||a.route_incarnation_id"
+        } else {
+            ""
+        };
+        let lease_affected = format!("EXISTS(SELECT 1 FROM media_resource_attempts a WHERE {alias}.resource='session:'||a.route_incarnation_id{lease_proposed})");
         let lease_permitted = claim(&format!(
             "{alias}.resource='session:'||{} AND {} IN('claim','adopt','fence')",
             field("route_incarnation_id"),
@@ -219,7 +242,34 @@ pub fn session_trigger_names(layout: Layout) -> Vec<String> {
 /// installation. Unknown additional protected-family objects refuse admission.
 pub fn session_shape_guard(layout: Layout) -> String {
     if layout == Layout::Principal {
-        return crate::store::sharing_source_sessions::schema_guard();
+        // Source's guard proves tables and required Source objects, but does
+        // not reject extra session-family triggers/indexes. Close that shape
+        // using the actual frozen rebuild declarations, not an edited baseline.
+        let mut allowed = session_trigger_names(layout);
+        let mut exact = vec![crate::store::sharing_source_sessions::schema_guard()];
+        for part in crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.split("-- next statement")
+        {
+            let part = part.trim();
+            if !part.starts_with("CREATE INDEX ") && !part.starts_with("CREATE TRIGGER ") {
+                continue;
+            }
+            let sql = part.trim_end_matches(';').replace("IF NOT EXISTS ", "");
+            let words = sql.split_whitespace().collect::<Vec<_>>();
+            allowed.push(words[2].to_owned());
+            exact.push(format!(
+                "EXISTS(SELECT 1 FROM sqlite_master WHERE name={} AND sql={})",
+                quote(words[2]),
+                quote(&sql)
+            ));
+        }
+        for sql in crate::store::sharing_source_sessions::candidate_statements() {
+            let words = sql.split_whitespace().collect::<Vec<_>>();
+            if matches!(words[1], "INDEX" | "TRIGGER") {
+                allowed.push(words[2].to_owned());
+            }
+        }
+        exact.push(format!("NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type IN('trigger','index') AND sql IS NOT NULL AND (tbl_name IN('media_session_requests','media_playback_pointers','media_sessions','media_session_preparations','media_playback_desired','media_session_producer_recovery','library_channel_session_recipes') OR name='background_analysis_viewer_refresh') AND name NOT IN({}))",allowed.iter().map(|name|quote(name)).collect::<Vec<_>>().join(",")));
+        return format!("({})", exact.join(") AND ("));
     }
     type Object = (String, String, String, Vec<Option<String>>);
     let objects: Vec<Object> =

@@ -167,13 +167,15 @@ pub(crate) async fn adopt<B: Backend>(
         .expected_predecessor_incarnation_id
         .map_or_else(|| "NULL".into(), |id| quote(&id.to_string()));
     let pointer=format!("(SELECT current_incarnation_id FROM media_playback_pointers pointer WHERE {pointer_owner}={} AND pointer.playback_id={})",quote(&binding.principal.owner_key()),quote(&binding.playback_id));
-    statements.push(schema::assertion(&format!("{pointer} IS {predecessor}")));
-    if let Some(epoch) = binding.expected_predecessor_owner_epoch {
-        statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id={predecessor} AND user_id={user} AND playback_id={} AND owner_epoch={epoch} AND state='active' AND publication_ready_at_ms=0)",quote(&binding.playback_id))));
-    }
-    if let Some(revision) = binding.expected_desired_revision {
-        let desired_owner = layout.owner("desired");
-        statements.push(schema::assertion(&format!("NOT EXISTS(SELECT 1 FROM media_playback_desired desired WHERE {desired_owner}={} AND desired.playback_id={} AND desired.revision!={revision})",quote(&binding.principal.owner_key()),quote(&binding.playback_id))));
+    statements.extend(playback_context(binding, layout));
+    // Preserve the ordinary activation's special ingress authorities. Frozen
+    // channel recipes belong to the ORIGINAL root incarnation, not a guessed
+    // worker route. A selected recipe must be exactly that admitted recipe.
+    let recipe = quote(&activation.recipe_json);
+    let library_owner = layout.owner("channel");
+    statements.push(schema::assertion(&format!("coalesce(json_type({recipe},'$.library_channel'),'null')='null' OR EXISTS(SELECT 1 FROM library_channel_session_recipes channel WHERE {library_owner}={} AND channel.request_id={} AND channel.incarnation_id={} AND channel.recipe_json={recipe})",quote(&binding.principal.owner_key()),quote(&binding.key.request_id),quote(&binding.key.request_incarnation_id.to_string()))));
+    if let Some(play_id) = binding.key.request_id.strip_prefix("jellyfin:") {
+        statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM jellyfin_plays WHERE play_id={} AND user_id={user} AND playback_id={} AND ((state='pending' AND expires_at_ms>{}) OR (state='active' AND native_incarnation_id={})) AND json_extract(payload,'$.native_request_fingerprint')={} AND json_extract(payload,'$.source_origin_ms')={} AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family) AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0) AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0) AND lower(trim(coalesce((SELECT value FROM settings WHERE key='compat.jellyfin.enabled'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) IN('1','true','yes','on') AND (SELECT value FROM settings WHERE key='compat.jellyfin.generation')=json_extract(jellyfin_plays.payload,'$.switch_generation'))",quote(play_id),quote(&binding.playback_id),input.context.now_ms,quote(&key.route_incarnation_id.to_string()),quote(&binding.request_fingerprint),activation.media_origin_ms)));
     }
     let root_owner = layout.owner("root");
     statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_session_requests root WHERE {root_owner}={} AND root.request_id={} AND root.incarnation_id={} AND root.request_fingerprint={} AND root.playback_id={} AND root.state='starting' AND root.claim_expires_at_ms={} AND root.claim_expires_at_ms>{} AND EXISTS(SELECT 1 FROM users WHERE id={user}))",quote(&binding.principal.owner_key()),quote(&binding.key.request_id),quote(&binding.key.request_incarnation_id.to_string()),quote(&binding.request_fingerprint),quote(&binding.playback_id),binding.original_deadline_ms,input.context.now_ms)));
@@ -197,9 +199,22 @@ pub(crate) async fn adopt<B: Backend>(
     };
     let desired_owner = layout.owner("desired");
     statements.push(format!("INSERT INTO media_playback_pointers(user_id,playback_id,current_incarnation_id,updated_at_ms,desired_revision{columns}) VALUES({user},{},{},{},(SELECT revision FROM media_playback_desired desired WHERE {desired_owner}={} AND playback_id={}){values}) ON CONFLICT({column},playback_id) DO UPDATE SET current_incarnation_id=excluded.current_incarnation_id,updated_at_ms=excluded.updated_at_ms,desired_revision=excluded.desired_revision",quote(&binding.playback_id),quote(&key.route_incarnation_id.to_string()),input.context.now_ms,quote(&binding.principal.owner_key()),quote(&binding.playback_id)));
+    if binding.key.request_id.starts_with("jellyfin:") {
+        let expires = input
+            .context
+            .now_ms
+            .checked_add(crate::store::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS)
+            .ok_or_else(invalid)?;
+        let request = quote(&binding.key.request_id);
+        statements.push(format!("UPDATE jellyfin_plays SET state='ended',expires_at_ms={expires},payload=json_set(payload,'$.superseded_by',substr({request},10)) WHERE user_id={user} AND playback_id={} AND state IN('pending','active') AND play_id!=substr({request},10) AND EXISTS(SELECT 1 FROM media_playback_pointers p JOIN media_sessions m ON m.incarnation_id=p.current_incarnation_id WHERE p.user_id={user} AND p.playback_id={} AND p.current_incarnation_id={} AND m.state='active' AND EXISTS(SELECT 1 FROM jellyfin_plays chosen WHERE chosen.play_id=substr({request},10) AND chosen.user_id={user} AND chosen.playback_id={} AND chosen.state='pending' AND json_extract(chosen.payload,'$.native_request_fingerprint')=m.request_fingerprint AND (jellyfin_plays.state='active' OR coalesce(json_extract(jellyfin_plays.payload,'$.negotiation_order'),0)<coalesce(json_extract(chosen.payload,'$.negotiation_order'),0))))",quote(&binding.playback_id),quote(&binding.playback_id),quote(&key.route_incarnation_id.to_string()),quote(&binding.playback_id)));
+    }
     statements.push(format!("UPDATE media_session_requests AS root SET incarnation_id={},owner_node_id={},state='resolved',response_json={},updated_at_ms={} WHERE {root_owner}={} AND request_id={}",quote(&key.route_incarnation_id.to_string()),quote(&key.worker_node_id),quote(&activation.response_json),input.context.now_ms,quote(&binding.principal.owner_key()),quote(&binding.key.request_id)));
     statements.push(advance_request(&operation, ",disposition='adopted'"));
     statements.push(advance_attempt(&operation, ""));
+    statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM job_leases WHERE resource={} AND owner_node_id={} AND fence={} AND expires_at_ms={} AND updated_at_ms={}) AND EXISTS(SELECT 1 FROM media_session_requests root WHERE {root_owner}={} AND root.request_id={} AND root.incarnation_id={} AND root.owner_node_id={} AND root.state='resolved' AND root.response_json={})",quote(&format!("session:{}",key.route_incarnation_id)),quote(&key.worker_node_id),key.owner_epoch,activation.lease_expires_at_ms,input.context.now_ms,quote(&binding.principal.owner_key()),quote(&binding.key.request_id),quote(&key.route_incarnation_id.to_string()),quote(&key.worker_node_id),quote(&activation.response_json))));
+    if binding.expected_predecessor_incarnation_id.is_some() {
+        statements.push(schema::assertion(&format!("EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id={predecessor} AND state='ended' AND terminal_reason='superseded' AND publication_ready_at_ms={}) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id={predecessor}) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||{predecessor} AND expires_at_ms>{})",crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,input.context.now_ms)));
+    }
     statements.push(schema::assertion(&format!("{pointer}={} AND EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id={} AND state='active' AND owner_epoch={} AND publication_ready_at_ms={})",quote(&key.route_incarnation_id.to_string()),quote(&key.route_incarnation_id.to_string()),key.owner_epoch,crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED)));
     operation.finish(&mut statements)?;
     let plan = AdoptionPlan {

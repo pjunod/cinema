@@ -19,6 +19,9 @@ pub mod schema;
 pub(crate) mod transactions;
 pub use codec::selected_recipe_digest;
 
+#[cfg(feature = "hiqlite-contract-tests")]
+pub mod validation;
+
 /// The owner key is derived from the separately supplied typed principal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +46,7 @@ pub struct RequestBinding {
     pub settings_digest: String,
     pub intent_digest: String,
     pub original_deadline_ms: i64,
+    #[serde(default, deserialize_with = "optional_canonical_uuid")]
     pub expected_predecessor_incarnation_id: Option<Uuid>,
     pub expected_predecessor_owner_epoch: Option<i64>,
     pub expected_desired_revision: Option<i64>,
@@ -162,10 +166,12 @@ pub struct AttemptRecord {
     pub key: AttemptKey,
     pub sequence: i64,
     pub phase: AttemptPhase,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub worker_instance_id: Uuid,
     pub serving_generation: u64,
     pub domains: Vec<String>,
     pub worker: Option<WorkerBinding>,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub last_operation_id: Uuid,
     pub last_payload_digest: String,
     pub updated_at_ms: i64,
@@ -177,8 +183,10 @@ pub struct RequestStatus {
     pub binding: RequestBinding,
     pub sequence: i64,
     pub next_ordinal: u8,
+    #[serde(default, deserialize_with = "optional_canonical_uuid")]
     pub winner_attempt_id: Option<Uuid>,
     pub disposition: RequestDisposition,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub last_operation_id: Uuid,
     pub last_payload_digest: String,
     pub attempts: Vec<AttemptRecord>,
@@ -273,6 +281,21 @@ fn invalid() -> StoreError {
     StoreError::Task("invalid adaptive resource coordination record".into())
 }
 
+fn optional_canonical_uuid<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Uuid>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|text| {
+            let id = Uuid::parse_str(&text).map_err(serde::de::Error::custom)?;
+            if id.to_string() != text {
+                return Err(serde::de::Error::custom("noncanonical UUID"));
+            }
+            Ok(id)
+        })
+        .transpose()
+}
+
 fn text(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
@@ -341,6 +364,7 @@ impl AttemptKey {
             || !text(&self.worker_node_id, 256)
             || !(1..=3).contains(&self.ordinal)
             || self.owner_epoch != i64::from(self.ordinal)
+            || serde_json::to_string(self).map_err(|_| invalid())?.len() > 2048
         {
             return Err(invalid());
         }
@@ -385,6 +409,7 @@ fn validate_domains(domains: &[String]) -> Result<(), StoreError> {
         || domains.len() > 32
         || domains.iter().any(|domain| !text(domain, 256))
         || domains.windows(2).any(|pair| pair[0] >= pair[1])
+        || serde_json::to_string(domains).map_err(|_| invalid())?.len() > 16 * 1024
     {
         return Err(invalid());
     }
@@ -408,7 +433,12 @@ impl RequestStatus {
     /// never an empty set of held resources.
     pub fn validate(&self) -> Result<(), StoreError> {
         self.binding.validate()?;
-        if self.sequence <= 0
+        if !self
+            .binding
+            .principal
+            .local_user_id()
+            .is_some_and(|id| id > 0)
+            || self.sequence <= 0
             || !(2..=4).contains(&self.next_ordinal)
             || self.attempts.len() != usize::from(self.next_ordinal - 1)
             || self.last_operation_id.is_nil()
