@@ -177,8 +177,7 @@ impl ActiveJobLease {
         if let Some(token) = token {
             let mut attempt = 1;
             let released = loop {
-                let result = self.coordinator.release(&token).await;
-                match result {
+                match self.coordinator.release(&token).await {
                     Ok(value) => break Ok(value),
                     Err(error) if attempt < RELEASE_ATTEMPTS => {
                         tracing::warn!(

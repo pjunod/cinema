@@ -83,7 +83,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -218,7 +218,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -558,7 +558,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -575,7 +575,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -592,7 +592,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -608,7 +608,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -625,7 +625,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -642,7 +642,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -659,7 +659,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -676,7 +676,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -811,7 +811,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -828,7 +828,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -845,7 +845,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -862,7 +862,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1131,7 +1131,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1164,7 +1164,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1196,7 +1196,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1212,7 +1212,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1229,7 +1229,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1245,7 +1245,7 @@
         "file": "crates/plurxd/src/job_lease.rs",
         "symbol": "ActiveJobLease::release",
         "anchor": "pub(crate) async fn release(",
-        "sha256": "d7d354ff333ad3c2f0da224e458f9a9bb2c20ea2b5637216beccd3395522d8ee"
+        "sha256": "501510b5599e090c77d684980a7d36c99f3f371d6698f93cf92cc49dcf246d57"
       },
       "held_across_await": [],
       "completed_by": "worker task",
