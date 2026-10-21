@@ -45,9 +45,9 @@ the model: a worker reaches a loss or pressure arm while request processing is
 paused at `BeforeScan`; the worker cannot begin release before that processing
 future resumes and returns; release finishes before retirement and admission
 drop. W3, W4, and W5 assert that partial order directly. W1 observes W1
-holding the shared domain while W2
-hits `DomainUnavailable`, then confirms both distinct requests complete after
-the production yield and retry delay. W6 observes completion reconciliation
+holding a source-I/O reservation while a second node's distinct job remains
+queued and unclaimed; after W1 releases capacity, W2 retries and both complete.
+It does not observe a domain-unavailable yield. W6 observes completion reconciliation
 after a committed completion reply is dropped, then reads the completed row.
 
 The event stream is not a complete serialization of all TLA variables. The
@@ -60,18 +60,24 @@ membership. The mapping and any unchecked transition remain visible in
 
 | ID | Exact Rust test | Observed behavior |
 |---|---|---|
-| W1/W2 | `library_worker_two_jobs_share_domain_and_both_complete` in `library_work.rs` | Distinct `library_scan` and `metadata_refresh` requests share one library domain. W2 yields while W1 holds it; after the production delay and retry, both requests complete. |
+| W1 | `library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete` in `library_work.rs` | Two node-specific JobManagers share the real store. While W1 is paused, W2 cannot claim its distinct `metadata_refresh` job because the queue's `source_io` reservation is occupied. The test checks the request stays pending and the job stays queued with no claim, failed attempt, or changed eligibility time. W1 completes; W2 then retries immediately and both real pipelines complete serially. |
 | W3 | `library_worker_domain_loss_joins_before_release_and_admission_drop` in `library_work.rs` | Domain-loss notification while processing is held at the pre-scan checkpoint; the processing future returns before release, retirement and admission drop. |
 | W4 | `library_worker_queue_loss_joins_before_release_and_retirement` in `library_work.rs` | Local queue-loss notification while processing is held at the pre-scan checkpoint; the processing future returns before release and cleanup. The durable job is queued after retirement. |
 | W5 | `library_worker_admission_pressure_joins_before_release_and_drop` in `library_work.rs` | Test-only pressure selection while processing is held at the pre-scan checkpoint; the processing future returns before release and admission drop. |
 | W6/S4 | `library_worker_reconciles_lost_completion_acknowledgement` in `library_work.rs` | The real worker commits completion, loses its acknowledgement, rereads durable state and observes the public projection `succeeded`. |
 | S1 | `formal_publication_library_captured_token_completes_while_durable_owners_current` in `formal_publication.rs` | A captured token is submitted directly to Store and succeeds while both durable owners remain live; the submitted `Failed` result is recorded as `failed`. |
-| S2/S3 | `formal_publication_library_completion_after_release_and_rebind_is_rejected` in `formal_publication.rs` | Store rejects the old captured token after release and after a distinct job binds a higher domain fence; the new owner can complete its own request. |
+| S2/S3 | `formal_publication_library_completion_after_release_and_rebind_is_rejected` in `formal_publication.rs` | S2 checks refusal after releasing the domain lease while the old queue token remains current. The old queue job is then retired before a distinct metadata job claims and binds a higher fence. S3 rejects the old completion after both old-queue retirement and domain rebind; it does not isolate higher-domain-fence rejection. The new owner completes its request. |
 
-W1 uses two different durable jobs, matching the production dedupe identities.
-Only one worker holds the domain at a time; W2's first attempt takes the
-unavailable-domain yield path, then its later retry performs the second full
-worker path. The test does not claim simultaneous scans.
+W1 uses two different durable jobs and separate node-local managers, matching
+the production dedupe identities and manager scope. W2's first attempt is
+refused at durable queue admission while W1 holds the shared source-I/O
+reservation; it never reaches domain acquisition, binding, or the unavailable-
+domain yield path. Once W1 completes, W2 retries without a yield delay and
+performs the second full worker path. The test does not claim simultaneous
+claims or scans, nor does it isolate domain contention.
+The test-only `JobManager::test_new_for_node` constructor in `state.rs` gives
+each worker a distinct node identity; it is fixture setup, not a production
+transition. The qualification source manifest binds this helper's bytes.
 
 `BeforeScan` fires inside `process_library_requests` immediately before the
 call to `run_scan`. In W3-W5 the gate prevents that call from starting until
@@ -93,6 +99,10 @@ W4 injects only the local queue-loss notification. Production retirement
 settles the still-owned job to `Queued`; the test does not invalidate durable
 queue authority, wait for queue TTL expiry, or claim that local revocation
 rolls back a detached write.
+
+S2/S3 does not isolate the higher-domain-fence predicate: S3 follows S2's
+domain-only check, but then also retires the old queue job before claiming the
+replacement. Thus S3 has both stale queue authority and a changed domain owner.
 
 S5 (renewal committed with its acknowledgement lost), renewal deadlines and
 heartbeat ordering are unchecked. The heartbeat runs in a spawned task and

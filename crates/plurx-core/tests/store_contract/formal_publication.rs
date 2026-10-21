@@ -1053,6 +1053,18 @@ async fn formal_publication_library_completion_after_release_and_rebind_is_rejec
                 .expect("release first owner"),
             "{backend}"
         );
+        let still_running = store
+            .background_job(&first.job_id)
+            .await
+            .expect("read queue owner after domain release")
+            .expect("old queue job retained");
+        assert_eq!(still_running.state, JobState::Running, "{backend}");
+        assert_eq!(
+            still_running.token.as_ref(),
+            Some(&first.token),
+            "{backend}"
+        );
+        assert!(first.token.lease_expires_ms > now + 2, "{backend}");
         let after_release = store
             .complete_library_work(CompleteLibraryWork {
                 token: first.token.clone(),
@@ -1075,9 +1087,18 @@ async fn formal_publication_library_completion_after_release_and_rebind_is_rejec
             "{backend}"
         );
 
-        // A distinct metadata-refresh job is the real second contender for
-        // this library domain. It acquires a higher fence and overwrites the
-        // stable binding tuple; the old request remains attached to its job.
+        // S2 above isolates release of the domain owner while the old queue
+        // token is still valid. Retire that queue attempt before admitting a
+        // distinct metadata-refresh job, so this contract backend can claim
+        // the real second job without bypassing source_io reservation rules.
+        first.retire(store.as_ref(), now).await;
+        let retired = store
+            .background_job(&first.job_id)
+            .await
+            .expect("read retired queue owner")
+            .expect("old queue job retained");
+        assert_eq!(retired.state, JobState::Cancelled, "{backend}");
+        let replacement_time = now + CLAIM_RESOLUTION_WINDOW_MS + 2;
         let second_work = enqueue_and_claim_library_work(
             store.as_ref(),
             backend,
@@ -1085,15 +1106,21 @@ async fn formal_publication_library_completion_after_release_and_rebind_is_rejec
             "node-b",
             "request-new",
             true,
-            now + 3,
+            replacement_time,
         )
         .await;
         assert_ne!(
             first.job_id, second_work.job_id,
             "{backend}: separate dedupe identities"
         );
-        let second =
-            bind_library_work(store.as_ref(), backend, second_work, "node-b", now + 3).await;
+        let second = bind_library_work(
+            store.as_ref(),
+            backend,
+            second_work,
+            "node-b",
+            replacement_time,
+        )
+        .await;
         assert!(
             second.lease.fence > first.lease.fence,
             "{backend}: higher domain fence"
@@ -1106,7 +1133,7 @@ async fn formal_publication_library_completion_after_release_and_rebind_is_rejec
                 result: LibraryWorkResult::Failed {
                     error: "stale after replacement".into(),
                 },
-                now_ms: now + 4,
+                now_ms: replacement_time + 1,
             })
             .await
             .expect("old owner verdict");
@@ -1128,14 +1155,13 @@ async fn formal_publication_library_completion_after_release_and_rebind_is_rejec
                     result: LibraryWorkResult::Failed {
                         error: "new owner result".into()
                     },
-                    now_ms: now + 5,
+                    now_ms: replacement_time + 2,
                 })
                 .await
                 .expect("new owner completion"),
             "{backend}: replacement may complete its request"
         );
-        first.retire(store.as_ref(), now).await;
-        second.retire(store.as_ref(), now + 3).await;
+        second.retire(store.as_ref(), replacement_time).await;
     })
     .await;
 }

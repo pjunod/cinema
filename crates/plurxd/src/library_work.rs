@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn library_worker_two_jobs_share_domain_and_both_complete() {
+    async fn library_worker_two_jobs_contend_at_the_durable_queue_and_both_complete() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let root = crate::test_tempdir().expect("root");
         let library = store
@@ -929,8 +929,15 @@ mod tests {
             .expect("library");
         enqueue_full(store.as_ref(), library.id, "request-scan", false).await;
         enqueue_full(store.as_ref(), library.id, "request-refresh", true).await;
-        let jobs = JobManager::test_new(Arc::clone(&store), root.path().join("artwork"));
-        let transcode = transcode_for(Arc::clone(&store), root.path());
+        let second_request = request_record(store.as_ref(), "request-refresh").await;
+        let initially_queued = store
+            .background_job(&second_request.job_id)
+            .await
+            .expect("read initially queued job")
+            .expect("second queue job retained");
+        let jobs =
+            JobManager::test_new_for_node(Arc::clone(&store), root.path().join("artwork-w1"), "w1");
+        let transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode-w1"));
         let (tx, mut events) = mpsc::unbounded_channel();
 
         let (first, _, resume_first) = spawn_worker(
@@ -943,23 +950,42 @@ mod tests {
             0,
         );
         next_worker_event(&mut events, "w1", WorkerPoint::BeforeScan).await;
+        let second_jobs =
+            JobManager::test_new_for_node(Arc::clone(&store), root.path().join("artwork-w2"), "w2");
+        let second_transcode = transcode_for(Arc::clone(&store), &root.path().join("transcode-w2"));
         let (second, _, _) = spawn_worker(
             "w2",
-            Arc::clone(&jobs),
-            Arc::clone(&transcode),
+            Arc::clone(&second_jobs),
+            Arc::clone(&second_transcode),
             tx.clone(),
             None,
             false,
             0,
         );
-        next_worker_event(&mut events, "w2", WorkerPoint::DomainUnavailable).await;
-        assert!(second.await.expect("contending worker joined").0);
+        assert!(!second.await.expect("queue-contending worker joined").0);
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event.worker, "w2", "queue-refused worker emitted an event");
+        }
         assert_eq!(
             request_record(store.as_ref(), "request-refresh")
                 .await
                 .state,
             "pending"
         );
+        // The stable job ID is payload-derived; select it through the request
+        // record so the assertion remains coupled to the real enqueue result.
+        let queued = store
+            .background_job(&second_request.job_id)
+            .await
+            .expect("read second queue job")
+            .expect("retained second queue job");
+        assert_eq!(
+            queued.state,
+            plurx_core::store::background_jobs::JobState::Queued
+        );
+        assert_eq!(queued.failed_attempts, 0);
+        assert!(queued.token.is_none());
+        assert_eq!(queued.not_before_ms, initially_queued.not_before_ms);
         resume_first
             .expect("first worker barrier")
             .send(())
@@ -970,10 +996,17 @@ mod tests {
             "completed"
         );
 
-        // The contention path applies the production five-second uncharged
-        // yield. Let that exact due time pass before retrying the second job.
-        tokio::time::sleep(Duration::from_millis(5_100)).await;
-        let (retry, _, _) = spawn_worker("w2-retry", jobs, transcode, tx, None, false, 0);
+        // Queue contention never claimed or yielded the second job, so its
+        // legitimate retry is immediately eligible after W1 releases capacity.
+        let (retry, _, _) = spawn_worker(
+            "w2-retry",
+            second_jobs,
+            second_transcode,
+            tx,
+            None,
+            false,
+            0,
+        );
         assert!(retry.await.expect("retry worker joined").0);
         assert_eq!(
             request_record(store.as_ref(), "request-refresh")
