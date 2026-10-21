@@ -809,19 +809,25 @@ def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
     config_map = mapping.get("configs")
     config_names = config_map.keys() if isinstance(config_map, dict) else ()
     governed = {
-        mapping.get("model_file"),
-        spec["mapping"],
-        spec["toolchain_manifest"],
-        "scripts/bootstrap-formal-toolchain",
-        "scripts/check-formal",
-        *(f"{spec['model_dir']}/{name}" for name in config_names),
+        value
+        for value in (
+            mapping.get("model_file"),
+            spec["mapping"],
+            spec["toolchain_manifest"],
+            "scripts/bootstrap-formal-toolchain",
+            "scripts/check-formal",
+            *(f"{spec['model_dir']}/{name}" for name in config_names),
+        )
+        if isinstance(value, str)
     }
     if package == "durable-jobs":
         governed.add("validation/points.toml")
     source_mapping = mapping.get("source_mapping")
     if isinstance(source_mapping, dict) and isinstance(source_mapping.get("tables"), list):
         governed.update(
-            row.get("source") for row in source_mapping["tables"] if isinstance(row, dict)
+            row["source"]
+            for row in source_mapping["tables"]
+            if isinstance(row, dict) and isinstance(row.get("source"), str)
         )
     if package == "worker-refinement":
         reference = mapping.get("correspondence")
@@ -832,11 +838,15 @@ def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
             except RunnerError:
                 correspondence = {}
             for row in correspondence.get("actions", []) if isinstance(correspondence.get("actions"), list) else []:
-                if isinstance(row, dict) and isinstance(row.get("source"), dict):
-                    governed.add(row["source"].get("file"))
+                if (
+                    isinstance(row, dict)
+                    and isinstance(row.get("source"), dict)
+                    and isinstance(row["source"].get("file"), str)
+                ):
+                    governed.add(row["source"]["file"])
             for row in correspondence.get("tests", []) if isinstance(correspondence.get("tests"), list) else []:
-                if isinstance(row, dict):
-                    governed.add(row.get("file"))
+                if isinstance(row, dict) and isinstance(row.get("file"), str):
+                    governed.add(row["file"])
     affected = base is None or bool(governed.intersection(changed))
     result = {
         "schema_version": 1,
