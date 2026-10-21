@@ -1,6 +1,6 @@
 # Operation progress — source waits to a repeatable progress argument
 
-**Status:** source map and design advice complete; model and tooling being built · **Date:** 2026-10-21 · **Owner:** Codex coordinator.
+**Status:** implementation complete; independent final review and qualification pending · **Date:** 2026-10-21 · **Owner:** Codex coordinator.
 
 [The status page](OPERATION-PROGRESS-STATUS.md) records current ownership, evidence and delivery. This is the next phase after [the bounded formal verification pilot](FORMAL-VERIFICATION-PILOT-PROPOSAL.md); its safety checks remain unchanged unless an explicit reviewed correction requires otherwise.
 
