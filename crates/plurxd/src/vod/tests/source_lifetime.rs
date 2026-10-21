@@ -222,6 +222,14 @@ async fn source_generation_registration_close_and_cancel_retain_actual_resources
         let registration_held = registration_pause.reached().await;
         let pid = rendition.last_child_pid.load(Relaxed);
         assert!(pid > 0, "actual FFmpeg was spawned before registration");
+        assert!(
+            rendition.slot.owns_registered_writer_task().await,
+            "actual VOD writer JoinHandle is owned before registration can await"
+        );
+        assert!(
+            rendition.slot.try_reserve_empty().is_err(),
+            "no competing producer may launch while association is paused"
+        );
         rendition.closed.store(true, Release);
         if cancel_waiter {
             caller.abort();

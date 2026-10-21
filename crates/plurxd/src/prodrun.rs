@@ -56,12 +56,12 @@ use std::{
 };
 
 use tokio::process::Child;
-#[cfg(unix)]
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{Mutex, Notify};
 
 use crate::prodexec::{after, Producer, Step, Termination};
 
+mod owned;
 mod physical;
 use physical::ProducerChild;
 
@@ -72,7 +72,7 @@ pub(crate) struct ProducerRegistration(Arc<GenerationLifetime>);
 
 struct GenerationLifetime {
     identity: Arc<()>,
-    writers: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    writers: Mutex<Option<RegisteredWriters>>,
     receipt: StdMutex<Option<ConfirmedProducerReap>>,
     settled: Notify,
     retirement: tokio_util::sync::CancellationToken,
@@ -89,14 +89,33 @@ impl ProducerWriters {
     }
 }
 
+enum RegisteredWriters {
+    Barrier(tokio::sync::oneshot::Receiver<()>),
+    Task(tokio::task::JoinHandle<()>),
+}
+
+impl RegisteredWriters {
+    async fn join(self) -> WriterSettlement {
+        let abandoned = match self {
+            Self::Barrier(receiver) => receiver.await.is_err(),
+            Self::Task(task) => task.await.is_err(),
+        };
+        if abandoned {
+            WriterSettlement::Abandoned
+        } else {
+            WriterSettlement::Settled
+        }
+    }
+}
+
 /// How a registered generation's writer barrier ended. Either way the writer
 /// is gone; the difference is a failure of that writer, never a reason to keep
 /// holding the child's job or admission for an owner that no longer exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WriterSettlement {
-    /// The writer task called [`ProducerWriters::settled`].
+    /// The actual owned task returned, or a legacy writer settled its barrier.
     Settled,
-    /// The writer task dropped its barrier without settling.
+    /// The actual owned task failed, or a legacy writer dropped its barrier.
     Abandoned,
 }
 
@@ -216,16 +235,11 @@ fn owned_reap(
             }
             let mut writers=WriterSettlement::Settled;
             if let Some(generation)=generation.as_ref(){
-                let receiver=generation.0.writers.lock().await.take();
-                if let Some(receiver)=receiver {
-                    // A closed barrier is the writer task ending without
-                    // settling. Its sender went down with the task, so the
-                    // writer is as finished as a settled one; parking here
-                    // would hold the job, the admission and the slot for the
-                    // life of the process on behalf of nothing.
-                    if receiver.await.is_err(){
+                let registered=generation.0.writers.lock().await.take();
+                if let Some(registered)=registered {
+                    writers=registered.join().await;
+                    if writers==WriterSettlement::Abandoned {
                         tracing::error!(target:"plurxd::prodrun","producer writer task ended without confirming settlement; releasing its reaped generation");
-                        writers=WriterSettlement::Abandoned;
                     }
                 }
             }
@@ -290,7 +304,6 @@ pub struct ProducerSlot {
 /// Exclusive custody of a genuinely empty producer slot, acquired before spawn.
 /// Keeping the guard through preparation prevents another start from racing
 /// attachment. It never waits for an existing child's writer/reaper barrier.
-#[cfg(unix)]
 pub(crate) struct EmptyProducerSlot(OwnedMutexGuard<Inner>);
 
 #[cfg(unix)]
@@ -314,10 +327,13 @@ impl EmptyProducerSlot {
 
 fn registered_generation() -> (ProducerRegistration, ProducerWriters) {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    (new_registration(Some(receiver)), ProducerWriters(sender))
+    (
+        new_registration(Some(RegisteredWriters::Barrier(receiver))),
+        ProducerWriters(sender),
+    )
 }
 
-fn new_registration(writers: Option<tokio::sync::oneshot::Receiver<()>>) -> ProducerRegistration {
+fn new_registration(writers: Option<RegisteredWriters>) -> ProducerRegistration {
     ProducerRegistration(Arc::new(GenerationLifetime {
         identity: Arc::new(()),
         writers: Mutex::new(writers),
@@ -389,7 +405,6 @@ impl ProducerSlot {
 
     /// Reserve a ready slot before starting any new child. Busy/reaping slots
     /// refuse immediately; cancellation never has to await predecessor writers.
-    #[cfg(unix)]
     pub(crate) fn try_reserve_empty(&self) -> io::Result<EmptyProducerSlot> {
         let state = Arc::clone(&self.inner)
             .try_lock_owned()
@@ -416,6 +431,16 @@ impl ProducerSlot {
     #[cfg(test)]
     async fn owns_child_job(&self) -> bool {
         self.inner.lock().await.child_job.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn owns_registered_writer_task(&self) -> bool {
+        let state = self.inner.lock().await;
+        let Some(registration) = state.registration.as_ref() else {
+            return false;
+        };
+        let writers = registration.0.writers.lock().await;
+        matches!(writers.as_ref(), Some(RegisteredWriters::Task(_)))
     }
 
     /// Attach a freshly spawned child positioned at `at` — the caller's half

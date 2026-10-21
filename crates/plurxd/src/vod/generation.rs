@@ -452,7 +452,9 @@ pub(super) async fn spawn_generation(
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (child, child_job, stdout, stderr, landing_probe) = {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let (registration, pid) = {
         if !generation_current() {
             return;
         }
@@ -494,7 +496,23 @@ pub(super) async fn spawn_generation(
                 return;
             }
         }
-        let spawned = match crate::producer_spawn::spawn(
+        let empty = match rendition.slot.try_reserve_empty() {
+            Ok(empty) => empty,
+            Err(error) => {
+                if generation_current() {
+                    record_failure(
+                        shared,
+                        rendition,
+                        crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                        format!("reserving the producer slot before launch: {error}"),
+                    );
+                }
+                return;
+            }
+        };
+        let writer_shared = Arc::clone(shared);
+        let writer_rendition = Arc::clone(rendition);
+        match empty.spawn_registered_owned(
             &program,
             &args,
             crate::producer_spawn::SpawnOptions {
@@ -503,6 +521,63 @@ pub(super) async fn spawn_generation(
                 descriptors,
                 env: &env,
                 work: crate::process_control::ChildWork::realtime("VOD transcode"),
+            },
+            at,
+            permit.map(|permit| Box::new(permit) as Box<dyn Send>),
+            move |registration, stdout, stderr| async move {
+                // Source association and private registration precede any
+                // publication. The actual JoinHandle already belongs to slot.
+                if ready_rx.await.is_err() {
+                    let _ = completed_tx.send(None);
+                    return;
+                }
+                let shared = writer_shared;
+                let rendition = writer_rendition;
+                if rendition.closed.load(Relaxed)
+                    || rendition.failure().is_some()
+                    || rendition.gen_epoch.load(Relaxed) != generation_epoch
+                    || rendition.cancelled_preparation_epoch.load(Acquire)
+                        == generation_epoch.saturating_add(1)
+                {
+                    let _ = completed_tx.send(None);
+                    return;
+                }
+                let (retiring, retired) = tokio::sync::oneshot::channel();
+                let result = tokio::join!(
+                    async {
+                        let outcome = run_generation(
+                            Arc::clone(&shared),
+                            Arc::clone(&rendition),
+                            Box::new(stdout),
+                            at,
+                            generation_epoch,
+                            registration.retirement(),
+                            landing_probe,
+                        )
+                        .await;
+                        // Request, NEVER await this task's own reap receipt.
+                        let _ = super::driver::request_registered_driver_retirement(
+                            &shared,
+                            &rendition,
+                            &registration,
+                        )
+                        .await;
+                        let _ = retiring.send(());
+                        outcome
+                    },
+                    async {
+                        let diagnostic = crate::ffmpeg::drain_diagnostics(stderr);
+                        tokio::pin!(diagnostic);
+                        tokio::select! {
+                            text = &mut diagnostic => text,
+                            _ = retired => match tokio::time::timeout(Duration::from_secs(5), &mut diagnostic).await {
+                                Ok(text) => text,
+                                Err(_) => "producer diagnostic drain exceeded its retirement deadline".to_owned(),
+                            },
+                        }
+                    }
+                );
+                let _ = completed_tx.send(Some(result));
             },
         ) {
             Ok(spawned) => spawned,
@@ -519,49 +594,28 @@ pub(super) async fn spawn_generation(
                 );
                 return;
             }
-        };
-        (
-            spawned.child,
-            spawned.child_job,
-            spawned.stdout,
-            spawned.stderr,
-            landing_probe,
-        )
+        }
     };
-    rendition
-        .last_child_pid
-        .store(child.id().unwrap_or(0), Relaxed);
-    // Transfer the raw child and physical resources synchronously before the
-    // first registration await. Losing this caller can only lose its waiter.
+    rendition.last_child_pid.store(pid.unwrap_or(0), Relaxed);
+    // Child, capacity and ACTUAL writer handle already belong to the slot.
+    // Dispatch association remains cancellation independent as before.
     let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
     tokio::spawn({
         let rendition = Arc::clone(rendition);
         let shared = Arc::clone(shared);
+        let registration = registration.clone();
         async move {
             let _private_operation = private_operation;
             if _private_operation.is_some() {
                 shared.hooks.get().before_private_registration().await;
             }
             rendition.hooks.before_producer_registration().await;
-            let (registration, writers) = rendition
-                .slot
-                .attach_registered_job_owned(
-                    child,
-                    child_job,
-                    at,
-                    permit.map(|permit| Box::new(permit) as Box<dyn Send>),
-                )
-                .await;
             rendition
                 .source_owners
                 .registered(&source_dispatch, &registration);
             drop(source_dispatch);
-            if let Err((registration, writers, stdout, stderr)) =
-                registration_tx.send((registration, writers, stdout, stderr))
-            {
-                drop(stdout);
-                drop(stderr);
-                writers.settled();
+            let _ = ready_tx.send(());
+            if registration_tx.send(()).is_err() {
                 let _ = rendition
                     .slot
                     .request_registered_retirement(&registration)
@@ -570,24 +624,86 @@ pub(super) async fn spawn_generation(
             }
         }
     });
-    let Ok((registration, writers, stdout, stderr)) = registration_rx.await else {
-        if !generation_current() {
-            return;
+    // Metadata is OUTSIDE the joined writer: it may await retirement without
+    // causing the actual task to wait on its own JoinHandle.
+    tokio::spawn({
+        let shared = Arc::clone(shared);
+        let rendition = Arc::clone(rendition);
+        let registration = registration.clone();
+        async move {
+            let key = rendition.key.clone();
+            let result = on_writer_panic(completed_rx, || {
+                if !rendition.closed.load(Relaxed)
+                    && rendition.failure().is_none()
+                    && rendition.gen_epoch.load(Relaxed) == generation_epoch
+                    && rendition.cancelled_preparation_epoch.load(Acquire)
+                        != generation_epoch.saturating_add(1)
+                {
+                    record_failure(
+                        &shared,
+                        &rendition,
+                        crate::playback_control::ProducerDecisionReason::ReaderFailed,
+                        "producer writer task ended without reporting completion".to_owned(),
+                    );
+                }
+            })
+            .await;
+            // This also retires cancelled-before-publication and panicked tasks.
+            let _ = rendition
+                .slot
+                .request_registered_retirement(&registration)
+                .await;
+            match rendition
+                .slot
+                .wait_registered_retirement(&registration)
+                .await
+            {
+                Ok(receipt) => {
+                    debug_assert!(receipt.matches(&registration));
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
+                }
+            }
+            let Some(Some((outcome, diagnostic))) = result else {
+                return;
+            };
+            // Completion is metadata about already-settled writes. It may wait
+            // for the manifest only after the reaper has released the writer's
+            // resources and any cleanup owner can release its publication gate.
+            let (outcome, completed) = outcome;
+            if let Some((sink, _)) = completed {
+                vodgen::Sink::completed_output(&sink).await;
+            }
+            let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
+            if !diagnostic.informational.is_empty() {
+                tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = generation_epoch, informational = %diagnostic.informational, "VOD producer informational output");
+            }
+            if !diagnostic.actionable.is_empty() {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = generation_epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
+            }
+            if let Some(outcome) = outcome {
+                on_generation_end(&shared, &rendition, outcome, generation_epoch, at).await;
+            }
         }
-        record_failure(
-            shared,
-            rendition,
-            crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
-            "owned producer registration did not complete".to_owned(),
-        );
+    });
+    if registration_rx.await.is_err() {
+        if generation_current() {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                "owned producer registration did not complete".to_owned(),
+            );
+        }
+        let _ = rendition
+            .slot
+            .request_registered_retirement(&registration)
+            .await;
+        let _ = registration.wait_confirmed_reap().await;
         return;
-    };
-    // A child launched before a close/failure still belongs to the actual
-    // registered reaper. Wait errors retain its permit and descendant job.
+    }
     if !generation_current() {
-        drop(stdout);
-        drop(stderr);
-        writers.settled();
         let _ = rendition
             .slot
             .request_registered_retirement(&registration)
@@ -602,109 +718,27 @@ pub(super) async fn spawn_generation(
             VodProducerKind::Copy
         },
     );
-    let epoch = rendition.gen_epoch.load(Relaxed);
-    // The writer task takes the rendition; the spawn line below still has to
-    // name it, because a per-rendition count is a grep for this key.
-    let spawned_key = rendition.key.clone();
-    let shared = Arc::clone(shared);
-    let rendition = Arc::clone(rendition);
-    let (supervised_shared, supervised) = (Arc::clone(&shared), Arc::clone(&rendition));
-    let writer = tokio::spawn(async move {
-        let key = rendition.key.clone();
-        let (retiring, retired) = tokio::sync::oneshot::channel();
-        let (outcome, diagnostic) = tokio::join!(
-            async {
-                let outcome = run_generation(
-                    Arc::clone(&shared),
-                    Arc::clone(&rendition),
-                    Box::new(stdout),
-                    at,
-                    epoch,
-                    registration.retirement(),
-                    landing_probe,
-                )
-                .await;
-                // Killing starts before diagnostic drain is joined, while the
-                // owned reaper waits for this task's actual writer settlement.
-                let _ = super::driver::request_registered_driver_retirement(
-                    &shared,
-                    &rendition,
-                    &registration,
-                )
-                .await;
-                let _ = retiring.send(());
-                outcome
-            },
-            async {
-                let diagnostic = crate::ffmpeg::drain_diagnostics(stderr);
-                tokio::pin!(diagnostic);
-                tokio::select! {
-                    text=&mut diagnostic=>text,
-                    _=retired=>match tokio::time::timeout(Duration::from_secs(5),&mut diagnostic).await{
-                        Ok(text)=>text,
-                        Err(_)=>"producer diagnostic drain exceeded its retirement deadline".to_owned(),
-                    },
-                }
-            }
-        );
-        writers.settled();
-        match rendition
-            .slot
-            .wait_registered_retirement(&registration)
-            .await
-        {
-            Ok(receipt) => {
-                debug_assert!(receipt.matches(&registration));
-            }
-            Err(error) => {
-                tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
-            }
-        }
-        // Completion is metadata about already-settled writes. It may wait
-        // for the manifest only after the reaper has released the writer's
-        // resources and any cleanup owner can release its publication gate.
-        let (outcome, completed) = outcome;
-        if let Some((sink, _)) = completed {
-            vodgen::Sink::completed_output(&sink).await;
-        }
-        let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
-        if !diagnostic.informational.is_empty() {
-            tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = epoch, informational = %diagnostic.informational, "VOD producer informational output");
-        }
-        if !diagnostic.actionable.is_empty() {
-            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
-        }
-        if let Some(outcome) = outcome {
-            on_generation_end(&shared, &rendition, outcome, epoch, at).await;
-        }
-    });
-    // The writer task owns this generation's segment writes and its end. A
-    // panic unwinds past `on_generation_end` and drops the writer barrier, so
-    // the reaper releases the slot but nothing tells the rendition. Only the
-    // join can: record the failure, which wakes waiters with a terminal class
-    // and kicks the driver to reclaim the producer.
-    tokio::spawn(on_writer_panic(writer, move || {
-        record_failure(
-            &supervised_shared,
-            &supervised,
-            crate::playback_control::ProducerDecisionReason::ReaderFailed,
-            "producer writer task panicked".to_owned(),
-        );
-    }));
     tracing::info!(
         target: "plurxd::vodserve",
-        rendition = %spawned_key,
+        rendition = %rendition.key,
         start_entry = at,
-        generation = epoch,
+        generation = generation_epoch,
         "spawned a producer generation"
     );
 }
 
-/// Join a generation writer and report only a panic. Every other end is the
-/// writer's own to report through `on_generation_end`.
-async fn on_writer_panic(writer: tokio::task::JoinHandle<()>, on_panic: impl FnOnce()) {
-    if writer.await.is_err_and(|error| error.is_panic()) {
-        on_panic();
+/// A panic/abandonment drops the result channel. The actual JoinHandle belongs
+/// to the reaper, not this independent completion-metadata observer.
+async fn on_writer_panic<T>(
+    writer: tokio::sync::oneshot::Receiver<T>,
+    on_panic: impl FnOnce(),
+) -> Option<T> {
+    match writer.await {
+        Ok(result) => Some(result),
+        Err(_) => {
+            on_panic();
+            None
+        }
     }
 }
 
@@ -2255,19 +2289,26 @@ mod writer_supervision_tests {
     #[tokio::test]
     async fn a_panicked_generation_writer_is_reported_and_a_clean_end_is_not() {
         let reported = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let panicked = tokio::spawn(async { panic!("writer fixture panics") });
+        let (sender, panicked) = tokio::sync::oneshot::channel::<()>();
+        let writer = tokio::spawn(async move {
+            let _sender = sender;
+            panic!("writer fixture panics");
+        });
         let seen = std::sync::Arc::clone(&reported);
         super::on_writer_panic(panicked, move || {
             seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         })
         .await;
+        assert!(writer.await.expect_err("actual task panicked").is_panic());
         assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let clean = tokio::spawn(async {});
+        let (sender, clean) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move { sender.send(()).expect("observer alive") });
         let seen = std::sync::Arc::clone(&reported);
         super::on_writer_panic(clean, move || {
             seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         })
         .await;
+        writer.await.expect("clean task joined");
         assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
