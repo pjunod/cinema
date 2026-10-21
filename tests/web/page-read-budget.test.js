@@ -473,7 +473,8 @@ test("cockpit Settings makes the active tab and long System values distinct", as
   assert.match(SHIPPED_UI, /\.kvgrid dd\{[\s\S]*?text-transform:none;word-break:normal/);
   assert.match(SHIPPED_UI, /\.storage-table\{grid-template-columns:minmax\(0,1fr\) max-content/);
   assert.match(shippedSource("storageHtml"), /class="stgtable storage-table"/);
-  assert.match(shippedSource("systemPanel"), /class="kvgrid system-grid"/);
+  assert.match(shippedSource("systemVersionsCard"), /system-kv/);
+  assert.match(SHIPPED_UI, /\.system-kv>\*\{min-width:0\}/);
   // Watch-state durability is reported once, on the Cluster tab, and nowhere
   // else. Two readings of the same projection on two screens is how an
   // operator ends up comparing a stale copy against a fresh one.
@@ -869,7 +870,7 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: ["developerReadiness"] },
     maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["settings", "users"], secondary: [] },
-    system: { required: ["sys"], secondary: ["playbackEvents"] },
+    system: { required: ["sys"], secondary: [] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness", "settings"] },
     sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
@@ -1694,7 +1695,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:["/developer/readiness"]},
     maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/settings","/users"],secondary:[]},
-    system:{required:["/system"],secondary:["playback-events","system-log"]},
+    system:{required:["/system"],secondary:[]},
     // The cluster settings cards fill their own mount when /settings lands; the
     // health board never waits for it.
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","/settings","cluster-log"]},

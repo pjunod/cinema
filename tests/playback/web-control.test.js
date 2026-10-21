@@ -243,7 +243,7 @@ function fullOpenHarness() {
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
     shippedSource("naturalBoundaryQualityCandidate"),
-    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
+    shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"),
     shippedSource("playerWantsPlayback"), transportTelemetrySources(),shippedSource("resumeQualityBoundary"),shippedSource("togglePlay"),
     shippedSource("playerInputSurface"), shippedSource("watchRouteInput"),
@@ -373,6 +373,8 @@ async function flushDeep() {
 }
 
 async function main() {
+  const preparedRecovery=preparedHlsRecoveryTests();
+  if(process.argv.includes('--prepared-hls-recovery')) return preparedRecovery;
   await test("Close and pagehide retain an unacknowledged commit's predecessor after decoder retirement",()=>{
     for(const pagehide of [false,true]){
       const h=preparedHarness();
@@ -1246,7 +1248,7 @@ async function main() {
       // retained branch reads the staged-successor slot before Apply.
       shippedSource("preparedState"),
       shippedSource("setQuality"),shippedSource("setSync"),
-      shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
+      shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),shippedSource("burnSub"),shippedSource("switchAudio"),
       // A directed change settles a promise chain rather than reopening
       // inline, so the harness hands back a form the cases can await.
       "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();if(retainedQualityChange(PLAYER))applyQualityWithRestart();}",
@@ -1780,7 +1782,7 @@ async function main() {
       "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url){return new Promise(resolve=>requests.push({url,resolve}));}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
-      shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("probePlaybackSource"),shippedSource("playbackAttemptTerminallyStopped"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {requests,loading,surface:surfacePainted,stops:()=>surfaceStops.length,start:stallDiagnose,timeout:()=>timer(),replace(){PLAYER={started:false,method:'remux'};}};",
     ].join("\n"))();
@@ -1808,7 +1810,7 @@ async function main() {
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};function fetch(){requests++;throw Error('terminal refusal must suppress generic probe');}",
       "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
-      shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("playbackAttemptTerminallyStopped"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {start:stallDiagnose,result:()=>({requests,loading,surface:surfacePainted(),stops:surfaceStops.length})};",
     ].join("\n"))();
@@ -1826,7 +1828,7 @@ async function main() {
       "const document={getElementById:()=>({})};const console={warn(){}};function fetch(){return new Promise(done=>resolve=done);}",
       "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){throw Error('stale recovery');}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
-      shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
+      shippedSource("probePlaybackSource"),shippedSource("playbackAttemptTerminallyStopped"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {loading,surface:surfacePainted,start:stallDiagnose,resolve:()=>resolve({status:500}),replace(kind){if(kind==='close')PLAYER=null;else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER={started:false,method:'transcode'};}};",
     ].join("\n"))();
@@ -4158,17 +4160,23 @@ async function main() {
     const instances = [];
     class FakeHls {
       static Events = { MANIFEST_PARSED: "manifest", ERROR: "error",
-        BUFFER_APPENDED: "append", LEVEL_LOADED: "level" };
+        BUFFER_APPENDED: "append", LEVEL_LOADED: "level", FRAG_LOADED: "loaded" };
+      static ErrorTypes = { NETWORK_ERROR: "networkError", MEDIA_ERROR: "mediaError" };
+      static ErrorDetails = { BUFFER_FULL_ERROR: "bufferFullError", BUFFER_APPEND_ERROR: "bufferAppendError" };
       static isSupported() { return true; }
       constructor(config) {
         this.config = config; this.events = {}; this.destroyed = false;
         this.bandwidthEstimate = 9_000_000; instances.push(this);
       }
-      on(event, fn) { this.events[event] = fn; }
+      on(event, fn) {
+        const previous=this.events[event];
+        this.events[event]=previous?(...args)=>{previous(...args);fn(...args);}:fn;
+      }
       loadSource(url) { this.source = url; }
       attachMedia(media) { this.media = media; }
       stopLoad() { this.loadsStopped = (this.loadsStopped || 0) + 1; }
       startLoad() { this.loadsResumed = (this.loadsResumed || 0) + 1; }
+      recoverMediaError() { this.mediaRecoveries = (this.mediaRecoveries || 0) + 1; }
       destroy() { this.destroyed = true; }
     }
     const scope = new PlaybackContextFunction(
@@ -4179,6 +4187,7 @@ async function main() {
       "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon", "SHARED_DECISION",
       [
         "let PLAYER=null; let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}};",
+        "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
         "let WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0,WATCH=null,STATS_TIMER=null; const location={hash:'#/'};",
         "const beginPlaybackPreparation={};const released=[],releaseStates=[];",
         "const PLAY_OPEN_GATE={invalidate(){},current(){return false;}};",
@@ -4201,6 +4210,20 @@ async function main() {
         "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
         shippedSource("bufferRunway"),
         "function vodClientContract(){return {fragLoadPolicy:{}};}",
+        "const hlsObservations=[];function markEvent(kind){hlsObservations.push(kind);}",
+        "function clearStreamFailureFor(){}function retuneBuffer(){}function reportBufferLimit(){}",
+        "function playbackControlHlsFatal(d){return {media_failure:d.type==='mediaError',observation:{}};}",
+        "function finishStallRecovery(){return false;}function currentStreamFailureOverlay(){return null;}",
+        "function showStallRecoveryFailure(){}function scheduleUrgentAutoControllerTick(){}",
+        "function exhaustHlsStartup(p){p.hlsStartup.state='exhausted';}",
+        "function endWait(){}function pbSyncSubIcon(){}function subNeedsBurn(s){return !!s?.burn;}",
+        "function restartPendingPlaybackOpen(){return false;}function burnSub(){throw Error('unexpected subtitle burn');}",
+        shippedSource("clearSubs"),shippedSource("rememberPlaybackSelection"),
+        shippedSource("nativeHlsSubtitleOrdinal"),shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),
+        shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
+        shippedSource("hlsStartupIncomplete"),shippedSource("hlsStartupEpisode"),
+        shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
+        shippedSource("scheduleHlsNetworkRetry"),shippedSource("armHlsStartupRetry"),
         shippedConst("PREPARED_HANDOFF_KEY"),
         shippedConst("PREPARED_BUFFER_LEAD_MS"),
         shippedConst("PREPARED_ALIGN_SLACK_MS"),
@@ -4229,6 +4252,7 @@ async function main() {
         shippedSource("preparedSharedSuccessor"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         qualityResourceTimingSources(),shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        shippedSource("adoptPreparedHls"),shippedSource("notePreparedHlsFragmentLoaded"),
         shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
@@ -4275,8 +4299,8 @@ async function main() {
         "function closeMenu(){} function toast(){} function qualityLabel(){return 'x';}",
         "function play(id,title,position,dur,meta){plays.push({id,position,meta,reason:PENDING_ATTEMPT_REASON});PENDING_ATTEMPT_REASON=null;}",
         "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
-        "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
-        "function hlsStartupCurrent(){return false;}",
+        shippedSource("selectedAudioIndex"),shippedSource("newRequestId"),shippedSource("qualityMediaIntent"),
+        "function playQuality(){return quality;}",
         "function recordAutoSwitch(p,from,to,reason,pos,id){(p.abr.switches||(p.abr.switches=[])).push({from,to,reason,pos,id});}",
         shippedConst("PREPARED_OFFER_BOUND_MS"),
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
@@ -4328,15 +4352,17 @@ async function main() {
         " supersede(){return supersedePlaybackControlIntent(PLAYER);},",
         " waiters(){return (PLAYER&&PLAYER.controlWaiters)||[];},",
         " selection(){return playbackControlSelection(PLAYER);},",
+        " intent(){return qualityMediaIntent(PLAYER,playbackControlSelection(PLAYER),true);},",
+        " subtitle(index){return setSub(index);},",
         " requestedRung(){return PLAYER&&PLAYER.autoRequestedHeight;},",
         " commit(){return commitPreparedReplacement(PLAYER,preparedState(PLAYER));},",
         " plays, mediaChanges,released,releaseStates,close:closePlayer,pagehide:closeVodForPageHide,",
-        " surfaceRaised};",
+        " surfaceRaised,hlsObservations};",
       ].join("\n"),
     );
     const api = scope(
       document, { Hls: FakeHls, PlurxPlaybackControl: control }, FakeHls,
-      { bandwidthSeedBps: () => null }, control, null,
+      { ...require("../../crates/plurxd/src/web/playback-policy.js"),bandwidthSeedBps: () => null }, control, null,
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
       (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
@@ -4417,6 +4443,118 @@ async function main() {
 
   await test("prepared HLS buffer readiness follows incumbent clock and releases listener ownership",
     ()=>preparedBufferObservationTests(preparedHarness,preparedPlayer,prepareAction));
+
+  function preparedHlsRecoveryTests(){
+    const preparedPlayer=overrides=>({offset:0,vod:true,hls:null,prepared:null,priorKbps:0,
+      controlAcknowledgement:null,pendingMediaChange:null,wantsPlayback:true,...overrides});
+    const prepareAction=()=>({...PREPARE_FIXTURE});
+    return Promise.all([
+    test("prepared HLS subtitle reattachment preserves the automatic candidate through commit",async()=>{
+      const h=preparedHarness(),requested="encode-480",previous="encode-720";
+      const p=h.set(preparedPlayer({fileId:7,sessionId:"predecessor",hls:{destroy(){}},
+        mediaAttachment:{id:1},controlIntentGeneration:0,started:true,method:"transcode",
+        qualityProtocol:"route-v1",qualityCandidateId:previous,curSub:1,burnedSub:null,aoffset:0,
+        subs:[{index:1,native:true,codec:"subrip"}],
+        qualityCandidates:[{id:requested,route:"encode",target_height:480,grade:"sdr"}],
+        abr:{requestedCandidateId:requested,catalogSelectionKey:JSON.stringify([0,1,null,0])},
+        directedChange:{intentGeneration:0,tappedAt:0,settled:false,
+          autoMove:{from:720,to:480,candidateId:requested,previousCandidateId:previous}}}));
+      const selection=h.selection(),intent=h.intent(),change=p.directedChange,attachment=p.mediaAttachment;
+      h.handle({...prepareAction(),effective_selection:{...PREPARE_FIXTURE.effective_selection,
+        candidate_id:requested,height:480}});
+      const staged=h.instances[0];
+      staged.events.manifest();h.spare.ranges=[[0,30]];staged.events.append();h.provePrepared(false);
+      assert.equal(p.abr.requestedCandidateId,requested,"reattaching subtitles cannot revert to the predecessor's candidate");
+      assert.equal(p.controlIntentGeneration,0,"reattaching the selected subtitle is not a viewer command");
+      assert.equal(change.settled,false,"subtitle reattachment cannot supersede the automatic handoff");
+      assert.deepEqual(h.selection(),selection,"exposure keeps the server's reserved candidate selection");
+      assert.deepEqual(h.intent(),intent,"reattachment preserves the media-intent recipe revision");
+      assert.equal(staged.subtitleTrack,0,"the selected native subtitle is attached to the new HLS instance");
+      assert.equal(p.mediaAttachment,attachment);
+      h.spare.frameCallback(0,{mediaTime:4/30,presentedFrames:5});
+      assert.equal(change.outcome,"committed");
+      assert.deepEqual(h.selection(),selection,"the committed acknowledgement carries the same requested recipe");
+      assert.deepEqual(h.intent(),intent,"the commit retains the offer's exact media intent");
+      assert.equal(p.abr.requestedCandidateId,requested);
+      assert.equal(h.queue().at(-1).state,"committed");
+      await h.subtitle(1);
+      assert.equal(p.controlIntentGeneration,1,"an explicit subtitle command still supersedes viewer intent");
+      assert.equal(staged.subtitleTrack,0,"the same explicit selection still reattaches its rendition");
+    }),
+    test("a committed prepared HLS successor owns fatal recovery on its visible element",()=>{
+    for(const kind of ["networkError","mediaError"]){
+      const h=preparedHarness();
+      const attachment={id:1},oldStartup={state:"presenting"};
+      const p=h.set(preparedPlayer({hls:{destroy(){}},mediaAttachment:attachment,
+        hlsStartup:oldStartup,hlsRetryUsed:1,started:true,method:"transcode"}));
+      const state=h.handle(prepareAction());
+      const staged=h.instances[0];
+      staged.events.manifest();h.spare.ranges=[[0,30]];staged.events.append();h.provePrepared();
+      assert.equal(p.mediaAttachment,attachment,"commit retains the reporter's attachment identity");
+      assert.equal(p.hlsStartup.hls,staged,"the active episode follows the visible HLS instance");
+      assert.equal(p.hlsStartup.state,"presenting","adoption does not restart first-frame accounting");
+      assert.equal(p.hlsStartup.attachment.current(),true);
+      assert.equal(p.hlsRetryUsed,0,"the successor owns its own bounded recovery budget");
+      assert.equal(h.logs.filter(row=>row.event==="hls_startup_presenting").length,0);
+      assert.equal(state.hlsAdopted,true);
+      staged.events.append();
+      assert.deepEqual(h.hlsObservations,["append"],"the visible successor records normal append observations");
+      staged.events.loaded(null,{frag:{type:"main",duration:2,
+        stats:{loaded:4096,total:4096,loading:{start:0,end:100}}}});
+      assert.equal(p.segBytes,4096,"normal fragment accounting replaces the staging observer");
+      // Established recovery remains usable long after the original startup
+      // deadline; it must resume the visible element at the backward target.
+      p.hlsStartup.deadlineMs=-1;
+      staged.media.currentTime=7;
+      staged.events.error(null,{fatal:true,type:kind,
+        details:kind==="networkError"?"fragLoadError":"fragParsingError"});
+      if(kind==="networkError"){
+        assert.equal(h.logs.filter(row=>row.event==="hls_fatal").length,1);
+        h.fireAll();
+        assert.equal(staged.loadsResumed,1,"network recovery reaches the committed pipeline");
+        assert.equal(h.logs.find(row=>row.event==="hls_retry").action,"resume_loading");
+      }else{
+        assert.equal(staged.mediaRecoveries,1,"media fatal reaches the usual decoder rescue");
+        assert.equal(h.logs.filter(row=>row.event==="hls_media_recovery").length,1);
+      }
+      const recorded=h.logs.length;
+      p.terminalStop={attachment};
+      staged.events.error(null,{fatal:true,type:kind,details:"fragLoadError"});
+      assert.equal(h.logs.length,recorded,"a stopped successor cannot spend another recovery");
+      p.terminalStop=null;
+      staged.media.id="retired";
+      staged.events.error(null,{fatal:true,type:kind,details:"fragLoadError"});
+      assert.equal(h.logs.length,recorded,"the pipeline must still own the visible element");
+      staged.media.id="video";
+      p.mediaAttachment={id:2};
+      staged.events.error(null,{fatal:true,type:kind,details:"fragLoadError"});
+      assert.equal(h.logs.length,recorded,"a retired successor's queued errors cannot affect a new attachment");
+    }
+    }),
+
+    test("prepared HLS rollback restores the predecessor's recovery owner",()=>{
+    const h=preparedHarness();
+    const incumbent={destroy(){}},oldStartup={hls:incumbent,state:"presenting"};
+    const p=h.set(preparedPlayer({hls:incumbent,hlsStartup:oldStartup,hlsRetryUsed:1}));
+    const state=h.handle(prepareAction());
+    const staged=h.instances[0];
+    staged.events.manifest();h.spare.ranges=[[0,30]];staged.events.append();h.provePrepared(false);
+    assert.equal(state.hlsAdopted,undefined,"exposure alone cannot take recovery away from rollback");
+    assert.equal(p.hlsStartup,oldStartup,"the predecessor keeps its recovery owner until first-frame proof");
+    const beforeFailure=h.logs.length;
+    staged.events.error(null,{fatal:true,type:"networkError",details:"fragLoadError"});
+    assert.equal(h.logs.length,beforeFailure,"a pre-proof failure remains owned by the rollback watchdog");
+    assert.equal(p.terminalStop,undefined,"the unproven successor cannot terminally stop the shared attachment");
+    h.fireAll();
+    assert.equal(p.hls,incumbent);
+    assert.equal(p.hlsStartup,oldStartup,"rollback restores the exact predecessor episode");
+    assert.equal(p.hlsRetryUsed,1,"rollback cannot renew the predecessor's spent retry");
+    const recorded=h.logs.length;
+    staged.events.error(null,{fatal:true,type:"networkError",details:"fragLoadError"});
+    assert.equal(h.logs.length,recorded,"the rolled-back successor no longer reports fatal errors");
+    }),
+    ]);
+  }
 
 
   // A warmed successor remains under the incumbent until aligned advancing
@@ -7114,6 +7252,7 @@ async function vendoredHlsStartupTests(){
       "class StockLoader{load(context,config,callbacks){return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{};}}",
       "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}getResponseHeader(){return null;}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
       shippedSource("preparedState"),
+      shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachedPreparedHls"),
       shippedSource("createPreparedHlsLoader"),
       shippedSource("notePreparedHlsFragmentLoaded"),
@@ -7200,7 +7339,7 @@ async function vendoredHlsStartupTests(){
         shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
         shippedSource("observeStreamFailureResponse"),
         shippedSource("createHlsStartupLoader"),
-        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),shippedSource("attachPlaybackSubtitle"),
         shippedSource("scheduleHlsNetworkRetry"),
         "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
         "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",
@@ -7460,7 +7599,7 @@ function quorumDiagnosisHarness(fetcher){
     "const TOKEN=null,document={getElementById:()=>({})},performance={now:()=>1},console={warn(){}};",
     "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function hlsStartupIncomplete(){return false;}function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function stopPlayerForExhaustion(){stops.push(true);}function raisePlaybackSurface(source,fault){faults.push(fault);}function playbackStallActions(){return ['retry','close'];}",
     shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),
-    shippedSource('probePlaybackSource'),shippedSource('stallDiagnose'),
+    shippedSource('probePlaybackSource'),shippedSource('playbackAttemptTerminallyStopped'),shippedSource('stallDiagnose'),
     "return {player:PLAYER,faults,stops,diagnose:stallDiagnose,note:(status,body)=>noteStreamFailure(status,body,{attachment:PLAYER.mediaAttachment,resource:'media',request_ordinal:1})};",
   ].join('\n'))(policy,fetcher);
 }
@@ -8157,7 +8296,7 @@ test("paused subtitle selection projects ordinal zero and Off immediately", asyn
     "function supersedePlaybackControlIntent(){}function notifyPlaybackControl(){}function restartPendingPlaybackOpen(){return false;}function nativeHlsSubtitleOrdinal(){return 0;}",
     "function playbackOwnsAttachedMedia(){return false;}function esc(s){return String(s);}function fmtMbps(){return '';}function fmtSize(){return '';}function fmtDur(){return '';}",
     "function audioFactLabel(t){return t.title;}function subFactLabel(t){return t.title;}function langName(){return 'English';}",
-    ...["setSub","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
+    ...["setSub","attachPlaybackSubtitle","clearSubs","rememberPlaybackSelection","pbSyncSubIcon","watchCurrentFile",
       "watchSelectedAudio","watchSelectedSub","watchTrackChip","watchFoldButton","watchTrackRow",
       "watchDeliveryRow","watchLedgerHtml","watchBindLedger","watchRenderLedger","watchFolds","watchRenderSubtitleGeneration","watchCanGenerateSubtitles","watchGenerationAction","watchTranslationAction"].map(shippedSource),
     "return {setSub,video,player:PLAYER,ledger,band,ccOn:()=>ccOn};",

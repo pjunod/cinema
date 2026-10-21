@@ -109,3 +109,11 @@ owner = "subtitles"
 reason = "Actual managed child execution requires a qualified packaged engine, matching self-test fixture, catalog model bytes and packaged FFmpeg; ordinary test runners do not install those assets."
 requires = "PLURX_SUBTITLE_ENGINE, PLURX_TEST_SUBTITLE_MODEL and absolute packaged PLURX_FFMPEG"
 command = "PLURX_SUBTITLE_ENGINE=/path/to/package/bin/subtitle-engine/whisper-cli PLURX_TEST_SUBTITLE_MODEL=/path/to/ggml-base.en.bin PLURX_FFMPEG=/path/to/package/bin/ffmpeg cargo test --locked -p plurxd --bin plurxd subtitle_transcription::tests::managed_real_engine_held_fd_clean_environment_recognizes_fixture -- --ignored --exact --nocapture"
+
+# Representative performance is an explicit hardware qualification, not known-red debt.
+[[fixtures]]
+test = "crates/plurxd/src/transcoder_optimization/comparison.rs::transcoder_optimization::comparison::tests::real_media_production_tools_comparison"
+owner = "transcoding"
+reason = "requires the node's production media tools and actual GPU"
+requires = "explicit PLURX_FFMPEG and PLURX_FFPROBE; actual target GPU; PLURX_COMPARISON_MACOS_PROCESSING=1 for native Mac processing"
+command = "PLURX_FFMPEG=/path/to/runtime/ffmpeg PLURX_FFPROBE=/path/to/runtime/ffprobe PLURX_COMPARISON_MACOS_PROCESSING=1 cargo test --locked -p plurxd --bin plurxd transcoder_optimization::comparison::tests::real_media_production_tools_comparison -- --ignored --exact --nocapture --test-threads=1"

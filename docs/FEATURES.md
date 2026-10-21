@@ -439,7 +439,13 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
 - **Manual quality override:** the player's **◆ Quality** menu — *Auto*
   (the automatic ladder), *Original* (never transcode video: direct/remux, with
   the error-path rescuing an undecodable pick), or a forced *1080p / 720p / 480p*
-  transcode. Persists per browser; switching restarts at the current position.
+  transcode. Persists per browser; switches preserve the current position,
+  using a prepared replacement when available.
+- **Current playback quality:** the Quality control shows Auto, Original or
+  Manual together with the resolution of the presented picture. Cropped
+  frames show their exact dimensions. A brief notice inside the fullscreen
+  player announces completed video-quality changes; initial playback,
+  ordinary seeks and failed prepared switches stay quiet.
 - **Resume everywhere:** client-seek for direct play, server fast-seek for remux,
   offset-based session for transcode. Multipart audiobooks map every physical
   part onto one item-level resume/progress timeline and continue at part ends.

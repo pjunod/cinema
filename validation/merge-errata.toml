@@ -416,3 +416,15 @@ reason = "Corrective commit 28250ece (fix(scripts): hand ship-physical's resolve
 [[errata]]
 commit = "98c224c59085bfb51228472df7c9d5a7c91532b1"
 reason = "Landing commit 98c224c59 of PR #1198 (test-harness and clippy repairs after #1197) carries two Regression-Test lines that name a file without a test: 'tests/web/calm-library.test.js' and 'tests/web/shared-artwork.test.js'. The repaired checks are the library harness's top-level incremental-grid cases in tests/web/calm-library.test.js, which are not a named test, and tests/web/shared-artwork.test.js::actual logout and route entry retire artwork before current authority changes; its third line, crates/plurxd/src/transcode/tests/seam_census.rs::seam_census_of_the_workspace, resolves. The fast lane on #1198's head f81360a68 passed with these checks. This permanent erratum records the malformed lines without rewriting history, moving the audit boundary, waiving future regression fields or claiming a new test run."
+
+[[errata]]
+commit = "411a97b8f27d84e3d72e860944d12f7f5ad8798c"
+reason = "Corrective commit 411a97b8 reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 preflight task 22052 reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."
+
+[[errata]]
+commit = "e64ce97386c2778122a70e10545d5e1c618152af"
+reason = "Corrective commit e64ce973 reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 full local history audit reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."
+
+[[errata]]
+commit = "845a868ff6c51ecfc6db7f3f46c3771068bfec03"
+reason = "Corrective commit 845a868f reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 full local history audit reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."

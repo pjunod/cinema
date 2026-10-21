@@ -1,13 +1,19 @@
 # Rust suite repair — preserve the 25 failures and qualify their corrections
 
-**Status:** open — implementation built; two qualification attempts on
-`c81f3af25` failed during external native-package setup before compilation or
-tests. Isolated pinned-image installation now passes over HTTPS; integrated
-workflow validation and fresh exact-source acceptance remain owed. Receipts are
-recorded in [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
+**Status:** integration refresh in progress after merge authorization on
+2026-10-21. Frozen `0f7b6325` passed run 5713: 6,928 native passes, zero
+failures and 49 unchanged ignores; seven doctest targets, 400 cohort bodies,
+20 writer bodies and both serial media cases also passed with qualified
+cleanup. Those receipts remain evidence for that exact older source.
+Effort development gate 5728 then refused the stale effort/main ancestry
+before compilation. Current `main` at `00c74cd8` is being integrated into
+the effort base and repair candidate; new exact-source compiler, focused,
+full native and development-gate acceptance are required before merge.
+Current receipts are recorded in
+[task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
-`codex/full-pr-suite-m1`, based on `effort/full-pr-suite` at `c1c344132`
-and carrying M0 dependency `16d1a5003` locally; neither task PR is merged.
+`codex/full-pr-suite-m1`, carrying the M0 dependency `16d1a5003`; neither
+old successful outcomes nor the failed development gate are replaced.
 
 Companion to [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md)
 (the current execution policy) and [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)

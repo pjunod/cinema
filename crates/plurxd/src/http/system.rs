@@ -251,6 +251,14 @@ pub async fn setup(
 
 #[derive(Serialize)]
 pub struct SystemDto {
+    pub platform: &'static str,
+    pub application_executable: Option<String>,
+    pub runtime_location: Option<String>,
+    pub graphics_devices: Vec<plurx_core::transcode::GraphicsDevice>,
+    pub encoder_device_bindings: Vec<plurx_core::transcode::EncoderDeviceBinding>,
+    pub transcoding_facts: Vec<crate::ffmpeg_support::TranscodingFact>,
+    pub additional_media_support: Vec<crate::ffmpeg_support::MediaSupport>,
+    pub ffmpeg_support: crate::ffmpeg_support::SupportReport,
     pub node_id: String,
     pub hwaccel_requested: String,
     pub hwaccel_restart_required: bool,
@@ -411,7 +419,8 @@ pub async fn system_info(
         .store
         .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
         .await?;
-    let optimization = crate::transcoder_optimization::status(&state.system).await;
+    let optimization =
+        crate::transcoder_optimization::status(&state.system, &state.transcode).await;
     let hwaccel_restart_required = (hwaccel_requested.is_some()
         && hwaccel_requested != state.system.hwaccel_override)
         || optimization.restart_required;
@@ -421,7 +430,33 @@ pub async fn system_info(
         .await?
         .unwrap_or_else(|| state.server_name.clone());
     let hostname = state.node_hostname.clone();
+    let ffmpeg_support = crate::ffmpeg_support::report(&state.system).await;
+    let current_preference = state
+        .store
+        .get_setting(keys::HWACCEL)
+        .await?
+        .unwrap_or_default();
+    let encoder = state.transcode.encoder_for_preference(&current_preference);
+    let transcoding_facts = crate::ffmpeg_support::transcoding_facts(
+        &state.system,
+        &ffmpeg_support,
+        encoder,
+        state.transcode.macos_video_processing_enabled(),
+        hw_max > 0,
+    );
+    let executable = std::env::current_exe().ok();
     Ok(Json(SystemDto {
+        platform: std::env::consts::OS,
+        application_executable: executable.as_ref().map(|path| path.display().to_string()),
+        runtime_location: executable
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|path| path.display().to_string()),
+        graphics_devices: state.system.encoders.graphics_devices.clone(),
+        encoder_device_bindings: state.system.encoders.device_bindings.clone(),
+        transcoding_facts,
+        additional_media_support: ffmpeg_support.additional_media_support.clone(),
+        ffmpeg_support,
         node_id: state.node_id.clone(),
         hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
         hwaccel_restart_required,
@@ -517,7 +552,8 @@ pub async fn update_hardware_preference(
             &request.preference,
         )
         .await?;
-    let optimization = crate::transcoder_optimization::status(&state.system).await;
+    let optimization =
+        crate::transcoder_optimization::status(&state.system, &state.transcode).await;
     Ok(Json(serde_json::json!({
         "node_id": state.node_id,
         "preference": request.preference,
@@ -966,9 +1002,13 @@ where
     Option::<FileId>::deserialize(deserializer).map(|id| id.map(|id| id.0))
 }
 
+mod frame_drop;
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
+    /// Bounded numeric frame-drop incident; retained in playback-event extra.
+    frame_drop: Option<frame_drop::ClientFrameDrop>,
     pub transport: Option<ClientTransportRecord>,
     /// "error" | "warn" — anything but "error" logs at WARN.
     pub level: String,
@@ -1701,6 +1741,11 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         (!context.is_empty()).then_some(serde_json::Value::Object(context))
     }
     let mut extra = serde_json::Map::new();
+    if ev.event == "frame_drop" {
+        if let Some(incident) = ev.frame_drop.as_ref().and_then(|value| value.value()) {
+            extra.insert("frame_drop".to_owned(), incident);
+        }
+    }
     if let Some(record) = ev.transport.as_ref().filter(|record| {
         record.command_id.len() <= 64
             && !record.command_id.is_empty()

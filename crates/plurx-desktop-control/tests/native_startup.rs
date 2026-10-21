@@ -122,6 +122,46 @@ fn package(root: &Path) {
 }
 
 #[test]
+fn macos_launcher_rebinds_legacy_media_tools_without_overwriting_custom_paths() {
+    let runtime = Path::new("/fixture/runtime");
+    for tool in ["ffmpeg", "ffprobe"] {
+        let packaged = runtime.join("current/runtime").join(tool);
+        for inherited in [
+            None,
+            Some(String::new()),
+            Some(format!(
+                "/opt/homebrew/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/{tool}"
+            )),
+            Some(format!(
+                "/usr/local/libexec/plurx/jellyfin-ffmpeg-8.1.3-1/{tool}"
+            )),
+            Some(format!("/fixture/runtime/versions/old/runtime/{tool}")),
+        ] {
+            assert_eq!(
+                native::packaged_media_override(
+                    runtime,
+                    tool,
+                    inherited.as_deref().map(std::ffi::OsStr::new)
+                ),
+                Some(packaged.clone()),
+            );
+        }
+        for custom in [
+            format!("/operator/media/{tool}"),
+            format!("/opt/homebrew/bin/{tool}"),
+            format!("/operator/jellyfin-ffmpeg-8.1.3-1/{tool}"),
+            format!("/opt/homebrew/libexec/plurx/custom/{tool}"),
+            "custom-tool".to_owned(),
+        ] {
+            assert_eq!(
+                native::packaged_media_override(runtime, tool, Some(std::ffi::OsStr::new(&custom))),
+                None
+            );
+        }
+    }
+}
+
+#[test]
 fn managed_package_launcher_selects_real_daemon_under_shipped_symlink_layout() {
     let scratch = Scratch::new();
     let i = installation(&scratch.0, InstallMethod::LinuxDeb);
