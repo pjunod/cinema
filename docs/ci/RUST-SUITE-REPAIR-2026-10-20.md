@@ -6,17 +6,27 @@ failures and 49 unchanged ignores; seven doctest targets, 400 cohort bodies,
 20 writer bodies and both serial media cases also passed with qualified
 cleanup. Those receipts remain evidence for that exact older source.
 Effort development gate 5728 refused stale effort/main ancestry before
-compilation. Main `00c74cd8` is integrated in `6a6d55099`; effort gate 5733
-then passed history/catalog checks and correctly refused the operation-progress
-model's old whole-file writer pin. The reviewed metadata refresh preserves
-the existing application/reply/timeout abstraction, model, configurations
-and guards; [the wait map](../../verification/operation-progress/WAIT-MAP.md)
-records its scope. Both package mapping checks and 39 focused formal
-runner/CI controls pass; TLC has not been rerun for this refresh. Both failed
-gates and old formal receipts retain their original verdicts and source
-bindings. Fresh exact-source compiler, focused,
-full native and development-gate acceptance remain required before merge;
-any new TLC qualification claim needs a new input-bound formal receipt.
+compilation. Main `00c74cd8` was integrated in `6a6d55099`; gate 5733 then
+passed history/catalog checks and correctly refused the operation-progress
+model's old whole-file writer pin. Reviewed pin refresh `2107c648` preserves
+the application/reply/timeout abstraction; [the wait map](../../verification/operation-progress/WAIT-MAP.md)
+records its scope. New main `7f5af452476b6911ffb84e5fcf4fb3f95de054a6`,
+including worker-refinement, is now merged into the staged candidate pending
+its integration commit. All three package mapping checks report no source
+drift, and all 43 focused formal package/runner/CI controls pass, including
+the existing stale-writer-hash and missing/ambiguous-anchor negatives. The
+reviewed writer pin still matches; no additional pin repair is needed.
+
+Worker-refinement separately models application, reply and caller observation,
+and local revocation versus durable authority. Its conditional model result
+is not a general Rust refinement or internal-receiver cancellation theorem.
+The writer correction does not change that protocol, transaction ordering or
+those limits. No model, configuration, checker or premise is changed by this
+integration review, and TLC has not been rerun for it. Both failed gates and
+old formal receipts retain their original verdicts and source bindings.
+Fresh exact-source compiler, focused, full native and development-gate
+acceptance remain required before merge; any fresh TLC qualification claim
+needs a new input-bound formal receipt.
 Current receipts are recorded in
 [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
