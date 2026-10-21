@@ -2346,6 +2346,7 @@ impl SettingsStore for SqliteStore {
     }
 
     async fn get_or_init_setting(&self, key: &str, seed: &str) -> Result<String, StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let key = key.to_owned();
         let seed = seed.to_owned();
         self.with_conn(move |conn| {
@@ -2433,6 +2434,7 @@ impl SettingsStore for SqliteStore {
     }
 
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let key = key.to_owned();
         let value = value.to_owned();
         self.with_conn(move |conn| {
@@ -2449,6 +2451,7 @@ impl SettingsStore for SqliteStore {
     }
 
     async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let key = key.to_owned();
         let value = value.to_owned();
         self.with_conn(move |conn| {
@@ -2470,6 +2473,7 @@ impl SettingsStore for SqliteStore {
         expected_item_id: i64,
         fence: &ArtworkRepairFence,
     ) -> Result<bool, StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let key = key.to_owned();
         let value = value.to_owned();
         let fence = fence.clone();
@@ -2517,6 +2521,7 @@ impl SettingsStore for SqliteStore {
     }
 
     async fn put_settings(&self, values: &[(&str, &str)]) -> Result<(), StoreError> {
+        crate::resource_settings::validate_legacy_keys(values.iter().map(|(key, _)| *key))?;
         let values = values
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))

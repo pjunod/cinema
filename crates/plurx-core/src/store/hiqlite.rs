@@ -5870,6 +5870,7 @@ impl SettingsStore for HiqliteAuthStore {
     }
 
     async fn get_or_init_setting(&self, key: &str, seed: &str) -> Result<String, StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let now = self.now()?;
         self.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
@@ -5947,6 +5948,7 @@ impl SettingsStore for HiqliteAuthStore {
     }
 
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let now = self.now()?;
         self.execute_idempotent(
             "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
@@ -5959,6 +5961,7 @@ impl SettingsStore for HiqliteAuthStore {
     }
 
     async fn put_setting_if_absent(&self, key: &str, value: &str) -> Result<bool, StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let now = self.now()?;
         Ok(self
             .execute(
@@ -5977,6 +5980,7 @@ impl SettingsStore for HiqliteAuthStore {
         expected_item_id: i64,
         fence: &ArtworkRepairFence,
     ) -> Result<bool, StoreError> {
+        crate::resource_settings::validate_legacy_keys([key])?;
         let now = self.now()?;
         Ok(self
             .execute(
@@ -6018,6 +6022,7 @@ impl SettingsStore for HiqliteAuthStore {
     }
 
     async fn put_settings(&self, values: &[(&str, &str)]) -> Result<(), StoreError> {
+        crate::resource_settings::validate_legacy_keys(values.iter().map(|(key, _)| *key))?;
         let now = self.now()?;
         let sql = "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
                    ON CONFLICT(key) DO UPDATE SET \

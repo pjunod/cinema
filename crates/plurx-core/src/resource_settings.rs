@@ -9,6 +9,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::StoreError, store::keys};
 
+/// Generic settings writers carry no operator-mode/import authority. Reject
+/// companion keys before any mutation, including numeric echoes in a batch.
+/// Only the typed CAS writer or verified importer installs these records.
+pub(crate) fn validate_legacy_keys<'a>(
+    keys: impl IntoIterator<Item = &'a str>,
+) -> Result<(), StoreError> {
+    if keys.into_iter().any(|key| {
+        matches!(
+            key,
+            keys::MAX_HW_SESSIONS_PROVENANCE | keys::SW_POOL_THREADS_PROVENANCE
+        )
+    }) {
+        return Err(StoreError::Task(
+            "resource provenance requires the typed capacity settings writer".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct CapacitySnapshot {
     pub revision: i64,

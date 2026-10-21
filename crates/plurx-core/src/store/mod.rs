@@ -2276,6 +2276,9 @@ pub(crate) fn validate_generated_settings(
     expected_generation: i64,
     values: &[(&str, &str)],
 ) -> Result<(), StoreError> {
+    crate::resource_settings::validate_legacy_keys(
+        std::iter::once(generation_key).chain(values.iter().map(|(key, _)| *key)),
+    )?;
     let next = expected_generation
         .checked_add(1)
         .ok_or_else(|| StoreError::Database("settings generation exhausted".to_owned()))?;

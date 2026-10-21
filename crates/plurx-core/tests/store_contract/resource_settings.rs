@@ -5,6 +5,92 @@ use plurx_core::{
 };
 
 #[tokio::test]
+async fn generic_writers_cannot_replay_provenance_or_partially_apply_a_settings_batch() {
+    for_each_backend(|store, backend| async move {
+        store
+            .put_setting(keys::MAX_HW_SESSIONS, "0")
+            .await
+            .expect("legacy ceiling");
+        store
+            .put_setting(keys::SW_POOL_THREADS, "0")
+            .await
+            .expect("legacy ceiling");
+        let initial = store
+            .resource_capacity_snapshot()
+            .await
+            .expect("snapshot")
+            .expect("schema");
+        for key in [
+            keys::MAX_HW_SESSIONS_PROVENANCE,
+            keys::SW_POOL_THREADS_PROVENANCE,
+        ] {
+            let replay = r#"{"schema":1,"mode":"automatic","bound_value":"0"}"#;
+            assert!(store.put_setting(key, replay).await.is_err(), "{backend}");
+            assert!(
+                store.put_setting_if_absent(key, replay).await.is_err(),
+                "{backend}"
+            );
+            assert!(
+                store.get_or_init_setting(key, replay).await.is_err(),
+                "{backend}"
+            );
+            for values in [
+                [("test.unrelated", "changed"), (key, replay)],
+                [(key, replay), ("test.unrelated", "changed")],
+                [(keys::MAX_HW_SESSIONS, "4"), (key, replay)],
+            ] {
+                assert!(
+                    store.put_settings(&values).await.is_err(),
+                    "{backend}: batch preflight"
+                );
+            }
+            assert!(
+                store
+                    .put_settings_if_generation(
+                        "test.generation",
+                        0,
+                        &[("test.generation", "1"), (key, replay),]
+                    )
+                    .await
+                    .is_err(),
+                "{backend}: generation is not mode authority"
+            );
+            assert!(store
+                .put_settings_if_generation(key, 0, &[(key, "1")])
+                .await
+                .is_err());
+        }
+        let after = store
+            .resource_capacity_snapshot()
+            .await
+            .expect("snapshot")
+            .expect("schema");
+        assert_eq!(
+            after.revision, initial.revision,
+            "{backend}: rejected before mutation"
+        );
+        assert_eq!(after.values, initial.values);
+        assert!(store
+            .get_setting("test.unrelated")
+            .await
+            .expect("unchanged")
+            .is_none());
+        assert!(store
+            .get_setting("test.generation")
+            .await
+            .expect("unchanged")
+            .is_none());
+        assert_eq!(
+            ResourceSettings::from_snapshot(&after.values)
+                .hardware_sessions
+                .state,
+            ReadState::LegacyAmbiguous
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn typed_modes_preserve_absence_zero_and_rollback_and_legacy_writes_win() {
     for_each_backend(|store, backend| async move {
         let initial = store
