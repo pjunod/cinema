@@ -19,6 +19,8 @@ use plurx_core::store::background_jobs::{
 use plurx_core::store::RootRemovalOutcome;
 use queue_fixture::QueueFixture;
 
+#[path = "../src/store/adaptive_resource_attempts/contract_tests.rs"]
+mod adaptive_resource_attempts;
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
 #[path = "store_contract/invitations.rs"]
@@ -31,12 +33,12 @@ mod jellyfin_identity;
 mod jellyfin_login;
 #[path = "store_contract/jellyfin_play.rs"]
 mod jellyfin_play;
+#[path = "store_contract/planning_capacity.rs"]
+mod planning_capacity;
 #[path = "store_contract/remote.rs"]
 mod remote;
 #[path = "store_contract/resource_settings.rs"]
 mod resource_settings;
-#[path = "store_contract/planning_capacity.rs"]
-mod planning_capacity;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/session_principals.rs"]
 mod session_principals;

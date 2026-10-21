@@ -198,23 +198,12 @@ fn legacy_columns(table: &str) -> Vec<(String, String)> {
 /// Exact SQL preserves old CHECK, UNIQUE, foreign-key and trigger semantics;
 /// additional indexes/triggers or any substituted definition refuse activation.
 fn legacy_object_guard() -> String {
-    type Object = (String, String, String, Vec<Option<String>>);
-    let objects: Vec<Object> =
-        serde_json::from_str(include_str!("sharing_source_legacy_schema.json"))
-            .expect("compiled closed predecessor snapshot");
-    let families = FAMILIES
-        .iter()
-        .map(|name| quote(name))
-        .collect::<Vec<_>>()
-        .join(",");
-    let predicates = objects.iter().map(|(kind,name,table,sql)| {
-        let sql = sql.iter().map(|sql|sql.as_ref().map_or_else(|| "sql IS NULL".to_owned(), |sql| format!("sql={}",quote(sql)))).collect::<Vec<_>>().join(" OR ");
-        format!("EXISTS(SELECT 1 FROM sqlite_master WHERE type={} AND name={} AND tbl_name={} AND ({sql}))",quote(kind),quote(name),quote(table))
-    }).collect::<Vec<_>>();
+    use super::adaptive_resource_attempts::schema as adaptive;
     format!(
-        "(SELECT count(*) FROM sqlite_master WHERE tbl_name IN({families}) OR name='background_analysis_viewer_refresh')={} AND ({})",
-        objects.len(),
-        predicates.join(") AND (")
+        "({}) AND (({}) OR ({}))",
+        adaptive::session_shape_guard(adaptive::Layout::Legacy),
+        adaptive::absent_guard(),
+        adaptive::exact_objects_guard(adaptive::Layout::Legacy)
     )
 }
 pub(crate) fn predecessor_layout_guard() -> String {
@@ -281,8 +270,35 @@ pub(crate) fn predecessor_guard(now_parameter: usize) -> String {
     assert!((1..=256).contains(&now_parameter));
     format!(
         "({}) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE state='starting') AND NOT EXISTS(SELECT 1 FROM media_session_preparations) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE expires_at_ms>${now_parameter})",
-        predecessor_layout_guard()
+        format_args!("({}) AND ({})", predecessor_layout_guard(), super::adaptive_resource_attempts::schema::absent_guard())
     )
+}
+
+/// Present-adjunct branch; caller dispatches BEFORE preparing table reads.
+/// A live Source rebuild is not permission to erase adaptive physical debt.
+pub(crate) fn adaptive_predecessor_guard(now_parameter: usize, live: bool) -> String {
+    use super::adaptive_resource_attempts::schema as adaptive;
+    assert!((1..=256).contains(&now_parameter));
+    let drained = if live {
+        "1".to_owned()
+    } else {
+        format!(
+        "NOT EXISTS(SELECT 1 FROM media_sessions WHERE state!='ended') AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE state='starting') AND NOT EXISTS(SELECT 1 FROM media_session_preparations) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE expires_at_ms>${now_parameter})"
+    )
+    };
+    format!(
+        "({}) AND ({}) AND ({drained})",
+        predecessor_layout_guard(),
+        adaptive::migration_drained_guard()
+    )
+}
+
+pub(crate) fn adaptive_layout_statements() -> Vec<String> {
+    use super::adaptive_resource_attempts::schema as adaptive;
+    let mut statements = adaptive::detach_session_triggers(adaptive::Layout::Legacy);
+    statements.extend(layout_statements());
+    statements.extend(adaptive::rebind_principal_statements());
+    statements
 }
 
 /// Frozen statement order preserves child authority rows and then seeds the

@@ -2085,6 +2085,7 @@ impl HiqliteAuthStore {
         store.install_subtitle_translation_schema(None).await?;
         store.install_library_annotations_schema(None).await?;
         store.install_resource_settings_schema(None).await?;
+        store.install_adaptive_attempt_schema(None).await?;
         Ok(store)
     }
 
@@ -2271,7 +2272,8 @@ impl HiqliteAuthStore {
                     self.install_subtitle_managed_schema(admission).await?;
                     self.install_subtitle_translation_schema(admission).await?;
                     self.install_library_annotations_schema(admission).await?;
-                    return self.install_resource_settings_schema(admission).await;
+                    self.install_resource_settings_schema(admission).await?;
+                    return self.install_adaptive_attempt_schema(admission).await;
                 }
                 SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
@@ -4133,6 +4135,63 @@ impl HiqliteAuthStore {
         ))
     }
 
+    async fn install_adaptive_attempt_schema(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        use super::adaptive_resource_attempts::{
+            schema, AdaptiveResourceAttemptStore, AttemptSchemaReadiness,
+        };
+        admit_schema_migration(admission)?;
+        // Authority: dispatch before referring to optional adjunct tables.
+        let versions = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT schema_version AS count FROM cluster_meta WHERE singleton=1",
+                params!(),
+            )
+            .await?;
+        let layout = match versions.as_slice() {
+            [row] if row.count == 81 => schema::Layout::Legacy,
+            [row] if row.count == 82 => schema::Layout::Principal,
+            _ => return Ok(()),
+        };
+        let rows = self
+            .client()
+            .query_consistent_map::<RemoteShapeRow, _>(schema::CATALOG_SQL, params!())
+            .await?;
+        if !rows.is_empty() {
+            // Partial/future/unknown installations remain unavailable, unchanged.
+            return Ok(());
+        }
+        let mut statements = vec![(
+            format!(
+                "INSERT INTO sharing_source_dispatch_guard SELECT 1,0 WHERE NOT(({}) AND ({}))",
+                schema::absent_guard(),
+                schema::session_shape_guard(layout)
+            ),
+            params!(),
+        )];
+        statements.extend(
+            schema::objects(layout)
+                .into_iter()
+                .map(|(_, sql)| (sql, params!())),
+        );
+        statements.push((format!(
+            "INSERT INTO media_resource_schema(singleton,version,layout,revision) VALUES(1,1,'{}',0)",layout.tag()
+        ),params!()));
+        admit_schema_migration(admission)?;
+        let attempted = self.schema_migration_transaction(statements).await;
+        // Exact authoritative settlement, including uncertain/concurrent install.
+        if self.adaptive_attempt_schema().await? == AttemptSchemaReadiness::Ready {
+            return Ok(());
+        }
+        attempted?;
+        Err(StoreError::Migration(
+            "adaptive attempt installation did not settle".into(),
+        ))
+    }
+
     async fn install_resource_settings_schema(
         &self,
         admission: SchemaMigrationAdmission<'_>,
@@ -4877,7 +4936,18 @@ impl HiqliteAuthStore {
     #[doc(hidden)]
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
-        let statements = vec![
+        let mut statements = Vec::new();
+        #[cfg(feature = "hiqlite-contract-tests")]
+        {
+            use super::adaptive_resource_attempts::{transactions::Backend, validation};
+            let layout = self.attempt_layout().await?;
+            statements.extend(
+                validation::reset_statements(layout)
+                    .into_iter()
+                    .map(|sql| (sql, params!())),
+            );
+        }
+        statements.extend(vec![
             ("DELETE FROM background_job_commands".to_owned(), params!()),
             ("DELETE FROM background_predictions".to_owned(), params!()),
             ("DELETE FROM background_embeddings".to_owned(), params!()),
@@ -5034,7 +5104,7 @@ impl HiqliteAuthStore {
                     .to_owned(),
                 params!(keys::INSTANCE_ID),
             ),
-        ];
+        ]);
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }

@@ -1851,6 +1851,7 @@ impl SqliteStore {
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
         super::resource_settings_schema::install_sqlite(conn)?;
+        super::adaptive_resource_attempts::schema::install_sqlite_checked(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

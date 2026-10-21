@@ -15,6 +15,7 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+pub mod adaptive_resource_attempts;
 pub mod sharing;
 pub use sharing::SharingStore;
 pub mod sharing_catalogue;
@@ -5790,6 +5791,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
+    + adaptive_resource_attempts::AdaptiveResourceAttemptStore
     + SharingStore
     + SharingCatalogueStore
     + SharingFileLocatorStore
@@ -5849,6 +5851,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
+        + adaptive_resource_attempts::AdaptiveResourceAttemptStore
         + SharingStore
         + SharingCatalogueStore
         + SharingFileLocatorStore

@@ -156,8 +156,23 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
     } else {
         layout::boot_authority_guard(4)
     };
-    let predecessor = if live {
-        layout::predecessor_layout_guard()
+    // Authority: presence dispatch avoids preparing optional-table SQL against
+    // an absent adjunct; both selected branches assert their shape at commit.
+    let adjunct = inner.client.query_consistent_map::<CountRow,_>(
+        "SELECT count(*) AS count FROM sqlite_master WHERE name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*'", params!()
+    ).await?;
+    let adaptive = match adjunct.as_slice() {
+        [row] => row.count > 0,
+        _ => return Err(MembershipError::Incompatible),
+    };
+    let predecessor = if adaptive {
+        layout::adaptive_predecessor_guard(3, live)
+    } else if live {
+        format!(
+            "({}) AND ({})",
+            layout::predecessor_layout_guard(),
+            crate::store::adaptive_resource_attempts::schema::absent_guard()
+        )
     } else {
         layout::predecessor_guard(3)
     };
@@ -191,9 +206,13 @@ async fn install(inner: &ReplicatedMembership, live: bool) -> Result<bool, Membe
         ),
     ];
     statements.extend(
-        layout::layout_statements()
-            .into_iter()
-            .map(|statement| (statement, params!())),
+        (if adaptive {
+            layout::adaptive_layout_statements()
+        } else {
+            layout::layout_statements()
+        })
+        .into_iter()
+        .map(|statement| (statement, params!())),
     );
     statements.extend([
         (layout::INSTALLATION_SCHEMA.to_owned(),params!()),
