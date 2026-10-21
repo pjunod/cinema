@@ -1548,6 +1548,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/playback/frame-drop-recorder.test.js
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
