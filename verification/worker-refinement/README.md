@@ -46,6 +46,11 @@ than repeatedly during exploration. One bounded retry follows the recorded
 not measured feasibility or a pass. A timeout or an incomplete final
 liveness check fails qualification; both complete pipelines and their
 properties remain mandatory.
+Positive worker-refinement runs use TLC's `-lncheck final` strategy, retaining
+every temporal property while deferring liveness checking until state
+exploration completes. Controls and witnesses use TLC's default checking
+cadence so an expected liveness counterexample can be reported without
+exploring the full graph first.
 
 **How to read results:** positives need complete exploration, zero queued
 states and no errors. A temporal control needs its sole named property to

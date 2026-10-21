@@ -46,10 +46,15 @@ class WorkerCorrespondenceTests(unittest.TestCase):
             {"progress.cfg": 900, "witness-both-complete.cfg": 300},
         )
 
-    def test_final_liveness_checking_is_worker_refinement_only(self) -> None:
-        self.assertEqual(formal.liveness_check_args("worker-refinement"), ["-lncheck", "final"])
-        self.assertEqual(formal.liveness_check_args("durable-jobs"), [])
-        self.assertEqual(formal.liveness_check_args("operation-progress"), [])
+    def test_final_liveness_checking_is_limited_to_worker_refinement_positives(self) -> None:
+        self.assertEqual(
+            formal.liveness_check_args("worker-refinement", {"verdict": "pass"}),
+            ["-lncheck", "final"],
+        )
+        for verdict in ("violation", "witness"):
+            self.assertEqual(formal.liveness_check_args("worker-refinement", {"verdict": verdict}), [])
+        self.assertEqual(formal.liveness_check_args("durable-jobs", {"verdict": "pass"}), [])
+        self.assertEqual(formal.liveness_check_args("operation-progress", {"verdict": "pass"}), [])
 
     def test_next_action_names_include_quantified_parameterized_operators(self) -> None:
         model = """\

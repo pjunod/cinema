@@ -123,9 +123,9 @@ PACKAGES: dict[str, dict[str, Any]] = {
 }
 
 
-def liveness_check_args(package: str) -> list[str]:
-    """Defer worker-refinement temporal checking until the state graph is complete."""
-    return ["-lncheck", "final"] if package == "worker-refinement" else []
+def liveness_check_args(package: str, record: dict[str, Any]) -> list[str]:
+    """Defer liveness checking only for worker-refinement positive runs."""
+    return ["-lncheck", "final"] if package == "worker-refinement" and record.get("verdict") == "pass" else []
 
 
 def package_spec(name: str) -> dict[str, Any]:
@@ -1244,7 +1244,7 @@ def run(args: argparse.Namespace) -> int:
             "-cp",
             jar,
             "tlc2.TLC",
-            *liveness_check_args(package),
+            *liveness_check_args(package, record),
             "-config",
             name,
             "-workers",
