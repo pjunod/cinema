@@ -96,8 +96,12 @@ The [approved plan](../features/ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md#9-evaluatio
 compares existing navigation, direct curated records and traversal on twelve
 sealed cases, three repeats per arm. A source proxy enforces exact visible
 passages; solvers receive no host filesystem, network, terminal or gold access.
-Patch acceptance needs a separately verified isolated executor and the frozen
-toolchain. Missing execution remains unavailable. Finite measured budgets,
+Patch acceptance needs a separately verified isolated executor, frozen
+toolchain, exact-family dependency prerequisite and trusted completed outcome.
+A version probe or bare nonzero exit cannot distinguish a patch assertion
+failure from unavailable infrastructure. Unsupported acceptance families remain
+unavailable and uncacheable; they cannot count as failed patches or justify
+paid comparison runs known to lack acceptance. Finite measured budgets,
 independent blind scoring and all failed runs belong in the result.
 
 Capture enforcement cannot graduate until ten actual eligible PRs and fourteen
