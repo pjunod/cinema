@@ -21,7 +21,6 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLCHAIN_MANIFEST = ROOT / "verification/durable-jobs/toolchain.json"
 BOOTSTRAP = ROOT / "scripts/bootstrap-formal-toolchain"
 CONFIG_ORDER = (
     "smoke.cfg",
@@ -75,6 +74,7 @@ PACKAGES: dict[str, dict[str, Any]] = {
         "mapping": "verification/durable-jobs/mapping.json",
         "model_dir": "verification/durable-jobs",
         "model_file": "verification/durable-jobs/DurableJobs.tla",
+        "toolchain_manifest": "verification/durable-jobs/toolchain.json",
         "output_dir": "target/verification/durable-jobs",
         "config_order": CONFIG_ORDER,
         "smoke_configs": SMOKE_CONFIGS,
@@ -86,6 +86,7 @@ PACKAGES: dict[str, dict[str, Any]] = {
         "mapping": "verification/operation-progress/mapping.json",
         "model_dir": "verification/operation-progress",
         "model_file": "verification/operation-progress/OperationProgress.tla",
+        "toolchain_manifest": "verification/durable-jobs/toolchain.json",
         "output_dir": "target/verification/operation-progress",
         "config_order": (
             "progress.cfg", "contention.cfg", "control-lock-cycle.cfg",
@@ -97,6 +98,28 @@ PACKAGES: dict[str, dict[str, Any]] = {
         "smoke_wall_budget_seconds": 180,
         "smoke_config_timeouts": {"progress.cfg": 120, "witness-success.cfg": 120},
         "config_timeout_cap_seconds": 120,
+        "disable_deadlock_check": False,
+    },
+    "worker-refinement": {
+        "mapping": "verification/worker-refinement/mapping.json",
+        "model_dir": "verification/worker-refinement",
+        "model_file": "verification/worker-refinement/WorkerRefinement.tla",
+        "toolchain_manifest": "verification/durable-jobs/toolchain.json",
+        "output_dir": "target/verification/worker-refinement",
+        "config_order": (
+            "progress.cfg", "contention.cfg", "control-lock-cycle.cfg",
+            "control-renewal-livelock.cfg", "control-external-stall.cfg",
+            "control-lost-settlement.cfg", "control-stale-commit.cfg",
+            "control-no-useful-progress.cfg", "witness-both-complete.cfg", "witness-overlap-reacquire.cfg",
+            "witness-detached-before-release.cfg", "witness-stale-after-release.cfg",
+            "witness-cancel-scan.cfg", "witness-cancel-queue-loss.cfg",
+            "witness-cancel-domain-loss.cfg", "witness-cancel-pressure.cfg",
+            "witness-reconcile.cfg",
+        ),
+        "smoke_configs": ("progress.cfg", "witness-both-complete.cfg"),
+        "smoke_wall_budget_seconds": 600,
+        "smoke_config_timeouts": {"progress.cfg": 300, "witness-both-complete.cfg": 300},
+        "config_timeout_cap_seconds": 300,
         "disable_deadlock_check": False,
     },
 }
@@ -245,6 +268,244 @@ def repo_file(relative: str, label: str) -> Path:
     return path
 
 
+def next_action_names(model_text: str) -> set[str]:
+    """Return named operator calls in Next that are defined in the model."""
+    definitions = set(re.findall(
+        r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^=\n]*\))?\s*==", model_text
+    ))
+    next_match = re.search(
+        r"(?ms)^Next\s*==\s*(.*?)(?=^[A-Za-z_][A-Za-z0-9_]*\s*(?:\([^=\n]*\))?\s*==|^====)",
+        model_text,
+    )
+    if next_match is None:
+        raise RunnerError("worker model has no parseable Next operator")
+    calls = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", next_match.group(1)))
+    actions = calls & definitions
+    if not actions:
+        raise RunnerError("worker model Next contains no named action operators")
+    return actions
+
+
+def worker_correspondence_inputs(
+    mapping: dict[str, Any], hashes: dict[str, str]
+) -> list[str]:
+    """Validate the worker model/source/test correspondence gap ledger."""
+    drift: list[str] = []
+    reference = mapping.get("correspondence")
+    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+        return ["worker-refinement mapping needs a path and SHA for correspondence.json"]
+    relative = reference.get("path")
+    expected_file_hash = reference.get("sha256")
+    required_path = "verification/worker-refinement/correspondence.json"
+    if relative != required_path:
+        drift.append(f"correspondence path must be the reviewed package file: {required_path}")
+        relative = required_path
+    try:
+        path = repo_file(relative, "worker correspondence")
+        actual_file_hash = sha256(path)
+        hashes[relative] = actual_file_hash
+        if not isinstance(expected_file_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_file_hash):
+            drift.append("correspondence file hash is not reviewed")
+        elif expected_file_hash != actual_file_hash:
+            drift.append("correspondence source drift requires review")
+        correspondence = read_json(path, "worker correspondence")
+    except RunnerError as exc:
+        return [*drift, str(exc)]
+
+    allowed_top = {"schema_version", "status", "model_file", "model_sha256", "tests", "actions"}
+    if set(correspondence) != allowed_top:
+        drift.append("correspondence has missing or unknown schema fields")
+    if correspondence.get("schema_version") != 1 or correspondence.get("status") != "reviewed":
+        drift.append("correspondence schema/status is not reviewed version 1")
+    spec = package_spec("worker-refinement")
+    model_file = correspondence.get("model_file")
+    model_hash = correspondence.get("model_sha256")
+    if model_file != spec["model_file"]:
+        drift.append("correspondence model_file differs from the closed package registry")
+    if model_file != mapping.get("model_file") or model_hash != mapping.get("model_sha256"):
+        drift.append("correspondence model identity differs from the package mapping")
+
+    model_text = ""
+    try:
+        model_path = repo_file(spec["model_file"], "worker model")
+        model_text = model_path.read_text(encoding="utf-8")
+    except (RunnerError, UnicodeError) as exc:
+        drift.append(str(exc))
+    next_actions: set[str] = set()
+    if model_text:
+        try:
+            next_actions = next_action_names(model_text)
+        except RunnerError as exc:
+            drift.append(str(exc))
+
+    tests = correspondence.get("tests")
+    test_ids: set[str] = set()
+    test_names: set[tuple[str, str]] = set()
+    test_file_hashes: dict[str, str] = {}
+    if not isinstance(tests, list) or not tests:
+        drift.append("correspondence test inventory must be a non-empty list")
+        tests = []
+    for row in tests:
+        if not isinstance(row, dict) or set(row) != {"id", "file", "name"}:
+            drift.append("correspondence test rows need exactly id, file, and name")
+            continue
+        identity, file, name = row.get("id"), row.get("file"), row.get("name")
+        if not all(isinstance(value, str) and value for value in (identity, file, name)):
+            drift.append("correspondence test identity, file, and name must be non-empty strings")
+            continue
+        if identity in test_ids:
+            drift.append(f"duplicate conformance test ID: {identity}")
+        test_ids.add(identity)
+        if identity.rsplit("::", 1)[-1] != name or not identity.startswith(file + "::"):
+            drift.append(f"conformance test ID must name its exact file and function: {identity}")
+        if (file, name) in test_names:
+            drift.append(f"duplicate conformance test function: {file}::{name}")
+        test_names.add((file, name))
+        try:
+            test_path = repo_file(file, "conformance test source")
+            test_text = test_path.read_text(encoding="utf-8")
+            actual_hash = sha256(test_path)
+            test_file_hashes[file] = actual_hash
+            hashes[file] = actual_hash
+            if not re.search(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+" + re.escape(name) + r"\s*\(", test_text):
+                drift.append(f"conformance test function is absent: {identity}")
+        except (RunnerError, UnicodeError) as exc:
+            drift.append(str(exc))
+
+    actions = correspondence.get("actions")
+    if not isinstance(actions, list) or not actions:
+        drift.append("correspondence action inventory must be a non-empty list")
+        actions = []
+    seen: set[tuple[str, str]] = set()
+    source_file_hashes: dict[str, str] = {}
+    seen_next: set[str] = set()
+    seen_boundaries: set[str] = set()
+    allowed_kinds = {"action", "boundary"}
+    required_boundaries = {
+        "select.queue_loss", "select.domain_loss", "select.admission_pressure", "select.work_returned",
+        "lock.acquire.queue_token_mutex", "lock.release.queue_token_mutex",
+        "lock.acquire.domain_fence", "lock.release.domain_fence",
+        "heartbeat.queue.deadline", "heartbeat.domain.deadline",
+        "heartbeat.queue.stop_join", "heartbeat.domain.stop_join",
+        "release.attempt", "release.retry", "release.ambiguous_fallback",
+        "retire.claim", "drop.admission", "sql.complete_library_work.trigger",
+    }
+    allowed_workers = {"w1", "w2", "both", "shared"}
+    allowed_trust = {
+        "code-fact", "PRM-fs", "PRM-admission", "PRM-authority", "PRM-backend",
+        "PRM-runtime", "PRM-time", "abstraction",
+    }
+    for row in actions:
+        fields = {"kind", "action", "worker", "source", "held_across_await", "completed_by", "trust", "schedules"}
+        if not isinstance(row, dict) or not fields <= set(row) or set(row) - (fields | {"gap"}):
+            drift.append("correspondence action rows have missing or unknown fields")
+            continue
+        kind, action, worker = row.get("kind"), row.get("action"), row.get("worker")
+        if not isinstance(kind, str) or kind not in allowed_kinds or not isinstance(action, str) or not action:
+            drift.append("correspondence action needs a valid kind and non-empty action name")
+            continue
+        key = (kind, action)
+        if key in seen:
+            drift.append(f"duplicate correspondence row: {kind} {action}")
+        seen.add(key)
+        if kind == "action":
+            if action not in next_actions:
+                drift.append(f"correspondence names an unknown Next action: {action}")
+            seen_next.add(action)
+        else:
+            if action not in required_boundaries:
+                drift.append(f"unknown worker correspondence boundary: {action}")
+            seen_boundaries.add(action)
+        if not isinstance(worker, str) or worker not in allowed_workers:
+            drift.append(f"invalid correspondence worker for {action}")
+        source = row.get("source")
+        if not isinstance(source, dict) or set(source) != {"file", "symbol", "anchor", "sha256"}:
+            drift.append(f"source correspondence needs file, symbol, anchor, and sha256: {action}")
+        else:
+            file, symbol, anchor, expected_hash = (source.get(k) for k in ("file", "symbol", "anchor", "sha256"))
+            if not all(isinstance(value, str) and value for value in (file, symbol, anchor)):
+                drift.append(f"source correspondence has an empty identity or anchor: {action}")
+            else:
+                try:
+                    source_path = repo_file(file, "worker source")
+                    source_text = source_path.read_text(encoding="utf-8")
+                    actual_hash = sha256(source_path)
+                    hashes[file] = actual_hash
+                    source_file_hashes[file] = actual_hash
+                    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                        drift.append(f"worker source hash is not reviewed: {file}")
+                    elif expected_hash != actual_hash:
+                        drift.append(f"worker source drift requires review: {file}")
+                    if source_text.count(anchor) != 1:
+                        drift.append(f"worker source anchor must occur exactly once: {action}")
+                except (RunnerError, UnicodeError) as exc:
+                    drift.append(str(exc))
+        held = row.get("held_across_await")
+        if not isinstance(held, list):
+            drift.append(f"held_across_await must be a lock/task list: {action}")
+        else:
+            held_seen: set[tuple[str, str]] = set()
+            for item in held:
+                if not isinstance(item, dict) or set(item) != {"lock", "holder_task"}:
+                    drift.append(f"held lock rows need lock and holder_task: {action}")
+                    continue
+                pair = (item.get("lock"), item.get("holder_task"))
+                if not all(isinstance(value, str) and value for value in pair):
+                    drift.append(f"held lock rows need non-empty names: {action}")
+                else:
+                    if pair in held_seen:
+                        drift.append(f"duplicate held lock/task pair: {action}")
+                    held_seen.add(pair)
+        if not isinstance(row.get("completed_by"), str) or not row["completed_by"]:
+            drift.append(f"correspondence completed_by is required: {action}")
+        trust = row.get("trust")
+        if not isinstance(trust, str) or trust not in allowed_trust:
+            drift.append(f"invalid correspondence trust class: {action}")
+        schedules = row.get("schedules")
+        if schedules == "unchecked":
+            if not isinstance(row.get("gap"), str) or not row["gap"].strip():
+                drift.append(f"unchecked correspondence needs an explicit gap: {action}")
+        elif isinstance(schedules, list) and schedules:
+            if any(not isinstance(item, str) or item not in test_ids for item in schedules):
+                drift.append(f"correspondence schedule references an unknown test ID: {action}")
+            valid_schedule_ids = [item for item in schedules if isinstance(item, str)]
+            if len(set(valid_schedule_ids)) != len(schedules):
+                drift.append(f"duplicate or malformed conformance schedule reference: {action}")
+            if trust == "abstraction" and (not isinstance(row.get("gap"), str) or not row["gap"].strip()):
+                drift.append(f"abstraction correspondence needs an explicit gap: {action}")
+        else:
+            drift.append(f"schedules must be test IDs or the literal unchecked: {action}")
+    if seen_next != next_actions:
+        missing = sorted(next_actions - seen_next)
+        extra = sorted(seen_next - next_actions)
+        drift.append(f"Next action coverage differs (missing={missing}, extra={extra})")
+    missing_boundaries = sorted(required_boundaries - seen_boundaries)
+    if missing_boundaries:
+        drift.append(f"correspondence lacks required Rust boundary rows: {missing_boundaries}")
+    referenced_tests = {
+        item
+        for row in actions
+        if isinstance(row, dict) and isinstance(row.get("schedules"), list)
+        for item in row["schedules"]
+        if isinstance(item, str)
+    }
+    if test_ids - referenced_tests:
+        drift.append(f"conformance tests are not referenced by any action: {sorted(test_ids - referenced_tests)}")
+    unpinned_test_files = sorted(set(test_file_hashes) - set(source_file_hashes))
+    if unpinned_test_files:
+        drift.append(f"conformance test files lack reviewed source hash pins: {unpinned_test_files}")
+    if not test_file_hashes:
+        drift.append("correspondence contains no hash-bound test source")
+    try:
+        manifest = repo_file(spec["toolchain_manifest"], "formal toolchain manifest")
+        hashes[spec["toolchain_manifest"]] = sha256(manifest)
+        bootstrap = repo_file("scripts/bootstrap-formal-toolchain", "formal toolchain bootstrap")
+        hashes["scripts/bootstrap-formal-toolchain"] = sha256(bootstrap)
+    except RunnerError as exc:
+        drift.append(str(exc))
+    return drift
+
+
 def mapping_inputs(mapping: dict[str, Any], package: str = "durable-jobs") -> tuple[list[str], dict[str, str]]:
     """Return drift diagnostics and the exact reviewed hashes used by the check."""
     spec = package_spec(package)
@@ -355,6 +616,22 @@ def mapping_inputs(mapping: dict[str, Any], package: str = "durable-jobs") -> tu
                     declared, _ = parse_config_contract(config_text)
                     if set(properties) != declared:
                         drift.append(f"reviewed properties differ from config declarations: {name}")
+                    if package == "worker-refinement" and record.get("verdict") in ("violation", "witness"):
+                        if len(properties) != 1:
+                            drift.append(f"worker-refinement controls and witnesses must declare one intended property: {name}")
+                        error_match = record.get("expected_error_match")
+                        expected_error = record.get("expected_error")
+                        if isinstance(error_match, dict):
+                            line = error_match.get("line")
+                            attribution = error_match.get("attribution")
+                            if line == "Temporal properties were violated.":
+                                if attribution != "sole_property" or record.get("expected_exit") != 13:
+                                    drift.append(f"temporal worker control must pin sole-property exit 13: {name}")
+                            elif isinstance(expected_error, str) and line == f"Invariant {expected_error} is violated.":
+                                if attribution != "named_property" or record.get("expected_exit") != 12:
+                                    drift.append(f"worker invariant control/witness must pin its named property and exit 12: {name}")
+                            else:
+                                drift.append(f"worker control/witness has an unsupported exact error marker: {name}")
                 error_match = record.get("expected_error_match")
                 if record.get("verdict") in ("violation", "witness"):
                     if isinstance(error_match, dict):
@@ -390,6 +667,9 @@ def mapping_inputs(mapping: dict[str, Any], package: str = "durable-jobs") -> tu
         except RunnerError as exc:
             drift.append(str(exc))
 
+    if package == "worker-refinement":
+        drift.extend(worker_correspondence_inputs(mapping, hashes))
+        return drift, hashes
     source_mapping = mapping.get("source_mapping")
     if not isinstance(source_mapping, dict) or source_mapping.get("status") != "reviewed":
         drift.append("authority source mapping is pending review")
@@ -531,7 +811,7 @@ def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
     governed = {
         mapping.get("model_file"),
         spec["mapping"],
-        "verification/durable-jobs/toolchain.json",
+        spec["toolchain_manifest"],
         "scripts/bootstrap-formal-toolchain",
         "scripts/check-formal",
         *(f"{spec['model_dir']}/{name}" for name in config_names),
@@ -543,6 +823,20 @@ def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
         governed.update(
             row.get("source") for row in source_mapping["tables"] if isinstance(row, dict)
         )
+    if package == "worker-refinement":
+        reference = mapping.get("correspondence")
+        if isinstance(reference, dict) and isinstance(reference.get("path"), str):
+            governed.add(reference["path"])
+            try:
+                correspondence = read_json(repo_file(reference["path"], "worker correspondence"), "worker correspondence")
+            except RunnerError:
+                correspondence = {}
+            for row in correspondence.get("actions", []) if isinstance(correspondence.get("actions"), list) else []:
+                if isinstance(row, dict) and isinstance(row.get("source"), dict):
+                    governed.add(row["source"].get("file"))
+            for row in correspondence.get("tests", []) if isinstance(correspondence.get("tests"), list) else []:
+                if isinstance(row, dict):
+                    governed.add(row.get("file"))
     affected = base is None or bool(governed.intersection(changed))
     result = {
         "schema_version": 1,
@@ -570,10 +864,10 @@ def durable_output(path: Path) -> Path:
     return output
 
 
-def resolve_toolchain(cache: Path) -> dict[str, Any]:
+def resolve_toolchain(cache: Path, package: str = "durable-jobs") -> dict[str, Any]:
     try:
         result = subprocess.run(
-            [sys.executable, str(BOOTSTRAP), "resolve", "--cache-dir", str(cache)],
+            [sys.executable, str(BOOTSTRAP), "resolve", "--cache-dir", str(cache), "--manifest", str(ROOT / package_spec(package)["toolchain_manifest"])],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -590,7 +884,8 @@ def resolve_toolchain(cache: Path) -> dict[str, Any]:
         raise RunnerError("toolchain resolver returned invalid JSON") from exc
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise RunnerError("toolchain resolver returned unsupported data")
-    if data.get("manifest_sha256") != sha256(TOOLCHAIN_MANIFEST):
+    manifest = repo_file(package_spec(package)["toolchain_manifest"], "formal toolchain manifest")
+    if data.get("manifest_sha256") != sha256(manifest):
         raise RunnerError("resolved toolchain manifest hash differs from repository pin")
     for key in ("java", "tlc"):
         record = data.get(key)
@@ -886,7 +1181,7 @@ def run(args: argparse.Namespace) -> int:
         return 1
     cache = args.cache_dir.expanduser().resolve()
     try:
-        toolchain = resolve_toolchain(cache)
+        toolchain = resolve_toolchain(cache, args.package)
     except RunnerError as exc:
         aggregate["status"] = "failed"
         aggregate["failure"] = str(exc)
