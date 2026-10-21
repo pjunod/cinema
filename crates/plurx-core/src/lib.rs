@@ -15,6 +15,7 @@ extern crate self as plurx_core;
 #[path = "../tests/support/queue_fixture.rs"]
 mod queue_fixture;
 
+pub mod adaptive_resources;
 pub mod annotations;
 pub mod auth;
 pub mod cluster;
