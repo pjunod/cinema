@@ -88,3 +88,11 @@ Before Rust edits, Luna verified `rustup run 1.97.1 cargo check -p plurxd
 --all-targets` with an owned warm target directory: exit zero in 2m 42s.
 No unit tests or model qualification have run in this phase. The default
 shell compiler is newer and will not be used as qualification evidence.
+
+The conformance implementation exposed another distinction: a local queue-loss
+notification does not prove that the durable queue lease expired. Retirement
+may resolve the still-valid attempt and settle it. Tests and model must
+separate the local signal from durable authority; an expiry-only schedule
+cannot stand in for an ambiguous notification. Worker lifecycle probes are
+compiled only for tests, following the existing task-local fault-seam pattern.
+Spawned-heartbeat scope limitations remain explicitly unchecked where relevant.
