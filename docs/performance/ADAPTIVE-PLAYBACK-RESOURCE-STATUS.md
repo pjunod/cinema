@@ -21,34 +21,32 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest source `cb7bc758841d64a1108a2ce81285069fe8075902` includes the node-local
-physical-vector ledger: atomic dimensions/epochs, exclusive no-spawn refund,
-post-spawn UnknownHeld and same-owner receipt-bound reconciliation. Its bounded
-two-family overlap validates ledger-minted identities, at most three roles each,
-actual retained guards/costs and aggregate caps without partial debits; shared
-roles count once, trial custody lasts through every unclosed role. Exact-source
-pinned core all-target Hiqlite Clippy passed 49 s (`111704.log`), compiling core
-fixtures too. Initial fixture unwrap lint failure (`223356.log`) is preserved;
-repair `555331231` passed 55 s (`223601.log`). No implementation tests executed.
-Settings now have independent canonical-shape v1 installation, persistent legacy
-numeric invalidation (including same-value UPSERT/REPLACE), revision-CAS typed
-writers and normal dirty-only System controls. Automatic preserves rollback
-cache/absence. Recognized imports bind companions and load them last; unversioned
-or corrupt companions are omitted with explicit receipt flags/normalized parity.
-New admin `/settings/transcode-capacity` isolates its CAS from aggregate saves;
-unchanged old numeric echoes preserve mode and omission. Partial/future schema
-refuses typed writes without deleting data or disabling ordinary playback.
-Exact-source pinned core Hiqlite-contract all-target Clippy PASS18s (`114401`),
-daemon all-target Clippy PASS164s (`114419`); test bodies NOT RUN. No production
-physical-receipt minting, history/controller or adapter/policy integration yet;
-M2/M3 remain incomplete. PR1248 draft published32c lags local; no qualification.
-Coordinator-owned
-native Linux compile-only checks passed on exact e9: daemon check/Clippy and core
-Hiqlite check/Clippy, all-targets, actual Rust 1.97.1, zero units executed. Private
-verified receipt SHA-256 is
-`c0cc2c6c36bdc56da9af8a638f6e24992b08806f66839bf5da35f368f2a1ea05`.
-That evidence does not cover later graph/audio/settings edits or runtime behavior;
-preserve the warm isolated target, do not duplicate the frozen run.
+Latest runtime `c0ea531d0` consumes mode-aware settings in VOD/Source-copy admission;
+Automatic ignores rollback cache but uses existing conservative pools, not learned
+expansion. Rolling planning snapshots and other consumers remain. `e213a4c83`
+adds instance-locked bounded local cost priors; preceding
+`740f4f30a` adds advisory original-deadline/peer/cleanup budgeting, protected runway,
+phase-aware trials, real-failure cooldown and growth stability. History keys bind
+runtime, workload, exact recipe, phase and actual concurrent mix; restart restores
+priors only, never expansion proof or claims. Generic settings writers now reject
+provenance replay before mutation (`ebf46fa55`). Typed CAS/import authority remains
+separate; legacy numeric writes still invalidate mode, including same-value SQL.
+These build on the atomic physical ledger/UnknownHeld, bounded family overlap and
+independently installed settings schema/API/System controls. No AUTH bump/implicit
+Source activation; preserve unknown schema/data, numeric rollback cache and omission.
+
+Pinned core all-target Hiqlite-contract Clippy PASS18s (`124911`) and daemon
+all-target Clippy PASS164s (`124616`) cover current runtime; test bodies NOT RUN.
+Earlier scoped passes remain in private task evidence. An edition2024 recursive
+formatter expansion was removed
+using sole-writer provenance; exact five-file guard compile PASS55s (`122819`).
+Targeted formatting now binds edition2021/skip_children. No production physical
+receipt minting or controller/adapter integration yet; M2/M3 remain incomplete.
+PR1248 is draft, coordinator-published6e6338dcc; local commits await transport.
+Management transferred to the designated Hermes controller, NOT final test handoff.
+Native Linux e9-only daemon/core checks/Clippy remain valid for e9, not newer code;
+verified result SHA `c0cc2c6c36bdc56da9af8a638f6e24992b08806f66839bf5da35f368f2a1ea05`.
+Keep warm owned targets; no repeated frozen native run or qualification claim.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
