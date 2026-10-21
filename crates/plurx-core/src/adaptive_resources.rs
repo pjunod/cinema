@@ -478,10 +478,14 @@ mod tests {
 
     #[test]
     fn reservation_rechecks_all_dimensions_and_epochs_atomically() {
-        let ledger = ResourceLedger::new(1, Metric::Known(vector(2))).unwrap();
-        assert!(ledger.assess(demand(2, false)).unwrap().refusal.is_none());
-        let (mut first, cleanup) = ledger.reserve(demand(1, false)).unwrap();
-        first.mark_spawn_possible().unwrap();
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(2))).expect("ledger fixture");
+        assert!(ledger
+            .assess(demand(2, false))
+            .expect("assessment")
+            .refusal
+            .is_none());
+        let (mut first, cleanup) = ledger.reserve(demand(1, false)).expect("first reservation");
+        first.mark_spawn_possible().expect("spawn custody");
         assert!(matches!(
             ledger.reserve(demand(2, false)),
             Err(AdmissionRefusal::HardLimit(ResourceDimension::Cpu))
@@ -495,47 +499,57 @@ mod tests {
             }),
             Err(AdmissionRefusal::HardLimit(ResourceDimension::Memory))
         ));
-        assert_eq!(ledger.snapshot().unwrap().used, vector(1));
-        ledger.update_hard_cap(2, Metric::Known(vector(0))).unwrap();
+        assert_eq!(ledger.snapshot().expect("held snapshot").used, vector(1));
+        ledger
+            .update_hard_cap(2, Metric::Known(vector(0)))
+            .expect("lower physical cap");
         assert!(matches!(
             ledger.reserve(demand(1, false)),
             Err(AdmissionRefusal::StaleEpoch)
         ));
         drop(first);
-        assert_eq!(ledger.snapshot().unwrap().unknown_held, 1);
+        assert_eq!(
+            ledger.snapshot().expect("uncertain snapshot").unknown_held,
+            1
+        );
         cleanup
             .close(PhysicalCloseReceipt {
                 binding: cleanup.binding,
             })
-            .unwrap();
-        assert_eq!(ledger.snapshot().unwrap().used, vector(0));
+            .expect("exact physical closure");
+        assert_eq!(ledger.snapshot().expect("closed snapshot").used, vector(0));
     }
 
     #[test]
     fn uncertain_drop_holds_trial_until_original_cleanup_reconciles() {
-        let ledger = ResourceLedger::new(1, Metric::Known(vector(10))).unwrap();
-        let (mut held, cleanup) = ledger.reserve(demand(1, true)).unwrap();
-        held.mark_spawn_possible().unwrap();
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(10))).expect("ledger fixture");
+        let (mut held, cleanup) = ledger.reserve(demand(1, true)).expect("trial reservation");
+        held.mark_spawn_possible().expect("spawn custody");
         drop(held);
-        assert!(ledger.snapshot().unwrap().trial_held);
+        assert!(ledger.snapshot().expect("held snapshot").trial_held);
         assert!(matches!(
             ledger.reserve(demand(1, true)),
             Err(AdmissionRefusal::TrialAlreadyHeld)
         ));
-        cleanup.mark_reaping().unwrap();
+        cleanup.mark_reaping().expect("same owner reaping");
         let binding = cleanup.binding;
-        cleanup.close(PhysicalCloseReceipt { binding }).unwrap();
-        let (not_spawned, _cleanup) = ledger.reserve(demand(1, true)).unwrap();
+        cleanup
+            .close(PhysicalCloseReceipt { binding })
+            .expect("confirmed closure");
+        let (not_spawned, _cleanup) = ledger.reserve(demand(1, true)).expect("replacement trial");
         drop(not_spawned);
-        assert_eq!(ledger.snapshot().unwrap().held, 0);
-        assert!(!ledger.snapshot().unwrap().trial_held);
+        assert_eq!(ledger.snapshot().expect("no-spawn snapshot").held, 0);
+        assert!(!ledger.snapshot().expect("no-spawn snapshot").trial_held);
     }
 
     #[test]
     fn unknown_bounds_and_overflow_never_become_spare_capacity() {
-        let ledger = ResourceLedger::new(1, Metric::Known(vector(u64::MAX))).unwrap();
-        let (mut held, _cleanup) = ledger.reserve(demand(u64::MAX, false)).unwrap();
-        held.mark_spawn_possible().unwrap();
+        let ledger =
+            ResourceLedger::new(1, Metric::Known(vector(u64::MAX))).expect("ledger fixture");
+        let (mut held, _cleanup) = ledger
+            .reserve(demand(u64::MAX, false))
+            .expect("maximum vector");
+        held.mark_spawn_possible().expect("spawn custody");
         assert!(matches!(
             ledger.reserve(demand(1, false)),
             Err(AdmissionRefusal::ArithmeticOverflow)
@@ -547,12 +561,15 @@ mod tests {
             }),
             Err(AdmissionRefusal::InsufficientEvidence)
         ));
-        assert_eq!(ledger.snapshot().unwrap().used, vector(u64::MAX));
+        assert_eq!(
+            ledger.snapshot().expect("unchanged snapshot").used,
+            vector(u64::MAX)
+        );
     }
 
     #[test]
     fn simultaneous_reservations_never_split_hard_dimensions() {
-        let ledger = ResourceLedger::new(1, Metric::Known(vector(1))).unwrap();
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(1))).expect("ledger fixture");
         let barrier = std::sync::Barrier::new(8);
         let successes: usize = std::thread::scope(|scope| {
             let workers: Vec<_> = (0..8)
@@ -565,7 +582,7 @@ mod tests {
                         else {
                             return 0;
                         };
-                        reservation.mark_spawn_possible().unwrap();
+                        reservation.mark_spawn_possible().expect("spawn custody");
                         drop(reservation); // UnknownHeld still occupies every dimension.
                         1
                     })
@@ -573,20 +590,22 @@ mod tests {
                 .collect();
             workers
                 .into_iter()
-                .map(|worker| worker.join().unwrap())
+                .map(|worker| worker.join().expect("reservation contender"))
                 .sum()
         });
         assert_eq!(successes, 1);
-        assert_eq!(ledger.snapshot().unwrap().used, vector(1));
+        assert_eq!(ledger.snapshot().expect("atomic snapshot").used, vector(1));
     }
 
     #[test]
     fn mismatched_receipt_cannot_release_or_destroy_reconciliation_authority() {
-        let first = ResourceLedger::new(1, Metric::Known(vector(1))).unwrap();
-        let second = ResourceLedger::new(1, Metric::Known(vector(1))).unwrap();
-        let (mut reservation, authority) = first.reserve(demand(1, false)).unwrap();
-        let (_other_reservation, other_authority) = second.reserve(demand(1, false)).unwrap();
-        reservation.mark_spawn_possible().unwrap();
+        let first = ResourceLedger::new(1, Metric::Known(vector(1))).expect("first ledger");
+        let second = ResourceLedger::new(1, Metric::Known(vector(1))).expect("second ledger");
+        let (mut reservation, authority) =
+            first.reserve(demand(1, false)).expect("first reservation");
+        let (_other_reservation, other_authority) =
+            second.reserve(demand(1, false)).expect("other reservation");
+        reservation.mark_spawn_possible().expect("spawn custody");
         drop(reservation);
         assert_eq!(
             authority.close(PhysicalCloseReceipt {
@@ -594,12 +613,18 @@ mod tests {
             }),
             Err(AdmissionRefusal::ReceiptMismatch)
         );
-        assert_eq!(first.snapshot().unwrap().unknown_held, 1);
+        assert_eq!(
+            first
+                .snapshot()
+                .expect("wrong-receipt snapshot")
+                .unknown_held,
+            1
+        );
         authority
             .close(PhysicalCloseReceipt {
                 binding: authority.binding,
             })
-            .unwrap();
-        assert_eq!(first.snapshot().unwrap().held, 0);
+            .expect("matching closure after refusal");
+        assert_eq!(first.snapshot().expect("closed snapshot").held, 0);
     }
 }
