@@ -993,7 +993,7 @@ mod tests {
         assert!(first.await.expect("first worker joined").0);
         assert_eq!(
             request_record(store.as_ref(), "request-scan").await.state,
-            "completed"
+            "succeeded"
         );
 
         // Queue contention never claimed or yielded the second job, so its
@@ -1012,7 +1012,7 @@ mod tests {
             request_record(store.as_ref(), "request-refresh")
                 .await
                 .state,
-            "completed"
+            "succeeded"
         );
     }
 
