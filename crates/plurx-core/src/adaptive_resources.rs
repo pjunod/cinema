@@ -6,7 +6,7 @@
 //! under one short lock. No lock crosses I/O or await. Post-spawn Drop retains
 //! accounting; only the actual cleanup owner may present a non-wire receipt.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +14,8 @@ use crate::process::observation::Metric;
 
 static NEXT_LEDGER: AtomicU64 = AtomicU64::new(1);
 const MAX_RESERVATIONS: usize = 1024;
+const MAX_FAMILY_ROLES: usize = 3;
+const MAX_OVERLAP_FAMILIES: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ResourceVector {
@@ -111,6 +113,37 @@ pub struct WorkloadDemand {
     pub trial: bool,
 }
 
+/// Ledger-minted family identity. A successor uses a distinct identity; sharing
+/// a role requires borrowing the actual retained reservation, not an integer
+/// supplied over the wire. This identity carries no executable authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FamilyIdentity {
+    ledger: u64,
+    family: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FamilyRole {
+    Video,
+    Audio,
+    Companion,
+}
+
+pub struct FamilyRoleDemand<'a> {
+    pub role: FamilyRole,
+    pub demand: WorkloadDemand,
+    /// A retained physical role is checked against this ledger under its lock.
+    /// It is counted once even if shared by both requested families.
+    pub retained: Option<&'a ResourceReservation>,
+}
+
+/// Complete requested role set, not only the missing roles. At most three
+/// distinct roles per family; no retained reservation is stolen or rebound.
+pub struct FamilyDemand<'a> {
+    pub identity: FamilyIdentity,
+    pub roles: &'a [FamilyRoleDemand<'a>],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdmissionRefusal {
@@ -124,6 +157,7 @@ pub enum AdmissionRefusal {
     UnknownReservation,
     InvalidTransition,
     ReceiptMismatch,
+    InvalidBundle,
     Unavailable,
 }
 
@@ -161,6 +195,7 @@ pub struct PhysicalCloseReceipt {
 
 struct Entry {
     binding: ReservationBinding,
+    family_role: Option<(FamilyIdentity, FamilyRole)>,
     resources: ResourceVector,
     state: ReservationState,
 }
@@ -170,8 +205,9 @@ struct State {
     cap: Metric<ResourceVector>,
     used: ResourceVector,
     next_reservation: u64,
+    next_family: u64,
     entries: BTreeMap<u64, Entry>,
-    trial: Option<u64>,
+    trial: Option<BTreeSet<u64>>,
     invalid: bool,
 }
 
@@ -244,8 +280,11 @@ impl State {
         };
         self.used = next_used;
         self.entries.remove(&id);
-        if self.trial == Some(id) {
-            self.trial = None;
+        if let Some(members) = self.trial.as_mut() {
+            members.remove(&id);
+            if members.is_empty() {
+                self.trial = None;
+            }
         }
         Ok(())
     }
@@ -268,6 +307,7 @@ impl ResourceLedger {
                 cap: hard_cap,
                 used: ResourceVector::default(),
                 next_reservation: 1,
+                next_family: 1,
                 entries: BTreeMap::new(),
                 trial: None,
                 invalid: false,
@@ -291,48 +331,202 @@ impl ResourceLedger {
         &self,
         demand: WorkloadDemand,
     ) -> Result<(ResourceReservation, CleanupAuthority), AdmissionRefusal> {
+        self.reserve_roles(&[(None, demand, None)])?
+            .pop()
+            .ok_or(AdmissionRefusal::InvalidBundle)
+    }
+
+    pub fn new_family(&self) -> Result<FamilyIdentity, AdmissionRefusal> {
         let mut state = self
             .inner
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
-        let resources = state.assess(demand)?;
-        let id = state.next_reservation;
-        let next = id
+        let family = state.next_family;
+        state.next_family = family
             .checked_add(1)
             .ok_or(AdmissionRefusal::IdentityExhausted)?;
+        Ok(FamilyIdentity {
+            ledger: self.id,
+            family,
+        })
+    }
+
+    /// Reserve the complete missing-role set in one transaction, never by
+    /// repeated single-role debits. A two-family overlap has at most six roles;
+    /// this does NOT widen an ordinary single family to six. No incumbent is
+    /// replaced, refunded or stolen. Only actual physical closure can debit
+    /// the individual returned role reservations later.
+    pub fn reserve_families(
+        &self,
+        families: &[FamilyDemand<'_>],
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+        if families.is_empty()
+            || families.len() > MAX_OVERLAP_FAMILIES
+            || families.iter().any(|family| {
+                family.identity.ledger != self.id
+                    || family.roles.is_empty()
+                    || family.roles.len() > MAX_FAMILY_ROLES
+            })
+        {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
+        let mut seen_families = BTreeSet::new();
+        let mut roles = Vec::new();
+        for family in families {
+            if !seen_families.insert(family.identity) {
+                return Err(AdmissionRefusal::InvalidBundle);
+            }
+            let mut seen_roles = BTreeSet::new();
+            for role in family.roles {
+                if !seen_roles.insert(role.role) {
+                    return Err(AdmissionRefusal::InvalidBundle);
+                }
+                roles.push((
+                    Some((family.identity, role.role)),
+                    role.demand,
+                    role.retained,
+                ));
+            }
+        }
+        self.reserve_roles(&roles)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn reserve_roles(
+        &self,
+        roles: &[(
+            Option<(FamilyIdentity, FamilyRole)>,
+            WorkloadDemand,
+            Option<&ResourceReservation>,
+        )],
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| AdmissionRefusal::Unavailable)?;
+        let mut missing = Vec::new();
+        for (family_role, demand, retained) in roles {
+            if let Some(held) = retained {
+                if held.binding.ledger != self.id {
+                    return Err(AdmissionRefusal::ReceiptMismatch);
+                }
+                let entry = state
+                    .entries
+                    .get(&held.binding.reservation)
+                    .ok_or(AdmissionRefusal::UnknownReservation)?;
+                if entry.binding != held.binding
+                    || !matches!(
+                        entry.state,
+                        ReservationState::Reserved | ReservationState::SpawnPossible
+                    )
+                    || demand.resources != Metric::Known(entry.resources)
+                    || entry.family_role.map(|(_, role)| role) != family_role.map(|(_, role)| role)
+                {
+                    return Err(AdmissionRefusal::InvalidBundle);
+                }
+                if state
+                    .entries
+                    .values()
+                    .any(|other| other.family_role == *family_role && other.binding != held.binding)
+                {
+                    return Err(AdmissionRefusal::InvalidBundle);
+                }
+            } else {
+                if family_role.is_some()
+                    && state
+                        .entries
+                        .values()
+                        .any(|entry| entry.family_role == *family_role)
+                {
+                    return Err(AdmissionRefusal::InvalidBundle);
+                }
+                missing.push((*family_role, *demand));
+            }
+        }
+        if missing.is_empty() {
+            return Ok(Vec::new());
+        }
+        let trial = missing
+            .first()
+            .ok_or(AdmissionRefusal::InvalidBundle)?
+            .1
+            .trial;
+        if missing.iter().any(|(_, demand)| demand.trial != trial) {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
+        if state
+            .entries
+            .len()
+            .checked_add(missing.len())
+            .is_none_or(|count| count > MAX_RESERVATIONS)
+        {
+            return Err(AdmissionRefusal::LedgerFull);
+        }
+        let resources: Vec<_> = missing
+            .iter()
+            .map(|(_, demand)| state.assess(*demand))
+            .collect::<Result<_, _>>()?;
+        let total = resources
+            .iter()
+            .try_fold(ResourceVector::default(), |sum, role| {
+                sum.checked_add(*role)
+            })
+            .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
         let used = state
             .used
-            .checked_add(resources)
+            .checked_add(total)
             .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
-        let binding = ReservationBinding {
-            ledger: self.id,
-            reservation: id,
-            allocation_epoch: state.epoch,
+        let Metric::Known(cap) = state.cap else {
+            return Err(AdmissionRefusal::InsufficientEvidence);
         };
-        // All fallible validation precedes the single accounting commit.
-        state.entries.insert(
-            id,
-            Entry {
-                binding,
-                resources,
-                state: ReservationState::Reserved,
-            },
-        );
+        if let Some(dimension) = used.exceeded(cap) {
+            return Err(AdmissionRefusal::HardLimit(dimension));
+        }
+        let first_id = state.next_reservation;
+        let count =
+            u64::try_from(resources.len()).map_err(|_| AdmissionRefusal::ArithmeticOverflow)?;
+        let next = first_id
+            .checked_add(count)
+            .ok_or(AdmissionRefusal::IdentityExhausted)?;
+        let mut owned = Vec::with_capacity(resources.len());
+        let mut trial_members = BTreeSet::new();
+        // All fallible validation precedes the single accounting commit; at
+        // most six plain-u64 map entries, and no external code under this lock.
+        for ((id, resources), (family_role, _)) in (first_id..next).zip(resources).zip(missing) {
+            let binding = ReservationBinding {
+                ledger: self.id,
+                reservation: id,
+                allocation_epoch: state.epoch,
+            };
+            state.entries.insert(
+                id,
+                Entry {
+                    binding,
+                    family_role,
+                    resources,
+                    state: ReservationState::Reserved,
+                },
+            );
+            if trial {
+                trial_members.insert(id);
+            }
+            owned.push((
+                ResourceReservation {
+                    ledger: self.clone(),
+                    binding,
+                },
+                CleanupAuthority {
+                    ledger: self.clone(),
+                    binding,
+                },
+            ));
+        }
         state.used = used;
         state.next_reservation = next;
-        if demand.trial {
-            state.trial = Some(id);
+        if trial {
+            state.trial = Some(trial_members);
         }
-        Ok((
-            ResourceReservation {
-                ledger: self.clone(),
-                binding,
-            },
-            CleanupAuthority {
-                ledger: self.clone(),
-                binding,
-            },
-        ))
+        Ok(owned)
     }
 
     pub fn update_hard_cap(
@@ -626,5 +820,226 @@ mod tests {
             })
             .expect("matching closure after refusal");
         assert_eq!(first.snapshot().expect("closed snapshot").held, 0);
+    }
+
+    fn family_roles(count: usize, trial: bool) -> Vec<FamilyRoleDemand<'static>> {
+        [FamilyRole::Video, FamilyRole::Audio, FamilyRole::Companion]
+            .into_iter()
+            .take(count)
+            .map(|role| FamilyRoleDemand {
+                role,
+                demand: demand(1, trial),
+                retained: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adaptive_overlap_is_atomic_for_four_and_six_roles() {
+        for count in [2, 3] {
+            let ledger = ResourceLedger::new(1, Metric::Known(vector(6))).expect("ledger");
+            let first = ledger.new_family().expect("first family");
+            let second = ledger.new_family().expect("second family");
+            let roles = family_roles(count, true);
+            let mut owned = ledger
+                .reserve_families(&[
+                    FamilyDemand {
+                        identity: first,
+                        roles: &roles,
+                    },
+                    FamilyDemand {
+                        identity: second,
+                        roles: &roles,
+                    },
+                ])
+                .expect("complete overlap");
+            assert_eq!(owned.len(), count * 2);
+            assert_eq!(
+                ledger.snapshot().expect("snapshot").used,
+                vector((count * 2) as u64)
+            );
+            for (reservation, _) in &mut owned {
+                reservation.mark_spawn_possible().expect("spawn");
+            }
+            let (last, last_cleanup) = owned.pop().expect("last trial role");
+            drop(owned); // Uncertain siblings retain the one graph trial claim.
+            drop(last);
+            last_cleanup
+                .close(PhysicalCloseReceipt {
+                    binding: last_cleanup.binding,
+                })
+                .expect("one confirmed role");
+            assert!(ledger.snapshot().expect("partial closure").trial_held);
+            assert!(matches!(
+                ledger.reserve(demand(1, true)),
+                Err(AdmissionRefusal::TrialAlreadyHeld)
+            ));
+        }
+    }
+
+    #[test]
+    fn overlap_rejects_seventh_role_third_family_and_overflow_without_mutation() {
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(6))).expect("ledger");
+        let identities = [
+            ledger.new_family().expect("family"),
+            ledger.new_family().expect("family"),
+            ledger.new_family().expect("family"),
+        ];
+        let roles = family_roles(3, false);
+        let third = family_roles(1, false);
+        assert!(matches!(
+            ledger.reserve_families(&[
+                FamilyDemand {
+                    identity: identities[0],
+                    roles: &roles
+                },
+                FamilyDemand {
+                    identity: identities[1],
+                    roles: &roles
+                },
+                FamilyDemand {
+                    identity: identities[2],
+                    roles: &third
+                },
+            ]),
+            Err(AdmissionRefusal::InvalidBundle)
+        ));
+        let mut four = family_roles(3, false);
+        four.push(FamilyRoleDemand {
+            role: FamilyRole::Video,
+            demand: demand(1, false),
+            retained: None,
+        });
+        assert!(matches!(
+            ledger.reserve_families(&[FamilyDemand {
+                identity: identities[0],
+                roles: &four
+            }]),
+            Err(AdmissionRefusal::InvalidBundle)
+        ));
+        let mut huge = family_roles(2, false);
+        huge[0].demand = demand(u64::MAX, false);
+        ledger
+            .update_hard_cap(2, Metric::Known(vector(u64::MAX)))
+            .expect("cap");
+        for role in &mut huge {
+            role.demand.limit_epoch = 2;
+        }
+        assert!(matches!(
+            ledger.reserve_families(&[FamilyDemand {
+                identity: identities[0],
+                roles: &huge
+            }]),
+            Err(AdmissionRefusal::ArithmeticOverflow)
+        ));
+        assert_eq!(ledger.snapshot().expect("unchanged").held, 0);
+    }
+
+    #[test]
+    fn shared_retained_role_is_counted_once_and_never_rebound() {
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(3))).expect("ledger");
+        let first = ledger.new_family().expect("first family");
+        let second = ledger.new_family().expect("second family");
+        let initial = [FamilyRoleDemand {
+            role: FamilyRole::Audio,
+            demand: demand(1, false),
+            retained: None,
+        }];
+        let mut audio = ledger
+            .reserve_families(&[FamilyDemand {
+                identity: first,
+                roles: &initial,
+            }])
+            .expect("shared audio");
+        let (audio, _) = audio.first_mut().expect("audio role");
+        audio.mark_spawn_possible().expect("audio spawn");
+        let roles = [
+            FamilyRoleDemand {
+                role: FamilyRole::Video,
+                demand: demand(1, false),
+                retained: None,
+            },
+            FamilyRoleDemand {
+                role: FamilyRole::Audio,
+                demand: demand(1, false),
+                retained: Some(audio),
+            },
+        ];
+        let owned = ledger
+            .reserve_families(&[
+                FamilyDemand {
+                    identity: first,
+                    roles: &roles,
+                },
+                FamilyDemand {
+                    identity: second,
+                    roles: &roles,
+                },
+            ])
+            .expect("two missing videos only");
+        assert_eq!(owned.len(), 2);
+        assert_eq!(ledger.snapshot().expect("all roles").used, vector(3));
+        assert_eq!(
+            ledger
+                .inner
+                .lock()
+                .expect("state")
+                .entries
+                .get(&audio.binding.reservation)
+                .expect("audio")
+                .family_role,
+            Some((first, FamilyRole::Audio))
+        );
+        assert!(matches!(
+            ledger.reserve_families(&[FamilyDemand {
+                identity: second,
+                roles: &roles
+            }]),
+            Err(AdmissionRefusal::InvalidBundle)
+        ));
+        assert_eq!(
+            ledger.snapshot().expect("duplicate refused").used,
+            vector(3)
+        );
+        drop(owned); // Never spawned: only the original audio remains.
+        assert_eq!(ledger.snapshot().expect("no-spawn refund").used, vector(1));
+    }
+
+    #[test]
+    fn family_identity_retained_cost_and_physical_zero_are_not_waived() {
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(0))).expect("zero physical cap");
+        let foreign = ResourceLedger::new(1, Metric::Known(vector(10))).expect("foreign ledger");
+        let family = ledger.new_family().expect("family");
+        let roles = family_roles(1, false);
+        assert!(matches!(
+            ledger.reserve_families(&[FamilyDemand {
+                identity: family,
+                roles: &roles
+            }]),
+            Err(AdmissionRefusal::HardLimit(ResourceDimension::Cpu))
+        ));
+        assert!(matches!(
+            ledger.reserve_families(&[FamilyDemand {
+                identity: foreign.new_family().expect("foreign family"),
+                roles: &roles
+            }]),
+            Err(AdmissionRefusal::InvalidBundle)
+        ));
+        let (_reservation, _) = foreign
+            .reserve(demand(1, false))
+            .expect("foreign reservation");
+        let changed = [FamilyRoleDemand {
+            role: FamilyRole::Video,
+            demand: demand(2, false),
+            retained: Some(&_reservation),
+        }];
+        assert!(matches!(
+            ledger.reserve_families(&[FamilyDemand {
+                identity: family,
+                roles: &changed
+            }]),
+            Err(AdmissionRefusal::ReceiptMismatch)
+        ));
+        assert_eq!(ledger.snapshot().expect("unchanged zero cap").held, 0);
     }
 }
