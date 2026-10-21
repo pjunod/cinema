@@ -39,7 +39,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Who is waiting on a child. See the module table.
@@ -290,6 +290,9 @@ pub struct RunningChild {
     /// Whether [`stop`] can kill it without any risk of signalling a
     /// recycled pid (Linux, through the pidfd opened at spawn).
     pub stoppable: bool,
+    /// Identity-bound leader counters. Successful reads do not imply complete
+    /// descendant measurement or verified packaged output.
+    pub resources: super::observation::ProcessObservation,
 }
 
 /// Per-class counters for `/metrics`.
@@ -306,6 +309,7 @@ struct Entry {
     work: ChildWork,
     program: String,
     started_at_ms: u64,
+    resources: Arc<Mutex<super::observation::ProcessObserver>>,
     #[cfg(target_os = "linux")]
     pidfd: Option<std::os::fd::OwnedFd>,
 }
@@ -373,6 +377,7 @@ pub(crate) fn register(
         work,
         program,
         started_at_ms,
+        resources: Arc::new(Mutex::new(super::observation::ProcessObserver::new(pid))),
         #[cfg(target_os = "linux")]
         pidfd: linux::pidfd_open(pid),
     };
@@ -407,13 +412,18 @@ pub fn running() -> Vec<RunningChild> {
                 entry.program.clone(),
                 entry.started_at_ms,
                 stoppable,
+                Arc::clone(&entry.resources),
             )
         })
         .collect::<Vec<_>>();
     rows.into_iter()
-        .map(|(pid, work, program, started_at_ms, stoppable)| {
+        .map(|(pid, work, program, started_at_ms, stoppable, resources)| {
             let policy = work.class.policy();
             let observed = observe(pid);
+            let resources = resources
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot(std::time::Instant::now());
             RunningChild {
                 pid,
                 class: work.class,
@@ -425,6 +435,7 @@ pub fn running() -> Vec<RunningChild> {
                 applied: observed.applied(policy),
                 observed,
                 stoppable,
+                resources,
             }
         })
         .collect()

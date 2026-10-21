@@ -2,6 +2,7 @@
 //! daemon's own inherited limits on how many descriptors it may hold.
 
 pub mod bounded;
+pub mod observation;
 #[cfg(test)]
 mod census;
 pub mod priority;
