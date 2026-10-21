@@ -326,7 +326,7 @@ def capture(root: Path, *, extra_paths=(), environment=None) -> Snapshot:
                                 module_versions, env, descriptors)
             if snapshot.verify(root):
                 return snapshot
-        except SnapshotChanged:
+        except (SnapshotChanged, model.SourceReadChanged):
             pass
         except KnowledgeError:
             if _identity(root) == before:
