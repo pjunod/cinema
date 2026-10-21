@@ -1,8 +1,9 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-20 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-10-21 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+- **2026-10-21 · Avatar Dolby Vision:** [hardware-selection root cause and physical comparison](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); proved VAAPI routing, focused regression and two complete FEL/P8.1 windows pass. Review/deployment and original frame-drop diagnosis remain open.
 - **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
 - **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
@@ -18,7 +19,6 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
   durable startup policy; source/published-image upgrades retain their existing
   deployment paths. Focused fixture validation is recorded in its PR; real
   desktop/engine acceptance and custom Pi ownership migration remain open.
-
 
 ## macOS source installation and the missing tray
 

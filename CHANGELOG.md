@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Dolby Vision FEL processing on Intel servers can use the independently
+  proved VAAPI output encoder when hardware selection prefers Quick Sync,
+  avoiding an unintended single-thread software encode and startup timeout.
+
 - Web playback counts delivered frame callbacks independently of suspicious
   timestamps, preventing metadata diagnostics from retaining a buffering
   overlay or triggering false stall recovery while the picture advances.

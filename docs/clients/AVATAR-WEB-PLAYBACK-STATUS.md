@@ -1,11 +1,96 @@
 # Avatar web playback — diagnosis and merge status
 
-**Status:** open · **Owner:** Codex, Avatar web stall chat · **Updated:** 2026-10-20
+**Status:** open · **Owner:** Codex, Avatar web playback investigation · **Updated:** 2026-10-21
 
 Companion to [the playback surface contract](PLAYBACK-SURFACE-CONTRACT.md).
-This ledger tracks the Safari buffering overlay and false-stall investigation.
+This ledger tracks Safari presentation faults and Avatar's processed Dolby
+Vision delivery.
 
 ## Current state
+
+The presentation observer repair is deployed in `c7d78b119`. The October 21
+enhancement investigation below identifies a separate encoder-selection
+defect: a Quick Sync preference silently selected single-thread x265 for
+reconstructed pictures despite a usable VAAPI output graph. The source fix
+and focused Linux regression are complete. Complete private windows pass;
+deployment and enhanced client/display acceptance remain open.
+
+## October 21 — Quick Sync preference selected software FEL output
+
+At 13:47:44 UTC, the server declined Avatar's processed Auto trial with
+`DV private window deadline expired`; the qualification phase took 5,046 ms.
+The 15:14:15 UTC reopen reused the same failed episode and immediately
+declined processing. Ordinary P7-to-P8.1 delivery retained dynamic metadata
+and discarded the FEL. The episode exclusion explains the later message;
+it does not identify the original slow stage.
+
+A private, read-only original-source window at 4462.458 seconds isolated
+the stages on the affected Intel server, using the installed media/helper
+bundle and a fresh shader cache for every trial:
+
+| Graph | Observation |
+|---|---|
+| Decode and reconstruct 48 native 4K pictures; NUT output discarded | 1.019 s; VAAPI decode, Intel Vulkan, 15 preroll pairs, 48 FEL contributions |
+| Same reconstruction into the existing single-thread x265 recipe | Encoder did not finish within the 30 s diagnostic bound; renderer itself was backpressured until 8.7 s |
+| Same reconstruction into Main10 VAAPI with P010 upload | 1.734 s; 48 pictures, both processes exited successfully |
+
+These isolate the encoder bottleneck, not complete serving acceptance: the
+comparison omits soundtrack encoding, MP4 publication and RPU adaptation.
+`completed_window_encoder` accepted preferred NVENC or proved VAAPI, while
+the affected server's preferred Quick Sync fell through to software. Its
+x265 graph deliberately permits one frame thread with no pool or wavefront
+parallelism. The fix selects the existing VAAPI completed-output contract
+for either Intel preference only when the independent VAAPI upload proof
+passes. Explicit software selection, absent-proof fallback, admission,
+encoder identity and the startup deadline retain their existing contracts.
+
+Focused evidence with Rust 1.97.1 on Linux:
+`cargo test -p plurxd --bin plurxd reconstructed_intel_preferences_use_only_proved_vaapi_output -- --exact dv_segment::tests::reconstructed_intel_preferences_use_only_proved_vaapi_output`:
+one passed. The regression covers both Intel preferences, the positive and
+negative proof, software/NVENC controls, three rasters and four cadences.
+Independent Astra review found no actionable issue in the source diff.
+Rust 1.97.1 workspace Clippy, formatting, catalog lint and served-script
+syntax passed on macOS; Linux daemon all-target Clippy and six documentation
+index checks also passed.
+
+The complete production runtime then passed consecutive 48-picture windows
+2229 and 2230 at 4462.458 and 4464.460 seconds. The cold window took 1,739 ms
+and the adjacent window 1,299 ms for 2,002 ms of media each. Both used
+40 Mb/s Main10 VAAPI, actual TrueHD-to-stereo-AAC/48 kHz/256 kb/s, 48 FEL
+contributions and 48 fresh/adapted Profile 8.1 RPUs. Production authoring,
+encoded-window/RPU/grid validation and child retirement passed, with a
+stable processing plan across the windows. These are private runtime/output
+checks, not independent picture-fidelity or enhanced display acceptance.
+The ignored physical harness and MP4/scalar evidence remain outside the tree;
+earlier diagnostic setup/reporting failures are not passing evidence.
+
+The viewer also reported three Safari dropped frames. Their original event
+times were not retained, and they are not evidence of the earlier server
+timeout. A subsequent 2,937-frame replay reported zero drops. A fresh-page,
+counter-only 95-second replay then reported 2,263 frames, zero drops, no
+hitch or metadata faults, and 24 fps. A 120-second replay with the Details
+panel open and scrolled to Enhancement/Frames reported 2,892 frames and
+zero drops; the slowest measured `updateStats` call took 5 ms. These runs
+do not establish the cause of the original three drops. The first
+diagnostic replay is excluded: its raw callback was registered before media
+readiness, reproducing the known
+[Safari callback-stranding mechanism](../playback-control/CALLBACK-ROOT-CAUSE-AND-FIX.md)
+in the instrumentation itself. No frame-drop correction is claimed from the
+invalid capture or the later healthy runs. A final counter-only replay at
+4494 seconds (original startup segment 545) instead exposed zero presentation
+callbacks while decoded frames advanced, followed by exhausted automatic
+recovery. Its replacement decoded 456 frames with zero drops; the probe
+registered no native frame callbacks. This separate callback-lifecycle fault
+remains under investigation. Diagnostic playback closed and the saved resume
+point remained at 1h 16m.
+
+The verification build exhausted the server system volume and caused a
+container restart. Task-owned compiler caches were moved to temporary
+storage; the server returned healthy with 8.8 GB free. This operational
+interruption happened after the playback captures and is not evidence about
+the original drops. Production image/settings were not upgraded by the probe.
+
+## Earlier presentation observer repair
 
 The observer repair and regression coverage are complete. [PR #1247](http://forge.lan:3000/noirr/plurx/pulls/1247)
 is owned by Codex for this investigation and carries the current gate and

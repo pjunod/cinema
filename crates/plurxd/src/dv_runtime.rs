@@ -521,12 +521,14 @@ pub(crate) fn completed_window_encoder(
     use plurx_core::transcode::Encoder;
     if preferred == Encoder::Nvenc {
         Encoder::Nvenc
-    } else if preferred == Encoder::Vaapi
+    } else if matches!(preferred, Encoder::Qsv | Encoder::Vaapi)
         && vaapi_upload_proved
         && plan
             .completed_reconstructed_output(Encoder::Vaapi)
             .is_some()
     {
+        // An Intel Quick Sync preference can use the independently proved
+        // VAAPI upload/encode graph for these reconstructed pictures.
         // Any raster and cadence: the window's HEVC level follows them.
         Encoder::Vaapi
     } else {

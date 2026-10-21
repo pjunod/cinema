@@ -1904,7 +1904,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn reconstructed_vaapi_selection_requires_only_the_upload_proof() {
+    fn reconstructed_intel_preferences_use_only_proved_vaapi_output() {
         use plurx_core::transcode::*;
         let mut source = encoded_recipe_source(true);
         source.width = Some(3840);
@@ -1917,22 +1917,29 @@ mod tests {
             };
             let (plan, _, _, _) = recipe_fixture_parts(&source, &options);
             for proved in [false, true] {
-                for rate in [24, 30, 60] {
-                    let actual = crate::vodencode::dv_runtime::completed_window_encoder(
-                        Encoder::Vaapi,
-                        proved,
-                        &plan,
-                        VodFrameGrid::new(rate, 1).expect("grid"),
-                    );
-                    assert_eq!(
-                        actual,
-                        if proved {
-                            Encoder::Vaapi
-                        } else {
-                            Encoder::Software
-                        },
-                        "{height} {rate} {proved}"
-                    );
+                let intel_output = if proved {
+                    Encoder::Vaapi
+                } else {
+                    Encoder::Software
+                };
+                for (preferred, expected) in [
+                    (Encoder::Qsv, intel_output),
+                    (Encoder::Vaapi, intel_output),
+                    (Encoder::Software, Encoder::Software),
+                    (Encoder::Nvenc, Encoder::Nvenc),
+                ] {
+                    for (numerator, denominator) in [(24, 1), (24000, 1001), (30, 1), (60, 1)] {
+                        let actual = crate::vodencode::dv_runtime::completed_window_encoder(
+                            preferred,
+                            proved,
+                            &plan,
+                            VodFrameGrid::new(numerator, denominator).expect("grid"),
+                        );
+                        assert_eq!(
+                            actual, expected,
+                            "{height} {numerator}/{denominator} {preferred:?} {proved}"
+                        );
+                    }
                 }
             }
         }
