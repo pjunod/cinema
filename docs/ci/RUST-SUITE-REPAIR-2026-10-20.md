@@ -1,13 +1,18 @@
 # Rust suite repair — preserve the 25 failures and qualify their corrections
 
-**Status:** open — implementation built; two qualification attempts on
-`c81f3af25` failed during external native-package setup before compilation or
-tests. Isolated pinned-image installation now passes over HTTPS; integrated
-workflow validation and fresh exact-source acceptance remain owed. Receipts are
-recorded in [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
+**Status:** qualified at exact `0f7b6325cce563fec1d8001dc141a46d432db573`
+through [run 5713 / task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
+The full ordinary Rust command passed in 2,636.152 seconds: 6,928 native
+passes, zero failures and all 49 unchanged ignored identities. Seven doctest
+targets, 400 cohort bodies, 20 writer bodies and both serial media cases
+also passed, with complete accounting and qualified cleanup. Earlier setup
+failures and red native receipts remain retained. This describes the frozen
+M1 source; M2 changes require fresh qualification.
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
 `codex/full-pr-suite-m1`, based on `effort/full-pr-suite` at `c1c344132`
-and carrying M0 dependency `16d1a5003` locally; neither task PR is merged.
+and carrying M0 dependency `16d1a5003`; integration is held for user
+clarification of the broader PR scope. M2 proceeds in the
+[setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md).
 
 Companion to [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md)
 (the current execution policy) and [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)

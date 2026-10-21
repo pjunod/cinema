@@ -1,6 +1,6 @@
 # Full suite on every PR — audit, execution contract, and implementation plan
 
-**Status:** open — M0 diagnostic baseline measured; M1 Rust repair and qualification in progress ·
+**Status:** open — M0 measured; M1 Rust qualified via PR #1244; M2 setup profiling active ·
 **Requested:** 2026-10-20 · **Audit source:** `c1c344132` ·
 **Evidence captured:** 2026-10-20 14:21:12 UTC
 
@@ -20,10 +20,14 @@ Existing source fixes are identified separately from unimplemented work.
 No passing complete run is claimed until its outcomes are recorded.
 Current measurements are tracked in
 [FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md).
-The authorized next milestone is tracked in
-[RUST-SUITE-REPAIR-2026-10-20.md](RUST-SUITE-REPAIR-2026-10-20.md): preserve
-the 25 failed identities, correct their causes and qualify repeated/full
-Rust execution before enabling any new automatic PR policy.
+M1 exact-source Rust qualification is recorded through the receipt in
+[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244) and the
+[repair ledger](RUST-SUITE-REPAIR-2026-10-20.md). Its merge remains held for
+user clarification of the PR's broader scope. The authorized M2 work is
+tracked in [the setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md):
+measure fixture construction, body and cleanup before optimizing them,
+preserve all assertions and qualify the new integrated source. Other lanes
+and the automatic every-PR policy cutover remain unqualified.
 
 ## 1. Outcome — every landing has complete, fresh test evidence
 

@@ -1419,11 +1419,33 @@ async fn terminal_analysis_history_is_age_and_generation_bounded() {
 
 #[tokio::test]
 async fn terminal_analysis_history_has_a_hard_global_cap() {
+    let timing = std::env::var("PLURX_TEST_SETUP_TIMING").as_deref() == Ok("1");
+    fn report_phase(phase: &str, started: Option<std::time::Instant>, operations: u64) {
+        if let Some(started) = started {
+            eprintln!(
+                "PLURX_TEST_SETUP_TIMING {}",
+                serde_json::json!({
+                    "test": "store::sqlite::fragment_index_cluster::tests::terminal_analysis_history_has_a_hard_global_cap",
+                    "phase": phase,
+                    "elapsed_seconds": started.elapsed().as_secs_f64(),
+                    "operations": operations,
+                })
+            );
+        }
+    }
+    let started = timing.then(std::time::Instant::now);
     let store = SqliteStore::open_in_memory().expect("store");
+    report_phase("open", started, 1);
+    let started = timing.then(std::time::Instant::now);
     seed_files(&store).await;
+    report_phase("seed_files", started, 1);
     store
-        .with_conn(|conn| {
+        .with_conn(move |conn| {
+            let started = timing.then(std::time::Instant::now);
             let transaction = conn.unchecked_transaction()?;
+            report_phase("transaction_begin", started, 1);
+            let started = timing.then(std::time::Instant::now);
+            let mut inserted = 0;
             for generation in 0_i64..=8_192 {
                 transaction.execute(
                     "INSERT INTO analysis_requests
@@ -1434,7 +1456,10 @@ async fn terminal_analysis_history_has_a_hard_global_cap() {
                                  'failed', 0, 1, 0, ?2, ?2)",
                     params![format!("terminal-{generation:05}"), generation],
                 )?;
+                inserted += 1;
             }
+            report_phase("terminal_insert_loop", started, inserted);
+            let started = timing.then(std::time::Instant::now);
             transaction.execute(
                 "INSERT INTO analysis_requests
                       (request_id, file_id, source_size, source_mtime, component,
@@ -1444,16 +1469,22 @@ async fn terminal_analysis_history_has_a_hard_global_cap() {
                              'node-a', 'queued', 0, 0, 9000, 9000, 9000)",
                 [],
             )?;
+            report_phase("queued_insert", started, 1);
+            let started = timing.then(std::time::Instant::now);
             transaction.execute(
                 "UPDATE analysis_requests SET state = 'failed'
                       WHERE request_id = 'cap-trigger'",
                 [],
             )?;
+            report_phase("cap_update", started, 1);
+            let started = timing.then(std::time::Instant::now);
             transaction.commit()?;
+            report_phase("commit", started, 1);
             Ok(())
         })
         .await
         .expect("exercise terminal cap trigger");
+    let started = timing.then(std::time::Instant::now);
     let count = store
         .with_read(|conn| {
             conn.query_row(
@@ -1467,6 +1498,7 @@ async fn terminal_analysis_history_has_a_hard_global_cap() {
         .await
         .expect("count terminal history");
     assert_eq!(count, 8_192);
+    report_phase("final_read", started, 1);
 }
 
 #[tokio::test]

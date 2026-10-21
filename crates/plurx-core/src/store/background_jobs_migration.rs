@@ -348,8 +348,33 @@ mod tests {
         );
     }
 
+    fn setup_phase_timing(
+        phase: &str,
+        started: Option<std::time::Instant>,
+        counts: impl FnOnce() -> Value,
+    ) {
+        if let Some(started) = started {
+            use std::io::Write as _;
+            let elapsed_ns = started.elapsed().as_nanos();
+            let summary = json!({
+                "component": "legacy_overflow",
+                "case": "store::background_jobs_migration::tests::migration_overflow_retains_all_accepted_work_until_capacity_frees",
+                "phase": phase,
+                "elapsed_ns": elapsed_ns,
+                "counts": counts(),
+            });
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "PLURX_TEST_SETUP_TIMING {summary}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn migration_overflow_retains_all_accepted_work_until_capacity_frees() {
+        let timing = std::env::var_os("PLURX_TEST_SETUP_TIMING").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+        let seed_started = timing.then(std::time::Instant::now);
         let (_directory, path, connection) = legacy_database();
         let transaction = connection
             .unchecked_transaction()
@@ -366,10 +391,18 @@ mod tests {
             ).expect("legacy transcode");
         }
         transaction.commit().expect("legacy commit");
+        setup_phase_timing("seed", seed_started, || json!({"legacy_jobs": 4_100}));
+        let seal_started = timing.then(std::time::Instant::now);
         seal(&connection);
         drop(connection);
+        setup_phase_timing("seal", seal_started, || json!({"legacy_jobs": 4_100}));
+        let open_started = timing.then(std::time::Instant::now);
         let store = SqliteStore::open(&path).expect("new binary");
+        setup_phase_timing("open", open_started, || json!({}));
+        let initial_import_started = timing.then(std::time::Instant::now);
+        let mut initial_import_pages = 0usize;
         for _ in 0..256 {
+            initial_import_pages += 1;
             store.import_legacy_jobs(1_000).await.expect("bounded page");
             if store
                 .job_migration_status()
@@ -388,12 +421,22 @@ mod tests {
             "foreground headroom remains available"
         );
         assert_eq!(full.awaiting_import, 260);
+        setup_phase_timing("initial_import", initial_import_started, || {
+            json!({
+                "pages": initial_import_pages, "accepted": full.accepted,
+                "materialized": full.materialized, "awaiting_import": full.awaiting_import,
+            })
+        });
+        let cancel_started = timing.then(std::time::Instant::now);
+        let mut cancellation_calls = 0usize;
+        let mut cancellation_pages = 0usize;
         // Free precisely the overflow. Cancelling all 3,840 accepted jobs
         // repeats unrelated cancellation coverage and dominates the fast lane;
         // retaining the others also proves draining does not discard them.
         let mut remaining = full.awaiting_import as usize;
         let mut cursor = None;
         loop {
+            cancellation_pages += 1;
             let page = store
                 .list_jobs(JobQuery {
                     node_id: None,
@@ -412,6 +455,7 @@ mod tests {
                     })
                     .await
                     .expect("free capacity");
+                cancellation_calls += 1;
                 remaining -= 1;
             }
             cursor = page.next_after_id;
@@ -420,11 +464,20 @@ mod tests {
             }
         }
         assert_eq!(remaining, 0, "freed the overflow capacity");
+        setup_phase_timing("cancel", cancel_started, || {
+            json!({
+                "pages": cancellation_pages, "cancellation_calls": cancellation_calls,
+                "remaining": remaining,
+            })
+        });
+        let drain_started = timing.then(std::time::Instant::now);
+        let mut drain_pages = 0usize;
         // Each page also budgets duplicated SQL bytes. SQL growth may reduce
         // rows per page; require progress until every accepted overflow drains,
         // with at most one page per pending job rather than a guessed page count.
         let mut pending = full.awaiting_import;
         for _ in 0..full.awaiting_import {
+            drain_pages += 1;
             store.import_legacy_jobs(3_000).await.expect("drain");
             let progress = store.job_migration_status().await.expect("drain progress");
             assert!(
@@ -447,6 +500,13 @@ mod tests {
             ),
             (4_100, 4_100, 0, 0)
         );
+        setup_phase_timing("drain", drain_started, || {
+            json!({
+                "pages": drain_pages, "accepted": done.accepted,
+                "materialized": done.materialized, "awaiting_import": done.awaiting_import,
+                "failed": done.failed,
+            })
+        });
     }
     #[tokio::test]
     async fn migration_terminal_legacy_receipts_expire_without_reimporting_work() {
