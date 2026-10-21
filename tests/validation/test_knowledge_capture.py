@@ -64,7 +64,7 @@ class KnowledgeCaptureTests(unittest.TestCase):
     def test_known_decision_can_be_acknowledged_without_matching_curated_scope(self):
         result = inspect_body(sample_graph(),
                               "Knowledge-Decision: plurx:decision:fixture-choice",
-                              ("src/unrelated.rs",))
+                              ("tests/unrelated.py",))
 
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["acknowledged"], [
@@ -72,13 +72,16 @@ class KnowledgeCaptureTests(unittest.TestCase):
         self.assertEqual(result["matched_open_obligations"], [])
 
     def test_unknown_and_wrong_kind_ids_fail_even_when_scope_does_not_match(self):
-        for field in ("Knowledge-Obligation: plurx:obligation:missing",
-                      "Knowledge-Obligation: plurx:decision:fixture-choice"):
+        cases = (("Knowledge-Obligation: plurx:obligation:missing",
+                  "Unknown supplied Knowledge-Obligation ID"),
+                 ("Knowledge-Obligation: plurx:decision:fixture-choice",
+                  "Invalid supplied Knowledge-Obligation ID."))
+        for field, expected_error in cases:
             with self.subTest(field=field):
                 result = inspect_body(sample_graph(), field, ("tests/other.py",))
                 self.assertEqual(result["acknowledged"], [])
                 self.assertEqual(len(result["errors"]), 1)
-                self.assertIn("Unknown supplied Knowledge-Obligation ID", result["errors"][0])
+                self.assertIn(expected_error, result["errors"][0])
 
     def test_malformed_supplied_id_is_rejected(self):
         result = inspect_body(sample_graph(), "Knowledge-Decision: not-an-id", ())

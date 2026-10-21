@@ -112,7 +112,10 @@ class SyntheticEngine:
 
 class KnowledgeIsolationTests(unittest.TestCase):
     def setUp(self):
-        base = Path(os.environ.get("PLURX_TEST_TMPDIR", Path.cwd() / "target" / "knowledge-isolation-tests"))
+        base = Path(os.environ.get(
+            "PLURX_TEST_TMPDIR",
+            Path.cwd() / "target" / "agent-fixtures" / ".hermes" /
+            "hdr-collaboration" / "workspaces" / "knowledge-isolation-tests"))
         base.mkdir(parents=True, exist_ok=True)
         self.directory = tempfile.TemporaryDirectory(prefix="isolation-", dir=base)
         self.addCleanup(self.directory.cleanup)
