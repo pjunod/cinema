@@ -471,6 +471,7 @@ pub(super) struct AttemptChild {
     /// Cleanup must join this task, including its diagnostic drain and job
     /// lifetime, before dropping the slot or returning legacy admission.
     supervisor: tokio::sync::Mutex<AttemptSupervisorJoin>,
+    join_runtime: tokio::runtime::Handle,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
     /// The supervisor's pause points; see [`AttemptChildHooks`]. The supervisor
     /// task runs through a clone of this one.
@@ -751,6 +752,7 @@ impl AttemptChild {
             #[cfg(test)]
             terminal_notify,
             supervisor: tokio::sync::Mutex::new(AttemptSupervisorJoin::Running(supervisor)),
+            join_runtime: tokio::runtime::Handle::current(),
             commands,
             #[cfg(test)]
             hooks,
@@ -1033,7 +1035,7 @@ impl Drop for AttemptChild {
             AttemptSupervisorJoin::Joined(Err("producer owner dropped".to_owned())),
         );
         if let AttemptSupervisorJoin::Running(supervisor) = supervisor {
-            tokio::spawn(async move {
+            self.join_runtime.spawn(async move {
                 if let Err(error) = supervisor.await {
                     tracing::error!(%error, "abandoned producer supervisor failed during join");
                 }

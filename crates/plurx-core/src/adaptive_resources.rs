@@ -204,6 +204,14 @@ pub struct PhysicalCloseReceipt {
     binding: ReservationBinding,
 }
 
+impl PhysicalCloseReceipt {
+    /// Read-only core seam for committing a matching durable settlement.
+    /// The binding is not a close proof, mint, wire token or refund authority.
+    pub(crate) fn custody_binding(&self) -> ReservationBinding {
+        self.binding
+    }
+}
+
 struct Entry {
     binding: ReservationBinding,
     family_role: Option<(FamilyIdentity, FamilyRole)>,
@@ -659,7 +667,7 @@ impl CleanupAuthority {
     }
 
     pub fn close(&self, receipt: PhysicalCloseReceipt) -> Result<(), AdmissionRefusal> {
-        if receipt.binding != self.binding {
+        if receipt.custody_binding() != self.binding {
             return Err(AdmissionRefusal::ReceiptMismatch);
         }
         let mut state = self
@@ -671,7 +679,7 @@ impl CleanupAuthority {
             .entries
             .get(&self.binding.reservation)
             .ok_or(AdmissionRefusal::UnknownReservation)?;
-        if entry.binding != receipt.binding {
+        if entry.binding != receipt.custody_binding() {
             return Err(AdmissionRefusal::ReceiptMismatch);
         }
         if entry.state == ReservationState::Reserved {

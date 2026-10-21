@@ -175,3 +175,24 @@ async fn cancelled_published_settlement_waiter_cannot_skip_owned_drain() {
     .expect("independent cleanup joins and settles despite cancelled waiter");
     assert!(closed.load(SeqCst));
 }
+
+#[tokio::test]
+async fn off_runtime_attempt_drop_transfers_supervisor_join_to_its_original_runtime() {
+    let dir = crate::test_tempdir().expect("scratch");
+    let (session, release, closed) = session_with_pending_drain(dir.path()).await;
+    let child = session.child.lock().await.take().expect("owned attempt");
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        drop(child);
+    })
+    .join()
+    .expect("attempt Drop does not require an entered runtime");
+    release.send(()).expect("supervisor still owns real drain");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !closed.load(SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("original runtime completes the owned reader");
+}

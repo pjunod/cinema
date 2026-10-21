@@ -1562,6 +1562,9 @@ pub struct ObservedDiagnostics {
     /// died is a session whose telemetry silently stopped, and joining it is
     /// how that becomes visible.
     progress: Option<tokio::task::JoinHandle<()>>,
+    /// The runtime that owns these actual readers. Abandonment may happen on
+    /// another thread without an entered Tokio runtime, including unwinding.
+    join_runtime: Option<tokio::runtime::Handle>,
     /// Set when there was never a reader to join.
     unobserved: bool,
 }
@@ -1588,6 +1591,8 @@ impl ObservedDiagnostics {
             plan_digest,
             contract_id,
             unobserved: reader.is_none(),
+            join_runtime: (reader.is_some() || progress.is_some())
+                .then(tokio::runtime::Handle::current),
             reader,
             progress,
         }
@@ -1704,16 +1709,29 @@ impl ObservedDiagnostics {
 
 impl Drop for ObservedDiagnostics {
     fn drop(&mut self) {
-        // A handle dropped without settling means its producer was torn down
-        // before classification. Abort rather than detach: a reader that
-        // outlives the thing that owns it is exactly the "detached
-        // best-effort logging" §7.1 refuses, and nobody is left to read what
-        // it would find.
-        if let Some(reader) = self.reader.take() {
+        // An abandoned reader cannot qualify output. Abort immediately, but
+        // keep the actual task handles in an independent join owner: abort
+        // alone is not task completion, including during supervisor unwind.
+        let reader = self.reader.take();
+        let progress = self.progress.take();
+        if let Some(reader) = &reader {
             reader.abort();
         }
-        if let Some(progress) = self.progress.take() {
+        if let Some(progress) = &progress {
             progress.abort();
+        }
+        if reader.is_none() && progress.is_none() {
+            return;
+        }
+        if let Some(runtime) = self.join_runtime.take() {
+            runtime.spawn(async move {
+                if let Some(progress) = progress {
+                    let _ = progress.await;
+                }
+                if let Some(reader) = reader {
+                    let _ = reader.await;
+                }
+            });
         }
     }
 }
