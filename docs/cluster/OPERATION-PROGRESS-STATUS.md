@@ -1,6 +1,6 @@
 # Operation progress — wait mapping and model delivery
 
-**Status:** Fable approved; seven local configurations complete; CI smoke and affected gate pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** not opened; implementation and independent review precede qualification.
+**Status:** Fable approved; seven local configurations complete; CI smoke and affected gate pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** [#1249](http://forge.lan:3000/noirr/plurx/pulls/1249); reviewed, local formal slice complete, CI smoke and main gate pending.
 
 Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). This phase extends the [completed bounded pilot](FORMAL-VERIFICATION-PILOT-STATUS.md) with a source-backed wait map and a finite-state model that permits repeated execution. It does not yet establish operation progress or cluster deadlock freedom.
 
@@ -13,7 +13,7 @@ Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). Th
 | Repeated-operation model and contract | GPT-6.1 Sol | Integrated; final static parse and 46 mapped anchors pass; no final qualification yet |
 | Checker and existing CI integration | GPT-6 Luna | Committed and integrated; static Python parsing complete, unit checks await final review |
 | Final independent adversarial review | Fresh Fable 5.1 reviewer | APPROVE on `3da7e0a34`; no blockers; 12 comments being recorded |
-| Qualification, PR and merge | Codex coordinator | Seven local configurations complete; PR publication, CI smoke/unit checks and merge remain |
+| Qualification, PR and merge | Codex coordinator | PR #1249 open; seven local configurations complete; CI smoke/unit checks and merge remain |
 
 Persistent work uses agent-owned clones. One accidental tooling write to the operator checkout was reversed with explicit approval and an exact captured patch; the affected file has no remaining diff. Subsequent editing is confined to explicit owned paths. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
 
@@ -61,3 +61,5 @@ The first paperwork batch passed 13 of 14 rules (76 of 77 methods); the status p
 `contention.cfg` passed complete exploration. The first lock-cycle control produced the correct temporal lasso, but the inherited runner rejected TLC's annotated `Back to state` line. Luna fixed the strict matcher and added positive/malformed-format regressions; only the failed control reran. The passing contention raw log was verified against identical model/config/source/mapping hashes and reclassified with the final runner without repeating TLC. The parser change touches only temporal-violation recognition, leaving the positive path unchanged.
 
 The four controls and reconciliation/cancellation witnesses then completed with their expected named outcomes. These are seven locally qualified configurations, including retained contention; CI will run the remaining positive and success witness. C2's temporal-translator concern is settled by the completed positive contention run. Full traces, original parser rejection, retry and retention receipt are preserved with qualification evidence. No product runtime source changed.
+
+The source tracer inspected the actual lasso states for all four controls: the added token/publication lock cycle, scanner scheduling starvation despite continuing heartbeat, a busy walker retaining admission, and a durable running row after local cleanup without expiry. It also inspected witness final states: committed result plus terminal waiter plus reconciliation/cleanup, and cancelled cleanup with the request still pending. The first parser-rejected trace remains explicitly incomplete; the fixed rerun is the counted evidence.
