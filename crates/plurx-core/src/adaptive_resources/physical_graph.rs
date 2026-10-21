@@ -268,6 +268,24 @@ impl OwnedPhysicalGraph {
         command: &mut Command,
         work: ChildWork,
     ) -> io::Result<GraphRoot> {
+        self.spawn_root_inner(command, work, None).await
+    }
+
+    pub(super) async fn spawn_durable_root(
+        &mut self,
+        command: &mut Command,
+        work: ChildWork,
+        arm: super::runtime::DurableArm,
+    ) -> io::Result<GraphRoot> {
+        self.spawn_root_inner(command, work, Some(arm)).await
+    }
+
+    async fn spawn_root_inner(
+        &mut self,
+        command: &mut Command,
+        work: ChildWork,
+        arm: Option<super::runtime::DurableArm>,
+    ) -> io::Result<GraphRoot> {
         let custody = self.custody();
         let mut members = custody.members.lock().await;
         if custody.sealed.load(Ordering::Acquire) || members.roots.len() >= custody.root_limit {
@@ -275,7 +293,7 @@ impl OwnedPhysicalGraph {
                 "physical graph sealed or root bound reached",
             ));
         }
-        begin_acquisition(&self.ledger, custody, &mut members)?;
+        begin_acquisition_with_arm(&self.ledger, custody, &mut members, arm.as_ref())?;
         // A returned spawn error is NOT no-spawn proof, including attach/resume
         // failures inside the shared launcher. Ledger custody remains held.
         let (child, job) = match spawn_job_custodied(command, work) {
@@ -321,6 +339,19 @@ impl OwnedPhysicalGraph {
                 member.process == root.process && !member.pipes_claimed && !member.waited
             })
             .ok_or_else(|| io::Error::other("physical graph root unavailable for writer"))?;
+        // A durable graph may create tasks only through its journal-backed
+        // concrete task adapter, never this legacy public entry point.
+        if self
+            .ledger
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other("resource ledger unavailable"))?
+            .entries
+            .get(&custody.binding.reservation)
+            .is_none_or(|entry| entry.durable.is_some())
+        {
+            return Err(io::Error::other("durable writer requires armed adapter"));
+        }
         member.pipes_claimed = true;
         let pipes = RootPipes {
             stdin: member.child.stdin.take(),
@@ -390,6 +421,15 @@ fn begin_acquisition(
     custody: &GraphCustody,
     members: &mut Members,
 ) -> io::Result<()> {
+    begin_acquisition_with_arm(ledger, custody, members, None)
+}
+
+fn begin_acquisition_with_arm(
+    ledger: &ResourceLedger,
+    custody: &GraphCustody,
+    members: &mut Members,
+    arm: Option<&super::runtime::DurableArm>,
+) -> io::Result<()> {
     let mut state = ledger
         .inner
         .lock()
@@ -397,11 +437,22 @@ fn begin_acquisition(
     if state.invalid {
         return Err(io::Error::other("resource ledger invalid"));
     }
+    let epoch = state.epoch;
+    let draining = state.draining;
     let entry = state
         .entries
         .get_mut(&custody.binding.reservation)
         .filter(|entry| entry.binding == custody.binding)
         .ok_or_else(|| io::Error::other("physical reservation unavailable"))?;
+    if entry.durable.is_some()
+        && (draining
+            || epoch != entry.binding.allocation_epoch
+            || !arm.is_some_and(|arm| arm.matches(custody.binding, custody.identity.generation)))
+    {
+        return Err(io::Error::other(
+            "durable acquisition is not armed or current",
+        ));
+    }
     if custody.sealed.load(Ordering::Acquire)
         || !matches!(
             entry.state,
@@ -435,7 +486,7 @@ fn retain_or_release_unacquired(ledger: &ResourceLedger, custody: &GraphCustody)
     if entry.binding != custody.binding {
         return;
     }
-    if entry.state == ReservationState::Reserved {
+    if entry.state == ReservationState::Reserved && entry.durable.is_none() {
         // The exclusive acquisition owner never reached begin_acquisition.
         let _ = state.release(custody.binding.reservation);
     } else {

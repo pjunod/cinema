@@ -2,6 +2,43 @@
 use super::super::tests::{deadline, new_obligation, options, owner, vector};
 use super::*;
 
+#[tokio::test]
+async fn cancelled_borrowed_wait_retains_receiver_and_same_owned_result() {
+    let id = Uuid::new_v4();
+    let (sender, receiver) = oneshot::channel();
+    let mut pending = PendingOperation { id, receiver };
+    tokio::select! {
+        biased;
+        _ = pending.wait_retained() => panic!("sender has not completed"),
+        _ = std::future::ready(()) => {},
+    }
+    let result = OperationResult::Prepared(PreparedBatch {
+        obligations: Vec::new(),
+        sequence: 17,
+        trial_group_id: None,
+    });
+    sender
+        .send(Ok(result))
+        .expect("borrow cancellation did not drop receiver");
+    assert!(
+        matches!(pending.wait_retained().await, Ok(OperationResult::Prepared(batch)) if batch.sequence == 17)
+    );
+}
+
+#[tokio::test]
+async fn disconnected_result_is_unknown_commit_never_definite_prepare_rollback() {
+    let (sender, receiver) = oneshot::channel();
+    let mut pending = PendingOperation {
+        id: Uuid::new_v4(),
+        receiver,
+    };
+    drop(sender);
+    let error = pending.wait_retained().await.expect_err("owner stopped");
+    assert_eq!(error.kind, ErrorKind::WorkerStopped);
+    assert_eq!(error.certainty, CommitCertainty::Unknown);
+    assert_eq!(error.operation_id, Some(pending.id));
+}
+
 #[cfg(unix)]
 #[test]
 fn expired_retry_cannot_downgrade_prior_unknown_commit_or_forget_its_command() {

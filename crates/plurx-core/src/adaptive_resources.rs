@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 
 use crate::process::observation::Metric;
 
@@ -189,7 +190,7 @@ pub enum ReservationState {
     UnknownHeld,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ReservationBinding {
     ledger: u64,
     reservation: u64,
@@ -213,12 +214,23 @@ impl PhysicalCloseReceipt {
     }
 }
 
+/// Failed close returns the ORIGINAL nonclone proof to its cleanup owner.
+/// In particular a durable binding must route it through committed settlement.
+#[derive(Debug)]
+pub struct RejectedPhysicalClose {
+    pub reason: AdmissionRefusal,
+    pub receipt: PhysicalCloseReceipt,
+}
+
 struct Entry {
     binding: ReservationBinding,
     family_role: Option<(FamilyIdentity, FamilyRole)>,
     resources: ResourceVector,
     state: ReservationState,
     custody: Option<Arc<physical_graph::GraphCustody>>,
+    // Private operation identity, never a disk/wire refund capability. Present
+    // BEFORE prepare enqueue, including cleanup-only reconstruction.
+    durable: Option<Uuid>,
 }
 
 struct State {
@@ -230,6 +242,7 @@ struct State {
     entries: BTreeMap<u64, Entry>,
     trial: Option<BTreeSet<u64>>,
     invalid: bool,
+    draining: bool,
 }
 
 #[derive(Clone)]
@@ -296,6 +309,9 @@ impl State {
             .entries
             .get(&id)
             .ok_or(AdmissionRefusal::UnknownReservation)?;
+        if entry.durable.is_some() {
+            return Err(AdmissionRefusal::InvalidTransition);
+        }
         let Some(next_used) = self.used.checked_sub(entry.resources) else {
             self.invalid = true;
             return Err(AdmissionRefusal::Unavailable);
@@ -333,6 +349,7 @@ impl ResourceLedger {
                 entries: BTreeMap::new(),
                 trial: None,
                 invalid: false,
+                draining: false,
             })),
         })
     }
@@ -534,6 +551,7 @@ impl ResourceLedger {
                     resources,
                     state: ReservationState::Reserved,
                     custody: None,
+                    durable: None,
                 },
             );
             if trial {
@@ -642,7 +660,7 @@ impl Drop for ResourceReservation {
         let Some(entry) = state.entries.get_mut(&self.binding.reservation) else {
             return;
         };
-        if entry.state == ReservationState::Reserved {
+        if entry.state == ReservationState::Reserved && entry.durable.is_none() {
             // This unique, non-clonable handle still owns exclusive no-spawn
             // custody; the separate cleanup authority has no spawn operation.
             let _ = state.release(self.binding.reservation);
@@ -673,7 +691,12 @@ impl CleanupAuthority {
         Ok(())
     }
 
-    pub fn close(&self, receipt: PhysicalCloseReceipt) -> Result<(), AdmissionRefusal> {
+    pub fn close(&self, receipt: PhysicalCloseReceipt) -> Result<(), RejectedPhysicalClose> {
+        self.close_unpersisted(&receipt)
+            .map_err(|reason| RejectedPhysicalClose { reason, receipt })
+    }
+
+    fn close_unpersisted(&self, receipt: &PhysicalCloseReceipt) -> Result<(), AdmissionRefusal> {
         if receipt.custody_binding() != self.binding {
             return Err(AdmissionRefusal::ReceiptMismatch);
         }
@@ -852,9 +875,11 @@ mod tests {
         reservation.mark_spawn_possible().expect("spawn custody");
         drop(reservation);
         assert_eq!(
-            authority.close(PhysicalCloseReceipt {
-                binding: other_authority.binding
-            }),
+            authority
+                .close(PhysicalCloseReceipt {
+                    binding: other_authority.binding
+                })
+                .map_err(|rejected| rejected.reason),
             Err(AdmissionRefusal::ReceiptMismatch)
         );
         assert_eq!(

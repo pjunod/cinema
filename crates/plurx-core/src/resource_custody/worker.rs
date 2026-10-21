@@ -40,13 +40,20 @@ impl PendingOperation {
     pub fn operation_id(&self) -> Uuid {
         self.id
     }
-    pub(crate) async fn wait(self) -> Result<OperationResult, CustodyError> {
-        self.receiver.await.map_err(|_| {
-            CustodyError::new(
+    pub(crate) async fn wait(mut self) -> Result<OperationResult, CustodyError> {
+        self.wait_retained().await
+    }
+    /// Cancellation of a borrowed runtime wait preserves the actual receiver.
+    pub(crate) async fn wait_retained(&mut self) -> Result<OperationResult, CustodyError> {
+        (&mut self.receiver).await.map_err(|_| {
+            let mut error = CustodyError::new(
                 ErrorKind::WorkerStopped,
                 "custody result waiter disconnected",
             )
-            .bind(self.id, Vec::new())
+            .bind(self.id, Vec::new());
+            // The owner may have failed AFTER COMMIT, before sending its result.
+            error.certainty = CommitCertainty::Unknown;
+            error
         })?
     }
 }

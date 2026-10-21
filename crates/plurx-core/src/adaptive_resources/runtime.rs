@@ -4,6 +4,7 @@
 //! The journal remains separate from replicated Store and advisory telemetry.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use uuid::Uuid;
@@ -18,16 +19,32 @@ use crate::resource_custody::{
     ProcessIdentity, RecoverySnapshot, Role,
 };
 
+mod operations;
+
+/// Nonclone, nonserde, same-live-operation acquisition capability. Only the
+/// retained operation bridge constructs it AFTER exact durable arm commit.
+pub(super) struct DurableArm {
+    binding: ReservationBinding,
+    generation: Uuid,
+}
+impl DurableArm {
+    pub(super) fn matches(&self, binding: ReservationBinding, generation: Uuid) -> bool {
+        self.binding == binding && self.generation == generation
+    }
+}
+
 /// Runtime authority is constructed only through core startup's retained daemon
 /// lock. Callers can inspect data, but cannot extract its ledger or journal to
-/// bypass write-ahead custody. No production launch/settlement API exists yet.
+/// bypass write-ahead custody. Unsupported physical/recovery backends still
+/// prohibit production migration, independently of the private operation book.
 pub struct NodeResourceRuntime {
     // The blocking owner also retains the actual daemon lock through queue drain.
-    _journal: CustodyJournal,
+    journal: CustodyJournal,
     owner: OwnerIdentity,
     recovered: RecoverySnapshot,
     ledger: ResourceLedger,
     recovered_bindings: BTreeMap<Uuid, ReservationBinding>,
+    operations: Mutex<operations::Operations>,
 }
 
 impl NodeResourceRuntime {
@@ -44,11 +61,12 @@ impl NodeResourceRuntime {
             &recovered,
         )?;
         Ok(Self {
-            _journal: journal,
+            journal,
             owner,
             recovered,
             ledger,
             recovered_bindings,
+            operations: Mutex::new(operations::Operations::default()),
         })
     }
 
@@ -77,7 +95,7 @@ impl NodeResourceRuntime {
     /// Blocking final-owner shutdown, not request cancellation or settlement.
     /// Charges remain durable; joining the DB owner grants no physical refund.
     pub fn drain(self) -> Result<(), CustodyError> {
-        self._journal.drain()
+        self.journal.drain()
     }
 }
 
@@ -246,6 +264,7 @@ fn restore_accounting(
                     resources: record.resources,
                     state: ReservationState::UnknownHeld,
                     custody: None,
+                    durable: Some(record.obligation_id),
                 },
             );
             bindings.insert(record.obligation_id, binding);

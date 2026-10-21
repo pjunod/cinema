@@ -205,9 +205,11 @@ fn restored_binding_is_fresh_and_an_old_receipt_cannot_refund_it() {
         binding: new_bindings[&obligation],
     };
     assert_eq!(
-        cleanup.close(PhysicalCloseReceipt {
-            binding: old_bindings[&obligation]
-        }),
+        cleanup
+            .close(PhysicalCloseReceipt {
+                binding: old_bindings[&obligation]
+            })
+            .map_err(|rejected| rejected.reason),
         Err(AdmissionRefusal::ReceiptMismatch)
     );
     assert_eq!(new.snapshot().expect("new still held").used, vector(2));
@@ -232,7 +234,11 @@ fn daemon_owner_uses_actual_graph_process_instance_without_continuity_claim() {
     assert!(owner.platform_domain.continuity_provider.is_none());
 }
 
-fn options(root: &Path, owner: OwnerIdentity, installation: InstallationContext) -> OpenOptions {
+pub(super) fn options(
+    root: &Path,
+    owner: OwnerIdentity,
+    installation: InstallationContext,
+) -> OpenOptions {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
