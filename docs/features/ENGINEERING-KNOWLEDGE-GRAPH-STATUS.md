@@ -50,7 +50,7 @@ the public record after independent cross-adjudication.
 | M2 | Snapshot isolation, rebuildable SQLite index and separate evidence dimensions implemented | Final review and qualification pending. Canonical proof closure remains independent of retrieval scope. |
 | M3 | Bounded traversal, continuation binding and CLI drafted | Final review, boundary tests and latency measurements pending. |
 | M4 | Advisory capture, preflight body wiring and repository skill drafted | Final review and fast lane pending. Maintained personal-skill installation remains unknown; amendment supplied. |
-| M5 | Generic harness/provider and mechanical graph projection drafted; exact clean corpus export independently approved | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
+| M5 | Generic harness/provider, mechanical graph projection and OCI executor source drafted; exact clean corpus export independently approved | No dry run, provider call, scored run or savings result. Candidate-code acceptance requires verified OS isolation. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
 
 Timing is recorded as shared agent-session wall intervals, including waits,
@@ -58,8 +58,8 @@ not exclusive person-time or human labeling cost. Initial authoring lacks
 start timestamps; the conservative bound is retained without inventing a
 measurement. Later record curation must retain its own timing.
 
-No unit suite, compiler, benchmark run, provider call, CI workflow or hardware
-campaign has run for this implementation. JSON parsing, hashes and source-schema inspection are preparation,
+No unit suite, compilation, benchmark run, provider call, CI workflow or hardware
+campaign has run for this implementation. Toolchain/image identities were read only. JSON parsing, hashes and source-schema inspection are preparation,
 not unit-test or qualification claims. The approved plan's earlier 28 doc
 checks remain historical evidence for that reviewed document revision.
 
@@ -130,6 +130,14 @@ common literal search/read/outline tools are an explicit study limitation,
 not a claim of full-workflow parity. No outside source, new case constraint
 or future answer is introduced to compensate. Model/settings, dry-run usage
 and a finite ceiling must be frozen before runtime.
+
+**D11, 2026-10-21:** Current main `957258574` was merged cleanly before
+review preparation; the evaluation baseline remains `168fe74fb`. Read-only
+inspection found an existing local Linux container engine and cached immutable
+1.97.1 runtime images. Toolchain execution, offline dependencies and actual
+isolation probes remain unverified until final review. Identical complete
+patch/proof inputs may reuse an actual acceptance result; all reuse and
+failed runs remain visible. No image pull, container or new service has run.
 
 ## Publication — one owner and an honest landing state
 

@@ -105,5 +105,6 @@
       "access_policy": "trusted_private_evaluator_only"
     }
   ],
-  "runtime_qualification": "not-run; projection review is not execution or CI evidence"
+  "runtime_qualification": "not-run; projection review is not execution or CI evidence",
+  "scope": "Corpus normalization and clean export preparation only; counters are not whole-project activity."
 }
