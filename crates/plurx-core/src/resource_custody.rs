@@ -1,0 +1,328 @@
+//! Node-local durable physical-obligation custody.
+//!
+//! Only the core runtime may mutate custody. Public snapshots/codecs are data,
+//! never receipt or launch authority. Initialize under the existing daemon lock
+//! before startup cleanup. No journal operation touches the accounting mutex.
+mod codec;
+mod schema;
+mod storage;
+#[cfg(test)]
+mod tests;
+mod transaction;
+mod worker;
+
+use crate::adaptive_resources::{PhysicalCloseReceipt, ReservationBinding, ResourceVector};
+pub use codec::{
+    Adapter, BootIdentity, ClosedMemberFact, Manifest, MemberKind, ObservedIdentity, PlannedMember,
+    PlatformDomain, ProcessIdentity, RecoveryMethod,
+};
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+use uuid::Uuid;
+pub use worker::{CustodyJournal, PendingOperation};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    UnsupportedStorage,
+    UnreadableAuthority,
+    IdentityMismatch,
+    InvalidCommand,
+    Conflict,
+    Exhausted,
+    QueueFull,
+    Deadline,
+    WorkerStopped,
+    Storage,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitCertainty {
+    NotStarted,
+    RolledBack,
+    Unknown,
+}
+#[derive(Clone, Debug, thiserror::Error, Serialize)]
+#[error("{message}")]
+pub struct CustodyError {
+    pub kind: ErrorKind,
+    pub operation_id: Option<Uuid>,
+    pub obligations: Vec<Uuid>,
+    pub certainty: CommitCertainty,
+    /// Sanitized constant description; never native paths, SQL, or owner data.
+    pub message: &'static str,
+}
+impl CustodyError {
+    fn new(kind: ErrorKind, message: &'static str) -> Self {
+        Self {
+            kind,
+            operation_id: None,
+            obligations: Vec::new(),
+            certainty: CommitCertainty::NotStarted,
+            message,
+        }
+    }
+    fn bind(mut self, operation: Uuid, obligations: Vec<Uuid>) -> Self {
+        self.operation_id = Some(operation);
+        self.obligations = obligations;
+        self
+    }
+}
+impl From<std::io::Error> for CustodyError {
+    fn from(_: std::io::Error) -> Self {
+        Self::new(ErrorKind::Storage, "custody filesystem operation failed")
+    }
+}
+impl From<rusqlite::Error> for CustodyError {
+    fn from(_: rusqlite::Error) -> Self {
+        Self::new(ErrorKind::Storage, "custody SQLite operation failed")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallationContext {
+    FirstInstallation,
+    Existing,
+}
+#[derive(Clone, Debug)]
+pub struct OwnerIdentity {
+    pub owner_id: Uuid,
+    pub node_id: String,
+    pub cluster_id: String,
+    pub os_boot: BootIdentity,
+    pub daemon_process: ProcessIdentity,
+    pub platform_domain: PlatformDomain,
+}
+/// Startup-only composition inputs. The caller must clone the actual held
+/// SelectedStore lock, not an unrelated file. The worker retains it until drain.
+pub struct OpenOptions {
+    pub data_dir: PathBuf,
+    pub excluded_roots: Vec<PathBuf>,
+    pub installation: InstallationContext,
+    pub owner: OwnerIdentity,
+    pub daemon_lock: DaemonLockGuard,
+    pub queue_capacity: usize,
+}
+
+/// Only existing core startup/store ownership can construct this guard. A path
+/// or arbitrary public file supplied by a daemon/request caller is not authority.
+pub struct DaemonLockGuard(Arc<File>);
+impl DaemonLockGuard {
+    pub(crate) fn from_held_lock(file: File) -> Self {
+        Self(Arc::new(file))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Prepared,
+    AcquisitionPossible,
+    Sealed,
+    UnknownHeld,
+    Settled,
+}
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::AcquisitionPossible => "acquisition_possible",
+            Self::Sealed => "sealed",
+            Self::UnknownHeld => "unknown_held",
+            Self::Settled => "settled",
+        }
+    }
+    fn parse(s: &str) -> Result<Self, CustodyError> {
+        match s {
+            "prepared" => Ok(Self::Prepared),
+            "acquisition_possible" => Ok(Self::AcquisitionPossible),
+            "sealed" => Ok(Self::Sealed),
+            "unknown_held" => Ok(Self::UnknownHeld),
+            "settled" => Ok(Self::Settled),
+            _ => Err(codec::invalid()),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Video,
+    Audio,
+    Companion,
+}
+impl Role {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Companion => "companion",
+        }
+    }
+    fn parse(s: &str) -> Result<Self, CustodyError> {
+        match s {
+            "video" => Ok(Self::Video),
+            "audio" => Ok(Self::Audio),
+            "companion" => Ok(Self::Companion),
+            _ => Err(codec::invalid()),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct MemberRecord {
+    pub plan: PlannedMember,
+    pub phase: String,
+    pub observed: Option<ObservedIdentity>,
+}
+#[derive(Clone, Debug)]
+pub struct ObligationRecord {
+    pub obligation_id: Uuid,
+    pub graph_id: Uuid,
+    pub owner_id: Uuid,
+    pub allocation_epoch: u64,
+    pub resources: ResourceVector,
+    pub trial_group_id: Option<Uuid>,
+    pub phase: Phase,
+    pub sequence: i64,
+    pub manifest: Manifest,
+    pub members: Vec<MemberRecord>,
+    pub hold_reason: Option<String>,
+    /// Reconstruction is cleanup-only regardless of the persisted phase.
+    pub cleanup_only: bool,
+}
+#[derive(Clone, Debug)]
+pub struct FamilyEdge {
+    pub family_id: Uuid,
+    pub role: Role,
+    pub obligation_id: Uuid,
+}
+/// Complete accounting, not a paginated diagnostic. ALL records are cleanup-only
+/// after restart, including intact prepared candidates lacking a fencing proof.
+#[derive(Clone, Debug)]
+pub struct RecoverySnapshot {
+    pub journal_id: Uuid,
+    pub installation_id: Uuid,
+    pub obligations: Vec<ObligationRecord>,
+    pub families: Vec<FamilyEdge>,
+    pub total: ResourceVector,
+    pub trial_groups: Vec<Uuid>,
+    pub protected_paths: Vec<PathBuf>,
+    /// Native old-owner identities needed by a positive fencing backend.
+    pub owners: Vec<OwnerIdentity>,
+}
+
+/// Private runtime capability, never deserialized from an obligation row.
+#[derive(Clone, Debug)]
+pub(crate) struct ObligationHandle {
+    journal_id: Uuid,
+    owner_id: Uuid,
+    obligation_id: Uuid,
+    graph_id: Uuid,
+    runtime_binding: ReservationBinding,
+}
+impl ObligationHandle {
+    pub(crate) fn obligation_id(&self) -> Uuid {
+        self.obligation_id
+    }
+    pub(crate) fn graph_id(&self) -> Uuid {
+        self.graph_id
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct FamilyHandle {
+    journal_id: Uuid,
+    family_id: Uuid,
+}
+/// Each role names either a new index in this atomic bundle or retained custody.
+#[derive(Clone, Debug)]
+pub(crate) enum RoleTarget {
+    New(usize),
+    Retained(ObligationHandle),
+}
+#[derive(Clone, Debug)]
+pub(crate) struct FamilyRequest {
+    pub family: FamilyHandle,
+    pub roles: Vec<(Role, RoleTarget)>,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct NewObligation {
+    pub runtime_binding: ReservationBinding,
+    pub allocation_epoch: u64,
+    pub resources: ResourceVector,
+    /// The ACTUAL graph generation/process_instance, not another UUID pair.
+    pub manifest: Manifest,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct PrepareBatch {
+    pub obligations: Vec<NewObligation>,
+    pub families: Vec<FamilyRequest>,
+    pub trial: bool,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedBatch {
+    pub obligations: Vec<ObligationHandle>,
+    pub sequence: i64,
+    pub trial_group_id: Option<Uuid>,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct TransitionKey {
+    pub handle: ObligationHandle,
+    pub operation_id: Uuid,
+    pub expected_sequence: i64,
+}
+/// No Clone/serde: actual physical proof survives cancellation in the owner book.
+#[derive(Debug)]
+pub(crate) struct PhysicalSettlement {
+    pub receipt: PhysicalCloseReceipt,
+    pub facts: Vec<ClosedMemberFact>,
+}
+
+#[derive(Debug)]
+pub(crate) enum Mutation {
+    Arm { members: Vec<Uuid> },
+    RecordAcquired { identity: ObservedIdentity },
+    Seal,
+    Hold { reason: String },
+    CancelPrepared,
+    Settle(PhysicalSettlement),
+}
+/// Queue/deadline refusal returns actual proof to the existing cleanup owner.
+#[derive(Debug)]
+pub(crate) struct RejectedTransition {
+    pub error: CustodyError,
+    pub key: TransitionKey,
+    pub mutation: Mutation,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CommitAck {
+    pub operation_id: Uuid,
+    pub obligation_id: Uuid,
+    pub graph_id: Uuid,
+    pub sequence: i64,
+    pub phase: Phase,
+}
+
+struct QueuedOperation {
+    id: Uuid,
+    deadline: Instant,
+    command: Command,
+}
+enum Command {
+    Prepare {
+        batch: PrepareBatch,
+        handles: Vec<ObligationHandle>,
+        trial: Option<Uuid>,
+    },
+    Change {
+        key: TransitionKey,
+        mutation: Mutation,
+    },
+}
+#[derive(Clone, Debug)]
+pub(crate) enum OperationResult {
+    Prepared(PreparedBatch),
+    Changed(CommitAck),
+}

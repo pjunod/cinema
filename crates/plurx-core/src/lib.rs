@@ -43,6 +43,7 @@ pub mod playback;
 pub mod playback_principal;
 pub mod process;
 pub mod remote_control;
+pub mod resource_custody;
 pub mod resource_history;
 pub mod resource_limits;
 pub mod resource_observation;
