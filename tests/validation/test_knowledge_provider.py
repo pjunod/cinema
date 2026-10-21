@@ -81,6 +81,38 @@ class EvaluationProviderTests(unittest.TestCase):
         self.assertEqual({"type": "disabled"}, request["thinking"])
         self.assertEqual([{"max_retries": 0, "timeout": 30}], client.option_calls)
 
+    def test_thinking_modes_refuse_before_counting_or_spending(self):
+        for thinking in ({"type": "enabled", "budget_tokens": 1024}, {"type": "adaptive"}, None):
+            with self.subTest(thinking=thinking):
+                api = FakeMessages(response=response())
+                client = FakeClient(api)
+                with self.assertRaises(EvaluationProviderError) as caught:
+                    AnthropicMessagesBackend(client, model="claude-haiku-4-5-20251001",
+                                             settings={"thinking": thinking}, tool_registry=SAFE_TOOLS)
+                self.assertEqual("UnsupportedThinkingMode", caught.exception.error_class)
+                with self.assertRaises(EvaluationProviderError):
+                    make_input_counter(client, model="claude-haiku-4-5-20251001",
+                                       settings={"thinking": thinking}, tool_registry=SAFE_TOOLS,
+                                       timeout_seconds=10)
+                self.assertEqual([], api.create_calls)
+                self.assertEqual([], api.count_calls)
+
+    def test_unexpected_signed_thinking_cannot_become_unsigned_tool_history(self):
+        for kind in ("thinking", "redacted_thinking"):
+            with self.subTest(kind=kind):
+                api = FakeMessages(response=response(content=[
+                    SimpleNamespace(type=kind, thinking="opaque", signature="signed"),
+                    SimpleNamespace(type="tool_use", id="toolu-1", name="read", input={"path": "x.py"}),
+                ]))
+                backend = AnthropicMessagesBackend(FakeClient(api), model="claude-haiku-4-5-20251001",
+                                                   settings={"thinking": {"type": "disabled"}},
+                                                   tool_registry=SAFE_TOOLS)
+                with self.assertRaises(EvaluationProviderError) as caught:
+                    backend.respond((message("user", "inspect"),), ("read",),
+                                    max_output_tokens=100, timeout_seconds=10)
+                self.assertEqual("UnsupportedThinkingResponse", caught.exception.error_class)
+                self.assertEqual(1, len(api.create_calls))
+
     def test_tool_only_response_is_normalized_without_executing_it(self):
         reply = response(
             content=[SimpleNamespace(type="tool_use", id="toolu-1", name="read",

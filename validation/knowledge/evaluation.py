@@ -596,6 +596,9 @@ class Score:
     patch_accepted: bool | None
     critical_authority_claim: bool = False
     critical_patch_regression: bool = False
+    # Private scorers commit to the gold set and each honored boolean. Synthetic
+    # fixtures may omit this; the vector itself never enters public output.
+    judgment_digest: str | None = None
 
     def __post_init__(self) -> None:
         _require(bool(self.scorer_id) and bool(self.run_id), "scorer/run identities required")
@@ -605,6 +608,11 @@ class Score:
         _require(self.patch_accepted is None or type(self.patch_accepted) is bool, "invalid patch acceptance")
         _require(type(self.critical_authority_claim) is bool and type(self.critical_patch_regression) is bool,
                  "critical findings must be boolean")
+
+        _require(self.judgment_digest is None or (
+            isinstance(self.judgment_digest, str) and len(self.judgment_digest) == 64
+            and all(char in "0123456789abcdef" for char in self.judgment_digest)),
+            "invalid per-obligation judgment digest")
 
     @property
     def correct(self) -> bool:
@@ -624,7 +632,8 @@ class IndependentScorer(Protocol):
 
 def _score_signature(score: Score) -> tuple[Any, ...]:
     return (score.gold_count, score.missed_count, score.false_obligations, score.unsupported_claims,
-            score.patch_accepted, score.critical_authority_claim, score.critical_patch_regression)
+            score.patch_accepted, score.critical_authority_claim, score.critical_patch_regression,
+            score.judgment_digest)
 
 
 def _interval(values: Sequence[float]) -> tuple[float, float]:

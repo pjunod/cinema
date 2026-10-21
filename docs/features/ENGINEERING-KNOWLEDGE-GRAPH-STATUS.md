@@ -8,7 +8,7 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — source prepared for final independent review
+## Current work — addressing independent implementation review
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
@@ -19,7 +19,7 @@ updates are implementation status, not a new claim of Fable approval.
 
 | Owner | Scope | State / next action |
 |---|---|---|
-| Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; later graph-record author | Active. Must not read private gold answers. |
+| Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; graph-record author | Active. R1/R5/R6 corrections; no private gold access. |
 | Sol 6.1 curator A | Private routing gold; no source or graph-record writes | Done. Six routing cases sealed; independent B/C approval. |
 | Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | Done. Six evidence cases sealed; independent A/C approval. |
 | Sol 6.1 scorer C | Independent gold/rubric adjudication, private corpus projection and trusted study driver; no record writes | Projection independently approved; generic driver source frozen for final review. No gold enters record-author or solver context. |
@@ -37,6 +37,14 @@ Required 4/4/4 task balance, 6/6 cohorts, two empty controls and five
 stale/disputed cases are frozen. Gold answers, hidden mutations and rubric content stay outside Git,
 record-author and future solver corpora. Only verified digests/counts enter
 the public record after independent cross-adjudication.
+
+Astra returned **REQUEST_CHANGES** on candidate `ac7a72c9e` in Hermes
+`t_ff338f21`: eight findings concern receipt byte coverage, sealed semantic
+visibility, actual graph identity, acceptance infrastructure classification,
+thinking protocol settings, per-obligation scorer agreement, historical path
+authority and public token evidence. All are assigned for correction and a
+same-task exact-source recheck. This is implementation review; the earlier
+Fable approval remains specification-only. No test or study result is implied.
 
 ## Milestone acceptance — distinguish source from qualification
 

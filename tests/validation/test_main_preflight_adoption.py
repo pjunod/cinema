@@ -341,6 +341,31 @@ class MainPreflightAdoptionCase(unittest.TestCase):
             adoption._TREE_CACHE.update(saved)
             adoption._DIGEST_CACHE.clear()
 
+    def test_knowledge_smoke_witness_binds_document_and_physical_child_bytes(self):
+        root = Path(__file__).resolve().parents[2]
+        rows = json.loads((root / "validation/main-preflight-inputs.json").read_text())["families"]
+        row = adoption.witness("operations:test_knowledge_pilot.KnowledgePilotSmokeTests.test_code_context_is_source_bound_and_utf8_bounded", rows)
+        selected = ["docs/PLAYBACK.md", "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
+                    "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
+                    "crates/plurx-core/src/playback/tests/child.rs",
+                    "crates/plurxd/src/http/stream/tests/child.rs",
+                    "tests/validation/test_main_unit_receipts.py"]
+        old, new = "e" * 40, "f" * 40
+        saved = dict(adoption._TREE_CACHE)
+        try:
+            files = {path: ("100644", "blob", "1" * 40) for path in selected}
+            files["unrelated/body.rs"] = ("100644", "blob", "1" * 40)
+            adoption._TREE_CACHE[old] = files
+            for path in selected + ["unrelated/body.rs"]:
+                adoption._TREE_CACHE[new] = {**files, path: ("100644", "blob", "2" * 40)}
+                adoption._DIGEST_CACHE.clear()
+                changed = adoption.input_digest(old, row) != adoption.input_digest(new, row)
+                self.assertEqual(path != "unrelated/body.rs", changed, path)
+        finally:
+            adoption._TREE_CACHE.clear()
+            adoption._TREE_CACHE.update(saved)
+            adoption._DIGEST_CACHE.clear()
+
     def test_own_origin_binds_job_attempt_and_inherited_inputs_are_independently_rebound(self):
         journal = {"run": 12, "commit": "a" * 40, "job": 34, "attempt": 1, "environment": {}}
         record = {**journal, "inputs": "b" * 64, "outcome": "success"}

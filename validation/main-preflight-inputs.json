@@ -4911,16 +4911,22 @@
         "tests/playback/routing-decisions.toml",
         "validation/python_unit_receipts.py",
         "validation/main_unit_receipts.py",
-        "validation/main_preflight_adoption.py"
+        "validation/main_preflight_adoption.py",
+        "crates/plurx-core/src/playback/**",
+        "crates/plurxd/src/http/stream.rs",
+        "crates/plurxd/src/http/stream/**",
+        "docs/PLAYBACK.md",
+        "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
+        "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md",
+        "tests/validation/test_main_preflight_adoption.py",
+        "tests/validation/test_main_unit_receipts.py",
+        "tests/validation/test_python_unit_receipts.py"
       ],
       "pathsets": [
         "crates/plurx-core/src/playback/**",
-        "crates/plurxd/src/http/stream*",
-        "docs/PLAYBACK.md",
-        "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md",
-        "docs/streaming/PLAYBACK-CAPS-V2-PLAN.md"
+        "crates/plurxd/src/http/stream/**"
       ],
-      "reason": "Real pilot smoke reads the explicit data, route source/test expansion and governed references. Unreviewed closure is never reusable."
+      "reason": "Real pilot CLI smoke binds bytes and modes of reviewed route owners/split children, authored literal scopes, receipt tests and governing documents. Pathsets additionally bind physical child membership; unrelated bodies remain reusable."
     },
     {
       "id_prefix": "validation:test_knowledge_evaluation.",

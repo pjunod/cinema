@@ -101,6 +101,10 @@ def _checked_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
     copied = _json_copy(dict(settings))
     if not isinstance(copied, dict):
         raise EvaluationProviderError("InvalidSettings")
+    # Message/Response cannot preserve signed reasoning blocks. Refuse before
+    # counting or spending instead of silently corrupting a tool round trip.
+    if "thinking" in copied and copied["thinking"] != {"type": "disabled"}:
+        raise EvaluationProviderError("UnsupportedThinkingMode")
     return copied
 
 
@@ -267,6 +271,8 @@ def _response(client_response: Any, allowed_tool_names: frozenset[str]) -> Respo
             value = _field(block, "text")
             if isinstance(value, str):
                 text_parts.append(value)
+        elif kind in {"thinking", "redacted_thinking"}:
+            raise EvaluationProviderError("UnsupportedThinkingResponse")
         elif kind == "tool_use":
             call_id, name, arguments = (_field(block, "id"), _field(block, "name"), _field(block, "input"))
             if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:

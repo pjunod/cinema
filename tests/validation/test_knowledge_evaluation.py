@@ -299,6 +299,16 @@ class ComparativeAnalysisTests(unittest.TestCase):
         self.assertEqual(result["disagreements"], [scores[0].run_id])
         self.assertEqual(result["comparisons"]["records"]["decision"], "inconclusive")
 
+    def test_equal_miss_counts_with_different_obligations_remain_disagreement(self):
+        batch = completed(cases(6))
+        scores = [replace(score, judgment_digest="a" * 64) for score in scored(batch, missed_a=5, missed_b=3, missed_c=3)]
+        scores[0] = replace(scores[0], judgment_digest="b" * 64)
+        result = analyze(batch, scores, bootstrap_samples=30)
+        self.assertEqual([scores[0].run_id], result["disagreements"])
+        self.assertEqual("inconclusive", result["comparisons"]["records"]["decision"])
+        with self.assertRaises(EvaluationError):
+            replace(scores[0], judgment_digest="not-a-digest")
+
     def test_critical_regression_vetoes_otherwise_positive_token_results(self):
         batch = completed(cases(6))
         target = next(run.spec.id for run in batch.runs if run.spec.arm == "C")
