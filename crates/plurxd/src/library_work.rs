@@ -1097,7 +1097,7 @@ mod tests {
         next_worker_event(&mut events, "w1", WorkerPoint::CompletionReconciled).await;
         assert!(task.await.expect("worker reconciled completion").0);
         let record = request_record(store.as_ref(), "completion-ack").await;
-        assert_eq!(record.state, "completed");
+        assert_eq!(record.state, "succeeded");
         assert!(
             record.result.is_some(),
             "committed completion survives lost acknowledgement"

@@ -285,7 +285,7 @@ async fn enqueue_and_claim_library_work(
     } else {
         JobKind::LibraryScan
     };
-    let ClaimOutcome::Claimed { job } = store
+    let outcome = store
         .claim_job(ClaimJob {
             job_id: request.job_id.clone(),
             expected_revision: 0,
@@ -298,9 +298,10 @@ async fn enqueue_and_claim_library_work(
             dispatched_at_ms: now,
         })
         .await
-        .expect("claim admitted library job")
-    else {
-        panic!("{backend}: library claim refused");
+        .expect("claim admitted library job");
+    let job = match outcome {
+        ClaimOutcome::Claimed { job } => job,
+        refused => panic!("{backend}: library claim refused: {refused:?}"),
     };
     UnboundLibraryWork {
         library_id,
@@ -1011,8 +1012,15 @@ async fn formal_publication_library_captured_token_completes_while_durable_owner
             .await
             .expect("read result")
             .remove(0);
-        assert_eq!(record.state, "completed", "{backend}");
-        assert!(record.result.is_some(), "{backend}");
+        assert_eq!(record.state, "failed", "{backend}");
+        assert!(
+            matches!(
+                record.result,
+                Some(LibraryWorkResult::Failed { ref error })
+                    if error == "scheduled result"
+            ),
+            "{backend}: stored result matches the submitted failure"
+        );
         scan.retire(store.as_ref(), now).await;
     })
     .await;

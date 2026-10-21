@@ -64,8 +64,8 @@ membership. The mapping and any unchecked transition remain visible in
 | W3 | `library_worker_domain_loss_joins_before_release_and_admission_drop` in `library_work.rs` | Domain-loss notification while processing is held at the pre-scan checkpoint; the processing future returns before release, retirement and admission drop. |
 | W4 | `library_worker_queue_loss_joins_before_release_and_retirement` in `library_work.rs` | Local queue-loss notification while processing is held at the pre-scan checkpoint; the processing future returns before release and cleanup. The durable job is queued after retirement. |
 | W5 | `library_worker_admission_pressure_joins_before_release_and_drop` in `library_work.rs` | Test-only pressure selection while processing is held at the pre-scan checkpoint; the processing future returns before release and admission drop. |
-| W6/S4 | `library_worker_reconciles_lost_completion_acknowledgement` in `library_work.rs` | The real worker commits completion, loses its acknowledgement, rereads durable state and observes `completed`. |
-| S1 | `formal_publication_library_captured_token_completes_while_durable_owners_current` in `formal_publication.rs` | A captured token is submitted directly to Store and succeeds while both durable owners remain live. |
+| W6/S4 | `library_worker_reconciles_lost_completion_acknowledgement` in `library_work.rs` | The real worker commits completion, loses its acknowledgement, rereads durable state and observes the public projection `succeeded`. |
+| S1 | `formal_publication_library_captured_token_completes_while_durable_owners_current` in `formal_publication.rs` | A captured token is submitted directly to Store and succeeds while both durable owners remain live; the submitted `Failed` result is recorded as `failed`. |
 | S2/S3 | `formal_publication_library_completion_after_release_and_rebind_is_rejected` in `formal_publication.rs` | Store rejects the old captured token after release and after a distinct job binds a higher domain fence; the new owner can complete its own request. |
 
 W1 uses two different durable jobs, matching the production dedupe identities.

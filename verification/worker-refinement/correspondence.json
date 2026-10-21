@@ -65,7 +65,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
+        "sha256": "5aabc17faad7b0aac1cdd913c3300f714f2bf6198da4f037e2a101f5e985e555"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -114,7 +114,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -148,7 +148,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -165,7 +165,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -182,7 +182,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -199,7 +199,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -233,7 +233,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -250,7 +250,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
+        "sha256": "5aabc17faad7b0aac1cdd913c3300f714f2bf6198da4f037e2a101f5e985e555"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -269,7 +269,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -286,7 +286,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -303,7 +303,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
+        "sha256": "5aabc17faad7b0aac1cdd913c3300f714f2bf6198da4f037e2a101f5e985e555"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -319,7 +319,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -336,7 +336,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -353,7 +353,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -369,7 +369,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -385,7 +385,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -401,7 +401,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -417,7 +417,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -433,7 +433,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -450,7 +450,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -467,7 +467,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -484,7 +484,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -501,7 +501,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -518,7 +518,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -534,7 +534,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -857,7 +857,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "library_worker_reconciles_lost_completion_acknowledgement",
         "anchor": "async fn library_worker_reconciles_lost_completion_acknowledgement()",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -873,7 +873,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -890,7 +890,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -907,7 +907,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -942,7 +942,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -959,7 +959,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -976,7 +976,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -992,7 +992,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1009,7 +1009,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1026,7 +1026,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1043,7 +1043,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1092,7 +1092,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1256,7 +1256,7 @@
         "file": "crates/plurxd/src/library_work.rs",
         "symbol": "work_library_queue",
         "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "0c745c019eb4614363dfa0953747862924f934b917bc59e67ef311668a6596f5"
+        "sha256": "b71e341152ca729c8df14ca9a606359077c9ad2e28f263a93518c4b56011d110"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1273,7 +1273,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_completion_after_release_and_rebind_is_rejected",
         "anchor": "async fn formal_publication_library_completion_after_release_and_rebind_is_rejected()",
-        "sha256": "115142892dba22215953870c6e302e6eeae168f06ba54c5f95cca99476558244"
+        "sha256": "5aabc17faad7b0aac1cdd913c3300f714f2bf6198da4f037e2a101f5e985e555"
       },
       "held_across_await": [],
       "completed_by": "store trigger",
