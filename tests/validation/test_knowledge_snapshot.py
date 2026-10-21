@@ -2,6 +2,7 @@
 
 These fixtures qualify no execution receipt, CI run or real environment.
 """
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,29 @@ class KnowledgeSnapshotTests(unittest.TestCase):
                              ("coverage", "scopes=[]\n"), ("conflicts", "conflicts=[]\n")):
             self.write("validation/knowledge/" + name + ".toml",
                        'schema_version=1\nrepository="plurx"\n' + arrays)
+        self.write("validation/knowledge/records.toml", '''schema_version=1
+repository="plurx"
+anchors=[]
+edges=[]
+claims=[]
+[[records]]
+id="plurx:check:fixture-reviewed"
+kind="check"
+title="Explicit reviewed synthetic source scope"
+scope=["src/**", "cases/*.json"]
+anchors=[]
+[records.attributes]
+check_kind="static"
+governed_ids=[]
+reference="docs/policy.md"
+[records.provenance]
+method="reviewed"
+author="Synthetic fixture author"
+reviewer="Synthetic fixture reviewer"
+origin="validation/knowledge/records.toml"
+source_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+revision="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+''')
         self.write("tests/playback/routing-decisions.toml", '''version=1
 [[decisions]]
 id="fixture.route"
@@ -143,7 +167,7 @@ checks=["fixture-check"]
             capture(self.root, extra_paths=(".env",))
 
     def test_reviewed_broad_pattern_cannot_ingest_private_members(self):
-        # The reviewed catalog selects src/**, but every concrete member must
+        # The reviewed authored record selects src/**; every concrete member must
         # independently satisfy the central source policy before stat/open.
         for relative in ("src/.codex/auth.json", "src/.hermes/auth.json", "src/auth.json",
                          "src/__pycache__/cached.pyc", "src/evaluation-private/answer.json"):
@@ -159,6 +183,35 @@ checks=["fixture-check"]
                     with self.assertRaises(KnowledgeError):
                         snapshot_module._read(self.root, relative)
                 path.unlink()
+
+    def test_impact_and_definition_scopes_do_not_capture_unrelated_bodies_but_receipt_proof_does(self):
+        catalog = self.root / "validation/points.toml"
+        catalog.write_text(catalog.read_text().replace('paths=["src/**"]', 'paths=["src/**", "unrelated/**"]'))
+        self.descriptor = {**self.descriptor,
+                           "inputs": [*self.descriptor["inputs"], "proof/**"],
+                           "pathsets": [*self.descriptor["pathsets"], "proof-members/*.json"]}
+        self.write_descriptor()
+        self.write("unrelated/body.py", "unrelated impact body; never capture")
+        self.write("proof/dependency.py", "canonical receipt proof")
+        self.write("proof-members/new.json", "{}")
+        graph = model.load_graph(self.root)
+        definitions = snapshot_module.selection(graph)
+        selected, _ = snapshot_module._members(self.root, definitions)
+        self.assertNotIn("unrelated/body.py", selected)
+        self.assertNotIn("proof/dependency.py", selected)
+        self.assertNotIn("proof-members/new.json", selected)
+        # A narrower receipt retrieval claim cannot erase the canonical linked
+        # check's complete input/path-set patterns.
+        check = next(node for node in graph.nodes if node.attributes.get("check_kind") == "canonical-preflight")
+        narrow = {"inputs": ["src/input.rs"]}
+        receipt = self.receipt(check_id=check.id, scope_descriptor=narrow,
+                               descriptor_digest=content_digest(narrow))
+        actual = replace(graph, receipts=(receipt,))
+        actual_selection = snapshot_module.selection(actual)
+        selected, _ = snapshot_module._members(self.root, actual_selection)
+        self.assertNotIn("unrelated/body.py", selected)
+        self.assertIn("proof/dependency.py", selected)
+        self.assertIn("proof-members/new.json", selected)
 
     def test_delete_rename_mode_and_aba_invalidate(self):
         original = capture(self.root)

@@ -131,21 +131,38 @@ def _inventory(root: Path) -> tuple[set[str], set[str]]:
 
 
 def selection(graph: model.GraphData, extra_paths=()) -> tuple[str, ...]:
+    """Select physical graph sources, authored scopes and actual receipt proof.
+
+    Imported impact patterns and definition-only check witnesses remain logical
+    metadata. Their canonical manifest bytes already bind those definitions.
+    """
     paths = set(BASE_PATHS)
+    nodes = {node.id: node for node in graph.nodes}
     for anchor in graph.anchors:
         paths.update((anchor.path, anchor.owner_module, *anchor.physical_paths))
     for node in graph.nodes:
-        paths.update(node.scope)
+        if node.kind in model.AUTHORED_KINDS and node.provenance.method == "reviewed":
+            paths.update(node.scope)
+        if node.kind == "artifact" and node.attributes.get("path"):
+            paths.add(node.attributes["path"])
         if not node.provenance.origin.startswith("plurx:"):
             paths.add(node.provenance.origin)
         descriptor = node.attributes.get("descriptor", {})
-        for field in ("inputs", "pathsets", "paths"):
-            paths.update(descriptor.get(field, ()))
         if descriptor.get("source_manifest"):
             paths.add(descriptor["source_manifest"])
     for receipt in graph.receipts:
-        for field in ("inputs", "pathsets", "paths"):
-            paths.update(receipt.scope_descriptor.get(field, ()))
+        # The receipt's claimed inputs are relevant even when incomplete. Only
+        # canonical linked witnesses can add a proof closure; catalog impact
+        # patterns cannot turn into evidence inputs merely by being adjacent.
+        descriptors = [receipt.scope_descriptor]
+        check = nodes.get(receipt.check_id)
+        if check is not None and check.attributes.get("descriptor_completeness") == "canonical":
+            descriptors.append(check.attributes.get("descriptor", {}))
+        for descriptor in descriptors:
+            for field in ("inputs", "pathsets"):
+                paths.update(descriptor.get(field, ()))
+            if descriptor.get("source_manifest"):
+                paths.add(descriptor["source_manifest"])
     patterns = tuple(sorted(_safe_selection(path) for path in paths))
     for path in extra_paths:
         _safe_selection(path)
