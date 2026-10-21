@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from validation.knowledge import GraphData, KnowledgeError, Receipt, content_digest
-from validation.knowledge import model
+from validation.knowledge import model, snapshot as snapshot_module
 from validation.knowledge.evidence import assess
 from validation.knowledge.index import build, load
 from validation.knowledge.snapshot import SnapshotChanged, capture
@@ -141,6 +141,24 @@ checks=["fixture-check"]
             capture(self.root, extra_paths=("unrelated.txt",))
         with self.assertRaises(KnowledgeError):
             capture(self.root, extra_paths=(".env",))
+
+    def test_reviewed_broad_pattern_cannot_ingest_private_members(self):
+        # The reviewed catalog selects src/**, but every concrete member must
+        # independently satisfy the central source policy before stat/open.
+        for relative in ("src/.codex/auth.json", "src/.hermes/auth.json", "src/auth.json",
+                         "src/__pycache__/cached.pyc", "src/evaluation-private/answer.json"):
+            with self.subTest(relative=relative):
+                path = self.write(relative, "synthetic credential; never ingest")
+                with patch("validation.knowledge.snapshot._read", wraps=snapshot_module._read) as reads:
+                    with self.assertRaises(KnowledgeError):
+                        capture(self.root)
+                self.assertNotIn(relative, [call.args[1] for call in reads.call_args_list])
+                # Even direct read callers must pass the policy before any
+                # filesystem traversal or stat helper is reached.
+                with patch("validation.knowledge.snapshot.checked_path", side_effect=AssertionError("filesystem guard reached")):
+                    with self.assertRaises(KnowledgeError):
+                        snapshot_module._read(self.root, relative)
+                path.unlink()
 
     def test_delete_rename_mode_and_aba_invalidate(self):
         original = capture(self.root)

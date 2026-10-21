@@ -57,12 +57,8 @@ def checked_path(root: Path, relative: str) -> Path:
 
 
 def _safe_selection(path: str) -> str:
-    safe_relative(path, pattern=True)
-    parts = path.lower().split("/")
-    require(not any(p in {".git", ".aws", ".ssh", "target", "node_modules", "__pycache__", "evaluation-private"}
-                    or p.startswith(".env") or p.endswith((".pem", ".key", ".fleet.json")) for p in parts),
-            "private/generated source selection refused")
-    return path
+    # One policy owns source privacy for discovery, globs and actual members.
+    return model.safe_source_relative(path, pattern=True)
 
 
 def _document_bytes(root: Path, path: str) -> bytes:
@@ -196,6 +192,8 @@ class CapturedInput:
 
 
 def _read(root: Path, relative: str) -> CapturedInput:
+    # A reviewed glob never grants permission to read a private matched file.
+    relative = model.safe_source_relative(relative)
     path = checked_path(root, relative)
     try:
         before = path.lstat()
