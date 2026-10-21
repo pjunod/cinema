@@ -573,8 +573,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 layout_guard_failed,
                                 rollback_succeeded,
                             );
-                            // A bounded caller may have stopped waiting. The
-                            // rollback is definitive even without its observer.
+                            // State-machine application may have been cancelled.
+                            // Rollback is definitive even without its observer.
                             let _ = req.tx.send(Err(err));
                         } else {
                             #[cfg(feature = "validation-test-helpers")]
@@ -1361,8 +1361,19 @@ mod snapshot_cut_tests {
             4,
         )
         .await;
-        // Read the actual committed database through an independent connection.
-        // A cancelled observer neither undoes a commit nor admits partial work.
+        let (ack, stopped) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Shutdown(ack))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .expect("writer shutdown remains bounded after cancellation")
+            .expect("writer persists metadata before acknowledging shutdown");
+        drop(writer);
+        // Reopen the actual database after shutdown. A cancelled observer
+        // neither undoes a commit nor admits partial work, and must not
+        // prevent the applied-log metadata from becoming durable.
         let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
         let ids = connection
             .prepare("SELECT id FROM rows_at_cut ORDER BY id")
@@ -1372,8 +1383,9 @@ mod snapshot_cut_tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(ids, if rollback { vec![1, 3] } else { vec![1, 2, 3] });
+        assert_eq!(image_metadata(&connection).last_applied_log_id, log(4));
         drop(connection);
-        shutdown(root, writer).await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -16,7 +16,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
-- A cancelled replicated transaction waiter no longer terminates the SQLite
+- An abandoned internal transaction reply no longer terminates the SQLite
   writer when a late commit or rollback reply is delivered. Later writes keep
   working; the original caller still treats a timeout as an unknown outcome.
 

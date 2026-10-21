@@ -441,11 +441,12 @@ upstream maintainer disposition or the whole drop condition. The original
 patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
-- A bounded caller may drop a transaction reply receiver before the writer
-  commits or rolls back. Reply delivery no longer panics the SQLite writer;
+- Cancellation or teardown may drop the internal transaction reply receiver
+  before the writer commits or rolls back. Reply delivery no longer panics the SQLite writer;
   the actual commit/rollback remains authoritative and later requests keep
   working. Deterministic real-writer tests abandon success and constraint-error
-  replies, verify the persisted rows and submit another write. No operation
+  replies, verify the persisted rows, submit another write, then reopen after shutdown
+  and verify durable applied-log metadata. No operation
   is retried and no caller timeout changes. This does not classify a timed-out
   Source activation as successful.
   File: `src/store/state_machine/sqlite/writer.rs`.
