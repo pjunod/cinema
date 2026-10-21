@@ -8,6 +8,22 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod tests;
+
+/// Local installation-location guard, NOT host continuity or extinction proof.
+/// It rejects ordinary copies/moves; coherent VM/filesystem clones/rollback can
+/// reproduce these values and require independently established native fencing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StorageIdentity {
+    version: u32,
+    platform: String,
+    canonical_directory: String,
+    device: u64,
+    inode: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Witness {
@@ -17,6 +33,7 @@ pub(super) struct Witness {
     pub journal_id: Uuid,
     pub node_id: String,
     pub cluster_id: String,
+    storage_identity: StorageIdentity,
 }
 
 pub(super) struct Storage {
@@ -234,6 +251,20 @@ impl Storage {
                 "custody directory is not private",
             ));
         }
+        let canonical_directory = path.to_str().ok_or_else(|| {
+            CustodyError::new(
+                ErrorKind::UnsupportedStorage,
+                "custody path has no v1 identity codec",
+            )
+        })?;
+        codec::long_text(canonical_directory)?;
+        let storage_identity = StorageIdentity {
+            version: 1,
+            platform: std::env::consts::OS.into(),
+            canonical_directory: canonical_directory.into(),
+            device: dm.dev(),
+            inode: dm.ino(),
+        };
         // Nonprivileged other users must not be able to replace an ancestor.
         // Sticky shared ancestors are allowed only above the trusted data root;
         // same-UID/privileged hostile replacement is not an OS-enforced boundary.
@@ -294,6 +325,7 @@ impl Storage {
                 journal_id: Uuid::new_v4(),
                 node_id: options.owner.node_id.clone(),
                 cluster_id: options.owner.cluster_id.clone(),
+                storage_identity: storage_identity.clone(),
             };
             publish(&path, &directory, &witness, true)?;
             installing = true;
@@ -311,6 +343,7 @@ impl Storage {
         codec::nonnil(witness.installation_id)?;
         if witness.node_id != options.owner.node_id
             || witness.cluster_id != options.owner.cluster_id
+            || witness.storage_identity != storage_identity
         {
             return Err(CustodyError::new(
                 ErrorKind::IdentityMismatch,
