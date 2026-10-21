@@ -6,7 +6,7 @@ PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 
-## What exists through 92dd41a48 / 5d7eba0f1
+## What exists through 83ec55303
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -48,6 +48,14 @@ or callback, exports no pipe, and uses two fixed read buffers. Sealed abort plus
 actual join closes ONLY those pipes, not descendants or external work. Generic
 legacy writers remain non-certifying; other typed-resource adapters are still
 absent and cannot bypass write-ahead custody through legacy entry points.
+
+Concrete source/pipe adapters now share combined pre-acquisition bounds. Every
+root reserves three possible pipe slots before launch; source handles cannot
+borrow those slots again. Pending reads retain their full requested buffer even
+after their task completes until its result is consumed; audited drain buffers
+use the same charge. Unknown generic writer costs are not finite spare memory.
+This closes a local accounting gap, not process/containment kernel-overhead
+estimation, durable source-file recovery, a physical receipt or production demand.
 
 Private cleanup consumes the original nonclone proof, retains it on queue refusal
 or uncertain commit, and refunds only after exact durable settlement. A public
@@ -110,8 +118,11 @@ cannot prove that a copied source host's processes or external resources ended.
 
 The released journal was serially adopted with original authorship. Its 28
 regression bodies, 10 startup/runtime/lock/namespace bodies and 12 new owned-
-operation/worker contracts are compile-checked, NOT executed. Pinned Rust1.97.1
-core+daemon all-target Hiqlite-contract cargo check passes at 66291c562 (95.955s).
+operation/worker contracts are compile-checked, NOT executed. Nine new mixed-
+adapter bodies also compile, NOT RUN. Pinned Rust1.97.1 core+daemon all-target
+Hiqlite-contract check passes at83ec55303 (45.319s), with nine source hashes.
+The initial test-only arm privacy error is retained, then corrected without
+exporting any production authority. Unit-only fixtures are not durable proof.
 Private APIs still produce warnings because production composition is missing;
 there is no current Clippy -Dwarnings, independent full-candidate review,
 behavioral qualification or platform physical-close pass.

@@ -24,43 +24,43 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`92dd41a48` adds the concrete core-only root pipe-drain task: durable Arm BEFORE
-creation, exact identity enrichment, retained JoinHandle across cancellation,
-fixed read buffers and sealed abort+join. No callback, exported pipe or detached
-external owner exists in that adapter. Its closure facts prove ONLY this task's
-pipes closed, never descendant extinction, physical settlement or a refund.
-Generic legacy writers remain non-certifying. Nine new bodies COMPILED NOT RUN.
+`83ec55303` closes a mixed-adapter accounting gap: root pipe slots and source
+handles share one pre-acquisition ceiling; retained source reads and audited
+drain buffers share one memory charge. Cancelled or completed-unconsumed reads
+remain counted. Unknown legacy writer cost is not finite headroom. Checks run
+under the graph lock before native acquisition/task creation, without awaiting
+under the ledger lock. Nine new I/O/task bodies COMPILED NOT RUN; unit-only arm
+fixtures are NOT durable commit/recovery receipts.
 
-Released M4 Store component `6169e9b18` is serially adopted, preserving six
-original commits as `86d88ea13` through `58533189e`; integration `5d7eba0f1`
-registers SQLite/Hiqlite installers, exact absent/present Source migration and
-29 backend contracts. One combined patch, not a second historical reset, binds
-feature-only fixture erasure. Production never writes Closed or erases debt.
-Claims, Prepared/winner/adoption CAS, loser fencing, protected maintenance and
-old-writer triggers now compile in main; worker RPC/advertisement is NOT wired.
+Actual pinned Rust1.97.1 core+daemon all-target Hiqlite-contract check PASS0
+45.319s, source-stable `evidence/compile-run71-194311.json` (nine source hashes).
+Initial test-arm privacy failure is preserved; only failed compilation retried.
+Current core38 library+3 libtest warnings remain; NO strict-Clippy
+or behavioral pass. Prior configuration receipts remain historical/scoped, not
+new unchanged checks. Combined bounds cover these concrete buffers/pipe slots,
+NOT arbitrary futures, process/containment kernel overhead or production demand.
 
-Current actual pinned Rust1.97.1 core+daemon all-target Hiqlite-contract check
-PASS0 128.03s, source-stable `evidence/compile-run70-191943.json` (25 source
-hashes). Earlier task-only129.925s remains scoped evidence, not a second test
-pass. All 38 new/integrated leaves are COMPILED NOT RUN. Private runtime APIs
-still warn; NO current strict-Clippy or behavioral pass. Child strict-default
-Clippy failure remains preserved, not relabelled by its passing feature builds.
+Retained `92dd41a48` arms before concrete pipe-drain creation and retains actual
+JoinHandles through sealed abort+join. Its facts prove ONLY its pipes closed,
+never descendant extinction, physical settlement or refund. `66291c562` owns
+prepare/root/settle-before-refund; `c39c30542` opens the actual-lock-bound runtime
+before scratch/probes. Full recovered costs/epochs/edges/trials/paths remain
+cleanup-only UnknownHeld; interim startup refuses pending/unreadable authority
+before legacy competition. Selective recovery/unaffected serving is NOT done.
 
-Retained `66291c562` owns prepare/root/settle-before-refund operations;
-`c39c30542` opens the actual-lock-bound runtime before scratch/probes. Full
-recovered costs/epochs/edges/trials/paths remain cleanup-only UnknownHeld; interim
-startup still refuses pending/unreadable authority before legacy competition.
-Selective recovery/unaffected serving is NOT done. Fresh unsupported Windows
-has NO ledger. Earlier journal/startup/bridge/compiler receipts remain valid
-within their scopes; see [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
+Released M4 `6169e9b18` remains author-preserving integrated through `5d7eba0f1`:
+SQLite/Hiqlite installers, Source guards, claim/Prepared/winner/adoption/fence
+authority and29 compiled backend contracts. No worker RPC/advertisement or normal
+Closed writer. Prior38 new/integrated leaves remain NOT RUN; preserve all anchors
+and the child strict-default Clippy failure. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
 
-R2/R3 do not prove host continuity, old-owner fencing or physical extinction.
-Positive containment/restart/typed-resource closure, production/supervisor wiring,
-shared-role transfer, learning/pacing/M4 runtime/M5 and remaining M0–M7 stay open.
-Ordinary production remains legacy; no unsupported trial or finite admission.
-Windows compiler/platform acceptance remains unavailable, not waived. PR1248 is
-draft: full implementation, actual independent Fable review/fixes, then once-only
-affected qualification/fast lane/authorized merge. No extra handoff or deployment.
+R2/R3 do not prove host continuity, old-owner fencing or extinction. Positive
+containment/restart/typed closure, production/supervisor/shared transfer,
+learning/pacing/M4 runtime/M5 and remaining M0–M7 stay open. Ordinary production
+remains legacy; no unsupported trial/finite admission. Fresh unsupported Windows
+has NO ledger; platform/compiler acceptance is not waived. Draft PR1248 still
+requires full implementation, actual independent Fable review/fixes, once-only
+affected qualification/fast lane/authorized merge. No extra handoff/deployment.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
