@@ -21,8 +21,8 @@ hashes, expected errors and limits; an edited input invalidates its receipt.
 ## Run the separate package with the existing pinned toolchain
 
 ```bash
-scripts/check-formal --package operation-progress smoke --cache-dir target/formal-toolchain
-scripts/check-formal --package operation-progress full --cache-dir target/formal-toolchain
+scripts/check-formal smoke --package operation-progress --cache-dir target/formal-toolchain
+scripts/check-formal full --package operation-progress --cache-dir target/formal-toolchain
 ```
 
 Smoke selects `progress.cfg` and `witness-success.cfg` without changing their
@@ -30,7 +30,8 @@ constants; its aggregate wall budget is 180 seconds. Each of the nine
 configurations has a 120-second cap. Use the runner's `--help` for single
 configuration selection. The existing durable-jobs pins supply TLC 1.7.4
 (internal banner TLC2 2.19) and Temurin 21.0.12+8. Qualification uses a 4 GiB
-Java heap and four workers, with durable logs, traces and receipt hashes.
+Java heap and `-workers auto`, with durable logs, traces and receipt hashes.
+The separate development calibration below explicitly used four workers.
 
 **How to read results:** positives require complete exploration, no errors
 and zero queued states. A control requires its sole named temporal property,

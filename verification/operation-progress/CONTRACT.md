@@ -134,8 +134,8 @@ all lower-layer writes have drained when release returns.
    one representative fenced item insert and one completion stand for a
    selected finite request. Additional pages/items/children must independently
    satisfy the same finite-return premise. The model does not establish their
-   bounds or scan throughput. The source's eight-request turn bound is not
-   confused with a lifetime event bound.
+   bounds or scan throughput. The source bounds a turn to eight rounds of
+   up to 256 pending rows each; that is not a lifetime event bound.
 2. **One full worker and one optional competitor.** The peer has separate
    claimed/admitted, domain-acquired/backend, release and backoff stages.
    It represents domain contention only; its queue mutex/publication pipeline,
@@ -146,9 +146,11 @@ all lower-layer writes have drained when release returns.
    publication invalid. `detachedCurrent` becomes false on release or a fresh
    queue claim, so a late old write cannot adopt a new attempt's identity.
    This is a relational abstraction of the selected owner, not modulo fence
-   arithmetic. The source also rejects a higher domain fence during binding;
-   `Current` excludes that superseded case. Equality alone is not an ordering
-   theorem. Ordering among several stale fences, old-boot reply payloads and
+   arithmetic. Source binding can replace an older binding with a higher
+   domain fence; it rejects a lower superseded fence or a different attempt
+   at the same domain fence. `Current` abstracts the selected valid owner
+   after those source guards; equality alone does not preserve all fence
+   ordering. Ordering among several stale fences, old-boot reply payloads and
    stale claim-resolution traffic remain in the original safety pilot or
    outside these progress claims.
 4. **Time barriers never wrap.** `eligible` is reset on each new backoff and

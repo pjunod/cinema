@@ -98,7 +98,7 @@
       {
         "table": "16 publication renewal lock",
         "source": "crates/plurx-core/src/store/publication.rs",
-        "anchor": "let mut state = self.state.write().await;",
+        "anchor": "pub async fn renew(\n        &self,\n        coordinator: &StoreCoordinator,\n        ttl: Duration,\n    ) -> Result<bool, StoreError> {\n        let mut state = self.state.write().await;",
         "sha256": "0a2d03cb8aa2a924d087ac882330e055bb2576231cd72e7b4222cc4f1dda060d"
       },
       {
