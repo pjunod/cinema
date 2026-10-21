@@ -22,17 +22,24 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest runtime `cad6f18ae` transfers exclusive reservation custody to a core graph
-before launch. The bounded ledger retains actual Child/Job handles and writer
-JoinHandles independently of cancelled waiters. Sealing fences acquisition; root
-count respects the reserved process bound. Partial attachment/resume errors retain
-their actual child/job; any launch error seals further entry. Generation, process
-instance, OS boot and actual root creation identity are distinct. No public receipt
-mint exists, and leader wait or task abandonment cannot release physical capacity.
-Unsupported containment refuses trials before launch; normal possible acquisition
-stays UnknownHeld after real root waits/joins. Positive containment, concrete typed
-nonprocess adapters, daemon integration and restart-persistent reconciliation are
-NOT implemented by this slice. In-memory custody is not a restart journal.
+Latest runtime `50e082555` adds the custodied producer launcher/slot bridge over
+`cad6f18ae`'s core ownership. The exclusive physical reservation enters core BEFORE
+spawn. Slots signal/status/wait only the actual retained root, rejecting cross-graph
+and already-waited signal targets. Core joins the actual registered writer task
+before the narrow producer event; cancellation/panic cannot refund its physical
+reservation. UnknownHeld remains distinct from completed producer retirement.
+Graph-owned retained-role borrows grant no acquisition/release authority; the
+atomic family transaction checks live ownership, current epoch and invalid ledger
+even when every requested role is already retained. Shared roles stay counted once.
+
+IMPORTANT: current VOD/rolling production callers still supply legacy opaque
+EncodeWorkerPermits, not these new physical demands. The real launch/slot bridge
+has authored call-site fixtures, but production demand/caller wiring is NOT done.
+Unsupported containment refuses trials before launch; possible acquisition stays
+UnknownHeld after actual waits/joins. Positive containment, concrete nonprocess
+adapters and restart-persistent reconciliation are NOT implemented. In-memory
+custody is not a journal. Controller owns the requested Windows compiler transport
+and exact local-journal ownership/transaction design; these are not human gates.
 
 Retained `5160af863`/`8ddae0e39` capacity snapshots bind raw four-key intent and exact
 same-statement catalog/marker readiness. Verified Automatic alone ignores rollback
@@ -44,11 +51,12 @@ already had coherent transactions; Hiqlite split authority reads were repaired.
 Earlier `e213a4c83` bounded instance-owned priors and `740f4f30a` advisory trial
 policy remain, not production growth authority. `ebf46fa55` generic provenance
 replay guards and independent settings/CAS/import installation remain intact.
-Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS181s (`142044`),
-SHA `ea3cfad00623adde5bf789800ba6f95819522a7c45b00318aa7995a01f356a12`.
-New custody fixtures and retained storage fixtures compile; bodies NOT RUN. Earlier
-M3 compiles (`141006`, `141635`) predate the final partial-launch/root-budget/seal
-audit repairs; their logs remain source-scoped evidence, not runtime acceptance.
+Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS79s (`153922`),
+SHA `8bb4302b4ee64d1e965fcfc7116fb4a1a0d124c011ff1385531b9199c7d0e3ac`.
+Six new bridge/borrow/root regressions and retained fixtures COMPILED, NOT RUN.
+Initial unused-bridge compile (`152857`) failed before fixtures were authored;
+the subsequent PASS157s (`153445`) predates final epoch guards/readiness assertions.
+Older M3 passes remain source-scoped evidence, never runtime acceptance or replays.
 Targeted rustfmt binds edition2021/skip_children. Native Linux e9 receipts remain
 e9-only; no new Linux or Windows containment qualification. M0–M7 remain incomplete.
 PR1248 stays draft; controller owns publication/status and review, then coordinates
@@ -60,28 +68,17 @@ Approved plan SHA-256 `be993867c7b1db568663f9d793fefbf87c9679e027f67064b7884d281
 and acceptance SHA-256 `16868e4e3eca9d870f3f32e3bff5d47aa11d89ef8c00eecbed18d2c1fe55d6e0`
 were verified against the clone before work.
 
-Initial `rustup run 1.97.1 cargo check` commands returned success, but their
-subprocess compiler provenance was not adequately captured: a later Clippy
-command reached Homebrew 1.98.0. Those initial commands are not pinned receipts.
-This was discovered after the first observation edits; no tests ran and no
-unrelated baseline lints were fixed. The prerequisite was repaired by compiling
-a pristine `git archive` of the exact baseline with explicit toolchain-bin PATH,
-RUSTC, RUSTDOC and cargo bindings, then the current source with the same bindings.
-Baseline all-target check passed (170 s); current all-target check passed (2 s);
-current `plurx-core --all-targets --features hiqlite-store` Clippy `-D warnings`
-passed (72 s). Actual rustc `1.97.1 (8bab26f4f 2026-07-14)`, commit
-`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, cargo `1.97.1
-(c980f4866 2026-06-30)`, host `aarch64-apple-darwin`. Explicit `rustup run`
-is necessary: unqualified binaries resolve a different Homebrew version.
-Actual clippy `0.1.97 (8bab26f4f6 2026-07-14)` is bound explicitly too.
-Private task evidence: `evidence/compiler-baseline.json` (initial unverified
-provenance, superseded) and corrected receipt `evidence/compiler-pinned.json`.
-Corrected full logs end `212528.log` (pristine baseline), `212837.log` (current
-check), `212839.log` (current Clippy) under `repo/target/quiet`.
-Owned target and temporary directories are durable siblings of the clone.
-This is macOS compile-only evidence, not native Linux or runtime acceptance.
-Ripwire was attempted first and refused because the binary is absent; bounded
-symbol search and `scripts/outline` are the fallback, not an absence proof.
+Historical prerequisite repair: initial successful `rustup run` checks had
+unverified subprocess provenance; Clippy later reached Homebrew 1.98.0. These
+are NOT pinned receipts. A pristine baseline archive was then checked with
+explicit toolchain-bin PATH/RUSTC/RUSTDOC/cargo (170s), followed by current
+check (2s) and core Hiqlite Clippy (72s). No unrelated lints/tests were run.
+Corrected private `evidence/compiler-pinned.json` supersedes
+`evidence/compiler-baseline.json`; full logs `212528`, `212837`, `212839` remain
+under `repo/target/quiet`. Pinned rustc1.97.1 commit
+`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, Clippy0.1.97, macOS aarch64 only.
+Task-owned build/scratch remain durable. Ripwire refused (binary absent);
+bounded symbol search/outline are fallback, not an absence proof.
 
 ## M0 current anchors and coverage
 
