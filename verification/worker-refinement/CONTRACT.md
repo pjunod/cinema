@@ -55,7 +55,10 @@ makes the mutated completion check that bit alone. It therefore permits a
 real pending request update after release, rather than merely removing a
 redundant guard while another guard still rejects the write. The positive
 safety guard is by construction; real storage schedules provide separate
-source conformance evidence.
+source conformance evidence. Late application after local revoke before
+durable release remains model-only: the current Rust durable-predicate
+schedule does not pause a previously dispatched facade call across local
+revocation.
 
 The same bounded detached slot represents an ambiguous release: lower
 application, reply and caller observation are independent. A timeout before
@@ -144,9 +147,11 @@ substitute for any operation-local temporal property.
 
 ## Cancellation observes work polls, not arbitrary await interruption
 
-The four selected scenarios represent scan cancellation, queue-loss
-notification, domain-loss notification and admission pressure. They may
-signal while scanning or publishing. The caller observes cancellation at
+The model abstracts scan cancellation, queue-loss notification, domain-loss
+notification and admission pressure into the same `Cancel` action, enabled
+only for `w1` under `Scenario = "cancel"`. The single cancellation witness
+does not distinguish those signals; the real Rust schedules cover their
+distinct paths separately. The abstract action may signal while scanning or publishing. The caller observes cancellation at
 modeled process-work polls: a busy blocking walk still must return before
 `ScanFinish`, and an already dispatched store call still must apply/reply or
 time out before its caller moves on. A queued lock grant must also resolve;

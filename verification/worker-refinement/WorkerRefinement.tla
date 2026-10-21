@@ -238,7 +238,7 @@ Reconcile(w) ==
    shutdown. It joins WalkDir; it does not complete the durable request[w]. *)
 Cancel(w) ==
   LET s == workers[w] IN
-  /\ Scenario \in {"cancel_scan", "cancel_queue", "cancel_domain", "cancel_pressure"}
+  /\ Scenario = "cancel"
   /\ s.pc \in {"scan", "item_write", "item_lock", "item_send", "item_wait",
        "complete_token", "complete_mutex", "complete_auth", "complete_read",
        "complete_lock", "complete_send", "complete_wait", "reconcile"}

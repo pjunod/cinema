@@ -28,7 +28,7 @@ scripts/check-formal full --package worker-refinement --cache-dir target/formal-
 The shared toolchain pins TLC 1.7.4 and Temurin 21.0.12+8. Each configuration
 has a 300-second hard cap and the qualification heap is 4 GiB. Smoke runs
 `progress.cfg` and `witness-both-complete.cfg` under a 600-second aggregate
-cap. Seventeen full configurations have a maximum combined cap of 85 minutes.
+cap. Fourteen full configurations have a maximum combined cap of 70 minutes.
 These are resource ceilings, not measured feasibility claims. A timeout
 fails qualification; both complete pipelines remain mandatory.
 
@@ -39,7 +39,7 @@ sole invariant to fail with exit 12 and a real finite trace. An unrelated
 error, timeout, malformed receipt or source drift fails the run. Expected
 violations characterize the selected model/control, not a production defect.
 
-## Seventeen configurations have separate evidence jobs
+## Fourteen configurations have separate evidence jobs
 
 All configurations contain both complete workers, one item milestone each,
 retry limit 2, distinct queue jobs and the same exclusive domain. Fault budget
@@ -60,11 +60,12 @@ budget is therefore at most one across the entire repeated execution.
 | `witness-overlap-reacquire.cfg` | `w2` acquires between `w1` release and reacquisition; both complete and clean up |
 | `witness-detached-before-release.cfg` | Detached completion applies after local revocation and before durable release |
 | `witness-stale-after-release.cfg` | A detached completion is rejected after durable invalidation; request stays pending |
-| `witness-cancel-scan.cfg` | Selected scan cancellation reaches cleanup |
-| `witness-cancel-queue-loss.cfg` | Local queue-loss notification reaches cleanup with durable authority independent |
-| `witness-cancel-domain-loss.cfg` | Local domain-loss notification reaches cleanup |
-| `witness-cancel-pressure.cfg` | Admission-pressure cancellation reaches cleanup |
+| `witness-cancel.cfg` | One abstract cancellation action reaches cleanup; distinct signals are covered only by Rust schedules |
 | `witness-reconcile.cfg` | Lost completion acknowledgement, authoritative non-pending reread and cleanup |
+
+The `renewal-livelock` control name denotes heartbeat activity continuing while
+`w1` scan-finish scheduling is unfair; the mutation changes only that fairness
+premise.
 
 `TimeObserved(w)` remains enabled and toggles only that worker's time marker
 while making its backoff/expiry barrier eligible. Global deadlock detection
