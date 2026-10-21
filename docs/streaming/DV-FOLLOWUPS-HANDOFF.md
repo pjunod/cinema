@@ -133,6 +133,19 @@ incident and general remote processed requalification remain out of B scope.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
+**Latest qualification correction (2026-10-21):** the genuine bright P8 excerpt
+reached complete L1 observation and master preparation, but the exact single
+1000-nit test exited 101 on a missing display-target receipt operation count.
+The base-RPU completion receipt used source metadata operations only, omitting
+the mapping already validated by the daemon. Sol's narrow source repair adds
+only that graph operation without inferring conditional reshape applications.
+Its new master/1000/1600 receipt regression awaits compilation and independent
+targeted closure before new/failed-only tests. No mapped cell passed; 1600 was
+unexecuted. Prior software passes remain retained, not repeated. Coordinator
+owns source-bound native compilation, real-input execution and PR publication;
+the remaining mapped cells, separate FEL integration, fast lane and merge are
+not complete. Historical input failures below remain distinguishable.
+
 **Implementation update (2026-10-19):** Sol 6.1 owns current source on
 `codex/cinema-display-target-a`; coordinator owns native/media/publication.
 Full independent Astra review, F1 publication-intent closure, landed-B integration

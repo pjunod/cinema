@@ -1,10 +1,23 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A software controls passed; real-input qualification pending · **Updated:** 2026-10-19 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (native/media/publication) ·
+**Status:** PR A software controls retained; P8 receipt repair awaiting compilation/review · **Updated:** 2026-10-21 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
 
+- The corrected real P8 excerpt reached complete 17,983-frame L1 observation and
+  master preparation, then its single 1000-nit test failed with exit 101: the
+  completed base-RPU receipt omitted `DisplayTargetMapping` (no count, expected
+  48). The helper target rows and rendered operation had already been validated;
+  source-RPU operations alone cannot describe post-reconstruction targeting.
+  The narrow repair retains conditional source operations and adds only the
+  completed graph's display-target operation for base receipts. A new focused
+  regression covers master/1000/1600 accounting and guard refusals, not helper
+  qualification. Compilation, independent targeted review and new/failed-only
+  validation remain. The 1600-nit cell was not run, no mapped cell passed, and
+  the interrupted standalone scanner's unknown exit is not reconstructed.
+  Retain prior 99 Rust / 141 shader / 70 helper passes and successful unchanged
+  policy evaluations; do not repeat them for the new receipt regression.
 - The first full-helper attempt refused the synthetic scan: the control muxer
   omitted the encoder's declared frame rate, losing Matroska DefaultDuration and
   demuxed packet durations. The control-only repair preserves matching positive

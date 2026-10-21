@@ -2401,7 +2401,7 @@ pub fn dv_receipt_completed_window(
         {
             return Err(invalid());
         }
-        let (operations, retained_levels) = if requires_el {
+        let (mut operations, retained_levels) = if requires_el {
             let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
             if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
                 return Err(invalid());
@@ -2425,6 +2425,18 @@ pub fn dv_receipt_completed_window(
             }
             (parsed.applied_operations, parsed.metadata_levels)
         };
+        if !requires_el {
+            // Source metadata determines conditional reshaping, not the
+            // post-reconstruction export already verified by the daemon.
+            operations.extend(
+                plan.graph
+                    .required_operations()
+                    .into_iter()
+                    .filter(|operation| {
+                        matches!(operation, DvOperation::DisplayTargetMapping { .. })
+                    }),
+            );
+        }
         for operation in &operations {
             let value = operations_applied.entry(*operation).or_insert(0);
             bump(value)?;

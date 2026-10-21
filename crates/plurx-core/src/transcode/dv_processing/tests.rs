@@ -1384,6 +1384,82 @@ fn completed_window_report_binds_publication_without_pixel_checksum_authority() 
 }
 
 #[test]
+fn completed_base_window_receipt_keeps_display_mapping_and_source_operations() {
+    let raw = include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal").to_vec();
+    let parsed = DvBaseMetadata::from_raw_rpu(&raw, (64, 64)).expect("authored base RPU");
+    assert!(parsed
+        .applied_operations
+        .contains(&DvOperation::PolynomialReshape));
+    assert!(!parsed.applied_operations.contains(&DvOperation::MmrReshape));
+    let keys = [key(0), key(1)];
+    let durations = [duration(), duration()];
+    let rpus = [raw.clone(), raw];
+    for nits in [None, Some(1000), Some(1600)] {
+        // As in the publication-binding control above, only this private test
+        // sets the completion flag. This is receipt accounting, not helper or
+        // encoded-output qualification and grants no production capability.
+        let mut completed = plan(DvDestination::Hdr10);
+        completed.source.catalog.profile = Some(i64::from(parsed.profile));
+        completed.source.el_kind = parsed.source_el_kind;
+        completed.source.coverage =
+            Some(DvSourceCoverage::sampled(7, keys.to_vec()).expect("control coverage"));
+        completed.source.bl_shape = Some(
+            DvPlaneShape::new(64, 64, DvPlaneRepresentation::DoviBaseP10Limited)
+                .expect("base shape"),
+        );
+        completed.source.el_shape = None;
+        completed.capability.scope = DvEvidenceScope::ProductionRoute;
+        completed.capability.completed_window_checked = true;
+        completed.capability.subset = DvMetadataSubset::RuntimeBaseRpuMasterDomainV2;
+        completed.capability.bl_shape = completed.source.bl_shape.expect("base shape");
+        completed.capability.el_shape = None;
+        completed.graph.strategy = DvStrategy::BaseRpuToHdr10;
+        completed.graph.pixels = DvGraph::expected(DvStrategy::BaseRpuToHdr10);
+        // The completed graph declares both conditional reshape capabilities;
+        // this polynomial-only RPU must not acquire an MMR application count.
+        completed.graph.pixels.insert(
+            2,
+            DvGraphEdge {
+                operation: DvOperation::MmrReshape,
+                input: DvIntermediateDomain::ReshapedBaseVdrComponents,
+                output: DvIntermediateDomain::ReshapedBaseVdrComponents,
+            },
+        );
+        if let Some(nits) = nits {
+            completed.graph.pixels.insert(
+                4,
+                DvGraphEdge {
+                    operation: DvOperation::DisplayTargetMapping { nits },
+                    input: DvIntermediateDomain::TargetMappedBt2020PqRgb,
+                    output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
+                },
+            );
+        }
+        let receipt = dv_receipt_completed_window(&completed, &keys, &durations, &rpus)
+            .expect("completed base receipt");
+        let mut expected = parsed.applied_operations.clone();
+        if let Some(nits) = nits {
+            expected.push(DvOperation::DisplayTargetMapping { nits });
+        }
+        for frame in receipt.served_frames() {
+            assert_eq!(frame.applied_operations, expected);
+        }
+        let counts: BTreeMap<_, _> = expected.into_iter().map(|op| (op, 2)).collect();
+        assert_eq!(receipt.counts().operations_applied, counts);
+        assert_eq!(receipt.counts().el_accepted, 0);
+        assert_eq!(receipt.counts().el_not_required, 2);
+        assert!(
+            dv_receipt_completed_window(&completed, &keys, &durations, &[vec![], vec![]]).is_err()
+        );
+        let mut wrong_profile = completed.clone();
+        wrong_profile.source.catalog.profile = Some(7);
+        assert!(dv_receipt_completed_window(&wrong_profile, &keys, &durations, &rpus).is_err());
+        completed.capability.completed_window_checked = false;
+        assert!(dv_receipt_completed_window(&completed, &keys, &durations, &rpus).is_err());
+    }
+}
+
+#[test]
 fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
     let grid = super::super::VodFrameGrid::new(24_000, 1_001).expect("NTSC cadence");
     let source: Vec<_> = (0..48)
