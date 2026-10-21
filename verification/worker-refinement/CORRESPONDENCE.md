@@ -66,7 +66,7 @@ membership. The mapping and any unchecked transition remain visible in
 | W5 | `library_worker_admission_pressure_joins_before_release_and_drop` in `library_work.rs` | Test-only pressure selection while processing is held at the pre-scan checkpoint; the processing future returns before release and admission drop. |
 | W6/S4 | `library_worker_reconciles_lost_completion_acknowledgement` in `library_work.rs` | The real worker commits completion, loses its acknowledgement, rereads durable state and observes the public projection `succeeded`. |
 | S1 | `formal_publication_library_captured_token_completes_while_durable_owners_current` in `formal_publication.rs` | A captured token is submitted directly to Store and succeeds while both durable owners remain live; the submitted `Failed` result is recorded as `failed`. |
-| S2/S3 | `formal_publication_library_completion_after_release_and_rebind_is_rejected` in `formal_publication.rs` | S2 checks refusal after releasing the domain lease while the old queue token remains current. The old queue job is then retired before a distinct metadata job claims and binds a higher fence. S3 rejects the old completion after both old-queue retirement and domain rebind; it does not isolate higher-domain-fence rejection. The new owner completes its request. |
+| S2/S3 | `formal_publication_library_completion_after_release_and_rebind_is_rejected` in `formal_publication.rs` | S2 checks refusal after releasing the domain lease while the old queue token remains current. It then settles that attempt with the worker's five-second yield policy; the request stays pending and the queue reservation is released. A distinct metadata job claims at `now + 4`, before the old retry is eligible. S3 rejects the old completion after both queue yield and domain rebind; it does not isolate higher-domain-fence rejection. The new owner completes its request. |
 
 W1 uses two different durable jobs and separate node-local managers, matching
 the production dedupe identities and manager scope. W2's first attempt is
@@ -101,8 +101,10 @@ queue authority, wait for queue TTL expiry, or claim that local revocation
 rolls back a detached write.
 
 S2/S3 does not isolate the higher-domain-fence predicate: S3 follows S2's
-domain-only check, but then also retires the old queue job before claiming the
-replacement. Thus S3 has both stale queue authority and a changed domain owner.
+domain-only check, but then also yields the old queue attempt before claiming
+the replacement. Thus S3 has both stale queue authority and a changed domain
+owner. The yielded request stays pending for its retry; the test does not
+retire it before checking the old completion.
 
 S5 (renewal committed with its acknowledgement lost), renewal deadlines and
 heartbeat ordering are unchecked. The heartbeat runs in a spawned task and

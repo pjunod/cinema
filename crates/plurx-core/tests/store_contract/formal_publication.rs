@@ -1087,18 +1087,42 @@ async fn formal_publication_library_completion_after_release_and_rebind_is_rejec
             "{backend}"
         );
 
-        // S2 above isolates release of the domain owner while the old queue
-        // token is still valid. Retire that queue attempt before admitting a
-        // distinct metadata-refresh job, so this contract backend can claim
-        // the real second job without bypassing source_io reservation rules.
-        first.retire(store.as_ref(), now).await;
-        let retired = store
+        // S2 isolates release of the domain owner while the old queue token
+        // is still valid. Follow the worker's real unavailable-domain policy:
+        // yield the current attempt without charging a failure, keep its
+        // request pending, and release its source_io reservation until retry.
+        assert!(
+            store
+                .settle_job(SettleJob {
+                    token: first.token.clone(),
+                    settlement: JobSettlement::Yield {
+                        error_code: None,
+                        checkpoint: None,
+                        not_before_ms: now + 5_000,
+                    },
+                    now_ms: now + 3,
+                })
+                .await
+                .expect("yield current queue attempt"),
+            "{backend}: real worker yield accepted"
+        );
+        assert_eq!(
+            request_record(store.as_ref(), "request-old").await.state,
+            "pending",
+            "{backend}: yield preserves pending request"
+        );
+        let yielded = store
             .background_job(&first.job_id)
             .await
-            .expect("read retired queue owner")
+            .expect("read yielded queue owner")
             .expect("old queue job retained");
-        assert_eq!(retired.state, JobState::Cancelled, "{backend}");
-        let replacement_time = now + CLAIM_RESOLUTION_WINDOW_MS + 2;
+        assert_eq!(yielded.state, JobState::Queued, "{backend}");
+        assert_eq!(yielded.failed_attempts, 0, "{backend}");
+        assert!(yielded.token.is_none(), "{backend}");
+        assert_eq!(yielded.not_before_ms, now + 5_000, "{backend}");
+        // Claim the second job before the yielded attempt's retry is eligible,
+        // proving the real settlement released source_io capacity.
+        let replacement_time = now + 4;
         let second_work = enqueue_and_claim_library_work(
             store.as_ref(),
             backend,

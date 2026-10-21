@@ -65,7 +65,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880"
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -250,7 +250,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880"
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -303,7 +303,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_captured_token_completes_while_durable_owners_current",
         "anchor": "async fn formal_publication_library_captured_token_completes_while_durable_owners_current()",
-        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880"
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
       },
       "held_across_await": [],
       "completed_by": "store/backend",
@@ -1273,7 +1273,7 @@
         "file": "crates/plurx-core/tests/store_contract/formal_publication.rs",
         "symbol": "formal_publication_library_completion_after_release_and_rebind_is_rejected",
         "anchor": "async fn formal_publication_library_completion_after_release_and_rebind_is_rejected()",
-        "sha256": "8bddd93ff818f9bf7c59f25702939c5f1f17eb89b713214631b8ea40bc007880"
+        "sha256": "86f35132a0950b99654be30d80eda6b98f617e00e49845a175e1a215f0a1c293"
       },
       "held_across_await": [],
       "completed_by": "store trigger",
