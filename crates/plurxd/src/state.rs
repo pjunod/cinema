@@ -708,6 +708,10 @@ impl StoreMetricsCache {
 /// Everything a request handler needs. Cheap to clone (all shared via `Arc`).
 #[derive(Clone)]
 pub struct AppState {
+    /// Opened once under SelectedStore's actual lock, before scratch/probes.
+    /// None means unsupported/unconfigured custody, NEVER zero resource usage.
+    pub(crate) resource_runtime:
+        Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     pub store: Arc<dyn Store>,
     pub(crate) sharing: Arc<crate::sharing::SharingManager>,
     pub(crate) link_receipts: Arc<crate::http::hls::link_receipts::LinkReceipts>,
@@ -1264,6 +1268,7 @@ impl AppState {
         );
         live_tv.set_settings_changes(settings_changes.clone());
         AppState {
+            resource_runtime: None,
             store,
             sharing,
             link_receipts: Default::default(),

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use crate::process::observation::Metric;
 
 pub mod physical_graph;
+pub mod runtime;
 
 static NEXT_LEDGER: AtomicU64 = AtomicU64::new(1);
 const MAX_RESERVATIONS: usize = 1024;

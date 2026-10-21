@@ -71,6 +71,7 @@ mod progressive;
 mod reader_formats;
 mod redact;
 mod renditiondir;
+mod resource_runtime;
 mod rolling_output;
 mod rolling_provenance;
 mod schedule;
@@ -1834,6 +1835,8 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let replication = selected.replication_monitor();
         let membership = selected.membership_manager();
         let catalogue = selected.catalogue_reader();
+        let resource_runtime =
+            resource_runtime::open_before_cleanup(&mut selected, &config).await?;
         let dirs = create_dirs_for_config(&config)?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
@@ -1850,6 +1853,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         };
         let parts = Boot {
             source_activation_at_boot: Some(source_layout_ready),
+            resource_runtime,
             store,
             replication,
             membership,
@@ -1906,6 +1910,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
 /// What a measured node hands to the server it is about to become.
 struct Boot {
     source_activation_at_boot: Option<bool>,
+    resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     store: Arc<dyn plurx_core::store::Store>,
     catalogue: plurx_core::store::CatalogueReader,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
@@ -2230,6 +2235,7 @@ async fn boot_observing(
     };
     let Boot {
         source_activation_at_boot,
+        resource_runtime,
         store,
         replication,
         membership,
@@ -2280,6 +2286,9 @@ async fn boot_observing(
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
+    // This exact startup owner outlives all serving/cleanup clones. Never open
+    // another journal lazily in a request or producer.
+    state.resource_runtime = resource_runtime;
     if let Some(owner) = &observation {
         let observer = owner.observer().await.ok_or_else(|| {
             anyhow::anyhow!("startup observation owner disappeared before activation")

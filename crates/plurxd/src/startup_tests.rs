@@ -3180,6 +3180,7 @@ async fn boot_serve_and_drain_in_runtime(
         config.clone(),
         Boot {
             source_activation_at_boot: None,
+            resource_runtime: None,
             store: handle.store,
             catalogue,
             replication: plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),

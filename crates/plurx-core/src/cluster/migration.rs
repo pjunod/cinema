@@ -285,11 +285,55 @@ pub struct SelectedStore {
     catalogue: CatalogueReader,
     local_client: Option<Client>,
     source_schema_startup_consumed: bool,
+    resource_custody_startup_consumed: bool,
     _daemon_lock: File,
 }
 
 #[cfg(feature = "hiqlite-store")]
 impl SelectedStore {
+    /// Startup-only custody inputs bound to this ACTUAL retained daemon lock.
+    /// Call before scratch cleanup/probes and open on the blocking executor.
+    /// Paths and installation context come from startup, never an RPC request.
+    pub fn resource_custody_options(
+        &mut self,
+        data_dir: PathBuf,
+        excluded_roots: Vec<PathBuf>,
+        installation: crate::resource_custody::InstallationContext,
+    ) -> Result<crate::resource_custody::OpenOptions, StoreError> {
+        if self.resource_custody_startup_consumed {
+            return Err(StoreError::Migration(
+                "resource custody startup owner already consumed".into(),
+            ));
+        }
+        self.resource_custody_startup_consumed = true;
+        let held = crate::fs_secure::std_file_identity(&self._daemon_lock).map_err(|_| {
+            StoreError::Migration("resource custody lock identity unavailable".into())
+        })?;
+        let expected = crate::fs_secure::regular_file_identity_nofollow_blocking(
+            &data_dir.join(DAEMON_LOCK_FILENAME),
+        )
+        .map_err(|_| StoreError::Migration("resource custody lock path unavailable".into()))?;
+        if !held.same_inode(expected) {
+            return Err(StoreError::Migration(
+                "resource custody data root does not match retained daemon lock".into(),
+            ));
+        }
+        let file = self._daemon_lock.try_clone().map_err(|_| {
+            StoreError::Migration("resource custody daemon lock retention failed".into())
+        })?;
+        Ok(crate::resource_custody::OpenOptions {
+            data_dir,
+            excluded_roots,
+            installation,
+            owner: crate::adaptive_resources::runtime::daemon_owner(
+                self.identity.node_id.clone(),
+                self.identity.cluster_id.clone(),
+            ),
+            daemon_lock: crate::resource_custody::DaemonLockGuard::from_held_lock(file),
+            queue_capacity: 64,
+        })
+    }
+
     /// Read-only watch-state replication projection for the server API.
     #[must_use]
     pub fn replication_monitor(&self) -> status::ReplicationMonitor {
@@ -638,6 +682,7 @@ pub async fn select_daemon_store_observing(
             catalogue,
             local_client: None,
             source_schema_startup_consumed: false,
+            resource_custody_startup_consumed: false,
             _daemon_lock: daemon_lock,
         });
     }
@@ -917,6 +962,7 @@ async fn join_fresh_store(
             catalogue,
             local_client: Some(client),
             source_schema_startup_consumed: false,
+            resource_custody_startup_consumed: false,
             _daemon_lock: daemon_lock,
         };
         finalize_pending_join_best_effort(config, &selected).await;
@@ -3159,6 +3205,7 @@ async fn open_active_store_with_key(
             catalogue,
             local_client: Some(client),
             source_schema_startup_consumed: false,
+            resource_custody_startup_consumed: false,
             _daemon_lock: daemon_lock,
         })
     }
@@ -5395,6 +5442,9 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod resource_custody_tests;
 
 #[cfg(feature = "hiqlite-store")]
 pub mod status {

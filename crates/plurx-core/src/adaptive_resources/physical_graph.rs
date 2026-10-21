@@ -33,6 +33,12 @@ const MAX_WRITERS: usize = 32;
 static PROCESS_INSTANCE: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
 static BOOT_IDENTITY: LazyLock<Metric<Uuid>> = LazyLock::new(read_boot_identity);
 
+/// The journal and every actual graph share this process instance and native
+/// boot observation. Neither identity is an old-owner fence or close proof.
+pub(super) fn daemon_identity() -> (Uuid, Metric<Uuid>) {
+    (*PROCESS_INSTANCE, *BOOT_IDENTITY)
+}
+
 /// Diagnostic identities, never a receipt or admission capability. Unknown boot
 /// identity cannot be replaced with a process-random UUID for reboot recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,10 +156,11 @@ impl ResourceReservation {
     pub fn into_physical_graph(mut self) -> Result<OwnedPhysicalGraph, AdmissionRefusal> {
         // Boot lookup may perform bounded OS I/O. Never hold the ledger's
         // short accounting lock while doing that or initializing randomness.
+        let (process_instance, os_boot) = daemon_identity();
         let identity = GraphIdentity {
             generation: Uuid::new_v4(),
-            process_instance: *PROCESS_INSTANCE,
-            os_boot: *BOOT_IDENTITY,
+            process_instance,
+            os_boot,
         };
         let mut state = self
             .ledger
