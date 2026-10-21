@@ -1,5 +1,4 @@
 """Real pilot CLI boundaries; no lab, provider, receipt or product execution."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -30,11 +29,12 @@ class KnowledgePilotSmokeTests(unittest.TestCase):
         self.assertTrue(any(r['provenance']['source_digest'] for r in answer['records']))
 
     def test_both_cohorts_return_real_multi_edge_paths(self):
-        evidence_path = 'validation/main_unit_receipts.py'
-        artifact = 'plurx:artifact:' + hashlib.sha256(evidence_path.encode()).hexdigest()[:20]
-        for identity in ('plurx:route:server.learned-decode-limit-expiry', artifact):
-            with self.subTest(identity=identity):
-                answer = json.loads(self.command('why', identity, '--max-depth', '6').stdout)
+        # M3 promises bounded code-to-document paths for both pilot cohorts.
+        for path in ('crates/plurx-core/src/playback/caps.rs', 'validation/main_unit_receipts.py'):
+            with self.subTest(path=path):
+                response = self.command('context', '--path', path, '--max-depth', '6', '--max-bytes', '8192')
+                self.assertLessEqual(len(response.stdout.encode('utf-8')), 8192)
+                answer = json.loads(response.stdout)
                 self.assertIn(answer['status'], {'ok', 'partial'})
                 self.assertTrue(any(len(p['steps']) >= 2 for p in answer['relationship_paths']))
                 for path in answer['relationship_paths']:

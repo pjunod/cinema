@@ -15,7 +15,7 @@ scripts/knowledge context --path crates/plurx-core/src/playback/caps.rs
 scripts/knowledge context --path crates/plurx-core/src/playback/caps.rs --symbol applies_at
 scripts/knowledge obligations --base origin/main --worktree
 scripts/knowledge obligations --staged
-scripts/knowledge why plurx:route:server.learned-decode-limit-expiry
+scripts/knowledge why plurx:route:server.learned-decode-limit-expiry --max-bytes 32768
 scripts/knowledge evidence plurx:check:routing.server.learned-decode-limit-expiry --max-depth 0 --max-bytes 32768
 scripts/knowledge conflicts --scope routing
 ```
