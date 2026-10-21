@@ -14,6 +14,8 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | open |
+| [OPERATION-PROGRESS-STATUS.md](OPERATION-PROGRESS-STATUS.md) | Current ownership, stage, review, evidence and merge state for operation progress. | open |
 | [FORMAL-VERIFICATION-PILOT-PROPOSAL.md](FORMAL-VERIFICATION-PILOT-PROPOSAL.md) | The bounded TLA+/TLC pilot contract, source anchors, verification limits, milestones and acceptance bar. | done |
 | [FORMAL-VERIFICATION-PILOT-REVIEW.md](FORMAL-VERIFICATION-PILOT-REVIEW.md) | Fable's design and final implementation findings, scope limits, and coordinator dispositions. | done |
 | [FORMAL-VERIFICATION-PILOT-STATUS.md](FORMAL-VERIFICATION-PILOT-STATUS.md) | Qualified finite results, runtime evidence, costs, limits, owner and delivery link. | done |
