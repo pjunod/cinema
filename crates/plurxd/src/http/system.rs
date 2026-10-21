@@ -2506,6 +2506,9 @@ pub struct SettingsDto {
     /// meets the number.
     pub transcode_max_hw_sessions: i64,
     pub transcode_software_pool_threads: i64,
+    /// Stored request/provenance, not the defaults resolved by the two legacy
+    /// numeric fields. Reading never initializes or rewrites a mode.
+    pub transcode_capacity_settings: plurx_core::resource_settings::ResourceSettings,
     /// App-managed offline preparation has a separate reservation budget from
     /// the opportunistic playback cache above.
     pub offline_enabled: bool,
@@ -2958,6 +2961,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
+        transcode_capacity_settings: plurx_core::resource_settings::ResourceSettings::from_snapshot(
+            &settings,
+        ),
         offline_enabled,
         offline_max_gb,
         offline_max_gb_per_user,

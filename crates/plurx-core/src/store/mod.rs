@@ -2053,6 +2053,8 @@ pub mod keys {
     /// right number is a property of the silicon: a discrete card with two
     /// NVENC chips is not a NUC.
     pub const MAX_HW_SESSIONS: &str = "transcode.max_hw_sessions";
+    /// Versioned operator provenance bound to the stored numeric bytes.
+    pub const MAX_HW_SESSIONS_PROVENANCE: &str = "transcode.max_hw_sessions.provenance";
     /// Threads the software-encoder CPU pool may hand out at once. Defaults
     /// to every core but one (plurxd derives it from the machine); an admin
     /// sets it lower on a box whose CPU has other jobs, or higher at their
@@ -2066,6 +2068,8 @@ pub mod keys {
     /// write pins one machine's core count on the whole cluster — which is why
     /// the page sends this field only when an operator actually moved it.
     pub const SW_POOL_THREADS: &str = "transcode.software_pool_threads";
+    /// Absent legacy provenance never proves an intentional Automatic choice.
+    pub const SW_POOL_THREADS_PROVENANCE: &str = "transcode.software_pool_threads.provenance";
     /// Disk the pre-transcode cache may occupy, in gigabytes. `0` turns the
     /// cache off: nothing is produced, and what is already there is evicted.
     ///

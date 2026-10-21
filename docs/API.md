@@ -517,6 +517,15 @@ write, because settings are persisted one at a time and a later bad field must
 not leave an earlier policy change in force —
 `dv_disk_keep_original = false` is the destructive case that forced the rule.
 
+`transcode_capacity_settings` is a read-only stored-provenance report for
+`hardware_sessions` and `software_pool_threads`: `state` is `absent`,
+`legacy_ambiguous`, `explicit` or `automatic`; `stored_present`, nullable
+`stored_value` and `provenance_valid` distinguish storage from defaults and
+malformed/binding-mismatched records. `zero_means` preserves hardware-disabled
+versus software-serialized semantics. GET performs no initialization or write.
+The existing two numeric DTO fields still report resolved legacy limits; this
+diagnostic does not itself enable an adaptive policy or implement a mode write.
+
 `macos_video_processing_enabled` and `macos_hevc_output_enabled` are
 admin-writable booleans, both defaulting to `false`. They independently choose
 native Mac processing and negotiated HEVC output for new plans. Saving either
