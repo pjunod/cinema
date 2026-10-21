@@ -219,23 +219,41 @@ class BudgetAndLoopTests(unittest.TestCase):
 
     def test_unknown_usage_failed_request_and_aggregate_ceiling_keep_all_pairs(self):
         for failure in ("unavailable", "backend_error", "aggregate"):
-            items = cases()
-            frozen = manifest(items, total_tokens=1000 if failure == "aggregate" else 100000,
-                              run_tokens=1000)
-            calls = []
-            class Backend:
-                def respond(self, messages, names, **kwargs):
-                    calls.append(1)
-                    if failure == "backend_error":
-                        raise RuntimeError("private provider details must not enter log")
-                    return Response("synthetic", usage=Usage() if failure == "unavailable" else Usage(900, 1))
-            result = run_batch(items, frozen, lambda *args: Backend(), lambda *args: 900,
-                               query_factory, receipt(frozen))
-            self.assertEqual(len(result.runs), 9)
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(sum(run.status == "not_started" for run in result.runs), 8)
-            self.assertIsNotNone(result.stopped_reason)
-            self.assertNotIn("private provider", str(result))
+            with self.subTest(failure=failure):
+                items = cases()
+                frozen = manifest(items, total_tokens=1000 if failure == "aggregate" else 100000,
+                                  run_tokens=1000)
+                calls = []
+                class Backend:
+                    def respond(self, messages, names, **kwargs):
+                        calls.append(1)
+                        if failure == "backend_error":
+                            raise RuntimeError("private provider details must not enter log")
+                        return Response("synthetic", usage=Usage() if failure == "unavailable" else Usage(900, 1))
+                result = run_batch(items, frozen, lambda *args: Backend(), lambda *args: 900,
+                                   query_factory, receipt(frozen))
+                self.assertEqual(len(result.runs), 9)
+                self.assertEqual(tuple(run.spec for run in result.runs), result.planned)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(sum(len(run.requests) for run in result.runs), 1)
+                self.assertEqual(result.runs[0].requests[0].reserved_tokens, 950)
+                if failure == "aggregate":
+                    # The first request settles at 901. The next 950-token
+                    # reservation is refused before dispatch, retaining that
+                    # planned pair as budget_exhausted and seven untouched pairs.
+                    expected = ["completed", "budget_exhausted"] + ["not_started"] * 7
+                    self.assertEqual(result.charged_tokens, 901)
+                    self.assertLessEqual(result.charged_tokens, frozen.limits.total_tokens)
+                else:
+                    # Unknown usage keeps the full reservation and stops before
+                    # attempting another planned pair, including on backend error.
+                    first = "usage_unavailable" if failure == "unavailable" else "error"
+                    expected = [first] + ["not_started"] * 8
+                    self.assertEqual(result.charged_tokens, 950)
+                    self.assertIsNone(result.runs[0].total_tokens)
+                self.assertEqual([run.status for run in result.runs], expected)
+                self.assertIsNotNone(result.stopped_reason)
+                self.assertNotIn("private provider", str(result))
 
     def test_unknown_tool_is_rejected_as_data_without_dispatch(self):
         items = cases()
