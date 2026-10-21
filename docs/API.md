@@ -751,7 +751,11 @@ A poisoned limiter mutex fails *open*, because a lock bug must not silence
 diagnostics.
 
 `event` is one of `playback_failed`, `stream_rejected`, `hls_fatal`, `stall`,
-`stall_end`, `stall_recovery`. `stall_end` closes a `stall` that was reported
+`stall_end`, `stall_recovery`, or `frame_drop`. A `frame_drop` report may carry
+the bounded, typed version 1 `frame_drop` object retained in playback-event
+`extra.frame_drop`; see the [recorder contract](clients/FRAME-DROP-RECORDER.md)
+for numeric columns, retention, admin retrieval and attribution limits.
+`stall_end` closes a `stall` that was reported
 while it was still going (the web's persistent wait): its `ms` is the time
 after that report, and it adds to `plurx_stalled_seconds_total` without
 counting a second stall. `decode_hw` is an optional hardware observation for

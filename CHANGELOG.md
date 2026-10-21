@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Web playback automatically captures bounded frame-drop incidents with recent
+  frame, buffer, lifecycle and request evidence, respecting diagnostic-history
+  controls and retaining account-scoped local copies for investigation.
+
 - Processed Dolby Vision admission respects actual HLS support when clients
   also advertise progressive DV; native web startup reads complete long-film
   processing timelines without confusing them with small master playlists.
