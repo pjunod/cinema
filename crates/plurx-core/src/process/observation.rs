@@ -78,6 +78,76 @@ pub struct ProcessObservation {
     pub age_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ManagedGraphObservation {
+    pub graph: u64,
+    pub managed_children: u32,
+    /// Sum of individually sampled member rates, excluding recursive child
+    /// totals. Advisory: members can have slightly different sample instants.
+    pub sum_member_cpu_ns_per_second: Metric<u64>,
+    /// RSS sum can double-count shared pages; it is not an allocation peak.
+    pub sum_member_resident_bytes: Metric<u64>,
+    /// Managed grouping cannot establish absence of unmanaged descendants.
+    pub complete_graph_cpu_ns_per_second: Metric<u64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ManagedGraphSnapshot {
+    pub graphs: Vec<ManagedGraphObservation>,
+    pub truncated: bool,
+}
+
+/// Bounded admin diagnostics. No graph identifier enters a metric label and
+/// no value here grants execution, closure, or memory-overcommit authority.
+pub fn managed_graphs() -> ManagedGraphSnapshot {
+    let rows = super::priority::running();
+    aggregate_graphs(rows.iter().filter_map(|row| {
+        let graph = row.resource_graph?;
+        let resident = match row.resources.counters {
+            Metric::Known(counters) => counters.resident_bytes,
+            Metric::Unknown(reason) => Metric::Unknown(reason),
+        };
+        Some((graph, row.resources.cpu_ns_per_second, resident))
+    }))
+}
+
+fn aggregate_graphs(
+    members: impl Iterator<Item = (u64, Metric<u64>, Metric<u64>)>,
+) -> ManagedGraphSnapshot {
+    let mut groups = std::collections::BTreeMap::<u64, ManagedGraphObservation>::new();
+    let mut truncated = false;
+    for (graph, cpu, resident) in members {
+        if groups.len() >= 64 && !groups.contains_key(&graph) {
+            truncated = true;
+            continue;
+        }
+        let entry = groups.entry(graph).or_insert(ManagedGraphObservation {
+            graph,
+            managed_children: 0,
+            sum_member_cpu_ns_per_second: Metric::Known(0),
+            sum_member_resident_bytes: Metric::Known(0),
+            complete_graph_cpu_ns_per_second: Metric::Unknown(UnknownReason::IncompleteTree),
+        });
+        entry.managed_children = entry.managed_children.saturating_add(1);
+        entry.sum_member_cpu_ns_per_second = add_metric(entry.sum_member_cpu_ns_per_second, cpu);
+        entry.sum_member_resident_bytes = add_metric(entry.sum_member_resident_bytes, resident);
+    }
+    ManagedGraphSnapshot {
+        graphs: groups.into_values().collect(),
+        truncated,
+    }
+}
+
+fn add_metric(left: Metric<u64>, right: Metric<u64>) -> Metric<u64> {
+    match (left, right) {
+        (Metric::Known(left), Metric::Known(right)) => left
+            .checked_add(right)
+            .map(Metric::Known)
+            .unwrap_or(Metric::Unknown(UnknownReason::InvalidCounter)),
+        (Metric::Unknown(reason), _) | (_, Metric::Unknown(reason)) => Metric::Unknown(reason),
+    }
+}
+
 /// One cache per owned child. No OS read under the process-registry lock.
 /// API callers share the one-second cadence instead of sampling per request.
 pub struct ProcessObserver {
@@ -489,5 +559,47 @@ mod tests {
         assert_eq!(current_graph(), None);
         let second = graph_scope(async { current_graph().expect("second scope") }).await;
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn managed_graph_diagnostics_preserve_unknowns_and_bound_cardinality() {
+        let snapshot = aggregate_graphs(
+            [
+                (1, Metric::Known(100), Metric::Known(1024)),
+                (1, Metric::Known(200), Metric::Known(2048)),
+                (
+                    2,
+                    Metric::Unknown(UnknownReason::Inaccessible),
+                    Metric::Known(4096),
+                ),
+            ]
+            .into_iter(),
+        );
+        assert!(!snapshot.truncated);
+        assert_eq!(snapshot.graphs[0].managed_children, 2);
+        assert_eq!(
+            snapshot.graphs[0].sum_member_cpu_ns_per_second,
+            Metric::Known(300)
+        );
+        assert_eq!(
+            snapshot.graphs[0].sum_member_resident_bytes,
+            Metric::Known(3072)
+        );
+        assert_eq!(
+            snapshot.graphs[0].complete_graph_cpu_ns_per_second,
+            Metric::Unknown(UnknownReason::IncompleteTree)
+        );
+        assert_eq!(
+            snapshot.graphs[1].sum_member_cpu_ns_per_second,
+            Metric::Unknown(UnknownReason::Inaccessible)
+        );
+        let bounded =
+            aggregate_graphs((1..=65).map(|graph| (graph, Metric::Known(0), Metric::Known(0))));
+        assert_eq!(bounded.graphs.len(), 64);
+        assert!(bounded.truncated);
+        assert_eq!(
+            add_metric(Metric::Known(u64::MAX), Metric::Known(1)),
+            Metric::Unknown(UnknownReason::InvalidCounter)
+        );
     }
 }

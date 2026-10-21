@@ -601,6 +601,13 @@ inaccessible, hidden, unsupported or unbounded containment stays Unknown rather
 than falling back to host RAM/core counts. The read-only snapshot is cached for
 one second and does not change admission or configure the host.
 
+`resource_graphs` contains at most 64 current managed graphs plus `truncated`.
+Each row reports its daemon-local `graph`, `managed_children`, sum of member CPU
+ns per second and RSS bytes, and explicitly Unknown complete-graph CPU coverage.
+Member RSS may count shared pages more than once; it is not a peak-allocation
+bound. Group IDs are scoped to this daemon lifetime, not stable workload IDs or
+metric labels. A child leaving this diagnostic inventory is not proof of reap.
+
 `ffmpeg_support` reports `executable`, optional `expected_executable`,
 `required_package`, `expected_version`, `executable_version`,
 `source_revision` (the required source pin), `package_verification`,
