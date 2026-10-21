@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "scope": "Generic trusted evaluator and synthetic contract source frozen for same-task independent recheck; private gold remains separate.",
-  "source_metadata_sha256": "a53c4bcaef34349631c5e26d4ea76a31cc91d0c447914e91804e929adb9875db",
+  "source_metadata_sha256": "11fac646fe0b13ab248e279ee6b0623f8c147fabe8d3dac1599a5231b7dc859b",
   "sources": {
     "isolation_adapter.py": "3d9d2d85dba0bcd82e23d8d09b414d21504a0e35d104fc8fec5db9fb06f86b33",
+    "prerequisite_only.py": "f59e5ceddcdbdfa18ac1d9c4e3e319200388b22e79c81b72b00d39daf57636fc",
     "private_contract_tests.py": "eded34662c4f9fcd498242e0908e15113d4f0d8eae7bfc21dcb5aaae6774c172",
     "python_byte_outcome_driver.py": "3abcfec23be7e60426899eeb7428b2271d6cf12e0db269e8bbe6ef8d2147c14f",
     "runtime_bindings.py": "c66bda9e0c9083561171729acbe4c079f67459401159be7fc73f536b32e4b251",
@@ -22,5 +23,6 @@
       "candidate Rust compile/test"
     ]
   },
-  "qualification": "not-run; source commitments confer no approval, actual family qualification or runtime evidence"
+  "qualification": "not-run; source commitments confer no approval, actual family qualification or runtime evidence",
+  "prerequisite_only_witness": "Review-gated capability refusal only; no OS/dependency qualification or paid study evidence."
 }
