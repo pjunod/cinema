@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run the pinned, mapped DurableJobs TLC configurations and write receipts."""
+"""Run a pinned, mapped formal package and write receipts."""
 
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -20,7 +21,6 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
-MAPPING_PATH = ROOT / "verification/durable-jobs/mapping.json"
 TOOLCHAIN_MANIFEST = ROOT / "verification/durable-jobs/toolchain.json"
 BOOTSTRAP = ROOT / "scripts/bootstrap-formal-toolchain"
 CONFIG_ORDER = (
@@ -67,6 +67,50 @@ PURPOSE_VERDICTS = {
 MAX_LOG_BYTES = 64 * 1024 * 1024
 MAX_HEAP_BYTES = 4 * 1024 * 1024 * 1024
 POLL_SECONDS = 0.2
+
+
+# CLI package selection is deliberately closed over reviewed source paths.
+PACKAGES: dict[str, dict[str, Any]] = {
+    "durable-jobs": {
+        "mapping": "verification/durable-jobs/mapping.json",
+        "model_dir": "verification/durable-jobs",
+        "model_file": "verification/durable-jobs/DurableJobs.tla",
+        "output_dir": "target/verification/durable-jobs",
+        "config_order": CONFIG_ORDER,
+        "smoke_configs": SMOKE_CONFIGS,
+        "smoke_wall_budget_seconds": SMOKE_WALL_BUDGET_SECONDS,
+        "smoke_config_timeouts": SMOKE_CONFIG_TIMEOUTS,
+        "disable_deadlock_check": True,
+    },
+    "operation-progress": {
+        "mapping": "verification/operation-progress/mapping.json",
+        "model_dir": "verification/operation-progress",
+        "model_file": "verification/operation-progress/OperationProgress.tla",
+        "output_dir": "target/verification/operation-progress",
+        "config_order": (
+            "progress.cfg", "contention.cfg", "control-lock-cycle.cfg",
+            "control-renewal-livelock.cfg", "control-external-stall.cfg",
+            "control-lost-settlement.cfg", "witness-success.cfg",
+            "witness-reconcile.cfg", "witness-cancel-cleanup.cfg",
+        ),
+        "smoke_configs": ("progress.cfg", "witness-success.cfg"),
+        "smoke_wall_budget_seconds": 180,
+        "smoke_config_timeouts": {"progress.cfg": 120, "witness-success.cfg": 120},
+        "config_timeout_cap_seconds": 120,
+        "disable_deadlock_check": False,
+    },
+}
+
+
+def package_spec(name: str) -> dict[str, Any]:
+    try:
+        return copy.deepcopy(PACKAGES[name])
+    except KeyError as exc:
+        raise RunnerError(f"unknown formal package {name!r}; known packages: {', '.join(PACKAGES)}") from exc
+
+
+# Backward-compatible name used by existing runner contract tests.
+MAPPING_PATH = ROOT / PACKAGES["durable-jobs"]["mapping"]
 
 
 class RunnerError(Exception):
@@ -201,8 +245,11 @@ def repo_file(relative: str, label: str) -> Path:
     return path
 
 
-def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+def mapping_inputs(mapping: dict[str, Any], package: str = "durable-jobs") -> tuple[list[str], dict[str, str]]:
     """Return drift diagnostics and the exact reviewed hashes used by the check."""
+    spec = package_spec(package)
+    config_order = spec["config_order"]
+    config_dir = spec["model_dir"]
     drift: list[str] = []
     hashes: dict[str, str] = {}
     drift.extend(validate_feasibility_attempts(mapping.get("feasibility_attempts", [])))
@@ -210,6 +257,8 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
     if not isinstance(model, str):
         drift.append("mapping has no model_file")
     else:
+        if model != spec["model_file"]:
+            drift.append(f"mapping model_file must be the reviewed package model: {spec['model_file']}")
         try:
             path = repo_file(model, "model")
             actual = sha256(path)
@@ -223,19 +272,19 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
             drift.append(str(exc))
 
     configs = mapping.get("configs")
-    if not isinstance(configs, dict) or set(configs) != set(CONFIG_ORDER):
-        drift.append("mapping config set differs from the reviewed 16-config registry")
+    if not isinstance(configs, dict) or set(configs) != set(config_order):
+        drift.append(f"mapping config set differs from the reviewed {len(config_order)}-config {package} registry")
         configs = configs if isinstance(configs, dict) else {}
-    for name in CONFIG_ORDER:
+    for name in config_order:
         record = configs.get(name)
         if not isinstance(record, dict):
             drift.append(f"mapping lacks config record: {name}")
             continue
         try:
-            path = repo_file(f"verification/durable-jobs/{name}", "TLC config")
+            path = repo_file(f"{config_dir}/{name}", "TLC config")
             config_text = path.read_text(encoding="utf-8")
             actual = sha256(path)
-            hashes[f"verification/durable-jobs/{name}"] = actual
+            hashes[f"{config_dir}/{name}"] = actual
             expected = record.get("sha256")
             if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
                 drift.append(f"config hash is not reviewed: {name}")
@@ -280,6 +329,9 @@ def mapping_inputs(mapping: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
                 or record["timeout_seconds"] < 1
             ):
                 drift.append(f"invalid timeout for {name}")
+            cap = spec.get("config_timeout_cap_seconds")
+            if cap is not None and isinstance(record.get("timeout_seconds"), int) and record["timeout_seconds"] > cap:
+                drift.append(f"configuration timeout exceeds reviewed {cap}-second cap: {name}")
             analysis = record.get("analysis")
             if not isinstance(analysis, dict) or analysis.get("status") != "reviewed":
                 drift.append(f"configuration analysis metadata is pending review: {name}")
@@ -416,39 +468,40 @@ def _git_output(*arguments: str, nul: bool = False) -> list[str]:
     return [line for line in raw.decode("utf-8", errors="replace").splitlines() if line]
 
 
-def source_git_identity(mapping: dict[str, Any]) -> dict[str, Any]:
+def source_git_identity(mapping: dict[str, Any], package: str = "durable-jobs") -> dict[str, Any]:
+    spec = package_spec(package)
     commit = _git_output("rev-parse", "--verify", "HEAD")[0]
     tree = _git_output("rev-parse", "--verify", "HEAD^{tree}")[0]
     tracked_changes = set(_git_output("diff", "--name-only", "-z", "HEAD", "--", nul=True))
     untracked = set(_git_output("ls-files", "--others", "--exclude-standard", "-z", nul=True))
     dirty_paths = sorted(tracked_changes | untracked)
-    governed = {
-        "verification/durable-jobs/mapping.json",
-        "verification/durable-jobs/toolchain.json",
-        "scripts/bootstrap-formal-toolchain",
-        "scripts/check-formal",
-        "tests/operations/test_formal_runner.py",
-        "tests/operations/test_formal_ci.py",
-        "tests/operations/test_formal_toolchain.py",
-        "validation/points.toml",
-    }
+    mapping_path = spec["mapping"]
+    model_dir = spec["model_dir"]
+    governed = {mapping_path, "verification/durable-jobs/toolchain.json", "scripts/bootstrap-formal-toolchain", "scripts/check-formal"}
+    if package == "durable-jobs":
+        governed.update({
+            "tests/operations/test_formal_runner.py",
+            "tests/operations/test_formal_ci.py",
+            "tests/operations/test_formal_toolchain.py",
+            "validation/points.toml",
+        })
     model = mapping.get("model_file")
     if isinstance(model, str):
         governed.add(model)
     configs = mapping.get("configs")
     if isinstance(configs, dict):
-        governed.update(f"verification/durable-jobs/{name}" for name in configs)
+        governed.update(f"{model_dir}/{name}" for name in configs)
     sources = mapping.get("source_mapping")
     if isinstance(sources, dict) and isinstance(sources.get("tables"), list):
         governed.update(
             row["source"] for row in sources["tables"]
             if isinstance(row, dict) and isinstance(row.get("source"), str)
         )
-    durable_dir = ROOT / "verification/durable-jobs"
-    if durable_dir.is_dir():
+    package_dir = ROOT / model_dir
+    if package == "durable-jobs" and package_dir.is_dir():
         governed.update(
             path.relative_to(ROOT).as_posix()
-            for path in durable_dir.rglob("*")
+            for path in package_dir.rglob("*")
             if path.is_file() or path.is_symlink()
         )
     governed_dirty = sorted(governed.intersection(dirty_paths))
@@ -467,21 +520,24 @@ def source_git_identity(mapping: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def mapping_check(base: str | None) -> int:
-    mapping = read_json(MAPPING_PATH, "runner mapping")
-    drift, hashes = mapping_inputs(mapping)
+def mapping_check(base: str | None, package: str = "durable-jobs") -> int:
+    spec = package_spec(package)
+    mapping_path = repo_file(spec["mapping"], "runner mapping")
+    mapping = read_json(mapping_path, "runner mapping")
+    drift, hashes = mapping_inputs(mapping, package)
     changed = changed_paths(base)
     config_map = mapping.get("configs")
     config_names = config_map.keys() if isinstance(config_map, dict) else ()
     governed = {
         mapping.get("model_file"),
-        "verification/durable-jobs/mapping.json",
+        spec["mapping"],
         "verification/durable-jobs/toolchain.json",
         "scripts/bootstrap-formal-toolchain",
         "scripts/check-formal",
-        "validation/points.toml",
-        *(f"verification/durable-jobs/{name}" for name in config_names),
+        *(f"{spec['model_dir']}/{name}" for name in config_names),
     }
+    if package == "durable-jobs":
+        governed.add("validation/points.toml")
     source_mapping = mapping.get("source_mapping")
     if isinstance(source_mapping, dict) and isinstance(source_mapping.get("tables"), list):
         governed.update(
@@ -490,11 +546,12 @@ def mapping_check(base: str | None) -> int:
     affected = base is None or bool(governed.intersection(changed))
     result = {
         "schema_version": 1,
+        "package": package,
         "affected": affected,
         "changed_paths": changed,
         "source_drift": drift,
         "input_sha256": hashes,
-        "mapping_sha256": sha256(MAPPING_PATH),
+        "mapping_sha256": sha256(mapping_path),
     }
     print(json.dumps(result, sort_keys=True))
     return 0 if not drift else 1
@@ -646,7 +703,12 @@ STATE_RE = re.compile(
 DEPTH_RE = re.compile(r"depth of the complete state graph search is\s+(\d+)", re.IGNORECASE)
 COMPLETE_RE = re.compile(r"Model checking completed\. No error has been found\.", re.IGNORECASE)
 TEMPORAL_FINISHED_RE = re.compile(r"^Finished checking temporal properties in\s+\S+", re.MULTILINE)
-TEMPORAL_TRACE_END_RE = re.compile(r"^(?:State\s+\d+:\s+Stuttering|Back to state\s+\d+)\s*$", re.MULTILINE)
+TEMPORAL_TRACE_END_RE = re.compile(
+    r"^(?:State\s+\d+:\s+Stuttering|Back to state\s+\d+(?:: "
+    r"<[A-Za-z_][A-Za-z0-9_!']* line [1-9]\d*, col [1-9]\d* to "
+    r"line [1-9]\d*, col [1-9]\d* of module [A-Za-z_][A-Za-z0-9_]*>)?)[ \t]*$",
+    re.MULTILINE,
+)
 ERROR_RE = re.compile(r"^Error:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
 FATAL_RE = re.compile(
     r"(?:Parsing Error|Semantic Error|OutOfMemoryError|Exception in thread|TLC encountered an error|No such file|cannot find module)",
@@ -755,42 +817,49 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
-def select_configs(mode: str, config: str | None) -> list[str]:
+def select_configs(mode: str, config: str | None, package: str = "durable-jobs") -> list[str]:
+    spec = package_spec(package)
+    config_order = spec["config_order"]
     if config is not None:
-        if config not in CONFIG_ORDER:
-            raise RunnerError(f"unknown config {config!r}; known configs: {', '.join(CONFIG_ORDER)}")
+        if config not in config_order:
+            raise RunnerError(f"unknown config {config!r}; known configs: {', '.join(config_order)}")
         return [config]
-    return list(SMOKE_CONFIGS) if mode == "smoke" else list(CONFIG_ORDER)
+    return list(spec["smoke_configs"]) if mode == "smoke" else list(config_order)
 
 
-def config_timeout(mode: str, name: str, configured: int, remaining: float | None) -> float:
-    profile_limit = SMOKE_CONFIG_TIMEOUTS.get(name, configured) if mode == "smoke" else configured
-    profile_limit = min(configured, profile_limit)
+def config_timeout(mode: str, name: str, configured: int, remaining: float | None, package: str = "durable-jobs") -> float:
+    profile = package_spec(package)
+    profile_limit = profile["smoke_config_timeouts"].get(name, configured) if mode == "smoke" else configured
+    profile_limit = min(configured, profile_limit, profile.get("config_timeout_cap_seconds", configured))
     return float(profile_limit if remaining is None else min(profile_limit, max(0.01, remaining)))
 
 
 def run(args: argparse.Namespace) -> int:
-    mapping = read_json(MAPPING_PATH, "runner mapping")
-    drift, input_hashes = mapping_inputs(mapping)
+    package = args.package
+    spec = package_spec(package)
+    mapping_path = repo_file(spec["mapping"], "runner mapping")
+    mapping = read_json(mapping_path, "runner mapping")
+    drift, input_hashes = mapping_inputs(mapping, package)
     if drift:
         raise RunnerError("mapping check failed: " + "; ".join(drift))
-    selected = select_configs(args.mode, args.config)
+    selected = select_configs(args.mode, args.config, package)
 
-    output_root = durable_output(args.output_dir)
+    output_root = durable_output(args.output_dir or ROOT / spec["output_dir"])
     output_root.mkdir(parents=True, exist_ok=True)
     model_file = mapping["model_file"]
     model_path = repo_file(model_file, "model")
-    source_git = source_git_identity(mapping)
+    source_git = source_git_identity(mapping, package)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run_dir = output_root / run_id
     run_dir.mkdir(mode=0o700)
     runner_hash = sha256(Path(__file__))
     aggregate: dict[str, Any] = {
         "schema_version": 1,
+        "package": package,
         "run_id": run_id,
         "mode": args.mode,
         "status": "in_progress",
-        "mapping_sha256": sha256(MAPPING_PATH),
+        "mapping_sha256": sha256(mapping_path),
         "model_sha256": input_hashes[model_file],
         "source_git": source_git,
         "input_sha256": input_hashes,
@@ -832,28 +901,28 @@ def run(args: argparse.Namespace) -> int:
     write_json(receipt_path, aggregate)
     model_started = time.monotonic()
     profile_deadline = (
-        model_started + SMOKE_WALL_BUDGET_SECONDS
+        model_started + spec["smoke_wall_budget_seconds"]
         if args.mode == "smoke" and args.config is None
         else None
     )
     aggregate["resource_policy"]["profile_wall_timeout_seconds"] = (
-        SMOKE_WALL_BUDGET_SECONDS if profile_deadline is not None else None
+        spec["smoke_wall_budget_seconds"] if profile_deadline is not None else None
     )
     write_json(receipt_path, aggregate)
     java = toolchain["java"]["path"]
     jar = toolchain["tlc"]["path"]
-    config_dir = ROOT / "verification/durable-jobs"
+    config_dir = ROOT / spec["model_dir"]
     for name in selected:
         record = mapping["configs"][name]
         remaining = None if profile_deadline is None else profile_deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
             aggregate["status"] = "failed"
-            aggregate["failure"] = "smoke profile exhausted its 180-second aggregate model budget"
+            aggregate["failure"] = f"smoke profile exhausted its {spec['smoke_wall_budget_seconds']}-second aggregate model budget"
             aggregate["remaining_configs"] = selected[len(aggregate["configs"]):]
             write_json(receipt_path, aggregate)
             print(json.dumps({"receipt": str(receipt_path), "status": "failed", "reason": aggregate["failure"]}, sort_keys=True))
             return 1
-        cfg = repo_file(f"verification/durable-jobs/{name}", "TLC config")
+        cfg = repo_file(f"{spec['model_dir']}/{name}", "TLC config")
         out_dir = run_dir / name.removesuffix(".cfg")
         out_dir.mkdir(mode=0o700)
         metadir = out_dir / "metadir"
@@ -871,14 +940,14 @@ def run(args: argparse.Namespace) -> int:
             name,
             "-workers",
             "auto",
-            "-deadlock",
+            *(["-deadlock"] if spec["disable_deadlock_check"] else []),
             "-metadir",
             str(metadir),
             "-cleanup",
             model_path.name,
         ]
         configured_timeout = record["timeout_seconds"]
-        effective_timeout = config_timeout(args.mode, name, configured_timeout, remaining)
+        effective_timeout = config_timeout(args.mode, name, configured_timeout, remaining, package)
         execution = execute(argv, config_dir, raw_log, effective_timeout)
         try:
             scratch_cleanup = cleanup_metadir(out_dir, metadir)
@@ -908,7 +977,7 @@ def run(args: argparse.Namespace) -> int:
             "expected_exit": record["expected_exit"],
             "analysis": record["analysis"],
             **verdict,
-            "config_sha256": input_hashes[f"verification/durable-jobs/{name}"],
+            "config_sha256": input_hashes[f"{spec['model_dir']}/{name}"],
             "source_hashes": {k: v for k, v in input_hashes.items() if k != model_file and not k.endswith(".cfg")},
             "argv": argv,
             "timeout_seconds": effective_timeout,
@@ -938,11 +1007,13 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check-mapping", help="offline source and input drift check")
     check.add_argument("--affected-base", help="base commit for changed-path impact reporting")
+    check.add_argument("--package", choices=tuple(PACKAGES), default="durable-jobs")
     smoke = commands.add_parser("smoke", help="run the bounded smoke, recovery, and witness profile")
-    full = commands.add_parser("full", help="run all 16 mapped TLC configurations")
+    full = commands.add_parser("full", help="run all mapped TLC configurations")
     for command, mode in ((smoke, "smoke"), (full, "full")):
+        command.add_argument("--package", choices=tuple(PACKAGES), default="durable-jobs")
         command.add_argument("--cache-dir", type=Path, default=ROOT / "target/formal-toolchain")
-        command.add_argument("--output-dir", type=Path, default=ROOT / "target/verification/durable-jobs")
+        command.add_argument("--output-dir", type=Path, help="durable receipt directory; defaults by package")
         command.add_argument("--config", help="run only one mapped config (for targeted reruns)")
         command.set_defaults(mode=mode)
     return result
@@ -952,7 +1023,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "check-mapping":
-            return mapping_check(args.affected_base)
+            return mapping_check(args.affected_base, args.package)
         return run(args)
     except RunnerError as exc:
         print(f"check-formal: {exc}", file=sys.stderr)

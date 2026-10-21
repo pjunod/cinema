@@ -295,6 +295,57 @@ VIEW ModelView
         self.assertFalse(result["complete"])
         self.assertIn("stuttering or back-edge", result["reason"])
 
+    def test_temporal_back_edge_accepts_reviewed_annotation(self) -> None:
+        expected = {
+            "verdict": "violation",
+            "expected_error": "L1_FreshClaimEventually",
+            "expected_exit": 37,
+            "expected_error_match": {
+                "line": "Temporal properties were violated.",
+                "attribution": "sole_property",
+                "allowed_error_lines": ["The following behavior constitutes a counter-example:"],
+            },
+            "minimum_trace_states": 2,
+            "analysis": {"properties": ["L1_FreshClaimEventually"]},
+        }
+        output = temporal_violation_output().replace(
+            "State 8: Stuttering\n", "State 8: <Tick>\n"
+        ).replace(
+            "Finished checking temporal properties in 00s at (synthetic).\n",
+            "Back to state 19: <Tick line 331, col 3 to line 332, col 53 of module OperationProgress>\n"
+            "Finished checking temporal properties in 00s at (synthetic).\n",
+        )
+        result = formal.classify(output, 37, expected, False, None)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["completion_kind"], "temporal_counterexample_detected")
+        bare_back_edge = output.replace(
+            "Back to state 19: <Tick line 331, col 3 to line 332, col 53 of module OperationProgress>",
+            "Back to state 19",
+        )
+        self.assertTrue(
+            formal.classify(bare_back_edge, 37, expected, False, None)["complete"]
+        )
+
+        malformed_terminators = (
+            "Back to state 19: <>\n",
+            "Back to state 19: < line 331, col 3 to line 332, col 53 "
+            "of module OperationProgress>\n",
+            "Back to state 19: <Tick line 331, col 3 to line 332, col 53 "
+            "of module OperationProgress\n",
+            "Back to state 19: <Tick line 331, col 3 to line 332, col 53 "
+            "of module OperationProgress> trailing\n",
+        )
+        for terminator in malformed_terminators:
+            with self.subTest(terminator=terminator):
+                malformed = output.replace(
+                    "Back to state 19: <Tick line 331, col 3 to line 332, col 53 "
+                    "of module OperationProgress>\n",
+                    terminator,
+                )
+                result = formal.classify(malformed, 37, expected, False, None)
+                self.assertFalse(result["complete"])
+                self.assertIn("stuttering or back-edge", result["reason"])
+
     def test_violation_rejects_missing_counterexample(self) -> None:
         output = violation_output().replace("State 1: <Initial predicate>\n", "")
         result = formal.classify(output, 23, VIOLATION, False, None)
