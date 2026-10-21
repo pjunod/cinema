@@ -41,7 +41,13 @@ class KnowledgePilotSmokeTests(unittest.TestCase):
                     self.assertTrue(all(step['provenance']['source_digest'] for step in path['steps']))
 
     def test_named_check_is_not_authenticated_execution(self):
-        answer = json.loads(self.command('evidence', 'plurx:check:routing.server.learned-decode-limit-expiry').stdout)
+        # Classify the named check directly; the full relationship walk may
+        # correctly refuse the default 8 KiB budget before returning records.
+        response = self.command('evidence', 'plurx:check:routing.server.learned-decode-limit-expiry',
+                                '--max-depth', '0', '--max-bytes', '32768')
+        self.assertLessEqual(len(response.stdout.encode('utf-8')), 32768)
+        answer = json.loads(response.stdout)
+        self.assertIn(answer['status'], {'ok', 'partial'})
         evidence = answer['evidence_assessment']
         self.assertEqual(evidence['execution'], 'not-run')
         self.assertEqual(evidence['origin'], 'unavailable')
