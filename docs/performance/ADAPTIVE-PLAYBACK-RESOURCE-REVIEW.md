@@ -93,3 +93,17 @@ plan and acceptance bytes are unchanged. Author-run revised paperwork passed
 hook passed catalog lint, rustfmt, workspace/all-target Clippy with warnings
 denied and served JavaScript syntax. These are document/source checks, not
 acceptance of an adaptive scheduler that has not been implemented.
+
+## 6. Implementation-time compatibility clarification (not new approval)
+
+The implementation manager source-verified that hardware zero disables hardware
+while software-pool zero allows one saturating idle-pool job and serializes
+further work. Nonzero undersized legacy service budgets also retain the existing
+idle-pool exception where applicable; bundle/family paths require specific
+coverage. These are legacy thread-service semantics, never exceptions to physical
+CPU/memory/device safety limits. Plan §4.3 and acceptance now spell this out.
+Original approved hashes in §5 remain historical and unchanged; current document
+bytes differ by this explicit clarification, not a retroactive reviewer receipt.
+The final independent implementation review must include this delta and its
+key-specific regression expectations. No new runtime acceptance or test execution
+is claimed by the manager clarification.

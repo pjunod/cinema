@@ -10,9 +10,33 @@ manager handoff precede qualification and landing.
 
 Normative [plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md),
 [acceptance](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) and
-[design review](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) are unchanged.
+[design review](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) retain their historical
+approval pins below. An explicit manager-accepted, source-grounded zero/service-
+budget clarification now changes their bytes; review §6 records that delta
+without inventing new independent approval. Current plan/acceptance/review
+SHA-256 respectively:
+`0a3a26eaab79e9b1852d16dc005394cfca59e676fae7319cbc34b0e64ca1386c`,
+`73067de47ac10b0855637540e0e3d84724e0361aa72340de9c867bd4cf1159fd`,
+`3c5a4b08f83617e73273e520aa4a9a78a60e69ab550618c97f2966756898e8ed`.
 
 ## Current source and compiler receipt
+
+Latest source `a4098f09540e13d3689012b39de658f2d709ab75` includes bounded
+64-graph diagnostics with explicitly Unknown descendant coverage, shared-audio
+useful service that cannot mint video recipe evidence, and a read-only four-state
+stored-limit report separate from resolved defaults. Exact-code pinned all-target
+daemon Clippy passed 170 s (`221512.log`); message-only amendment preserves its
+tree `1e63dbed06a090d8d332f6e0abfe7e277974c198`. M2's parser/report is partial:
+transactional mode writers, persistent invalidation/import/restore, controls and
+adaptive vector/policy remain absent. No admission behavior has changed. New
+fixtures are authored/compiled, not executed. PR1248 remains draft at published
+`e9f4af52d`, whose paperwork passed, not runtime qualification. Coordinator-owned
+native Linux compile-only checks passed on exact e9: daemon check/Clippy and core
+Hiqlite check/Clippy, all-targets, actual Rust 1.97.1, zero units executed. Private
+verified receipt SHA-256 is
+`c0cc2c6c36bdc56da9af8a638f6e24992b08806f66839bf5da35f368f2a1ea05`.
+That evidence does not cover later graph/audio/settings edits or runtime behavior;
+preserve the warm isolated target, do not duplicate the frozen run.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
@@ -453,7 +477,10 @@ mode=`automatic/explicit/legacy_ambiguous`, and bound stored numeric string
 K without valid bound provenance = enforced LegacyAmbiguous; valid Explicit =
 enforced saved ceiling; valid Automatic = ignore the numeric rollback cache.
 Malformed numeric or inconsistent explicit provenance fails closed, never
-silently expands. Zero retains its existing disabled meaning in enforced mode.
+silently expands. Zero is kind-specific: hardware zero disables hardware
+sessions; software-pool zero retains the existing serialized/idle-pool oversize
+semantics, not a software ban (`SwPool::try_take`, admission.rs352–377, and
+store/mod.rs2062–2066). Do not normalize these two meanings into one zero cap.
 
 Shared persistent settings INSERT/UPDATE triggers on either numeric key always
 invalidate its provenance to legacy-ambiguous, including writes by an old binary,

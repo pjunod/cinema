@@ -17,6 +17,7 @@ or skipped platform case counts as a pass.
 | Test class | Required observations |
 |---|---|
 | Policy and replay | Fake clock; unknown/stale/corrupt samples; non-finite/overflow inputs; changes of recipe/backend/quota; duplicate observations; bounded history; explicit caps and zero semantics |
+| Stored-limit compatibility | Hardware zero disables hardware; software zero serializes one saturating idle-pool job, not a ban. Preserve applicable nonzero legacy software idle-pool oversize and family/bundle semantics without overriding true physical hard limits. Cover direct pool, bundle/family admission, provenance, round-trip and rollback separately. |
 | Atomic ownership | Simultaneous starts; family/predecessor overlap; cancellation in every phase; panic, failed wait, child descendants; UnknownHeld on panic/drop; no permit release before reap; no double count of shared audio or DVR transport |
 | Measurement | Startup/steady separation; paced live input; full-buffer holds; slow client vs slow source; cached responses; blocked output; sample loss; external contention; no falsely inferred spare capacity |
 | Trial protection | Warm VOD incumbents and newcomer; no fresh runway; unknown memory; startup timeout; cleanup timeout; workload complexity spike; thermal slowdown; cooldown only on real service failure; buffer-paced 0× never causes a false abort; four/six-role overlap and seventh-role refusal |

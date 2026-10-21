@@ -191,7 +191,10 @@ into “needs a GPU slot and threads.”
 ### 4.3 Compatibility and settings migration
 
 Existing keys `transcode.max_hw_sessions` and
-`transcode.software_pool_threads` keep their zero/disabled meanings. Add explicit
+`transcode.software_pool_threads` keep distinct meanings: hardware zero disables
+hardware; zero/undersized software budgets permit one saturating idle-pool job,
+not a ban. Physical caps still bind. Family/bundle and approval details:
+[review §6](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md). Add explicit
 provenance to new writes, with four read states:
 
 | State | Decision and transition |
