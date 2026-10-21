@@ -100,10 +100,33 @@ class KnowledgeModelTests(unittest.TestCase):
 
     def test_split_child_private_path_refuses_before_module_expansion_reads(self):
         self.write("src/owner.rs", '// split: begin body\n#[path = "auth.json"]\nmod body;\n// split: end body\n')
-        with patch("validation.rust_modules.module_source", side_effect=AssertionError("unsafe child reached expansion")):
+        with patch("validation.rust_modules._child_body", side_effect=AssertionError("unsafe child reached expansion")):
             with self.assertRaisesRegex(KnowledgeError, "credential source path refused"):
                 resolve_anchor(self.root, {"id": "plurx:symbol:private-child", "path": "src/owner.rs",
                     "kind": "symbol", "selector": "fn route(", "digest": SHA})
+
+    def test_external_frozen_roots_preserve_logical_hls_normalization(self):
+        owner = "crates/plurxd/src/http/hls.rs"
+        child = "crates/plurxd/src/http/child.rs"
+        parent_text = '// split: begin body\n#[path = "child.rs"]\nmod body;\n// split: end body\n'
+        child_text = "use super::*;\n\npub(in crate::http) fn route() -> super::super::Token { todo!() }\n"
+        for prefix in ("frozen-left", "another/frozen-right"):
+            self.write(prefix + "/" + owner, parent_text)
+            self.write(prefix + "/" + child, child_text)
+        spec = {"id": "plurx:symbol:logical-hls", "path": owner, "kind": "symbol",
+                "selector": "pub(super) fn route() -> super::Token", "digest": SHA}
+        # The canonical helper's process-root inference must never participate.
+        with patch("validation.rust_modules.module_source", side_effect=AssertionError("process root inferred")):
+            left = resolve_anchor(self.root / "frozen-left", spec)
+            right = resolve_anchor(self.root / "another/frozen-right", spec)
+        self.assertEqual(left.current_digest, right.current_digest)
+        self.assertEqual(left.physical_paths, right.physical_paths)
+        self.assertEqual(left.owner_module, owner)
+        self.assertEqual(right.owner_module, owner)
+        self.assertEqual(left.path, child)
+        self.assertEqual(right.path, child)
+        self.assertEqual(left.line, 3)
+        self.assertEqual(right.line, 3)
 
     def test_public_symlink_cannot_reach_private_source_directory(self):
         self.write(".aws/config", "synthetic private bytes\n")

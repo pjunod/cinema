@@ -461,6 +461,40 @@ def _sections(raw: bytes):
         yield path, "".join(lines[start:stop]).encode("utf-8"), start + 1, stop
 
 
+def _logical_module_source(root: Path, owner: str, owner_text: str) -> tuple[str, tuple[str, ...]]:
+    """Expand an inventory module using its logical path, not process REPO_ROOT.
+
+    Equivalent to the canonical module_source composition. The upstream child
+    normalizer receives the explicit owner key so frozen corpora and worktrees
+    retain HLS visibility/path rewrites without changing upstream globals.
+    """
+    from validation.rust_modules import _product_blocks, _child_body
+    blocks = list(_product_blocks(owner_text))
+    relatives = [owner]
+    child_paths = {}
+    # Validate the complete input set before any upstream child reader runs.
+    for _, children in blocks:
+        for child in children:
+            relative = (PurePosixPath(owner).parent / safe_relative(child)).as_posix()
+            read_source(root, relative)
+            child_paths[child] = source_path(root, relative)
+            relatives.append(relative)
+    pieces = []
+    last = 0
+    for block, children in blocks:
+        bodies = [_child_body(child_paths[child], owner) for child in children]
+        if len(bodies) == 1:
+            expanded = bodies[0]
+        else:
+            header = bodies[0].split("\n", 1)[0] + "\n"
+            inner = [body[len(header):-len("}\n")] for body in bodies]
+            expanded = header + "\n".join(inner) + "}\n"
+        pieces.extend((owner_text[last:block.start()], expanded))
+        last = block.end()
+    pieces.append(owner_text[last:])
+    return "".join(pieces), tuple(dict.fromkeys(relatives))
+
+
 def resolve_anchor(root: Path, raw: Mapping[str, Any]) -> Anchor:
     exact(raw, {"id", "path", "kind", "selector", "digest"}, {"owner_module", "excerpt"}, "anchor declaration")
     identifier(raw["id"])
@@ -485,17 +519,12 @@ def resolve_anchor(root: Path, raw: Mapping[str, Any]) -> Anchor:
         require("\n" not in selector, "symbol selector must be one line")
         # Existing inventories normalize split children. Track every expansion
         # input and locate the physical match independently of display offsets.
-        from validation.rust_modules import module_source, _product_blocks, _child_body
+        from validation.rust_modules import _child_body
         owner_text = read_source(root, owner).decode("utf-8")
-        relatives = [owner]
-        # Discover child declarations without split_children(), which resolves
-        # paths before the source policy can reject private/generated inputs.
-        children = [child for _, names in _product_blocks(owner_text) for child in names] if owner.endswith(".rs") else []
-        for child in sorted(children):
-            relative = (PurePosixPath(owner).parent / safe_relative(child)).as_posix()
-            read_source(root, relative)
-            relatives.append(relative)
-        expanded = module_source(source_path(root, owner)) if owner.endswith(".rs") else read_source(root, owner).decode("utf-8")
+        if owner.endswith(".rs"):
+            expanded, relatives = _logical_module_source(root, owner, owner_text)
+        else:
+            expanded, relatives = owner_text, (owner,)
         require(expanded.count(selector) == 1, f"{'missing' if selector not in expanded else 'ambiguous'} symbol anchor: {raw['id']}")
         candidates = []
         for relative in relatives:
