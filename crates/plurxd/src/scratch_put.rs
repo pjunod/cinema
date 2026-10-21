@@ -525,7 +525,7 @@ impl Refused {
 async fn serve_connection(shared: &Arc<Shared>, stream: tokio::net::TcpStream) {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::with_capacity(PIECE_BYTES, read);
-    let status = match receive(shared, &mut reader).await {
+    let status = match receive(shared, &mut reader, &mut write).await {
         Ok(status) => status,
         Err(refused) => {
             tracing::debug!(reason = %refused.reason, "scratch upload refused");
@@ -545,6 +545,7 @@ async fn serve_connection(shared: &Arc<Shared>, stream: tokio::net::TcpStream) {
 
 struct Request {
     delete: bool,
+    expect_continue: bool,
     lane: u32,
     name: String,
     body: BodyMode,
@@ -556,9 +557,14 @@ enum BodyMode {
     Length(u64),
 }
 
-async fn receive<R>(shared: &Arc<Shared>, reader: &mut R) -> Result<&'static str, Refused>
+async fn receive<R, W>(
+    shared: &Arc<Shared>,
+    reader: &mut R,
+    write: &mut W,
+) -> Result<&'static str, Refused>
 where
     R: AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
     let request = tokio::select! {
         request = tokio::time::timeout(REQUEST_HEAD_TIMEOUT, read_request(shared, reader)) => {
@@ -566,7 +572,41 @@ where
         }
         () = closed(shared) => return Err(Refused::gone("the session ended")),
     };
+    if request.expect_continue {
+        tokio::time::timeout(
+            REQUEST_HEAD_TIMEOUT,
+            write.write_all(b"HTTP/1.1 100 Continue\r\n\r\n"),
+        )
+        .await
+        .map_err(|_| Refused::new("408 Request Timeout", "could not continue request"))?
+        .map_err(|error| {
+            Refused::new(
+                "400 Bad Request",
+                format!("could not continue request: {error}"),
+            )
+        })?;
+    }
     if request.delete {
+        // FFmpeg sends DELETE using chunked transfer coding, with a zero
+        // terminal chunk. Consume and prove that empty body before unlink:
+        // accepting its header alone would also authorize nonempty requests.
+        let mut body = Body::new(request.body);
+        let mut unexpected = [0_u8; 1];
+        let read = tokio::time::timeout(REQUEST_HEAD_TIMEOUT, body.read(reader, &mut unexpected))
+            .await
+            .map_err(|_| Refused::new("408 Request Timeout", "no DELETE body terminator"))?
+            .map_err(|error| {
+                Refused::new(
+                    "400 Bad Request",
+                    format!("invalid DELETE framing: {error}"),
+                )
+            })?;
+        if read != 0 {
+            return Err(Refused::new(
+                "400 Bad Request",
+                "Live TV DELETE body must be empty",
+            ));
+        }
         enter_lane(shared, request.lane).await?;
         return delete_live_segment(shared, &request).await;
     }
@@ -666,6 +706,7 @@ where
     let target = parts.next().unwrap_or_default().to_owned();
     let mut chunked = None;
     let mut length = None;
+    let mut expect_continue = false;
     loop {
         let header = read_line(reader, &mut line, &mut head).await?;
         if header.is_empty() {
@@ -675,7 +716,15 @@ where
             return Err(bad("malformed header"));
         };
         let value = value.trim();
-        if key.eq_ignore_ascii_case("transfer-encoding") {
+        if key.eq_ignore_ascii_case("expect") {
+            if !value.eq_ignore_ascii_case("100-continue") {
+                return Err(Refused::new(
+                    "417 Expectation Failed",
+                    "unsupported request expectation",
+                ));
+            }
+            expect_continue = true;
+        } else if key.eq_ignore_ascii_case("transfer-encoding") {
             if chunked.is_some() {
                 return Err(bad("more than one Transfer-Encoding"));
             }
@@ -721,7 +770,7 @@ where
     if !valid_object_name(name) {
         return Err(bad("not an HLS object name"));
     }
-    if delete && (!live_segment_name(name) || chunked.is_some() || length.is_some_and(|n| n != 0)) {
+    if delete && (!live_segment_name(name) || length.is_some_and(|n| n != 0)) {
         return Err(bad("not an empty Live TV segment deletion"));
     }
     let body = match (chunked, length) {
@@ -734,6 +783,7 @@ where
     };
     Ok(Request {
         delete,
+        expect_continue,
         lane,
         name: name.to_owned(),
         body,
@@ -1590,6 +1640,68 @@ mod tests {
             .starts_with("HTTP/1.1 400"));
         assert!(temporary.path().join("index.m3u8").exists());
         assert_eq!(sink.shared.lock().committed.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_tv_accepts_ffmpeg_empty_chunked_delete_and_rejects_payload() {
+        let temporary = crate::test_tempdir().expect("temporary");
+        let sink = PutSink::bind_live_tv(temporary.path().to_owned()).expect("live sink");
+        let base = sink.base_url(0);
+        for name in ["segment-000000.ts", "segment-000001.ts"] {
+            assert!(put(&base, name, &[1; 128])
+                .await
+                .starts_with("HTTP/1.1 201"));
+        }
+        async fn chunked_delete(base: &str, name: &str, body: &[u8]) -> String {
+            let (host, path) = host_path(base);
+            let mut stream = tokio::net::TcpStream::connect(&host)
+                .await
+                .expect("connect");
+            stream.write_all(format!("DELETE {path}/{name} HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n").as_bytes()).await.expect("head");
+            let mut interim = [0_u8; 25];
+            stream
+                .read_exact(&mut interim)
+                .await
+                .expect("100 Continue before body");
+            assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+            if !body.is_empty() {
+                chunk(&mut stream, body).await;
+            }
+            finish(stream).await
+        }
+        assert!(chunked_delete(&base, "segment-000000.ts", &[])
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(!temporary.path().join("segment-000000.ts").exists());
+        assert!(chunked_delete(&base, "segment-000001.ts", b"unexpected")
+            .await
+            .starts_with("HTTP/1.1 400"));
+        assert_eq!(
+            tokio::fs::read(temporary.path().join("segment-000001.ts"))
+                .await
+                .expect("untouched"),
+            vec![1; 128]
+        );
+        // Malformed chunk syntax is refused before the same valid file can
+        // be removed by a subsequent empty request.
+        let (host, path) = host_path(&base);
+        let mut malformed = tokio::net::TcpStream::connect(&host)
+            .await
+            .expect("connect");
+        malformed.write_all(format!("DELETE {path}/segment-000001.ts HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\nnot-hex\r\n").as_bytes()).await.expect("malformed request");
+        let mut reply = Vec::new();
+        malformed
+            .read_to_end(&mut reply)
+            .await
+            .expect("malformed response");
+        assert!(String::from_utf8(reply)
+            .expect("HTTP")
+            .starts_with("HTTP/1.1 400"));
+        assert!(temporary.path().join("segment-000001.ts").exists());
+        assert!(chunked_delete(&base, "segment-000001.ts", &[])
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(!temporary.path().join("segment-000001.ts").exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
