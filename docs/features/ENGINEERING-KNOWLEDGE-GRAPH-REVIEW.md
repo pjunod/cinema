@@ -198,3 +198,11 @@ bundle shapes, refusing the full study with every spending/credential/container/
 staging/cache spy untouched. This is not OS/dependency qualification or a token
 comparison. The original 0/4 witness, warm failure and fixture error remain
 historical evidence. Public fast-lane and landing state belong to the owning PR.
+
+Main subsequently advanced to `7f5af4524` (already-landed worker refinement).
+Its integration preserves every approved pilot implementation/test/CLI/skill
+byte and all six evaluator source hashes. A documentary backlog collision
+retains main's P35 and assigns this pilot P36. The unstarted R5 review request
+was withdrawn; no R5 Astra approval is claimed. Independent mechanical
+integration verification and current-head CI follow the retained R4 source
+approval, honoring the owner's single adversarial review workflow.

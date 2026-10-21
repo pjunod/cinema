@@ -182,8 +182,12 @@ Main remains `00c74cd8c` at recheck freeze; study baseline remains unchanged.
 was queued. Merge its already-landed worker-refinement changes, preserving
 its workflow/catalog additions. Its P35 backlog identity is retained; this
 pilot moves to P36. The frozen study baseline and approved pilot source stay
-unchanged. A narrow same-card integration recheck precedes the first public
-fast lane; unchanged private synthetic/capability evidence is retained.
+unchanged. Independent mechanical verification checks the unchanged pilot
+source and effective integration before the current-candidate fast lane.
+The unstarted R5 integration-only review request was withdrawn to honor the
+owner's one-adversarial-review workflow; it grants no new Astra approval.
+Actual R4 source approval and unchanged private synthetic/capability evidence
+are retained, with exact source and integration identities distinguished.
 
 ## Publication — one owner and an honest landing state
 
