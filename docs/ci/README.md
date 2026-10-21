@@ -8,9 +8,9 @@ a document to this folder.
 | File | Answers | |
 |---|---|---|
 | [FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md) · [data](FULL-SUITE-BASELINE-2026-10-20.json) | Frozen M0 runtime observations, queue/build/test timing and explicit qualification gaps. | open |
-| [FULL-SUITE-EVERY-PR-PLAN.md](FULL-SUITE-EVERY-PR-PLAN.md) | October 20 source/run audit, ranked slowdown findings, and the implementation contract for fresh complete tests on every ready PR; M1 Rust qualified and M2 setup profiling active; broader cutover remains pending. | open |
+| [FULL-SUITE-EVERY-PR-PLAN.md](FULL-SUITE-EVERY-PR-PLAN.md) | October 20 source/run audit, ranked slowdown findings, and the implementation contract for fresh complete tests on every ready PR; refreshed M1 qualification running and M2 focused improvements measured; full M2 evidence and broader cutover remain pending. | open |
 | [RUST-SUITE-REPAIR-2026-10-20.md](RUST-SUITE-REPAIR-2026-10-20.md) | The original 25 Rust failures, assertion-preserving corrections and exact native qualification through PR #1244; merge remains held. | open |
-| [FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md) | M2 setup profiling, the qualified M1 comparison baseline, fixture helper boundaries and conditional production queue-cache acceptance. | open |
+| [FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md) | M2 paired setup measurements, private fixture and bounded queue-cache controls; focused improvements passed, full candidate qualification pending. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
 | [EFFORT-WEB-STATIC-CONTRACTS.md](EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |
