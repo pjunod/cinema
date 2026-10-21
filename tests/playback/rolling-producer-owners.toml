@@ -3149,7 +3149,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # waits for all exits before capacity assertions; it never runs driver_pass.
 # -2 removed production tasks: serve/delivery.rs refresh expiry and
 # vodserve.rs ProcessedProbeLease drop cleanup. Net +1, no new shipped task.
-expected_occurrences = 984
+# Worker-refinement conformance: +1 `tokio::spawn` in the `#[cfg(test)]`
+# `library_work::tests::spawn_worker` helper. Its returned JoinHandle is awaited
+# by each schedule; this adds no production task owner or shipped behavior.
+expected_occurrences = 985
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4807,7 +4810,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # vod/driver.rs:1290/1348 (5s held/exited observations). Timeout is failure,
 # never cleanup evidence. -2 removed refresh timeout/expiry sleep in
 # manager/create.rs and serve/delivery.rs. Net +4; no new shipped timer.
-expected_occurrences = 1826
+# Worker-refinement conformance: +1 15-second `tokio::time::timeout` in the
+# `#[cfg(test)]` `library_work::tests::next_worker_event` barrier helper. It
+# bounds receipt of the selected event; timeout is failure, not join evidence.
+expected_occurrences = 1827
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

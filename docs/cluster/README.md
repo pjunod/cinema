@@ -14,6 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
 | [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |
 | [OPERATION-PROGRESS-STATUS.md](OPERATION-PROGRESS-STATUS.md) | Qualified progress scope, evidence, review and live PR delivery link. | built |
 | [FORMAL-VERIFICATION-PILOT-PROPOSAL.md](FORMAL-VERIFICATION-PILOT-PROPOSAL.md) | The bounded TLA+/TLC pilot contract, source anchors, verification limits, milestones and acceptance bar. | done |
