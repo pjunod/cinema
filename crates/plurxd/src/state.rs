@@ -3470,6 +3470,21 @@ impl JobManager {
         Arc::new(Self::new(store, artwork_dir))
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_new_for_node(
+        store: Arc<dyn Store>,
+        artwork_dir: PathBuf,
+        node_id: impl Into<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self::new_with_scan_prune_percent(
+            store,
+            artwork_dir,
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            node_id.into(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ))
+    }
+
     fn new_with_scan_prune_percent(
         store: Arc<dyn Store>,
         artwork_dir: PathBuf,

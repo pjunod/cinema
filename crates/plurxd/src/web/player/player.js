@@ -102,6 +102,8 @@
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
  * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
  * @property {any} [mediaAttachment]       the current media attachment token
+ * @property {number} [frameDropAuthGeneration] authentication generation that owns frame-drop observations
+ * @property {{count:number,last:number}} [frameDropBudget] current attachment's incident count and cooldown time
  * @property {{sessionId:string|null,attachment:any,reason:string|null,message?:string}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
  * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
  * @property {any} [playPermissionDenied] browser permission refusal retained until a new attachment

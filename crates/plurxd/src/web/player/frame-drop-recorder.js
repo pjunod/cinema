@@ -6,7 +6,18 @@ const FRAME_DROP_LIMITS=Object.freeze({windowMs:60000,postMs:10000,samples:144,f
 const FRAME_DROP_EVENT=Object.freeze({play:1,pause:2,seeking:3,seeked:4,waiting:5,playing:6,
   stalled:7,loadedmetadata:8,loadeddata:9,canplay:10,emptied:11,error:12,ratechange:13,
   visibilitychange:14,focus:15,blur:16,longtask:17,counter_reset:18});
-function createFrameDropRecorder({now,wall,emit,context=()=>({}),resources=()=>[],budget={count:0,last:-Infinity},id}={}){
+/**
+ * @typedef {Object} FrameDropRecorderOptions
+ * @property {() => number} now
+ * @property {() => number} wall
+ * @property {(incident: Object) => void} emit
+ * @property {() => {attachment_id?: string}} [context]
+ * @property {() => unknown[]} [resources]
+ * @property {{count: number, last: number}} [budget]
+ * @property {() => string} id
+ */
+/** @param {FrameDropRecorderOptions} options */
+function createFrameDropRecorder({now,wall,emit,context=()=>({}),resources=()=>[],budget={count:0,last:-Infinity},id}){
   const limits=FRAME_DROP_LIMITS;
   const numeric=value=>typeof value==="number"&&Number.isFinite(value)&&Math.abs(value)<=Number.MAX_SAFE_INTEGER
     ?Math.round(value*1000)/1000:null;

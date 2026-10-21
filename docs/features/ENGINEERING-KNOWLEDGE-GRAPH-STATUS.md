@@ -178,6 +178,13 @@ qualifies. A capability-refusal witness is separate from OS/dependency proof.
 This may yield an explicit inconclusive evaluation; it cannot yield savings.
 Main remains `00c74cd8c` at recheck freeze; study baseline remains unchanged.
 
+**D13, 2026-10-21:** Main advanced to `7f5af4524` while the source review
+was queued. Merge its already-landed worker-refinement changes, preserving
+its workflow/catalog additions. Its P35 backlog identity is retained; this
+pilot moves to P36. The frozen study baseline and approved pilot source stay
+unchanged. A narrow same-card integration recheck precedes the first public
+fast lane; unchanged private synthetic/capability evidence is retained.
+
 ## Publication — one owner and an honest landing state
 
 Owner: Codex integrator, branch `effort/engineering-knowledge-pilot`. One
