@@ -1204,7 +1204,10 @@
                 ..Default::default()
             },
         ).await;
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("readrate");
+        // As in d3_copy_session: successful optional capture needs paced
+        // objects; the default burst would consume this whole 12 s fixture.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced capture");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("retained allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
@@ -1321,7 +1324,10 @@
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        // As in d3_copy_session: successful optional capture needs paced
+        // objects; the default burst would consume this whole 12 s fixture.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced capture");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
             work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
@@ -1331,12 +1337,36 @@
             .await.expect("real PUT transcode");
         let session = manager.sessions.lock().await.get(&first.session_id).cloned().expect("first");
         let production = session.rolling_provenance.as_ref().expect("held actual input");
-        let artifact = tokio::time::timeout(Duration::from_secs(30), async {
+        let completed = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Some(artifact) = manager.vod.acquire_rolling_output(production) { break artifact; }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await.expect("normal complete PUT inventory");
+        }).await;
+        if completed.is_err() {
+            // Read once only after the original failure. Do not reacquire,
+            // retry publication, reap the child, or change the producer pace.
+            let failed = session.failed.load(Acquire);
+            let failure = failed.then(|| session.failure_reason());
+            let child_handle = session.child.try_lock()
+                .map(|child| child.as_ref().and_then(|child| child.id()))
+                .map_err(|_| "child observation locked");
+            let upload = session.upload.as_ref().map(|upload| (
+                upload.failure(), upload.observed_complete_inventory().is_some()));
+            eprintln!("complete PUT timeout: failed={failed} failure={failure:?} producer_attempt={} compatibility_attempt={} progress_ms={:?} child_handle_pid={child_handle:?} upload(failure,complete_inventory)={upload:?} collection_abandoned={:?} retained={:?}",
+                session.control.current_producer_attempt(), session.compatibility_producer_attempt(),
+                session.progress.out_time_ms(),
+                session.rolling_collection.as_ref().map(|collection| collection.abandoned()),
+                manager.vod.retained_snapshot());
+            // This is a bounded diagnostic after a captured failure, not a
+            // second completion deadline or an opportunity to qualify it.
+            let actor = tokio::time::timeout(Duration::from_secs(1), session.control.snapshot())
+                .await.map(|snapshot| snapshot.map(|snapshot| (
+                    snapshot.mode, snapshot.startup, snapshot.retired,
+                    snapshot.terminal, snapshot.producer_control)));
+            eprintln!("complete PUT timeout actor(mode,startup,retired,terminal,producer)={actor:?}");
+        }
+        let artifact = completed.expect("normal complete PUT inventory");
         let manifest = artifact.manifest().expect("complete inventory");
         assert!(!manifest.contains_object("init.mp4"), "TS must not invent initialization");
         let name = manifest.objects.iter().find(|object| object.name.ends_with(".ts"))
@@ -1373,7 +1403,10 @@
         store.put_setting(keys::CACHE_MAX_GB, "1").await.expect("allowance");
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("unpaced");
+        // As in d3_copy_session: successful optional capture needs paced
+        // objects; the default burst would consume this whole 12 s fixture.
+        store.put_setting(keys::HLS_READRATE, "1").await.expect("paced capture");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store),
             work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu));
@@ -1440,6 +1473,7 @@
         // Rolling retention is a Developer switch, off by default (D3).
         store.put_setting(keys::VOD_ROLLING_RETENTION, "1").await.expect("retention on");
         store.put_setting(keys::HLS_READRATE, "1").await.expect("paced writer");
+        store.put_setting(keys::HLS_BURST_SECS, "0").await.expect("no initial burst");
         let work = crate::test_tempdir().expect("work");
         let manager = Arc::new(TranscodeManager::new(Arc::clone(&store), work.path().to_path_buf(),
             EncoderCaps::default(), Pipeline::Cpu));
@@ -1451,10 +1485,12 @@
         let session = manager.sessions.lock().await.get(&info.session_id).cloned().expect("session");
         let collection = session.rolling_collection.as_ref().expect("optional reservation");
         let held = collection.hold_optional_capture_for_test().await;
+        assert!(!collection.abandoned(), "the held gate must precede any retention refusal");
         // This is the actual synchronous capture boundary used by both writers.
         // A stalled owner cannot be joined by the ordinary commit path.
         collection.capture(source, "seg00099.m4s",
             crate::rolling_output::CommittedObject { bytes: 1, digest: [0; 32] });
+        assert!(collection.abandoned(), "capture against the held gate refuses optional retention immediately");
         let playlist = tokio::time::timeout(Duration::from_secs(20), manager.playlist(&info.session_id))
             .await.expect("ordinary publication independent of optional owner").expect("playlist");
         assert!(!playlist.is_empty());

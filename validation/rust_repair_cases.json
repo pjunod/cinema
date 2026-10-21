@@ -193,6 +193,31 @@
       "target": "plurxd",
       "name": "transcode::source_actor::tests::source_status_waiter_cancellation_retains_owned_observation",
       "owner": "crates/plurxd/src/transcode/tests/source_actor.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::rolling_real_put_complete_ts_attaches_exact_new_owner",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_05.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::rolling_busy_optional_capture_never_waits_on_ordinary_publication",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_05.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::rolling_real_copy_complete_retention_attaches_new_owner_and_verified_body",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_05.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::rolling_integrity_refusal_is_one_way_and_retained_copy_bypasses_full_scratch",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_05.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::tests::rolling_publication_budget_one_point_two_x_writer_sustains_one_x_for_thirty_minutes",
+      "owner": "crates/plurxd/src/transcode/tests/chunk_03.rs"
     }
   ]
 }

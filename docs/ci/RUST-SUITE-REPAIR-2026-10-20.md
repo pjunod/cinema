@@ -44,7 +44,7 @@ earlier failure.
 | Serving fence | A finite publisher could exit while the test performed real decodes. | Use an owned live publisher, bounded cleanup, and real-media panic/cancellation controls. Preserve the original live-child and decoded-media assertions. |
 | Replicated browse authority bar | Setup proof preceded fixture writes, so it did not necessarily cover the echo being tested. | Establish an observable applied-index/proof precondition before each route; invoke each handler once. Stop the sampler and prove an actually expired proof requires authority fallback. |
 | Media seam census | Processed-reuse tests replaced the real driver with a test-only early return. | Exercise the real driver with typed ordering/observation hooks; preserve real task and slot ownership assertions, including teardown races and panic/cancellation. |
-| Nine Source/HTTP cases | Linux baseline failed during actual Source startup; local execution has not reproduced it. Failure-only diagnostics now preserve the typed Store/startup refusal and first HTTP response. | Do not increase deadlines, retry assertions or claim a repair from a local pass. Diagnose the Linux/full-suite result before closure. |
+| Nine Source/HTTP cases | Full 22-thread execution reached the existing three-second replicated Store timeout during startup. The controlled four-thread full body passes the same nine cases and waiter-cancellation control unchanged; failure-only diagnostics preserve the first typed refusal and HTTP response. | Keep the timeout and unknown-outcome semantics. The old-source comparison supports contention as a trigger, but fresh execution must qualify the newer repair candidate. |
 | Newly surfaced K06 clock case, outside the original 25 | Full run 5679 constructed a clock observer before its actual applied-membership watch was ready. | Share the original 45-second startup deadline with a wait for both real nodes to observe the same committed learner membership. Construct the manager once; preserve every authorization, stale-heartbeat, fresh-heartbeat, removal and cleanup assertion. Add this case to the additional repeated cohort. |
 
 ## 3. Qualification binds actual execution to the source and inventory
@@ -60,13 +60,17 @@ The declared sequence is compile, inventory, static checks (including the
 26 evidence/controller controls), ten rounds of
 the affected Core/daemon cohort, the complete ordinary Rust cell, and the
 two exact serial media cases. Each round runs the inventoried real
-binaries with 22 test threads and all original failed identities. Ten additional
-regressions are listed separately, including five actual-task panic,
-cancellation and registration-teardown controls. Three of those controls
-reside in the existing Linux-only processed-reuse module; Mac results cannot
-qualify those three. The newly surfaced K06 and Source waiter-cancellation cases are also repeated, making
-350 executions for the next candidate while the original 25 identities
-remain unchanged. The complete ordinary cell admits four simultaneous
+binaries with 22 test threads and all original failed identities. Fifteen
+additional regressions are listed separately, including five actual-task
+panic, cancellation and registration-teardown controls. Three of those
+controls reside in the existing Linux-only processed-reuse module; Mac
+results cannot qualify those three. K06, Source waiter-cancellation, four
+rolling retention/publication cases and the simulated capacity case are
+also repeated. The declared cohort is 40 cases (14 Core and 26 daemon),
+requiring 400 bodies over ten rounds; the original 25 identities remain
+unchanged. The static phase separately requires 20 vendor transaction
+bodies: two cancellation controls repeated ten times. These are declared
+requirements, not claimed execution. The complete ordinary cell admits four simultaneous
 cases; focused cohort invocations remain explicitly at 22 threads and the
 two serial cases remain at one. Internal test runtimes and scenario races
 are unchanged. The baseline and controlled comparison both reported 22
@@ -111,7 +115,7 @@ not performance estimates or permission to drop cases.
 | First Linux qualification, run 5675 on `b10f7c6c7` | Compile passed in 1,084.352s, inventory in 6.710s and static checks in 753.591s. Inventory: 36 native binaries, 6,977 cases, 49 ignored. Rust 1.97.1 and Jellyfin FFmpeg 8.1.3 verified. All ten Core rounds passed 13 cases; all ten daemon rounds aborted with a browse-test stack overflow. The 301-second cohort is failed and incomplete, with safe process-group cleanup. No Source/HTTP outcome is inferred from an aborted binary. |
 | Browse default-stack correction | Heap-own each real handler future before nested accounting helpers, and separately box the unchanged expiry sequence. Preserve the sampler abort/join, real expiry, one request and exact `[0,4,0]` assertion. The complete test passes locally with `RUST_MIN_STACK` unset in 10.45s; fresh Linux qualification remains owed. Earlier focused Mac commands used an 8-MiB stack and did not expose the default-stack failure. |
 | Local Linux native code generation | Two affected-daemon native build attempts exceeded the shared VM memory limit, including one job with incremental/debug symbols disabled. Neither yielded test outcomes; the two additional OOM kills remain setup failures. |
-| Ten Linux cohort repetitions after stack correction | On exact `9971299d6`, all 330 executions passed: 250 original-failure bodies and 80 controls. Every native exit was zero, cleanup qualified, and strict accounting found no gaps. This receipt remains bound to that source. The next candidate adds K06 as a ninth additional case and requires 340 fresh executions. |
+| Ten Linux cohort repetitions after stack correction | On exact `9971299d6`, all 330 executions passed: 250 original-failure bodies and 80 controls. Every native exit was zero, cleanup qualified, and strict accounting found no gaps. This receipt remains bound to that source. The expanded candidate now declares 400 fresh cohort bodies; this older 330-body receipt cannot satisfy that requirement. |
 | Full Core on `9971299d6` | 1,943 passed, one failed and five ignored in 1,388.11s. The sole failure was the previously passing, unchanged K06 fixture: `Internal("clock observation lacks applied membership")` at manager construction. An additional SQL-writer panic appeared in its captured output. The original ten Core failures passed in this full body. The run remains red. |
 | Isolated K06 before correction | Passed in 19.97s with the real Hiqlite backend and default stack; the known shutdown-handler panic was matched by the existing strict catcher. An isolated pass does not repair the full-run readiness race. |
 | K06 correction, local native checks | The complete unchanged assertion sequence passes in 19.89s after the real-watch readiness wait. The expanded Core cohort (all original ten plus four additional cases) passes all 14 in 22.54s, with default stack and 22 test threads. Strict helper/controller/document controls pass 27 cases; independent review confirms the single original deadline and one constructor invocation. |
@@ -123,10 +127,132 @@ not performance estimates or permission to drop cases.
 | Dropped transaction reply correction | Two real-writer regressions reproduce the old success/error reply panics deterministically, then pass after late reply delivery stops panicking the writer. Ten pairs pass with strict exact-body accounting. Actual commit, rollback and later writes are verified; strengthened regressions also require persisted applied-log metadata after real shutdown and reopen. Neither the Store deadline nor unknown-outcome semantics changes. Hiqlite generic patch 27 remains pending upstream tracking. The next Linux static phase repeats and accounts for both bodies ten times. |
 | Follow-up local native cohort | All 14 Core cases passed in 22.96s and all 18 platform-applicable daemon cases passed in 58.87s, including every original failed identity and the new waiter case. Default stack and 22 test threads were retained. Three additional controls remain Linux-only. Workspace strict Clippy passed in 214s; 47 evidence/workflow/ledger/docs checks passed with one existing skip. |
 | Cancellation boundary | The writer reply receiver belongs to Raft state-machine application, separately from the public client's timeout waiter. Failed-fixture teardown can abandon it after a timeout. The logs plus deterministic regression prove an internal abandoned-reply defect; they do not prove a client timeout alone directly cancels the SQL writer's waiter. |
-| Controlled resource comparison | Diagnostic branch `codex/full-pr-suite-contention`, commit `ffbed0dd3`, differs from failed `9971299d6` only by full-run `RUST_TEST_THREADS=4` instead of 22. Cohort invocations remain explicitly 22 threads; Rust source, assertions and deadlines are identical. Run 5698 completed Core (1,944 passed, five ignored) in 919.56s versus 1,388.11s at 22 threads, and Store (270 passed) in 385.32s versus 860.40s. All nine original Source/HTTP cases and the additional waiter-cancellation case pass unchanged at four threads; final daemon/full accounting is still in progress. This supports inter-test contention as the startup-timeout trigger, separately from the internal abandoned-reply bug. External host load is not controlled. Its results cannot qualify the newer repair candidate. The repair workflow now adopts the measured four-case full-run budget and requires fresh current-source execution. |
+| Completed controlled resource comparison, run 5698 (internal 5727) | Old-source `ffbed0dd3` with four ordinary test threads finished in 2,563.040s (42m43s), exit 101, safe cleanup. Secondary strict accounting covers all 6,977 native cases: 6,927 passed, one failed, 49 ignored. All original 25 and the Source waiter control pass. The sole failure is `rolling_real_put_complete_ts_attaches_exact_new_owner`. Original red/incomplete evidence remains untouched; [§4.1](#41-four-threads-reduce-measured-cost-but-the-comparison-remains-red) records scope and resource limits. |
 | K06-only candidate disposition | `fef12d2f5` passed exact-source Linux all-target Clippy in 370s; run 5691 was cancelled while queued with no test execution after the older full run reproduced Source failures. The fresh follow-up qualification receipt is recorded in task PR #1244; previous source identities cannot substitute for it. |
-| Independent review | Earlier schema, proof and task-ownership changes reviewed. Follow-up writer, parser and F6 corrections are being verified; unresolved Source full-load failures block closure. |
+| Independent review | Earlier schema, proof and task-ownership changes reviewed. The old-source comparison now passes all original 25; one separate rolling case still fails. Follow-up writer, parser and F6 corrections, all repeated controls and complete current-source execution remain acceptance requirements. |
 | Exact-head effort gate | Pending. |
+
+### 4.1 Four threads reduce measured cost, but the comparison remains red
+
+Run 5698 (internal 5727) executed `ffbed0dd310a7131c009ba5a43a38462c18e5f40`
+on `codex/full-pr-suite-contention`. Its only committed difference from
+`9971299d699c9d5b202e533afff41bbacf7aa4bc` is the ordinary full-run
+`RUST_TEST_THREADS=4` setting in the repair workflow. The `crates/` and
+`vendor/` Git tree objects match exactly; assertions, scenario concurrency
+and deadlines are unchanged. Both jobs report 22 logical and affinity CPUs.
+The focused cohort remains explicitly at 22 test threads. This older source
+predates the K06 readiness, abandoned-reply and F6 cancellation follow-ups;
+its outcomes cannot qualify those corrections on the newer repair branch.
+
+All 36 native binaries reconcile exactly under the reviewed parser from
+`8e2a8cb64`: 6,927 passed · one failed · 49 ignored, totaling 6,977.
+Seven selected doctest targets remain separate: the Core target's one case
+passed; the other six contained zero cases. All original 25 passed, including
+all nine Source/HTTP cases; the additional Source waiter-cancellation case
+also passed. Core reported 1,944 passes and five ignores; ordinary Store
+reported 270 passes; daemon reported 4,381 passes, one failure and 40 ignores.
+The sole failed body was
+`transcode::tests::rolling_real_put_complete_ts_attaches_exact_new_owner`,
+which timed out at its existing 30-second inventory precondition. It did
+not reach the attachment assertion. No correction or successful rerun of
+that fixture is claimed here.
+
+| Ordinary full-cell measure | 22 threads, run 5679 | Four threads, run 5698 | Change |
+|---|---|---|---|
+| Native command wall time | 4,395.719s | 2,563.040s | −41.7% |
+| Core reported body time | 1,388.11s | 919.56s | −33.8% |
+| Ordinary Store reported body time | 860.40s | 385.32s | −55.2% |
+| Daemon reported body time | 2,102.96s | 1,228.26s | −41.6% |
+| Sampled cgroup CPU time | 58,747.551 CPU-s | 6,960.619 CPU-s | −88.2% |
+| Sampled system CPU time | 50,274.329 CPU-s | 2,768.788 CPU-s | −94.5% |
+| Sampled user CPU time | 8,473.221 CPU-s | 4,191.831 CPU-s | −50.5% |
+| Mean consumed CPUs within sampled interval | 13.377 | 2.724 | −79.6% |
+| Peak sampled process RSS sum | 6.347 GB | 3.621 GB | −42.9% |
+| Peak sampled cgroup memory current | 6.721 GB | 10.506 GB | **+56.3%** |
+
+**How to read the resource comparison:** counters cover only each job's
+cgroup during the ordinary command, including Cargo/observer overhead.
+Five-second samples use the first and last observations strictly inside
+that command, omitting 4.162s at the 22-thread boundaries and 7.293s at the
+four-thread boundaries. CPU differences are cumulative counter deltas over
+those sampled intervals. Peaks are sampled, and process RSS sums may count
+shared pages more than once. Both windows recorded zero OOM and CPU
+throttling increments. Cgroup memory moved opposite process RSS; these
+receipts lack `memory.stat`, so they do not establish a cause or an overall
+memory reduction. External host load and cache state were not controlled.
+One comparison supports inter-test contention as a Source startup-timeout
+trigger; it does not establish a distribution, p95 or current-source
+qualification.
+
+**Provenance and retained verdicts:** the original native command exited
+101 with qualified process cleanup. Its original parser conservatively
+refused an inherited Tray child frame containing interleaved parent output.
+The separately hashed secondary parse preserves that parent outcome and
+accounts for all 36 binaries and seven doctest targets with zero gaps;
+`native_passed` remains false. Both original red/incomplete receipts remain
+unchanged. Executable hashes match for 35 of 36 binaries; the daemon byte
+hash differs despite identical committed Rust sources and the same native
+basename. The evidence therefore claims source identity, not identical
+bytes for every executable or an explanation for that difference.
+
+The retained artifact is `3826-rust-continuation-rust-final-5727-1`, under
+source `ffbed0dd3`; the comparison artifact is
+`3783-rust-continuation-rust-final-5708-1`, under `9971299d6`. Ignored local
+receipts `rust-repair-resource-threads4-secondary-native-evidence.json`,
+`rust-repair-resource-threads22-secondary-native-evidence.json` and
+`rust-repair-thread-resource-comparison-summary.json` retain raw-log,
+inventory, original verdict, parser, policy and resource-sample SHA-256s,
+exact original-25 outcomes, both daemon hashes and sample boundaries.
+`reparse-thread-resource-comparison.py` reproduces those derived receipts
+from the retained artifacts. These files are secondary audit products,
+not replacement CI receipts.
+
+### 4.2 Rolling fixture preconditions remain under qualification
+
+The local 44-case rolling stress run with 22 test threads and
+`RUST_MIN_STACK` unset finished with 41 passes and three failures in 39.10s
+(`env--u-RUST_MIN_STACK-20261021-135432.log`). The complete-PUT case passed;
+two adjacent retained-copy/integrity cases timed out before inventory, and
+the separate simulated 1.2x capacity case measured 1.198 under stress. Those
+results remain failed; no new passing receipt is claimed.
+
+The three positive retention fixtures used an unpaced producer despite
+requiring optional capture to succeed. Their follow-up applies the existing
+`d3_copy_session` fixture precondition: `HLS_READRATE=1` and
+`HLS_BURST_SECS=0`. This prevents the default initial burst from consuming
+the entire short fixture while capture must retain its committed objects.
+The original 30-second inventory deadline and attachment, integrity,
+retained-body and new-owner assertions remain unchanged. This repairs a
+missing fixture guarantee; run 5698's inventory timeout alone does not prove
+the optional-capture gate was busy.
+
+The separate busy-capture negative now explicitly checks that retention is
+not abandoned before capture against its actually held gate, and that this
+capture immediately marks it abandoned. Zero initial burst retains the
+original paced setup and 20-second ordinary-publication deadline. The
+required result remains ordinary publication while optional retention is
+refused. These four rolling cases are now additional cohort entries; they
+do not replace any original failure.
+
+The capacity simulation mixed Tokio's paused clock with the sampler's
+unpaused `std::Instant`: a real extra millisecond can make its intended
+`1,200 × 1,000 / 1,000` speed sample become `1,200 × 1,000 / 1,001`, or
+1.198 after integer scaling. The fixture now uses the existing real sampler's
+`note_out_time_at` with explicit simulation timestamps `(0, 0)`,
+`(1,000, 1,200)` and `(1,000 + 2 × RECENT_SAMPLE_MAX_GAP_MS, 2,400)`.
+Both exact `Some(1.2)` assertions and the complete 30-minute simulation
+remain unchanged. No production sampler, threshold or rounding tolerance
+changes. This fifth rolling case brings the declared additional list to 15
+and the full cohort to 400 bodies; the separate vendor controls add 20.
+Local follow-up passes all 44 rolling cases together with 22 threads in
+20.34s (`env--u-RUST_MIN_STACK-20261021-135904.log`). All 50 exact bodies
+in ten declared rounds of the five new rolling entries also pass, taking
+142s total (`env-PYTHONPATH-.--opt-homebrew-bin-python3.12-20261021-140114.log`).
+The local receipt retains native identities, per-round headers/footers,
+filtered counts, executable and source hashes; no ignored or zero-match
+body qualifies. `RUST_MIN_STACK` is unset. The 52 evidence/workflow/vendor
+ledger/docs checks pass with one existing skip. These Mac checks do not
+replace complete current-source Linux qualification, which remains owed.
 
 Closure requires every original failure to execute and pass, all declared
 repetitions and new ownership controls to pass, exact complete full-cell

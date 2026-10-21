@@ -944,17 +944,15 @@
         let directory = crate::test_tempdir().expect("publication capacity");
         let session = test_session(directory.path().to_path_buf());
         let started = Instant::now();
-        let generation = session.progress.begin_attempt();
-        apply_progress_line(&session.progress, generation, "out_time_us=0");
-        session.progress.sample_wall_ms.store(-1_000, Relaxed);
-        session.progress.sample_out_ms.store(0, Relaxed);
-        apply_progress_line(&session.progress, generation, "out_time_us=1200000");
+        let _ = session.progress.begin_attempt();
+        // Progress measures std::Instant, which Tokio's paused clock does
+        // not freeze. Feed the real sampler explicit simulation timestamps.
+        session.progress.note_out_time_at(0, 0);
+        session.progress.note_out_time_at(1_000, 1_200);
         assert_eq!(session.progress.recent_speed(), Some(1.2));
         session
             .progress
-            .sample_wall_ms
-            .store(-RECENT_SAMPLE_MAX_GAP_MS * 2, Relaxed);
-        apply_progress_line(&session.progress, generation, "out_time_us=2400000");
+            .note_out_time_at(1_000 + RECENT_SAMPLE_MAX_GAP_MS * 2, 2_400);
         assert_eq!(
             session.progress.recent_speed(),
             Some(1.2),
