@@ -24,47 +24,43 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`936ea9490` owns actual read-only source files and blocking open/read/close tasks
-before waits. Cancellation retains the same operation; read retries bind exact
-offset/length. No File/raw handle escapes. The reserved-handle/64-member limit
-and copied-buffer budget cover retained operations, not a whole-pipeline memory
-bound. Close joins pending I/O then drops its own handle but remains UnknownHeld:
-no remote lease, descendant, filesystem durability or physical-release proof.
-Five new regression bodies COMPILED NOT RUN. Pinned core all-target Hiqlite-contract
-Clippy PASS67s (`175947`); updated daemon all-target Clippy PASS212s (`180157`).
-Private `evidence/compile-run61.json` binds source/log hashes and true terminal
-exit0. `e3898fa37` supplies the journal's private read-only reservation-binding
-accessor (core Clippy PASS90s). Neither accessor mints launch/refund authority.
+`c39c30542` composes one core runtime under the actual retained SelectedStore
+lock, before scratch/probes. Every recovered full charge is cleanup-only
+UnknownHeld with fresh nonexported bindings, original allocation epochs, complete
+family edges, trial membership and protected paths; no cap clamping or old receipt
+refund. Graph and journal share the actual daemon process instance. Startup inputs
+are single-use and verify the retained lock inode. Pending/unreadable authority
+currently refuses startup before cleanup or legacy competitors: safe interim
+refusal, NOT final recovery availability. Fresh unsupported Windows has NO ledger.
+See [custody operations and limits](ADAPTIVE-RESOURCE-CUSTODY.md).
 
-Retained `68287923c` joins rolling supervisors before returning legacy capacity;
-`5b6330c43` retains abandoned reader joins on their original runtime. Nine bodies
-COMPILED NOT RUN, previous combined Clippy PASS464.726s remains source-scoped in
-`evidence/compile-run55-final.json`. Interrupted `165805` is INVALID, not a pass.
+Journal `t_5034245a` explicitly RELEASED READ_ONLY; author-preserving adoption
+`c51994671`/`4eaef3f5c`/`31d5c1df8` corresponds to original
+`4c080843`/`a84439e9`/`f9ba37af`. No scratch providers adopted. Its 28 bodies plus
+10 new runtime/lock/namespace bodies COMPILED NOT RUN. Current pinned Rust1.97.1
+core+daemon all-target Hiqlite-contract cargo check exit0 PASS56.276s, log `182510`,
+source-stable receipt `evidence/compile-run66-182510.json`. This is NOT a current
+Clippy -Dwarnings pass: 15 private journal API warnings remain until write-ahead/
+settlement integration. Initial154.969s pass preceded the single-use refinement.
 
-Retained `71b405efb` owns the VOD slot BEFORE spawn and actual writer before any
-registration await; completion metadata cannot self-join. `0c50b9593` owns diagnostic
-drain across cancellation and actually joins timed-out readers; lost progress is
-incomplete evidence. `50e082555`/`cad6f18ae` supply graph/slot/retained-role custody.
-None is a descendant-containment or physical-ledger close proof.
+R2/R3 are design clarifications, not final implementation review. The v1 Unix
+installation-location witness rejects detectable moves/replacements, not coherent
+clones/rollback or same-directory old DB+witness restoration; equality grants no
+continuity, owner fence or refund. Never retry missing authority as a new install.
+Positive normal closure, recovery and write-ahead/settle-before-refund integration
+remain missing. Ordinary production is legacy, not finite physical demands.
 
-Ordinary production remains legacy capacity, not finite physical demands.
-Unsupported backends cannot be migrated into permanent slot exhaustion, and an
-existing physical hold cannot be bypassed by relabelling a replacement legacy.
-Astra R2 supplies the dedicated node-local SQLite/write-ahead/settle-before-refund
-contract. Isolated journal `t_5034245a` owns resource_custody plus one lib registration;
-integration owns startup/ledger/physical_graph. M4 Store authority has separate
-backend-session ownership (`t_8c190a7a`); shared registrations stay integration-owned.
-Journal is not yet released/adopted. No runtime persistence or positive containment.
-Controller found no Windows-labelled runner in its inventory: that is not proof
-no machine exists or a waiver of Windows qualification; no compiler supplied yet.
-
-Capacity/provenance `5160af863`/`8ddae0e39`, bounded priors `e213a4c83`, advisory
-trials `740f4f30a` and independent settings/CAS/import guards remain intact.
-Earlier compile receipts stay source-scoped; no passing behavioral check replayed.
-Targeted rustfmt binds edition2021/skip_children. Native Linux e9 receipts remain
-e9-only; no new Linux or Windows containment qualification. M0–M7 remain incomplete.
-PR1248 stays draft; controller owns publication/status and review, then coordinates
-once-only affected tests/qualification/authorized merge without another handoff.
+Retained `936ea9490` source-handle custody, `68287923c`/`5b6330c43` rolling joins,
+`71b405efb` VOD pre-spawn ownership and `0c50b9593` diagnostic drain remain source-
+scoped, NOT physical-close proofs. Earlier Clippy/log receipts stay retained, not
+replayed; interrupted `165805` remains INVALID. Capacity/settings/history guards
+are unchanged. M4 `t_8c190a7a` exclusively owns backend sessions; its registration-
+only scratch is authorized, authoritative shared seams remain integration-owned.
+No component adoption before release. Native Linux e9 evidence is e9-only;
+Windows compiler/physical qualification remain unavailable, not waived. M0–M7
+remain incomplete. PR1248 stays draft; controller publishes status and coordinates
+final independent Fable review/fixes, then affected tests/fast lane/authorized merge
+once. No extra handoff gate, deployment or successful behavioral-test replay.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.

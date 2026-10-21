@@ -234,6 +234,7 @@ Windows, systemd, launchd, Unraid, storage, GPU access, and ports. The
 | Run and troubleshoot the server | [Operations](docs/OPERATIONS.md) |
 | Find commands quickly | [Cheat sheet](docs/CHEATSHEET.md) |
 | Understand playback decisions | [Playback](docs/PLAYBACK.md) |
+| Follow adaptive resource implementation and local custody limits | [Resource ledger](docs/performance/ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) · [Custody operations](docs/performance/ADAPTIVE-RESOURCE-CUSTODY.md) |
 | Understand the architecture | [Architecture](docs/ARCHITECTURE.md) |
 | Connect an application | [API](docs/API.md) · [Integrations](docs/INTEGRATION.md) |
 | Understand authentication and exposure | [Security](docs/SECURITY.md) |

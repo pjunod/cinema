@@ -2,7 +2,7 @@
 
 **Updated:** 2026-10-20 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
-- **2026-10-21 · Adaptive playback resources:** Sol 6.1 owns [the implementation ledger](docs/performance/ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md). M0/M1 partial; M2 has atomic physical custody/family overlap and persistent limit provenance/CAS controls/import normalization, not production policy integration. Pinned core Hiqlite-contract and daemon all-target Clippy pass atcb7bc7588; native only frozen e9. Draft PR1248; implementation tests/qualification await complete-candidate review/fixes and manager handoff.
+- **2026-10-21 · Adaptive playback resources:** Sol 6.1 owns [the implementation ledger](docs/performance/ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md). Released journal adopted; `c39c30542` restores cleanup-only full charges under the actual daemon lock before scratch/probes. Pinned core+daemon all-target Hiqlite-contract cargo check passes; private write-ahead APIs still warn, no current -Dwarnings claim. M0–M7 incomplete, no behavioral tests. Draft PR1248; final independent review/fixes then once-only tests/qualification/merge, no extra handoff gate or deployment.
 - **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
 - **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
