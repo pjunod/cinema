@@ -1,5 +1,6 @@
 """Synthetic M5 boundaries. No real case, private gold, provider or filesystem."""
 from dataclasses import replace
+import hashlib
 import json
 import unittest
 
@@ -64,7 +65,8 @@ def scored(batch, *, missed_a=0, missed_b=0, missed_c=0, zero_gold=False):
         missed = {"A": missed_a, "B": missed_b, "C": missed_c}[run.spec.arm]
         for scorer in ("independent-one", "independent-two"):
             scores.append(Score(scorer, run.spec.id, 0 if zero_gold else 10,
-                                0 if zero_gold else missed, 0, 0, True))
+                                0 if zero_gold else missed, 0, 0, True,
+                                judgment_digest=hashlib.sha256(json.dumps([zero_gold, missed]).encode()).hexdigest()))
     return scores
 
 
@@ -306,6 +308,11 @@ class ComparativeAnalysisTests(unittest.TestCase):
         result = analyze(batch, scores, bootstrap_samples=30)
         self.assertEqual([scores[0].run_id], result["disagreements"])
         self.assertEqual("inconclusive", result["comparisons"]["records"]["decision"])
+        missing = [replace(score, judgment_digest=None) if score.run_id == scores[0].run_id else score
+                   for score in scored(batch)]
+        unavailable = analyze(batch, missing, bootstrap_samples=30)
+        self.assertEqual([scores[0].run_id], unavailable["unscored_runs"])
+        self.assertEqual("inconclusive", unavailable["comparisons"]["records"]["decision"])
         with self.assertRaises(EvaluationError):
             replace(scores[0], judgment_digest="not-a-digest")
 

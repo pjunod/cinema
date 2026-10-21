@@ -596,8 +596,8 @@ class Score:
     patch_accepted: bool | None
     critical_authority_claim: bool = False
     critical_patch_regression: bool = False
-    # Private scorers commit to the gold set and each honored boolean. Synthetic
-    # fixtures may omit this; the vector itself never enters public output.
+    # Scorers commit to the gold set and each honored boolean. Missing
+    # commitments remain unscored; the vector never enters public output.
     judgment_digest: str | None = None
 
     def __post_init__(self) -> None:
@@ -665,7 +665,7 @@ def analyze(batch: BatchLog, scores: Sequence[Score], *, bootstrap_samples: int 
         pair = grouped.get(identity, [])
         _require(len(pair) <= 2 and len({score.scorer_id for score in pair}) == len(pair),
                  "exactly two independent scorers required")
-        if len(pair) != 2:
+        if len(pair) != 2 or any(score.judgment_digest is None for score in pair):
             unscored.append(identity)
         elif _score_signature(pair[0]) != _score_signature(pair[1]):
             disagreements.append(identity)
