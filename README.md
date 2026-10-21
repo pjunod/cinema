@@ -212,7 +212,7 @@ records setup, upgrades, ownership and hardware acceptance.
 |---|---|---|
 | Raspberry Pi 5 (server and HDMI Cinema) | `make pi-setup` | 64-bit Pi OS Trixie Desktop; provisions Docker/media tools and browser; native/systemd selectable |
 | Docker / Compose | `make install-docker`, then `make docker-up` | Docker with Compose; configured media and data mounts |
-| macOS (launchd, VideoToolbox) | `make install-macos` — [macOS guide](deploy/MACOS.md) | Xcode Command Line Tools, Homebrew, Rust via rustup |
+| macOS (launchd, VideoToolbox) | `make install-macos` — [macOS guide](deploy/MACOS.md) | Xcode Command Line Tools; installs missing Homebrew, rustup and pinned Rust as needed |
 | Native service (systemd, launchd, or the Windows service) | `make install` | Repository-pinned Rust toolchain, or a prebuilt `plurxd` via `INSTALL_FLAGS=--binary` |
 | Core binaries and GUI tray | `make install-binary` | GUI hosts receive the companion with a fresh server stopped and automatic startup off; headless hosts receive the standalone core |
 | Build from source | `cargo run -p plurxd` | Repository-pinned Rust toolchain; `ffmpeg` and `ffprobe` |

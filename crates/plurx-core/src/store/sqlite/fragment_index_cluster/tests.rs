@@ -1446,17 +1446,21 @@ async fn terminal_analysis_history_has_a_hard_global_cap() {
             report_phase("transaction_begin", started, 1);
             let started = timing.then(std::time::Instant::now);
             let mut inserted = 0;
-            for generation in 0_i64..=8_192 {
-                transaction.execute(
+            {
+                // Reuse only the compiled INSERT; every row still executes its
+                // real bindings, constraints and installed triggers.
+                let mut insert = transaction.prepare(
                     "INSERT INTO analysis_requests
                           (request_id, file_id, source_size, source_mtime, component,
                            force_rebuild, target_node_id, state, fence, attempts,
                            not_before_ms, created_at_ms, updated_at_ms)
                          VALUES (?1, 1, 100, ?2, 'fragment_index', 0, 'node-a',
                                  'failed', 0, 1, 0, ?2, ?2)",
-                    params![format!("terminal-{generation:05}"), generation],
                 )?;
-                inserted += 1;
+                for generation in 0_i64..=8_192 {
+                    insert.execute(params![format!("terminal-{generation:05}"), generation])?;
+                    inserted += 1;
+                }
             }
             report_phase("terminal_insert_loop", started, inserted);
             let started = timing.then(std::time::Instant::now);
@@ -1470,6 +1474,16 @@ async fn terminal_analysis_history_has_a_hard_global_cap() {
                 [],
             )?;
             report_phase("queued_insert", started, 1);
+            let before_cap = transaction.query_row(
+                "SELECT COUNT(*) FROM analysis_requests
+                      WHERE state IN ('ready', 'failed', 'cancelled')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            assert_eq!(
+                before_cap, 8_193,
+                "the real terminal-history boundary must be exceeded before the cap transition"
+            );
             let started = timing.then(std::time::Instant::now);
             transaction.execute(
                 "UPDATE analysis_requests SET state = 'failed'

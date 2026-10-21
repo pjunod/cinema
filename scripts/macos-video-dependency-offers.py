@@ -2,6 +2,7 @@
 """Verify and extract pinned dependency offers without reconstructing Git metadata."""
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -10,6 +11,33 @@ import tarfile
 POLICY = Path(__file__).with_name("macos-video-dependency-sources.json")
 MODEL = "opus_data-a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e.tar.gz"
 ALIASES = {"openssl": "openssl-3.6.3", "xz": "v5.8.3", "libpng": "v1.6.58"}
+
+# The reviewed October 15 native package retained this exact SVN r6531
+# source offer. Its archive bytes differ from the later canonical export;
+# keep the consumed identity rather than relabelling it as that export.
+SOURCE_ALTERNATIVES = {
+    "lame": {
+        "canonical": {"kind": "svn-source-archive", "revision": "6531",
+                      "sha256": "e9a12c30eba636984ba16231488611d3a34eb78b2cfc616ac58aa1d5cbf97ba5"},
+        "alternate": {"kind": "svn-source-archive", "revision": "6531",
+                      "sha256": "ddf41981c2dabdf658006fa156e8dbb7ef187d8a21e2954c563ee5f67679e285"},
+    }
+}
+# Verifier changes must not rewrite the identity of an already executed
+# helper. This exact earlier helper is retained and checked before acceptance.
+REVIEWED_EXTRACTION_HELPERS = {
+    "0fdd889aeb40a076a74a1c146e77bc76a4ee9ef18896738e9f539cabc6137161",
+}
+GENERATION_TOOL_ARCHIVES = {
+    "automake": {
+        "23c091faee8dac047b0670d8c10da030bf104610fc064b904407de1a1ff8f437",
+        "79e8b1f7a967e87ce8a9ded76bee7f793d0ce1886ab2002feb1b0510f578b75a",
+    },
+    "libtool": {
+        "719ae9c4597d0198ee77da6bb09dfcb6f68ae0302330f1a1e61503648e59fdd2",
+        "24adb3aa9ae035c70faba344af57d73215eb89281045af6c7ccd307751f8b0bf",
+    },
+}
 
 
 # Exact audited generated outputs of the historical reconstruction. These are
@@ -184,6 +212,13 @@ def archive_name(role, facts):
     raise ValueError("unknown dependency source kind")
 
 
+def source_identity_matches(role, actual, expected):
+    if actual == expected:
+        return True
+    approved = SOURCE_ALTERNATIVES.get(role)
+    return bool(approved and expected == approved["canonical"] and actual == approved["alternate"])
+
+
 def verify_offers(directory, roles=None):
     expected = json.loads(POLICY.read_text())
     manifest_path = directory / "manifest.json"
@@ -196,7 +231,7 @@ def verify_offers(directory, roles=None):
     if not required <= set(actual):
         raise ValueError("missing required dependency source role")
     for role in actual:
-        if actual[role] != expected[role]:
+        if not source_identity_matches(role, actual[role], expected[role]):
             raise ValueError("dependency source identity mismatch: " + role)
         if roles is not None and role not in required:
             continue
@@ -235,19 +270,31 @@ def stage_offers(directory, destination):
     return {"manifest_sha256": digest(destination / "manifest.json"), "roles": sorted(actual)}
 
 
-def verify_preparation(root):
+def verify_preparation(root, allow_retained=False):
     facts = json.loads((root / "prepared-source.json").read_text())["dependency_source_inputs"]
+    helper, policy = Path(__file__), POLICY
+    if allow_retained and facts.get("helper_sha256") != digest(helper):
+        if facts.get("helper_sha256") not in REVIEWED_EXTRACTION_HELPERS:
+            raise ValueError("unreviewed retained extraction helper")
+        helper = root / "extraction-helpers/macos-video-dependency-offers.py"
+    if allow_retained and facts.get("policy_sha256") != digest(policy):
+        policy = root / "extraction-helpers/macos-video-dependency-sources.json"
     paths = {"manifest_sha256": root / "dependency-source-inputs/manifest.json",
              "recipe_bindings_sha256": root / "dependency-recipe-bindings.json",
-             "helper_sha256": Path(__file__), "policy_sha256": POLICY}
+             "helper_sha256": helper, "policy_sha256": policy}
     for key, path in paths.items():
         if path.is_symlink() or not path.is_file() or digest(path) != facts.get(key):
             raise ValueError("prepared dependency input changed: " + key)
+    expected = json.loads(POLICY.read_text())
+    retained = json.loads(policy.read_text())
+    if set(retained) != set(expected) or any(
+            not source_identity_matches(role, retained[role], expected[role]) for role in retained):
+        raise ValueError("prepared dependency policy is not approved")
     return json.loads(paths["recipe_bindings_sha256"].read_text())
 
 
-def verify_recipe(root, recipe, role):
-    bindings = verify_preparation(root)
+def verify_recipe(root, recipe, role, allow_retained=False):
+    bindings = verify_preparation(root, allow_retained)
     if recipe not in bindings or role not in bindings[recipe]["roles"]:
         raise ValueError("dependency role is not bound to this pinned recipe")
     path = root / "source" / recipe
@@ -312,7 +359,8 @@ def extract_source(root, role, revision, destination, recipe):
 
 
 def verify_consumption(root):
-    verify_preparation(root)
+    verify_preparation(root, allow_retained=True)
+    helper_sha256 = json.loads((root / "prepared-source.json").read_text())["dependency_source_inputs"]["helper_sha256"]
     directory = root / "dependency-source-inputs"
     actual = verify_offers(directory)
     receipt = root / "dependency-source-consumption.jsonl"
@@ -324,8 +372,8 @@ def verify_consumption(root):
     consumed = set()
     for row in rows:
         role = row["role"]
-        binding = verify_recipe(root, row["recipe"], role)
-        if row.get("recipe_sha256") != binding["recipe_sha256"] or row.get("extraction_helper_sha256") != digest(Path(__file__)):
+        binding = verify_recipe(root, row["recipe"], role, allow_retained=True)
+        if row.get("recipe_sha256") != binding["recipe_sha256"] or row.get("extraction_helper_sha256") != helper_sha256:
             raise ValueError("consumed recipe/helper identity mismatch")
         if role not in actual:
             raise ValueError("unknown consumed dependency role")
@@ -447,26 +495,36 @@ def retain_archive_build(root, evidence):
     for name in ("dependency-recipe-bindings.json", "dependency-source-consumption.jsonl"):
         shutil.copyfile(root / name, recipes / name)
     shutil.copytree(root / "extraction-helpers", recipes / "extraction-helpers")
+    tools = root / "source-generation-tools"
     return {"mode": "verified-archive-recipe-consumption", "dependency_sources": consumed,
-            **retain_compiled_snapshot(root, evidence)}
+            **retain_compiled_snapshot(root, evidence, tools if tools.is_dir() else None)}
+
+
+def retain_generation_tools(tool_source, evidence):
+    """Index exact source members, independent of their installed location."""
+    tool_files = {}
+    retained = evidence / "source-generation-tools"
+    retained.mkdir()
+    for name, approved in GENERATION_TOOL_ARCHIVES.items():
+        original = tool_source / "archives" / (name + ".tar.gz")
+        checksum = digest(original) if original.is_file() and not original.is_symlink() else None
+        if checksum not in approved:
+            raise ValueError("source-generation tool archive mismatch")
+        shutil.copyfile(original, retained / original.name)
+        with tarfile.open(original) as contents:
+            for member in contents:
+                path = Path(member.name)
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("unsafe source-generation tool member")
+                if member.isfile():
+                    value = hashlib.sha256(contents.extractfile(member).read()).hexdigest()
+                    tool_files.setdefault(value, {"sha256": value, "archive": original.name,
+                        "archive_sha256": checksum, "member": member.name})
+    return tool_files
 
 
 def retain_compiled_snapshot(root, evidence, tool_source=None):
-    tool_files = {}
-    if tool_source is not None:
-        pinned = {"automake": "23c091faee8dac047b0670d8c10da030bf104610fc064b904407de1a1ff8f437",
-                  "libtool": "719ae9c4597d0198ee77da6bb09dfcb6f68ae0302330f1a1e61503648e59fdd2"}
-        retained_tools = evidence / "source-generation-tools"
-        retained_tools.mkdir()
-        for name, expected in pinned.items():
-            original = tool_source / "archives" / (name + ".tar.gz")
-            if original.is_symlink() or digest(original) != expected:
-                raise ValueError("source-generation tool archive mismatch")
-            shutil.copyfile(original, retained_tools / original.name)
-            with tarfile.open(original) as archive:
-                for member in archive:
-                    if member.isfile():
-                        tool_files[str((tool_source / member.name).resolve())] = {"sha256": hashlib.sha256(archive.extractfile(member).read()).hexdigest(), "archive": original.name, "archive_sha256": expected, "member": member.name}
+    tool_files = retain_generation_tools(tool_source, evidence) if tool_source is not None else {}
 
     snapshot = evidence / "compiled-source.tar.gz"
     index = {}
@@ -484,14 +542,22 @@ def retain_compiled_snapshot(root, evidence, tool_source=None):
             if path.is_symlink():
                 resolved = path.resolve()
                 if not resolved.is_relative_to((root / "source").resolve()):
-                    if str(resolved) not in tool_files or not resolved.is_file() or digest(resolved) != tool_files[str(resolved)]["sha256"]:
+                    metadata = tool_files.get(digest(resolved)) if resolved.is_file() else None
+                    if metadata is None:
                         raise ValueError("compiled source symlink escapes verified source-generation tools")
-                    # Retain actual tool-provided source as a regular member;
-                    # no task-local absolute symlink survives redistribution.
-                    info = archive.gettarinfo(str(resolved), arcname=str(relative))
-                    with resolved.open("rb") as content:
-                        archive.addfile(info, content)
-                    index[str(relative)] = {**tool_files[str(resolved)], "source": "verified-source-generation-tool", "original_symlink_target": tool_files[str(resolved)]["member"]}
+                    # Emit the verified archive member itself, not arbitrary
+                    # bytes reached through an external host symlink.
+                    original = tool_source / "archives" / metadata["archive"]
+                    with tarfile.open(original) as tools:
+                        member = tools.getmember(metadata["member"])
+                        data = tools.extractfile(member).read()
+                    if hashlib.sha256(data).hexdigest() != metadata["sha256"]:
+                        raise ValueError("source-generation member changed while retaining")
+                    info = tarfile.TarInfo(str(relative))
+                    info.mode, info.size = member.mode, len(data)
+                    archive.addfile(info, io.BytesIO(data))
+                    index[str(relative)] = {**metadata, "source": "verified-source-generation-tool",
+                                            "original_symlink_target": metadata["member"]}
                 else:
                     archive.add(path, arcname=str(relative), recursive=False)
                     index[str(relative)] = {"symlink": str(path.readlink())}

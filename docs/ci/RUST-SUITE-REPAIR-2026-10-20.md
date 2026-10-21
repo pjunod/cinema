@@ -1,18 +1,22 @@
 # Rust suite repair — preserve the 25 failures and qualify their corrections
 
-**Status:** qualified at exact `0f7b6325cce563fec1d8001dc141a46d432db573`
-through [run 5713 / task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
-The full ordinary Rust command passed in 2,636.152 seconds: 6,928 native
-passes, zero failures and all 49 unchanged ignored identities. Seven doctest
-targets, 400 cohort bodies, 20 writer bodies and both serial media cases
-also passed, with complete accounting and qualified cleanup. Earlier setup
-failures and red native receipts remain retained. This describes the frozen
-M1 source; M2 changes require fresh qualification.
+**Status:** integration refresh in progress after merge authorization on
+2026-10-21. Frozen `0f7b6325` passed run 5713: 6,928 native passes, zero
+failures and 49 unchanged ignores; seven doctest targets, 400 cohort bodies,
+20 writer bodies and both serial media cases also passed with qualified
+cleanup. Those receipts remain evidence for that exact older source.
+Effort development gate 5728 then refused the stale effort/main ancestry
+before compilation. Main `00c74cd8` was integrated into the repair candidate
+in `6a6d55099f38095e7dd32ef7f042b9c5ce3f1f6e`; new exact-source compiler,
+focused, full native and development-gate acceptance are pending before merge.
+Current receipts are recorded in
+[task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
-`codex/full-pr-suite-m1`, based on `effort/full-pr-suite` at `c1c344132`
-and carrying M0 dependency `16d1a5003`; integration is held for user
-clarification of the broader PR scope. M2 proceeds in the
-[setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md).
+`codex/full-pr-suite-m1`, carrying the M0 dependency `16d1a5003`; neither
+old successful outcomes nor the failed development gate are replaced.
+M2 retains the profiling ancestry at `3ce97c94e` and continues in the
+[setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md);
+its refreshed integration and optimizations require their own qualification.
 
 Companion to [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md)
 (the current execution policy) and [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md)

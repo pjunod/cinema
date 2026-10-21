@@ -28,6 +28,7 @@ audit_paths = [
   "scripts/**",
   "tests/**",
   "validation/**",
+  "verification/**",
   "vendor/**",
 ]
 audit_exclude = []
@@ -468,6 +469,7 @@ paths = [
   "crates/plurx-core/src/{cluster,config,domain,error,fs_secure,fs_secure_windows,lib,testfixtures}.rs",
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/store/mod.rs",
+  "crates/plurx-core/src/store/sqlite/fixture.rs",
   "crates/plurx-core/src/store/scan_identity_repair.rs",
   "crates/plurx-core/src/store/dv_conversion.rs",
   "crates/plurx-core/src/store/hiqlite_dv_conversion.rs",
@@ -509,6 +511,7 @@ paths = [
   "crates/plurx-core/src/store/renditionplan.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
+  "crates/plurx-core/tests/store_contract/formal_publication.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
@@ -533,6 +536,7 @@ paths = [
   "crates/plurx-core/tests/schema_lineage_upgrade.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
+  "crates/plurx-core/src/store/sqlite/fixture.rs",
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
   # check that refuses a corrupt database before migration touches it.
   "crates/plurx-core/src/store/sqlite/housekeeping.rs",
@@ -833,6 +837,7 @@ id = "server.api"
 title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
+  "crates/plurxd/src/http/system/frame_drop.rs",
   "crates/plurxd/src/dv_disk/tests.rs",
   "crates/plurxd/src/http/system/tests.rs",
   "crates/plurxd/src/http/test_agents.rs",
@@ -1007,6 +1012,7 @@ paths = [
   "crates/plurx-core/src/output_measurement.rs",
   "crates/plurx-core/src/transcode/**",
   "crates/plurxd/src/transcoder_optimization.rs",
+  "crates/plurxd/src/transcoder_optimization/**",
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-core/tests/fixtures/hevc-progressive-configuration.json",
   "crates/plurx-core/tests/fixtures/dv-runtime/**",
@@ -1303,6 +1309,8 @@ paths = [
   "scripts/player-input-fence",
   "scripts/playback-surface-fence",
   "scripts/control-reporter-browser-check",
+  "scripts/system-settings-browser-check",
+  "scripts/system-settings-preview",
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
   "scripts/js-check",
@@ -1402,7 +1410,20 @@ paths = [
   "scripts/build-macos-video-ffmpeg",
   "scripts/build-macos-source-parser",
   "scripts/build-macos-source-runtime",
+  "scripts/build-macos-source-media",
+  "scripts/build-macos-vulkan",
+  "scripts/macos-vulkan-sources.json",
+  "scripts/ffmpeg-support-matrix.json",
+  "crates/plurxd/src/ffmpeg_support.rs",
   "scripts/install-linux-source-runtime",
+  "scripts/bootstrap-formal-toolchain",
+  "scripts/check-formal",
+  "verification/durable-jobs/**",
+  "verification/operation-progress/**",
+  "tests/operations/test_formal_runner.py",
+  "tests/operations/test_formal_ci.py",
+  "tests/operations/test_formal_toolchain.py",
+  "tests/operations/test_operation_progress_runner.py",
   "scripts/install-compose-tray",
   "scripts/linux-tray-release",
   "scripts/package-macos",

@@ -10,6 +10,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Web playback controls show the current presented resolution and quality mode,
+  with a brief quality-change notice that also works in fullscreen.
+
 - Native macOS menu-bar and optional Linux desktop controls show local server status, open the web interface and logs, start/stop/restart the server, and manage separate server and tray startup preferences. Named upgrades use authenticated GitHub release artifacts; production release trust and macOS signing must be provisioned before distribution.
 - Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
@@ -20,6 +23,46 @@ bump may break compatibility and a **patch** bump never does.
   writer when a late commit or rollback reply is delivered. Later writes keep
   working; the original caller still treats a timeout as an unknown outcome.
 
+- Web playback automatically captures bounded frame-drop incidents with recent
+  frame, buffer, lifecycle and request evidence, respecting diagnostic-history
+  controls and retaining account-scoped local copies for investigation.
+
+- Processed Dolby Vision admission respects actual HLS support when clients
+  also advertise progressive DV; native web startup reads complete long-film
+  processing timelines without confusing them with small master playlists.
+
+- Dolby Vision FEL processing on Intel servers can use the independently
+  proved VAAPI output encoder when hardware selection prefers Quick Sync,
+  avoiding an unintended single-thread software encode and startup timeout.
+
+- Web playback counts delivered frame callbacks independently of suspicious
+  timestamps, preventing metadata diagnostics from retaining a buffering
+  overlay or triggering false stall recovery while the picture advances.
+
+- Apple TV movie and show rows keep complete posters, titles and metadata
+  visible while browsing. Library headings, search and the letter index scroll
+  with the results, leaving the compact tools available above them.
+
+- Web prepared quality switches reattach selected subtitles without cancelling
+  the pending quality request or sending a contradictory commit to the server.
+  Visible successors retain HLS failure recovery; established retries and
+  queued stall probes preserve their proper budgets and terminal diagnoses.
+
+- System settings separates Cinema and Jellyfin FFmpeg versions, shows concise
+  configured media capabilities and actual device bindings, and compares
+  representative decoding, processing and encoding work. Auto prefers working
+  hardware using real-media speed; collapsed diagnostics no longer poll.
+
+- Native Mac installs retain the complete patched Jellyfin media package,
+  including Metal reference-white support, static Vulkan/libplacebo, the
+  source parser and font authority. Known legacy media paths follow the
+  current runtime. Settings warns prominently about the wrong package,
+  missing hardware-specific features or failed execution probes, with a
+  separate build/execution matrix for Mac, Intel, AMD and NVIDIA hardware.
+
+- macOS source installation installs the pinned Rust toolchain when missing,
+  bootstrapping rustup through Homebrew and installing Homebrew if needed.
+  Existing toolchains are reused without a download.
 - Safari Play and Resume prepare the persistent media element during the user
   gesture, before asynchronous stream readiness. Browser permission refusals
   now stop recovery immediately and retain position and track choices for an

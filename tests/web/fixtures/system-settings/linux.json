@@ -1,0 +1,207 @@
+{
+  "node_id": "fixture-node",
+  "name": "Fixture server",
+  "display_name": "Fixture server",
+  "version": "0.7.0",
+  "build": "v0.7.0-754-g5fc6f6405",
+  "built_at": "2026-10-20T12:00:00Z",
+  "platform": "linux",
+  "application_executable": "/usr/local/bin/cinema",
+  "runtime_location": null,
+  "data_dir": "/var/lib/cinema",
+  "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+  "ffmpeg_version": "8.1.3-Jellyfin",
+  "hwaccel_pref": "nvenc",
+  "hwaccel_requested": "nvenc",
+  "encoder_selected": "NVIDIA NVENC",
+  "encoders": {
+    "nvenc": true,
+    "qsv": true,
+    "vaapi": true,
+    "videotoolbox": false
+  },
+  "transcoder_optimization": {
+    "running": false,
+    "report": null
+  },
+  "storage": {
+    "ran": true,
+    "mounts": []
+  },
+  "tone_map": {
+    "ran": true,
+    "selected": "cuda",
+    "selected_label": "CUDA",
+    "verdicts": []
+  },
+  "macos_video_processing": {
+    "enabled": true,
+    "hdr10_metal": {
+      "availability": "available"
+    }
+  },
+  "graphics_devices": [
+    {
+      "id": "0000:01:00.0",
+      "vendor": "NVIDIA",
+      "vendor_id": "10de",
+      "device_id": "fixture-nvidia",
+      "model": "NVIDIA discrete GPU (fixture)"
+    },
+    {
+      "id": "0000:00:02.0",
+      "vendor": "Intel",
+      "vendor_id": "8086",
+      "device_id": "fixture-intel",
+      "model": "Intel integrated GPU (fixture)",
+      "render_node": "/dev/dri/renderD128"
+    }
+  ],
+  "encoder_device_bindings": [
+    {
+      "backend": "nvenc",
+      "device_ids": [],
+      "binding": "unresolved",
+      "detail": "NVIDIA NVENC uses the driver's default device; physical device binding is unverified"
+    },
+    {
+      "backend": "qsv",
+      "device_ids": [],
+      "binding": "unresolved",
+      "detail": "Intel Quick Sync uses the driver's default device; physical device binding is unverified"
+    },
+    {
+      "backend": "vaapi",
+      "device_ids": [
+        "0000:00:02.0"
+      ],
+      "binding": "configured",
+      "detail": "VA-API render node: /dev/dri/renderD128"
+    }
+  ],
+  "transcoding_facts": [
+    {
+      "backend": "cuda",
+      "detail": "NVDEC \u00b7 NVIDIA video hardware (driver default)\nSupported codecs use hardware; others use the CPU",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "hardware_decoding",
+      "label": "Hardware decoding"
+    },
+    {
+      "backend": "nvenc",
+      "detail": "NVENC \u00b7 NVIDIA video hardware (driver default)",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "hardware_encoding",
+      "label": "Hardware encoding"
+    },
+    {
+      "backend": "CUDA",
+      "detail": "CUDA \u00b7 GPU acceleration",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "tone_mapping",
+      "label": "HDR \u2192 SDR tone mapping"
+    },
+    {
+      "backend": "CUDA",
+      "detail": "CUDA \u00b7 Hardware-accelerated resizing\nSelected for compatible streams",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "hardware_scaling",
+      "label": "Hardware scaling"
+    },
+    {
+      "backend": "CPU",
+      "detail": "CPU rendering \u00b7 May require GPU frame transfers",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": false,
+      "id": "subtitle_burn_in",
+      "label": "Subtitle burn-in"
+    },
+    {
+      "backend": "CPU",
+      "detail": "CPU processing \u00b7 Interlaced video",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": false,
+      "id": "deinterlacing",
+      "label": "Deinterlacing"
+    }
+  ],
+  "additional_media_support": [
+    {
+      "id": "ac4",
+      "label": "AC-4 audio",
+      "support_available": true,
+      "detail": "Audio decoder \u00b7 Used when the source requires it"
+    },
+    {
+      "id": "dolby_vision",
+      "label": "Dolby Vision",
+      "support_available": true,
+      "detail": "Dolby Vision metadata and rendering support \u00b7 Profile-dependent"
+    },
+    {
+      "id": "vulkan",
+      "label": "Vulkan / libplacebo",
+      "support_available": true,
+      "detail": "Alternative GPU processing \u00b7 CUDA is selected"
+    },
+    {
+      "id": "opencl",
+      "label": "OpenCL tone mapping",
+      "support_available": true,
+      "detail": "Alternative GPU tone mapping \u00b7 CUDA is selected"
+    }
+  ],
+  "ffmpeg_support": {
+    "required_package": "8.1.3-1",
+    "expected_version": "8.1.3-Jellyfin",
+    "executable_version": "8.1.3-Jellyfin",
+    "source_revision": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
+    "package_verified": false,
+    "package_verification": "unsupported_platform",
+    "executable": "/usr/lib/jellyfin-ffmpeg/ffmpeg",
+    "package_problems": [],
+    "checked_at": 1792497600,
+    "rows": [
+      {
+        "id": "nvenc",
+        "label": "NVENC encoding",
+        "applicable": true,
+        "required": true,
+        "included": true,
+        "runtime": "passed",
+        "required_for": "NVIDIA hardware",
+        "missing": []
+      },
+      {
+        "id": "qsv",
+        "label": "Quick Sync encoding",
+        "applicable": true,
+        "required": true,
+        "included": true,
+        "runtime": "passed",
+        "required_for": "Intel hardware",
+        "missing": []
+      },
+      {
+        "id": "vaapi",
+        "label": "VA-API encoding",
+        "applicable": true,
+        "required": true,
+        "included": true,
+        "runtime": "passed",
+        "required_for": "Linux graphics hardware",
+        "missing": []
+      }
+    ]
+  }
+}

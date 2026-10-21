@@ -1,0 +1,182 @@
+{
+  "node_id": "fixture-node",
+  "name": "Fixture server",
+  "display_name": "Fixture server",
+  "version": "0.7.0",
+  "build": "v0.7.0-754-g5fc6f6405",
+  "built_at": "2026-10-20T12:00:00Z",
+  "platform": "macos",
+  "application_executable": "~/Library/Application Support/plurx/runtime/versions/fixture/cinema",
+  "runtime_location": "~/Library/Application Support/plurx/runtime/versions/fixture/",
+  "data_dir": "~/Library/Application Support/plurx",
+  "ffmpeg": "~/Library/Application Support/plurx/runtime/versions/fixture/runtime/ffmpeg",
+  "ffmpeg_version": "8.1.3-Jellyfin",
+  "hwaccel_pref": "videotoolbox",
+  "hwaccel_requested": "videotoolbox",
+  "encoder_selected": "Apple VideoToolbox",
+  "encoders": {
+    "videotoolbox": true,
+    "nvenc": false,
+    "qsv": false,
+    "vaapi": false
+  },
+  "transcoder_optimization": {
+    "running": false,
+    "report": null
+  },
+  "storage": {
+    "ran": true,
+    "measured_at": 1792497600,
+    "mounts": [
+      {
+        "roots": [
+          "/media/movies"
+        ],
+        "read_bps": 356000000
+      },
+      {
+        "roots": [
+          "/media/shows"
+        ],
+        "read_bps": 329000000
+      },
+      {
+        "roots": [
+          "/media/archive"
+        ],
+        "read_bps": null,
+        "note": "No file large enough for a read measurement."
+      }
+    ]
+  },
+  "tone_map": {
+    "ran": true,
+    "selected": "cpu",
+    "selected_label": "CPU tone mapping",
+    "verdicts": [
+      {
+        "pipeline": "vt_tonemap_metal",
+        "label": "Metal HDR tone mapping",
+        "passed": true,
+        "speedup": 1.45
+      }
+    ],
+    "census": {
+      "state": "idle",
+      "node_id": "fixture-node"
+    }
+  },
+  "macos_video_processing": {
+    "enabled": true,
+    "hdr10_metal": {
+      "availability": "available"
+    }
+  },
+  "graphics_devices": [],
+  "encoder_device_bindings": [],
+  "transcoding_facts": [
+    {
+      "backend": "videotoolbox",
+      "detail": "VideoToolbox \u00b7 Apple video hardware\nSupported codecs use hardware; others use the CPU",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "hardware_decoding",
+      "label": "Hardware decoding"
+    },
+    {
+      "backend": "videotoolbox",
+      "detail": "VideoToolbox \u00b7 Apple video hardware",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "hardware_encoding",
+      "label": "Hardware encoding"
+    },
+    {
+      "backend": "Metal",
+      "detail": "Metal \u00b7 GPU acceleration",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "tone_mapping",
+      "label": "HDR \u2192 SDR tone mapping"
+    },
+    {
+      "backend": "VideoToolbox",
+      "detail": "VideoToolbox \u00b7 Hardware-accelerated resizing",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "hardware_scaling",
+      "label": "Hardware scaling"
+    },
+    {
+      "backend": "VideoToolbox / Metal",
+      "detail": "Mac GPU processing \u00b7 Text and bitmap subtitles",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "subtitle_burn_in",
+      "label": "Subtitle burn-in"
+    },
+    {
+      "backend": "VideoToolbox",
+      "detail": "VideoToolbox \u00b7 Interlaced SDR video",
+      "device_ids": [],
+      "enabled": true,
+      "hardware": true,
+      "id": "deinterlacing",
+      "label": "Hardware deinterlacing"
+    }
+  ],
+  "additional_media_support": [
+    {
+      "id": "ac4",
+      "label": "AC-4 audio",
+      "support_available": true,
+      "detail": "Audio decoder \u00b7 Used when the source requires it"
+    },
+    {
+      "id": "dolby_vision",
+      "label": "Dolby Vision",
+      "support_available": true,
+      "detail": "Dolby Vision metadata and rendering support \u00b7 Profile-dependent"
+    },
+    {
+      "id": "vulkan",
+      "label": "Vulkan / libplacebo",
+      "support_available": true,
+      "detail": "Alternative GPU processing \u00b7 Metal is selected"
+    },
+    {
+      "id": "opencl",
+      "label": "OpenCL tone mapping",
+      "support_available": true,
+      "detail": "Alternative GPU tone mapping \u00b7 Metal is selected"
+    }
+  ],
+  "ffmpeg_support": {
+    "required_package": "8.1.3-1",
+    "expected_version": "8.1.3-Jellyfin",
+    "executable_version": "8.1.3-Jellyfin",
+    "source_revision": "253db2a7b0a8045c54ce68ce33d7f601229b1822",
+    "package_verified": true,
+    "package_verification": "verified",
+    "executable": "~/Library/Application Support/plurx/runtime/versions/fixture/runtime/ffmpeg",
+    "package_problems": [],
+    "checked_at": 1792497600,
+    "rows": [
+      {
+        "id": "metal",
+        "label": "Metal HDR tone mapping",
+        "applicable": true,
+        "required": true,
+        "included": true,
+        "runtime": "passed",
+        "required_for": "Apple GPU processing",
+        "missing": []
+      }
+    ]
+  }
+}

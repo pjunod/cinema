@@ -1,24 +1,30 @@
 # Full-suite setup performance — measure fixture cost before optimizing it
 
-**Status:** open — M2 profiling in progress; no setup optimization qualified ·
-**Written:** 2026-10-21 · **Owner:** Codex ·
+**Status:** open — two focused baselines measured; optimizations implemented
+but uncompiled and unqualified · **Written:** 2026-10-21 · **Owner:** Codex ·
 **Branch:** `codex/full-pr-suite-m2`
 
 Companion to the [canonical every-PR plan](FULL-SUITE-EVERY-PR-PLAN.md)
 (the complete execution contract) and the
 [M1 repair ledger](RUST-SUITE-REPAIR-2026-10-20.md) (the corrected Rust
-baseline). This ledger owns M2 setup measurements and any resulting fixture
-optimization. Work uses an independent checkout; the user checkout is not
-used for edits or tests. Preserve all assertions and scenario concurrency.
-If a measured optimization needs production behavior changes, record and
-review that extension before implementing it.
+baseline). This ledger owns M2 measurements and the resulting fixture and
+queue preparation changes. Work uses an independent checkout; the user
+checkout is not used for edits or tests. Preserve all assertions, identities,
+capacity boundaries, production deadlines and scenario concurrency.
 
-M1 is qualified at its exact source through the receipt in
-[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). Its merge into
-`effort/full-pr-suite` is held for user clarification because that PR carries
-M0 diagnostics and the writer correction as well as test repairs. A green
-Rust result neither merges the PR nor qualifies other platform lanes or an
-automatic every-PR policy cutover.
+M1 exact-source qualification is recorded in
+[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). The user has now
+authorized its complete merge into `effort/full-pr-suite`. Required effort
+gate 5728 remains a retained red receipt: authenticated history binding
+refused the older effort/main ancestry. The committed repair refresh
+`6a6d55099f38095e7dd32ef7f042b9c5ce3f1f6e` integrates main
+`00c74cd8c5ebd9ff3c6957532c42854ddc3d671a`; its development-gate and fresh
+exact-source qualification are pending. M2 retains the profiling ancestry
+`3ce97c94e` and has prepared the local merge of that refresh, preserving the
+optimizations and both baseline receipts below. The combined M2 source is
+uncompiled and unqualified. No history guard is weakened. The old green
+result does not qualify this refreshed candidate, other platform lanes or
+automatic every-PR execution.
 
 ## 1. The green M1 run is the comparison baseline
 
@@ -37,67 +43,98 @@ automatic every-PR policy cutover.
 
 **How to read it:** command wall time, native binary body time and complete
 job time have different boundaries. Their difference does not measure
-SQLite migrations, SQL preparation, media generation or teardown. Isolated
-phase costs are unknown until M2 records them. The 49 ignored statuses remain
-ignored; successful serial executions are separate observations. M2 must
-retain the complete baseline identities and seven doctest targets rather
-than making a faster run by selecting fewer tests.
+migrations, SQL preparation or teardown. Section 2 measures three focused
+cases separately; other isolated costs remain unknown. The 49 ignored
+statuses remain ignored; serial passes are separate observations. M2 must
+retain every baseline identity and seven doctest targets.
 
-## 2. Measure construction, body and cleanup separately
+## 2. Two local baselines identify different dominant phases
 
-Record source/tree, toolchain, features, command, runner limits, parallelism
-and artifact hashes with each comparison. Use the same candidate and fixed
-resources to separate fresh Store construction, migration/backfill, fixture
-population, actual test work and owned shutdown. For Source/media fixtures,
-separate database construction, media generation, probing, body and cleanup.
-Report phase boundaries and samples; do not subtract unrelated whole-job
-measurements and call the remainder setup.
+Both `baseline-01` and `baseline-02` executed committed source
+`3ce97c94e6168012425781360267a04f85448fc0`, tree
+`c43ad8530a1bc87516ac8f0220b988e521210b9f`. Every selected native body passed,
+returned zero and qualified process-group cleanup in both samples.
 
-Keep the existing four-thread ordinary execution and 22-thread focused
-cohort as separately labelled measurements. Cache state and external load
-must be recorded as limitations when uncontrolled. A before/after comparison
-must establish that the intended work was performed in both samples.
+The environment is local Linux ARM64, pinned Rust 1.97.1, debug optimization
+level zero and debug information zero, Cargo build jobs one, and only the
+`hiqlite-store` feature. Debug assertions and overflow checks are enabled.
+Native tests run individually with `--exact --test-threads=1`, timing enabled
+and `RUST_MIN_STACK` unset. This is focused local evidence, not a CI
+whole-suite result or a direct speed comparison against the differently
+scheduled M1 run.
 
-## 3. Keep implementation ownership narrow
+| Exact case suffix | Baseline 01 command seconds | Baseline 02 command seconds |
+|---|---:|---:|
+| `terminal_analysis_history_has_a_hard_global_cap` | 136.207 | 135.931 |
+| `migration_overflow_retains_all_accepted_work_until_capacity_frees` | 102.477 | 100.742 |
+| `recently_added_matches_the_whole_catalogue_ranking` | 53.777 | 53.567 |
 
-| Surface | Intended M2 ownership and boundary |
+**Baseline 01 phase measurements:**
+
+| Case | Actual measured work | Seconds |
+|---|---|---:|
+| Terminal analysis history | Cold open | 0.23797 |
+| Terminal analysis history | 8,193 real terminal inserts | 135.90010 |
+| Terminal analysis history | Actual cap transition | 0.02383 |
+| Migration overflow | SQL preparation, 4,100 statements across 257 queue transactions | 70.26632 |
+| Migration overflow | Statement stepping, same transactions | 20.13291 |
+| Migration overflow | Commit, same transactions | 0.40956 |
+| Catalogue ranking | 200 cold Store opens | 46.79879 |
+| Catalogue ranking | 200 seeding operations, 9,339 rows in total | 0.32306 |
+| Catalogue ranking | 5,000 production queries | 3.83321 |
+| Catalogue ranking | 5,000 independent oracle queries | 2.54224 |
+
+The history measurement combines repeated preparation and execution inside
+its insert loop; it does not isolate preparation alone. The migration path
+explicitly times preparation while the writer lock is held. Catalogue
+construction dominates that case, while its production and oracle queries
+still perform substantial real work. The candidate targets these measured
+costs; no post-change improvement is claimed yet.
+
+Raw native logs, phase rows, source and executable bindings, and cleanup
+receipts remain in ignored `target/rust-performance-local/` sample folders.
+The two `summary.json` SHA-256 digests are:
+
+- Baseline 01: `31558d22bdc9f08a99d1eab1639361b909db877dd608d2009acb062f09136b27`.
+- Baseline 02: `c14399e6a626efd698d8d94f720686b3c5ebaec646566ab02914c292d1bb21c0`.
+
+## 3. The candidate keeps implementation ownership narrow
+
+The following changes are implemented in the working tree, **not compiled,
+executed or qualified**. The overall performance work is authorized; the
+production queue extension has a measured preparation basis and requires
+its substantive controls, rather than another optional-feature approval.
+
+| Owned surface | Exact files and implemented boundary |
 |---|---|
-| Test Store initialization | Test-only helper work around [SQLite construction](../../crates/plurx-core/src/store/sqlite/mod.rs) and [Store contract fixtures](../../crates/plurx-core/tests/store_contract.rs), selected only after phase measurements. Preserve real empty/upgrade/backfill cases and independent databases. |
-| Core domain fixture setup | [Queue fixture helpers](../../crates/plurx-core/tests/support/queue_fixture.rs), if measured setup or statement preparation is material. Keep domain assertions, queue transitions and synthetic-clock contracts intact. |
-| Daemon fixture construction | [Source actor fixtures](../../crates/plurxd/src/transcode/tests/source_actor.rs) and [HTTP Source fixtures](../../crates/plurxd/src/http/shared_source_playback.rs), if measured construction dominates. Preserve real Store/producer ownership and actual media/proof behavior. |
-| Production queue statement cache | Conditional extension only. No production queue optimization is claimed or approved by a fixture-only measurement. Require measured preparation cost and the controls below before extending implementation scope. |
-| Integration and evidence | Root agent owns Rust integration and commits; this ledger records measurements, reviewed scope and acceptance. File ownership must be assigned before parallel edits. |
+| Analysis-history fixture | [fragment_index_cluster/tests.rs](../../crates/plurx-core/src/store/sqlite/fragment_index_cluster/tests.rs) prepares the same INSERT once and still executes all 8,193 actual rows. A new pre-cap assertion proves the threshold was exceeded; the original 8,192 cap and queued/final-state assertions remain. |
+| Production queue adapter | [background_jobs.rs](../../crates/plurx-core/src/store/sqlite/background_jobs.rs) uses the connection's bounded `prepare_cached` only in `queue_transaction`; SQL, fresh bindings, complete row stepping and commit/rollback semantics remain. Five real controls cover mixed request order, late-row errors, rollback and trigger effects, changed-schema refusal, independent Stores and durable reopen. |
+| Explicit initialized fixture | New [fixture.rs](../../crates/plurx-core/src/store/sqlite/fixture.rs), gated by [sqlite/mod.rs](../../crates/plurx-core/src/store/sqlite/mod.rs), copies an immutable initialized template into a private memory database, reapplies initialization and regenerates dynamic settings. Five controls cover cold equivalence, dynamic state/PRAGMAs, mutation/rollback/FTS isolation, parallel connections and the real cold-file backfill/reopen path. Cold constructors are unchanged. |
+| Single helper caller | Only `recently_added_matches_the_whole_catalogue_ranking` in [media/tests.rs](../../crates/plurx-core/src/store/sqlite/media/tests.rs) adopts the explicit fixture helper. Its 200 independent Stores, 9,339 rows and 5,000 production/oracle comparisons remain. No general Source or migration-fixture conversion is claimed. |
+| Source inventory | [placeholder_census.rs](../../crates/plurx-core/src/store/placeholder_census.rs) and [replicated.rs](../../crates/plurx-core/src/store/replicated.rs) register the new fixture module in their exact source inventories. The transaction total remains unchanged. Unchecked SQLite arity remains 103; the [consistent-read census](../../crates/plurx-core/src/store/consistent_read_census.rs) ceiling remains 237. |
+| Integration and evidence | Root owns Rust integration, compiler sequencing and commits; this ledger records measurements and acceptance. No mutable Store is shared between cases. |
 
-A reusable initialized fixture must copy immutable state into each test's
-private database. It must retain the schema version, PRAGMAs, identity,
-WAL/sidecar lifecycle and independent mutation behavior. Never share a
-mutable Store across test cases or replace migration tests with a prepared
-current-schema database.
-
-A production queue cache extension needs a measured SQL preparation cost on
-the real queue path, not an assumption from total Store time. Retain SQL and
-transaction semantics. Prove fresh parameter binding for repeated distinct
-requests, commit and rollback behavior, schema-change invalidation or safe
-repreparation, concurrent ownership and shutdown. Compare the uncached
-baseline and include a rollback path for the change. Caching must not retain
-a previous request's values or turn an error into a successful result.
+Preparation caching must never retain previous request values, skip streamed
+rows, ignore new schema/trigger refusals or turn a failed transaction into a
+success. Reverting the narrow cache call restores uncached preparation;
+rollback correctness is independently required by the new controls. Fixture
+copies cannot replace genuine empty/upgrade/backfill paths or discard
+connection-local PRAGMAs, ownership and WAL/sidecar lifecycle obligations.
 
 ## 4. Qualification must retain the work being measured
 
-- [ ] Capture isolated phase measurements and name the source, resources and
-  cache state; rank changes by measured cost rather than presumed setup cost.
-- [ ] Assign exact helper files and review each implementation against its
-  fixture boundaries before changing production scope.
-- [ ] Preserve all existing assertions, identities, ignores, doctest targets,
-  production deadlines and scenario concurrency. Add isolation, lifecycle and
-  schema/rollback controls for any reused setup or prepared statement cache.
-- [ ] Run focused controls through the established compiler loop, then obtain
-  fresh source-bound complete native and doctest evidence for the integrated
-  candidate. Retain failures; a later pass cannot erase an earlier result.
-- [ ] Record measured improvement and unresolved costs without claiming other
-  platform qualification or automatic ready-PR execution.
+- [x] Record two complete focused native baselines with isolated phase rows,
+  exact source/tree and process cleanup.
+- [x] Assign the narrow helper and measured queue preparation surfaces; retain
+  all existing assertions and add real isolation/schema/rollback controls.
+- [ ] Compile the exact integrated candidate and run all added controls through
+  the established pinned compiler loop. Implementation alone is not a pass.
+- [ ] Repeat matched local measurements with unchanged case identities,
+  assertions, resources and scheduling; record actual improvement and limits.
+- [ ] Obtain fresh source-bound complete native and doctest evidence after
+  integration. Retain all failures; later passes cannot erase earlier results.
+- [ ] Preserve other platform and automatic ready-PR cutover obligations in
+  the [canonical plan](FULL-SUITE-EVERY-PR-PLAN.md).
 
-M2 does not delete expensive cases, adopt earlier test outcomes as fresh
-execution, increase deadlines to hide setup, change ignore dispositions, or
-weaken assertions. The [canonical plan](FULL-SUITE-EVERY-PR-PLAN.md) still
-owns broader lane repair, merge-candidate binding and the eventual cutover.
+M2 does not remove expensive cases, adopt old outcomes as fresh execution,
+increase deadlines, change ignore dispositions or weaken assertions.

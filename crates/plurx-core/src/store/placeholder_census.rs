@@ -131,6 +131,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("coordination.rs", include_str!("sqlite/coordination.rs")),
     ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
     ("file_grants.rs", include_str!("sqlite/file_grants.rs")),
+    ("fixture.rs", include_str!("sqlite/fixture.rs")),
     ("dvr.rs", include_str!("sqlite/dvr.rs")),
     ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
     (

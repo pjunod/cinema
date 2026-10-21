@@ -67,6 +67,43 @@ test('native readiness waits for master and selected child before assigning src'
  assert.match(h.requests.at(-1).url,/index\.m3u8\?token=fixture$/);
  assert.equal(h.player.hlsStartup.dispatches,4);h.stop();
 });
+function processedMoviePlaylist(entries=5915){
+ return '#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI="init.mp4"\n'+
+  Array.from({length:entries},(_,i)=>`#EXTINF:2.002000,\nseg${String(i).padStart(5,'0')}.m4s\n`).join('')+'#EXT-X-ENDLIST\n';
+}
+test('native readiness admits the complete processed movie timeline as child or scalar media',async()=>{
+ const playlist=processedMoviePlaylist();assert.ok(Buffer.byteLength(playlist)>65536);
+ for(const scalar of [false,true]){
+  const h=harness();await flush();
+  vm.runInContext(shippedFunction('decode-tiers.js','parseSegTimes'),h.ctx);
+  h.answers.push(...(scalar?[h.response(playlist)]:[h.response(master),h.response(playlist)]));
+  h.advance(1000);await flush();
+  assert.equal(h.sources.length,1,`scalar=${scalar}`);
+  assert.equal(h.player.segTimes.length,5915,'retain every boundary, not a truncated prefix');
+  assert.equal(h.player.segTimes.at(-1),11841.83);
+  assert.equal(h.player.hlsStartup.manifestState,'parsed');h.stop();
+ }
+});
+test('native readiness keeps finite and distinct media, master, error and init body budgets',async()=>{
+ const probe=async({kind,size,status=200})=>{
+  const h=harness();await flush();let reads=0,cancels=0;
+  const prefix=kind==='init'?Buffer.from([0,0,0,8,102,116,121,112]):Buffer.from(kind==='master'?master:media);
+  const bytes=new Uint8Array(size);bytes.fill(32);bytes.set(prefix);
+  h.answers.push({ok:status>=200&&status<300,status,url:'',headers:{get:()=>kind==='init'?'video/mp4':'application/vnd.apple.mpegurl'},
+   body:{getReader:()=>({read:async()=>++reads===1?{done:false,value:bytes}:{done:true},cancel:async()=>{cancels++;}})}});
+  try{return {value:await h.ctx.nativeHlsFetch(h.player,h.player.hlsStartup,'http://fixture.invalid/session/index.m3u8',{init:kind==='init'}),reads,cancels};}
+  catch(error){return {error,reads,cancels};}finally{h.stop();}
+ };
+ const limitHarness=harness();await flush();
+ const limits=vm.runInContext('NATIVE_HLS_BODY_LIMITS',limitHarness.ctx);limitHarness.stop();
+ for(const [kind,limit]of [['media',limits.playlist],['master',limits.master],['init',limits.init]]){
+  const accepted=await probe({kind,size:limit});assert.ok(accepted.value,kind);
+  const refused=await probe({kind,size:limit+1});assert.equal(refused.error?.terminal,true,kind);
+  assert.match(refused.error.message,/byte limit/);assert.ok(refused.cancels>=1,'the bounded reader is retired');
+ }
+ const refused=await probe({kind:'media',size:limits.error+1,status:503});
+ assert.equal(refused.error?.terminal,true);assert.match(refused.error.message,/byte limit/);
+});
 test('native readiness ignores superseded delayed body and does not leak credentials across session',async()=>{
  const h=harness();await flush();
  let release;h.answers.push(()=>new Promise(resolve=>release=resolve));h.advance(1000);await flush();

@@ -344,8 +344,8 @@ function playbackProgressTick(v,p,frameSample=false){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Callback support is itself the observation contract. Zero presented
-      // callbacks is real evidence and must not fall through to a decoded-frame
+      // Count delivered callbacks independently of their timestamp quality.
+      // Zero callbacks is real evidence and must not fall through to a decoded-frame
       // counter that can advance while the compositor remains frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
     }else try{
@@ -522,7 +522,7 @@ function pbTick(){
   if(sk){ sk.setAttribute("aria-valuenow", Math.round(f*100)); sk.setAttribute("aria-valuetext", clockFromSec(pos)+(tot>0?" of "+clockFromSec(tot):"")); }
   // Seeking a transcode restarts the session at a new offset, which moves the
   // whole subtitle timeline — re-shift the cues whenever that happens.
-  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) setSub(PLAYER.curSub);
+  if(playbackOwnsAttachedMedia(PLAYER)&&!PLAYER.controlSeek&&PLAYER.curSub>=0 && PLAYER._subOff!=null && PLAYER._subOff!==(PLAYER.offset||0)) attachPlaybackSubtitle(v,PLAYER,PLAYER.curSub);
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
   if(b&&v){ const paused=(v.paused||v.ended),following=!!(PLAYER&&PLAYER.libraryChannel); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused&&following?"Resume live":paused?"Play":"Pause"); b.title=paused&&following?"Resume live":"Play / Pause (space)"; } }

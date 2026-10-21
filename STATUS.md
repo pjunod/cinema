@@ -1,9 +1,11 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-20 · Newest effort first; each entry links to its current ledger.
-
+**Updated:** 2026-10-21 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 
+- **2026-10-21 · Avatar Dolby Vision:** [live diagnosis and evidence](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); Intel repair #1250 deployed and Apple TV confirmed. Follow-up corrects shared capability/timeline contracts; Astra approved, Rust regression and 38 web tests passed; injected Safari reports FEL/RPU/DYN and 3,010 frames / zero drops. [Automatic frame-drop capture](docs/clients/FRAME-DROP-RECORDER.md) is built; production acceptance, slow startup and original display-drop trigger remain open. Paul owns deployment.
+- **2026-10-21 · Operation progress:** [live ledger](docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.
+- **2026-10-20 · System settings:** [approved layout and comparison ledger](docs/clients/SYSTEM-SETTINGS-STATUS.md); built and independently rendered; native macOS comparison passes, Linux hardware acceptance open.
 - **2026-10-20 · Safari resume:** [reviewed fix and 108 passing tests](docs/clients/SAFARI-PLAYBACK-ACTIVATION.md); physical Safari/HEVC acceptance pending.
 
 ## Processed VOD successor root reuse
@@ -19,11 +21,9 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
   deployment paths. Focused fixture validation is recorded in its PR; real
   desktop/engine acceptance and custom Pi ownership migration remain open.
 
-
 ## macOS source installation and the missing tray
 
 **Source correction built; PR review pending.** The first tray promotion packaged the companion for release archives but left `make install-macos` on the daemon-only path. Source installation now stages a complete native runtime and companion before migration; the explicit server-only path retains legacy prefix installs. [Desktop controls](docs/server/DESKTOP-CONTROL.md) explains installation, opening the app and separate login preferences. The focused controller/migration and installer regressions pass; independent PR review remains pending.
-
 
 ## Native server tray, startup policy and release upgrades
 

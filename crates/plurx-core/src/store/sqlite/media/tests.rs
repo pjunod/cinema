@@ -232,7 +232,7 @@ async fn recently_added_matches_the_whole_catalogue_ranking() {
             i64::try_from(state % bound).expect("small")
         };
         let started = timing.then(std::time::Instant::now);
-        let store = SqliteStore::open_in_memory().expect("open");
+        let store = SqliteStore::fixture_in_memory().expect("open fixture");
         if let Some(started) = started {
             elapsed[0] += started.elapsed();
             operations[0] += 1;

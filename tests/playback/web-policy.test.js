@@ -374,12 +374,13 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
     "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
     // The same half-second tick carries the MediaSession position (F-web-13);
     // the plan forbids a second timer for it, so it has to be visible here.
-    "updatePlayerMediaSession",
+    "updatePlaybackQualityChrome", "updatePlayerMediaSession",
     `${shippedSource("playbackSamplingTick")}\nreturn playbackSamplingTick;`,
   )(
     render,
     () => { order.push("sample"); return "1.5 s client loaded · 1 server HTTP wait"; },
     () => { order.push(`paint:${render.waitDetail}`); },
+    () => {},
     (v, p) => { order.push(["mediasession", v, p]); },
   );
   const sampled = {}, sampledPlayer = {};
@@ -4086,7 +4087,8 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
     "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
     "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
     "hlsStartupIncomplete", "diagnoseHlsStartup", "abortHlsStartupLoaders", "performance",
-    [shippedSource("playbackStallActions"), shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
+    [shippedSource("playbackStallActions"), shippedSource("playbackAttemptTerminallyStopped"),
+      shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
   );
   const player = { method: "remux", probeUrl: null, started: false };
   await diagnose(
