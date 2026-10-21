@@ -13,6 +13,7 @@ enhancement investigation below identifies a separate encoder-selection
 defect: a Quick Sync preference silently selected single-thread x265 for
 reconstructed pictures despite a usable VAAPI output graph. The source fix
 and focused Linux regression are complete. Complete private windows pass;
+[PR #1250](http://forge.lan:3000/noirr/plurx/pulls/1250) carries the fix;
 deployment and enhanced client/display acceptance remain open.
 
 ## October 21 — Quick Sync preference selected software FEL output
@@ -79,7 +80,10 @@ in the instrumentation itself. No frame-drop correction is claimed from the
 invalid capture or the later healthy runs. A final counter-only replay at
 4494 seconds (original startup segment 545) instead exposed zero presentation
 callbacks while decoded frames advanced, followed by exhausted automatic
-recovery. Its replacement decoded 456 frames with zero drops; the probe
+recovery. The stored plan and a bounded source-packet check independently
+confirmed that entry 545 starts with a clean IDR (NAL type 19) at 4489.902 s
+and no leading pictures, ruling out initial CRA/RASL discard for these drops.
+Its replacement decoded 456 frames with zero drops; the probe
 registered no native frame callbacks. This separate callback-lifecycle fault
 remains under investigation. Diagnostic playback closed and the saved resume
 point remained at 1h 16m.
