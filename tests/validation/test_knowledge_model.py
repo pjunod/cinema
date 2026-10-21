@@ -13,6 +13,7 @@ from validation.knowledge import (Claim, Conflict, Coverage, Edge, GraphData,
 from validation.knowledge.adapters import (artifact_id, import_catalog,
     import_routing, input_descriptor, normalize_receipt, route_check_id,
     route_id, symbol_id)
+from validation.knowledge.model import read_source, source_path
 
 REV = "a" * 40
 SHA = "sha256:" + "b" * 64
@@ -77,6 +78,39 @@ class KnowledgeModelTests(unittest.TestCase):
         (self.root / "docs" / "escape.md").symlink_to(self.root.parent / "outside.md")
         with self.assertRaises(KnowledgeError):
             resolve_anchor(self.root, {**spec, "path": "docs/escape.md"})
+
+    def test_private_generated_and_credential_sources_refuse_before_filesystem_access(self):
+        refused = (".git/config", "nested/.ssh/key", ".aws/config", ".codex/session.json",
+                   ".hermes/state.json", "target/generated.rs", "node_modules/pkg/index.js",
+                   ".env", "nested/.env.local", "scripts/lab.fleet.json", "forgejo_token",
+                   "scripts/.ssh-deploy-key", "auth.json", "scripts/credentials.json",
+                   "tests/fixtures/.env", "tests/fixtures/.git/config")
+        for path in refused:
+            with self.subTest(path=path):
+                with patch.object(Path, "resolve", side_effect=AssertionError("filesystem resolution reached")), \
+                     patch.object(Path, "open", side_effect=AssertionError("file bytes opened")):
+                    with self.assertRaises(KnowledgeError):
+                        source_path(self.root, path)
+                    with self.assertRaises(KnowledgeError):
+                        read_source(self.root, path)
+        for path in (".github/workflows/fixture.yml", ".agents/skills/fixture/SKILL.md",
+                     "scripts/lab.fleet.example.json", "tests/fixtures/auth.json"):
+            self.write(path, "synthetic public fixture\n")
+            self.assertEqual(read_source(self.root, path), b"synthetic public fixture\n")
+
+    def test_split_child_private_path_refuses_before_module_expansion_reads(self):
+        self.write("src/owner.rs", '// split: begin body\n#[path = "auth.json"]\nmod body;\n// split: end body\n')
+        with patch("validation.rust_modules.module_source", side_effect=AssertionError("unsafe child reached expansion")):
+            with self.assertRaisesRegex(KnowledgeError, "credential source path refused"):
+                resolve_anchor(self.root, {"id": "plurx:symbol:private-child", "path": "src/owner.rs",
+                    "kind": "symbol", "selector": "fn route(", "digest": SHA})
+
+    def test_public_symlink_cannot_reach_private_source_directory(self):
+        self.write(".aws/config", "synthetic private bytes\n")
+        (self.root / "public.rs").symlink_to(self.root / ".aws/config")
+        with patch.object(Path, "open", side_effect=AssertionError("private bytes opened")):
+            with self.assertRaisesRegex(KnowledgeError, "private/generated"):
+                read_source(self.root, "public.rs")
 
     def routing_fixture(self):
         self.write("src/owner.rs", '// split: begin body\n#[path = "child.rs"]\nmod body;\n// split: end body\n')

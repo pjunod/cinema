@@ -86,11 +86,39 @@ def safe_relative(value: Any, *, pattern: bool = False) -> str:
     return value
 
 
+_PRIVATE_OR_GENERATED_PARTS = frozenset({
+    ".git", ".ssh", ".aws", ".codex", ".hermes", "target", "node_modules",
+})
+_CREDENTIAL_NAMES = frozenset({
+    "forgejo_token", ".ssh-deploy-key", "auth.json", "credentials", "credentials.json",
+    "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pypirc",
+})
+
+
+def _source_access_policy(relative: str) -> None:
+    """Defense in depth, not secret detection or a substitute for an allowlist.
+
+    Check lexically before filesystem access. A tracked synthetic credential
+    name is allowed only beneath a named fixture directory; private/generated
+    roots, dotenv files and local fleet configuration remain excluded there.
+    """
+    parts = tuple(part.casefold() for part in PurePosixPath(relative).parts)
+    require(not (_PRIVATE_OR_GENERATED_PARTS & set(parts)), "private/generated source path refused")
+    name = parts[-1]
+    require(name != ".env" and not name.startswith(".env."), "dotenv source path refused")
+    require(not name.endswith(".fleet.json") or name.endswith(".fleet.example.json"), "local fleet source path refused")
+    fixture = any(part in {"fixture", "fixtures"} for part in parts[:-1])
+    require(name not in _CREDENTIAL_NAMES or fixture, "credential source path refused outside fixtures")
+
+
 def source_path(root: Path, relative: str, *, exists: bool = True) -> Path:
     relative = safe_relative(relative)
+    _source_access_policy(relative)
     root = root.resolve()
     path = root / relative
-    require(path.resolve().is_relative_to(root), f"symlink escapes repository: {relative}")
+    resolved = path.resolve()
+    require(resolved.is_relative_to(root), f"symlink escapes repository: {relative}")
+    _source_access_policy(resolved.relative_to(root).as_posix())
     require(not exists or path.is_file(), f"missing source: {relative}")
     return path
 
@@ -457,13 +485,14 @@ def resolve_anchor(root: Path, raw: Mapping[str, Any]) -> Anchor:
         require("\n" not in selector, "symbol selector must be one line")
         # Existing inventories normalize split children. Track every expansion
         # input and locate the physical match independently of display offsets.
-        from validation.rust_modules import module_source, split_children, _child_body
-        source_path(root, owner)
-        children = sorted(split_children(source_path(root, owner))) if owner.endswith(".rs") else []
+        from validation.rust_modules import module_source, _product_blocks, _child_body
+        owner_text = read_source(root, owner).decode("utf-8")
         relatives = [owner]
-        for child in children:
-            relative = child.relative_to(root.resolve()).as_posix() if child.is_relative_to(root.resolve()) else ""
-            require(bool(relative), "split child escapes repository")
+        # Discover child declarations without split_children(), which resolves
+        # paths before the source policy can reject private/generated inputs.
+        children = [child for _, names in _product_blocks(owner_text) for child in names] if owner.endswith(".rs") else []
+        for child in sorted(children):
+            relative = (PurePosixPath(owner).parent / safe_relative(child)).as_posix()
             read_source(root, relative)
             relatives.append(relative)
         expanded = module_source(source_path(root, owner)) if owner.endswith(".rs") else read_source(root, owner).decode("utf-8")
