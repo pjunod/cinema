@@ -8,6 +8,9 @@ a document to this folder.
 | File | Answers | |
 |---|---|---|
 | [PROJECT-BACKLOG.md](PROJECT-BACKLOG.md) | Cross-project to-do: designed but unbuilt work, remaining acceptance, reconciliations and deferred decisions. | live |
+| [ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md](ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md) | Independent Fable plan-review findings, author corrections, source answers and exact-candidate approval. | done |
+| [ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md) | Bounded graph pilot connecting code to governing intent, review obligations and scoped execution evidence; implementation, skill enforcement and comparative evaluation. | open |
+| [ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md) | Live M0–M5 owners, independent curation/sealing, evidence and batched PR progress. | open |
 | [DESKTOP-TRAY-IMPLEMENTATION.md](DESKTOP-TRAY-IMPLEMENTATION.md) | macOS/Linux desktop server controls, separate startup policies, signed GitHub release upgrades, task ownership and native/package acceptance. | open |
 | [DESKTOP-TRAY-QUALIFICATION.md](DESKTOP-TRAY-QUALIFICATION.md) | Complete tray cohort, retained focused evidence, native qualification, review and promotion gaps. | open |
 | [DESKTOP-UPGRADE-TRANSACTION.md](DESKTOP-UPGRADE-TRANSACTION.md) | Desktop tray plan §6: standalone/cluster shutdown, package lock/cohort rules, pre-start recovery and migration-aware rollback. | open |

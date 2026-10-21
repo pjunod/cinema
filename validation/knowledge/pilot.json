@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "repository": "plurx",
+  "milestone": "M0",
+  "state": "feasibility-in-progress",
+  "source_commit": "168fe74fb2a47f3ccd56b795741dfe3422307b0d",
+  "source_tree": "ea8c9c283a71b67bf773511144eb3ee7ab09ee9c",
+  "approved_specification_sha256": "473d391e9b6a1e20ea1ecdd9d93b46339e69ba31923bd85f60bcc6a534d2821c",
+  "implementation_branch": "effort/engineering-knowledge-pilot",
+  "cohorts": {
+    "routing": {
+      "manifest": "tests/playback/routing-decisions.toml",
+      "ids": [
+        "server.capability-profile",
+        "server.learned-decode-limit",
+        "server.learned-decode-limit-expiry",
+        "server.verdict",
+        "server.manual-quality",
+        "server.execution-plan"
+      ]
+    },
+    "receipt": {
+      "sources": [
+        "validation/main_preflight_adoption.py",
+        "validation/python_unit_receipts.py",
+        "validation/main_unit_receipts.py",
+        "validation/main-preflight-inputs.json"
+      ],
+      "policy": "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md"
+    }
+  },
+  "cases": [
+    {
+      "id": "P01",
+      "cohort": "routing",
+      "type": "investigation",
+      "subject": "Explicit capability precedence",
+      "gold_sealed": false
+    },
+    {
+      "id": "P02",
+      "cohort": "routing",
+      "type": "investigation",
+      "subject": "Learned-limit expiry",
+      "gold_sealed": false
+    },
+    {
+      "id": "P03",
+      "cohort": "routing",
+      "type": "planning-review",
+      "subject": "Learned-limit scope",
+      "gold_sealed": false
+    },
+    {
+      "id": "P04",
+      "cohort": "routing",
+      "type": "planning-review",
+      "subject": "Verdict ownership",
+      "gold_sealed": false
+    },
+    {
+      "id": "P05",
+      "cohort": "routing",
+      "type": "small-patch",
+      "subject": "Manual-quality policy",
+      "gold_sealed": false
+    },
+    {
+      "id": "P06",
+      "cohort": "routing",
+      "type": "small-patch",
+      "subject": "Execution-plan derivation",
+      "gold_sealed": false
+    },
+    {
+      "id": "E01",
+      "cohort": "receipt",
+      "type": "investigation",
+      "subject": "Check definition versus execution",
+      "gold_sealed": false
+    },
+    {
+      "id": "E02",
+      "cohort": "receipt",
+      "type": "small-patch",
+      "subject": "Input-path membership change",
+      "gold_sealed": false
+    },
+    {
+      "id": "E03",
+      "cohort": "receipt",
+      "type": "small-patch",
+      "subject": "Environment mismatch",
+      "gold_sealed": false
+    },
+    {
+      "id": "E04",
+      "cohort": "receipt",
+      "type": "planning-review",
+      "subject": "Unauthenticated reported pass",
+      "gold_sealed": false
+    },
+    {
+      "id": "E05",
+      "cohort": "receipt",
+      "type": "investigation",
+      "subject": "Unusable history versus current-run integrity",
+      "gold_sealed": false
+    },
+    {
+      "id": "E06",
+      "cohort": "receipt",
+      "type": "planning-review",
+      "subject": "Compile versus behavioral qualification",
+      "gold_sealed": false
+    }
+  ],
+  "limits": {
+    "authored_records": 60,
+    "cases": 12,
+    "initial_gold_cases": 3,
+    "initial_curation_person_hours": 8,
+    "total_curation_person_hours": 16,
+    "evaluation_runs": 108,
+    "automatic_paid_execution": false
+  },
+  "evaluation": {
+    "arms": {
+      "A": "existing-workflow",
+      "B": {
+        "max_depth": 0
+      },
+      "C": {
+        "max_depth": 6
+      }
+    },
+    "repeats": 3,
+    "wrapper_pins_depth": true,
+    "solver_depth_override": "refuse",
+    "gold_location": "outside-solver-corpora",
+    "gold_expected_answers_in_git": false,
+    "gold_commitments": [],
+    "rubric_commitment": null,
+    "solver_model": "not-selected-before-seal",
+    "aggregate_execution_ceiling": null,
+    "execution_state": "not-authorized-until-measured-dry-run-and-finite-ceiling"
+  },
+  "skill_integration": {
+    "maintained_house_skill_source": "unverified",
+    "installed_cache_editing": false,
+    "repository_skill_planned": ".agents/skills/engineering-knowledge/SKILL.md"
+  },
+  "unit_execution": "deferred-until-final-adversarial-review-and-fixes",
+  "source_fingerprints": {
+    "tests/playback/routing-decisions.toml": "4b1ac129707ec1dbdd5c4f6ef911084feedbe98cf25056279cd9432d36fff747",
+    "validation/points.toml": "2417c1cf88cbbe75465751b61fa66e9f154d8a6c9f60d44c8bf1e74888ecfe52",
+    "validation/runner.py": "1f47e242e01ca7e7e33bd2a062d7b7aa1a4790f67f3227ea6a5706c70d8d2daa",
+    "validation/main_preflight_adoption.py": "b9851a5404ef4cfe213b8244a67adc2d8b92df730390e19884aa2e7619c053c8",
+    "validation/python_unit_receipts.py": "4e1c4a42e598ca3268589b45c6efd5a77f2c95d8a346b7b547ee51046d15a9d7",
+    "validation/main-preflight-inputs.json": "ecdf411552a50cf68ee3c2e91160a48151fd3d5d610609b30009b0424ba9d793",
+    "docs/PLAYBACK.md": "d910da173bbe86c9b52fe90f4ff0ffd8d7ba9fce35b78d7d7860c4f72e0c09ef",
+    "docs/ci/PYTHON-UNIT-PR-RECEIPTS.md": "4f31ed6a1a60805704293f0f57fb1a4f2b100141f3bef107e8eb7d10f5fda0d7",
+    "docs/DEVELOPMENT_PIPELINE.md": "0315f39c6328f64d062c35b59469ae0e7c414c17514c28a071465018a6d0bdc5",
+    "AGENTS.md": "b9cdc27e00ab26459505b289b6acfefe7c762aa51aa3f19d2f8dad2a9b74bb1d"
+  }
+}

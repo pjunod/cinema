@@ -1,0 +1,84 @@
+# Engineering knowledge graph review — close findings before building
+
+**Status:** done · **Approved:** 2026-10-21 · **Scope:** implementation-plan
+review and author dispositions; see [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md) for implementation
+
+Companion to the [pilot plan](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md), which
+owns the build contract and execution ledger. This document records actual
+review findings, author corrections and exact-candidate review status. It
+does not turn conceptual advice or author checks into independent approval.
+
+## Fable R1 — changes requested on the frozen plan
+
+Actual reviewer: Fable 5.1, `claude-fable-5-1`, Anthropic, Hermes profile
+`hdr-fable-api`, task `t_9621e97b`, 2026-10-21. Reviewed plan SHA-256:
+`06a476e30dd4d40474ea16c2dc3679db37b8ebf71e6fbd0d3a15e6a9587cfdba`.
+Verdict: **REQUEST_CHANGES**, with three blocking findings. The reviewer
+read the plan, brief, manifest, index context and prior conceptual verdict.
+It did not open the supplied source context before its iteration budget
+ended. Source questions below were unverified, not refuted.
+
+## Author dispositions — R2 independently verified
+
+| ID | Finding | Correction and remaining review |
+|---|---|---|
+| F1 · blocking | M5 depended circularly on a ten-PR process window; eligibility was undefined. | Plan §6 defines distinct landed PRs touching the frozen curated scopes. M5 lands comparative results with advisory capture. Later M5b decides enforcement after both ten eligible PRs and 14 days, starting when advisory M4 reaches main. |
+| F2 · blocking | Gold answers and authored records could be tuned to each other; nine gold lists had no seal point. | Plan §8/§9.1 require all twelve gold lists and rubric sealed before M1, with digests in §11. Independent record authors see only cohort definitions/case subjects. Solver isolation excludes gold and future answers from files, Git objects and tool permissions. |
+| F3 · blocking | B/C differed in formatting and budgets as well as traversal. | Plan §5/§9.2 use the identical interface, envelope, metadata, ordering and byte limit; B is enforced depth 0, C fixed depth 6. Only relationship expansion differs. |
+| F4 · medium | Token comparison could cherry-pick correctly completed runs. | Plan §9.3 requires all three repeats in both B/C correct; fewer than three qualifying cases in either cohort is inconclusive. All-run failures/usage remain reported. Zero-gold cases measure false assertions separately. |
+| F5 · medium | Graph code could appear to assign authenticated status. | Plan §4.3 permits copying only an existing validator verdict with identity/scope; synthetic fixtures claim no real authenticated execution. Missing real evidence remains unavailable. |
+| F6 · medium | Dependency closure had no canonical owner. | Plan §4.3 names the imported descriptor/digest or catalog provider closure and retains incomplete scope as unknown. Safety correction to suggested wording: authored records can narrow retrieval, never remove proof inputs or invent wider qualification. Narrowing the proof itself could wrongly preserve stale evidence. |
+| F7 · low | Invalid PR-field references had no clear enforcement surface before optional paperwork integration. | Plan §6 defines body-file-aware lint in existing PR preflight; local validation-lint checks graph data and explicitly reports absent PR context as unchecked. Paperwork only moves the same check earlier. |
+| F8 · low | Review fixes could exceed the 40 KiB document limit. | Replaced the long example diagram and condensed research prose. Keep full dispositions here and validate final plan size independently, including while untracked. |
+
+The same-task R2 recheck verified all eight corrections in the actual plan
+text, accepted the F6 safety interpretation as stricter and correct, and
+found no regression from the replacements. The reviewer independently
+checked E1/E2, partially checked E3, and accepted E4's author-supplied source
+excerpts for plan purposes without claiming independent source verification.
+
+## Source answers — author verified, not reviewer conclusions
+
+Inspected source baseline remains
+`d1f61377096074b915856ae5c913e1dc68885738` on 2026-10-21.
+
+| Question | Evidence supplied for the recheck |
+|---|---|
+| E1 · routing schema and IDs | Parsed [routing-decisions.toml](../../tests/playback/routing-decisions.toml): all 68 rows have exactly the five fields in plan §2; all six §3.1 IDs exist. No schema extension is required. |
+| E2 · point fields/direction | AST inspection of [runner.py](../../validation/runner.py) confirms the six fields listed in plan §2. `_expand_consumers` explicitly states that A depending on B means B's changes can break A; impact walks provider to consumer. Proof dependency closure walks the declared provider relation, a distinct operation. |
+| E3 · gates and exception | [Contributor rules](../../AGENTS.md) require manual effort dispatch and current-candidate main-promotion/qualification evidence, and define the disjoint-file exception. The [pipeline](../DEVELOPMENT_PIPELINE.md) describes the two gates; [effort-ci.yml](../../.github/workflows/effort-ci.yml) is dispatch-only and [ci.yml](../../.github/workflows/ci.yml) names Main promotion gate. Current amendments take precedence over older trigger descriptions; this plan does not authorize automatic full CI. |
+| E4 · applicability signatures | [main_preflight_adoption.py](../../validation/main_preflight_adoption.py) defines `input_digest(commit, row)` over Git input identities/modes, path membership and optional history. [python_unit_receipts.py](../../validation/python_unit_receipts.py) defines `SourceApplicability(current_commit, source_reader=read_git_test_source, worktree_reader=read_worktree_test_source)` and explicitly limits its proof to method/local fixtures, not arbitrary production inputs. |
+
+## Closure — exact R2 plan approved, implementation not started
+
+R2 plan SHA-256:
+`473d391e9b6a1e20ea1ecdd9d93b46339e69ba31923bd85f60bcc6a534d2821c`
+(40,142 bytes). Fable 5.1 (`claude-fable-5-1`, Anthropic,
+`hdr-fable-api`) returned **APPROVE** in same-task R2 run 49 on 2026-10-21,
+with no blocking findings remaining and no further recheck required.
+The reviewed specification is retained byte for byte in agent-owned inputs.
+Later repository plan header/ledger changes record M0 progress; they are not
+claimed as another independent approval. See the live status for execution
+amendments from the owner.
+
+The independent report is `REVIEW-R2.md` and machine verdict
+`VERDICT-R2.json` in the durable Hermes review workspace for task
+`t_9621e97b`. R1's requested changes and original candidate remain preserved.
+
+Non-blocking R2 observations are disposed as follows; none changes the
+approved plan contract or claims independent verification beyond its scope:
+
+| ID | Disposition |
+|---|---|
+| O1 · arm enforcement | Accepted M0/M5 harness clarification: the evaluation wrapper pins depth by arm and rejects solver overrides. This implements §9.2's existing enforced-depth requirement; record it in the frozen evaluator manifest and test override refusal. |
+| O2 · orphan short line | Cosmetic rewrap deferred to the next substantive plan revision, preserving exact-content approval. |
+| O3 · gate descriptions | Retain §8's explicit deference to live pipeline and governing contributor rules. M0/integrator must recheck current triggers and mandatory gates rather than infer automatic full CI from historical prose. No rule is weakened here. |
+| E5 · PR-body entry point | Author confirmed the existing main-fast-lane paperwork step passes `PR_BODY` via `--body-env`; `scripts/paperwork` accepts `--body-file` too and already materializes the body for regression validation. M4 must explicitly pass the same locally captured body into knowledge lint in preflight, with absent context reported unchecked; it may not assume unrelated preflight jobs already receive it. |
+
+Author validation after R2: all 28 tests passed across documentation index
+(6), size budget (5), status audit (3), and infrastructure-name (14) suites.
+The new untracked documents also passed explicit relative-target, size and
+whitespace checks. These are author checks, not Fable approval.
+
+Plan approval closes this review only. It does not authorize a build, source
+changes, benchmark execution or broader rollout.
