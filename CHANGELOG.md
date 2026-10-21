@@ -19,6 +19,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Processed Dolby Vision Profile 8.1 playlists include the required HDR10
+  compatibility brand so Apple players can recognize the Dolby Vision enhancement.
+
 - Web playback automatically captures bounded frame-drop incidents with recent
   frame, buffer, lifecycle and request evidence, respecting diagnostic-history
   controls and retaining account-scoped local copies for investigation.
