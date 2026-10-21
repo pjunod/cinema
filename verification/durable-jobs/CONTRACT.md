@@ -1,14 +1,13 @@
 # Durable-job contract — connect finite authority transitions to source
 
-**Status:** implementation contract; development checking only; independent
-review and final qualification pending · **Source:** `3808640c7` plus the
-publication conformance additions · **Scope:** bound `library_scan` and
+**Status:** reviewed source contract; bounded qualification complete ·
+**Checked source:** `663b3aa548` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
 and the [pilot proposal](../../docs/cluster/FORMAL-VERIFICATION-PILOT-PROPOSAL.md),
 which owns acceptance. The transition correspondence below is a **reviewed
-mapping candidate**, not an automatic refinement proof. Source hashes in
+source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 

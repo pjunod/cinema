@@ -1,7 +1,7 @@
 # Durable jobs — check bounded publication authority with TLC
 
-**Status:** implemented, development checking in progress; independent review
-and final qualification pending. This package checks a finite model of bound
+**Status:** implemented and independently reviewed; all 16 bounded configurations
+and 11 focused runtime tests qualified. Delivery and CI are tracked in the status page. This package checks a finite model of bound
 `library_scan` / `metadata_refresh` workers publishing through
 `insert_item_fenced`. It is a bounded protocol check and a source mapping,
 not a refinement theorem or a result about the entire cluster.

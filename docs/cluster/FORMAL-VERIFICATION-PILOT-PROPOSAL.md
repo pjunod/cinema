@@ -1,6 +1,6 @@
 # Formal verification pilot — check durable-job authority before expanding proofs
 
-**Status:** implementation active; M0 interface frozen; no formal result · **Revised:** 2026-10-20 ·
+**Status:** implemented; bounded results in the status page · **Revised:** 2026-10-20 ·
 **Owner:** Codex coordinator (this chat); Sol implementation; Fable 5.1 advice/review ·
 **Executes:** Paul's request to turn the formal-methods exploration into a
 reviewable project · **Source inspected:** `9ab523c32e00e5b56c15bbc7a71ac2d3d48c0d5e`.
@@ -635,7 +635,7 @@ frontier growth. One positive-only state quotient reduced cost but did not
 make that horizon credible within the declared budget. Fable's second
 text-only design consultation recommended a two-job eight-event baseline
 and an additional single-job eleven-event lifecycle check. Sol implements the
-configurations; Fable has not performed the final implementation review.
+configurations; final review and qualified results are in the status page.
 
 The identity domains, shared safety transition relation and enabled faults
 stay explicit. The two-job baseline checks all seeds through eight events;
