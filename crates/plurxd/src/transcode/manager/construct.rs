@@ -400,6 +400,22 @@ impl TranscodeManager {
         self
     }
 
+    pub(crate) fn register_playback_cache(
+        self: &Arc<Self>,
+        budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,
+    ) {
+        if let Some(cache) = self.cache.as_ref() {
+            crate::cachekeep::register_playback_cache(
+                budget,
+                Arc::clone(&self.store),
+                cache.dir.clone(),
+                cache.node_id.clone(),
+                self.cache_readers.clone(),
+            );
+        }
+        self.vod.register_playback_cache(budget);
+    }
+
     pub fn cache_readers(&self) -> &crate::cachekeep::ActiveCacheReaders {
         &self.cache_readers
     }

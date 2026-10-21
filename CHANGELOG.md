@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- All playback caches share one disk budget with reader-safe global eviction,
+  pre-write capacity reservations and a filesystem free-space reserve, preventing
+  completed renditions and concurrent producers from exhausting server disks.
+
 - Web playback automatically captures bounded frame-drop incidents with recent
   frame, buffer, lifecycle and request evidence, respecting diagnostic-history
   controls and retaining account-scoped local copies for investigation.

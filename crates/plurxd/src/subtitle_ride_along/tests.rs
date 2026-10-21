@@ -871,7 +871,7 @@ async fn a_ride_in_flight_is_listed_until_its_plan_ends() {
     );
     // The settings read carries the same list, and says why the next
     // pass would not ride when the switch is off.
-    let diagnostics = crate::subtitle_source::diagnostics(false, &case.root);
+    let diagnostics = crate::subtitle_source::diagnostics(false, &case.root).await;
     assert!(diagnostics.riding.iter().any(|ride| ride.file_id == id));
     assert!(!diagnostics.gate.open);
     assert_eq!(
@@ -1840,4 +1840,29 @@ async fn a_second_nodes_index_pass_skips_cluster_extracted_coverage_for_the_same
         .await
         .expect("stale publication");
     assert!(plan_tracks(&gate, file_id, &held, &tracks).await.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runaway_stage_files_stop_at_the_reserved_per_file_bound() {
+    let base = crate::test_tempdir().expect("stage");
+    let target = base.path().join("runaway.sup");
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+        .args(["-c", "head -c 16384 /dev/zero > \"$1\"", "stage-writer"])
+        .arg(&target);
+    super::configure_stage_file_limit(&mut command, 4096).expect("bounded child output");
+    let status = command.status().await.expect("bounded child");
+    assert!(
+        !status.success(),
+        "the OS refuses bytes beyond the reservation"
+    );
+    assert_eq!(
+        std::fs::metadata(target).expect("bounded stage").len(),
+        4096
+    );
+    // The child's limit must not lower the daemon's own file-size ceiling.
+    let parent = base.path().join("parent");
+    std::fs::write(&parent, [0_u8; 8192]).expect("parent remains unrestricted");
+    assert_eq!(std::fs::metadata(parent).expect("parent file").len(), 8192);
 }
