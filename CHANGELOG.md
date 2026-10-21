@@ -16,6 +16,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- A cancelled replicated transaction waiter no longer terminates the SQLite
+  writer when a late commit or rollback reply is delivered. Later writes keep
+  working; the original caller still treats a timeout as an unknown outcome.
+
 - Safari Play and Resume prepare the persistent media element during the user
   gesture, before asynchronous stream readiness. Browser permission refusals
   now stop recovery immediately and retain position and track choices for an

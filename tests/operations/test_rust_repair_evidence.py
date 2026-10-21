@@ -116,7 +116,7 @@ class RepairEvidenceCase(unittest.TestCase):
 
     def test_tray_child_needs_reviewed_owner_and_exact_filtered_footer(self):
         owner = self.root / 'crates/plurx-tray/src/tests.rs'
-        owner.parent.mkdir(parents=True)
+        owner.parent.mkdir(parents=True, exist_ok=True)
         owner.write_text('reviewed inherited child protocol')
         self.policy['nested_source_sha256'][str(owner.relative_to(self.root))] = hashlib.sha256(owner.read_bytes()).hexdigest()
         self.binary.update(executable='/target/plurx_tray-aabbccdd', target={'name': 'plurx_tray'},
@@ -128,6 +128,56 @@ class RepairEvidenceCase(unittest.TestCase):
                          'test parent ... ok', footer(1, ignored=1)])
         self.assertTrue(self.assess(log)['qualification_complete'])
         self.assertFalse(self.assess(log.replace('1 filtered out', '0 filtered out'))['qualification_complete'])
+
+    def tray_interleaved_log(self, failed=False):
+        owner = self.root / 'crates/plurx-tray/src/tests.rs'
+        owner.parent.mkdir(parents=True, exist_ok=True)
+        owner.write_text('reviewed inherited child protocol')
+        self.policy['nested_source_sha256'][str(owner.relative_to(self.root))] = hashlib.sha256(owner.read_bytes()).hexdigest()
+        self.binary.update(executable='/target/plurx_tray-aabbccdd', target={'name': 'plurx_tray'},
+                           cases=[{'name': 'delegated_child', 'ignored': True},
+                                  {'name': 'interleaved_parent', 'ignored': False},
+                                  {'name': 'parent', 'ignored': False}])
+        return '\n'.join([
+            'Running unittests src/lib.rs (/target/plurx_tray-aabbccdd)',
+            'running 3 tests', 'test delegated_child ... ignored',
+            'running 1 test',
+            'test interleaved_parent ... ' + ('FAILED' if failed else 'ok'),
+            'test delegated_child ... ok', footer(1, filtered=2),
+            'test parent ... ok', footer(1 if failed else 2, failed=int(failed), ignored=1)])
+
+    def test_interleaved_parent_outcome_is_preserved_including_failure(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                report = self.assess(self.tray_interleaved_log(failed))
+                self.assertTrue(report['qualification_complete'], report['gaps'])
+                self.assertEqual(report['native_passed'], not failed)
+                result = report['observed_suites'][0]['result']
+                self.assertEqual(result['passed'], 1 if failed else 2)
+                self.assertEqual(result['failed'], int(failed))
+                child = report['nested_protocol_observations'][0]
+                self.assertEqual(child['excluded_lines'], [3, 5, 6])
+                self.assertEqual(child['preserved_outcome_lines'], [4])
+
+    def test_interleaved_tray_child_still_requires_complete_unambiguous_rows(self):
+        log = self.tray_interleaved_log()
+        mutations = {
+            'missing_parent': log.replace('test interleaved_parent ... ok\n', ''),
+            'unknown_child': log.replace('test delegated_child ... ok', 'test unknown_child ... ok'),
+            'duplicate_child': log.replace('test delegated_child ... ok',
+                                           'test delegated_child ... ok\ntest delegated_child ... ok'),
+            'nested_header': log.replace('test interleaved_parent ... ok',
+                                         'running 1 test\ntest interleaved_parent ... ok'),
+            'footer_mismatch': log.replace('2 filtered out', '1 filtered out'),
+            'unknown_parent': log.replace('test interleaved_parent ... ok',
+                                          'test unknown_parent ... ok'),
+        }
+        for reason, mutated in mutations.items():
+            with self.subTest(reason=reason):
+                self.assertFalse(self.assess(mutated)['qualification_complete'])
+        owner = self.root / 'crates/plurx-tray/src/tests.rs'
+        owner.write_text('changed protocol')
+        self.assertFalse(self.assess(log)['qualification_complete'])
 
     def test_empty_or_incomplete_inventory_is_never_qualified(self):
         for inventory in [{'binaries': [], 'discovery_complete': True},

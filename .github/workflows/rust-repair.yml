@@ -330,6 +330,21 @@ jobs:
                           return 'Inventoried native binary changed before test bodies'
               return None
 
+          def writer_checks(output):
+              from validation.rust_writer_evidence import CASES as writer_cases
+              cargo = ['cargo', 'test', '--manifest-path', 'vendor/hiqlite/Cargo.toml', '--locked',
+                       '--no-default-features', '--features', 'sqlite', '--lib']
+              listing = output / 'static' / 'writer-inventory.log'
+              commands = [shlex.join([*cargo, '--', '--list']) + ' > ' + shlex.quote(str(listing))]
+              for repetition in range(1, 11):
+                  log = output / 'static' / f'writer-round-{repetition:02d}.log'
+                  receipt = log.with_suffix('.json')
+                  commands.append(shlex.join([*cargo, '--', '--exact', *writer_cases, '--test-threads=2'])
+                                  + ' > ' + shlex.quote(str(log)))
+                  commands.append(shlex.join(['python3', '-m', 'validation.rust_writer_evidence',
+                                             str(listing), str(log), str(receipt)]))
+              return '\n'.join(commands)
+
           def command(phase, output, previous):
               if phase == 'compile':
                   # Redirection stays inside the owned process group; bash preserves cargo's native exit.
@@ -345,7 +360,8 @@ jobs:
               if phase == 'static':
                   return ['bash', '-e', '-o', 'pipefail', '-c',
                           'make fmt-check spike-lock-check lint test-socket-permission-check\n'
-                          'python3 -m unittest tests.operations.test_rust_repair_evidence tests.operations.test_rust_repair_workflow']
+                          'python3 -m unittest tests.operations.test_rust_repair_evidence tests.operations.test_rust_repair_workflow tests.operations.test_rust_writer_evidence\n'
+                          + writer_checks(output)]
               if phase == 'units':
                   return ['env', 'RUST_MIN_STACK=8388608', *LINEAGE, '--', '--test-threads=1'] if CELL == 'store-lineage' else NATIVE
               return [*SERIAL, CASES[phase], '--', '--exact', '--ignored', '--test-threads=1']

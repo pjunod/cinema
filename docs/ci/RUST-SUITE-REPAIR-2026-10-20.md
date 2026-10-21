@@ -56,15 +56,15 @@ that task is not yet merged into the effort. Its workflow remains available as t
 diagnostic command; the new repair workflow owns M1 acceptance.
 
 The declared sequence is compile, inventory, static checks (including the
-21 evidence/controller controls), ten rounds of
+26 evidence/controller controls), ten rounds of
 the affected Core/daemon cohort, the complete ordinary Rust cell, and the
 two exact serial media cases. Each round runs the inventoried real
-binaries with 22 test threads and all original failed identities. Nine additional
+binaries with 22 test threads and all original failed identities. Ten additional
 regressions are listed separately, including five actual-task panic,
 cancellation and registration-teardown controls. Three of those controls
 reside in the existing Linux-only processed-reuse module; Mac results cannot
-qualify those three. The newly surfaced K06 case is also repeated, making
-340 executions for the next candidate while the original 25 identities
+qualify those three. The newly surfaced K06 and Source waiter-cancellation cases are also repeated, making
+350 executions for the next candidate while the original 25 identities
 remain unchanged. The full cell also declares 22 threads;
 the baseline resource receipt reported 22 logical and affinity CPUs.
 This is recorded execution context, not a reduction in the case universe.
@@ -112,8 +112,16 @@ not performance estimates or permission to drop cases.
 | Full Core on `9971299d6` | 1,943 passed, one failed and five ignored in 1,388.11s. The sole failure was the previously passing, unchanged K06 fixture: `Internal("clock observation lacks applied membership")` at manager construction. An additional SQL-writer panic appeared in its captured output. The original ten Core failures passed in this full body. The run remains red. |
 | Isolated K06 before correction | Passed in 19.97s with the real Hiqlite backend and default stack; the known shutdown-handler panic was matched by the existing strict catcher. An isolated pass does not repair the full-run readiness race. |
 | K06 correction, local native checks | The complete unchanged assertion sequence passes in 19.89s after the real-watch readiness wait. The expanded Core cohort (all original ten plus four additional cases) passes all 14 in 22.54s, with default stack and 22 test threads. Strict helper/controller/document controls pass 27 cases; independent review confirms the single original deadline and one constructor invocation. |
-| Full ordinary Rust and exact serial media cells | Run 5679 continues under its original `9971299d6` source to retain later diagnostic outcomes; its Core failure remains a failure. Fresh complete qualification after the K06 correction is owed. |
-| Independent review | Store schema/preservation, native accounting, browse proof, real publisher cleanup and real driver teardown reviewed; no remaining blocker. |
+| Full ordinary Rust on `9971299d6`, run 5679 | The command finished in 4,395.719s (73m16s), exit 101, with safe cleanup. Strict original accounting conservatively refused interleaved Tray parent/child output. A separately hashed secondary parse using the corrected parser accounts for 36 native binaries: 6,918 passed, ten failed, 49 ignored (6,977 total), plus seven doctest targets. The original red/incomplete receipt is untouched. Exactly 18 original cases passed and seven Source/HTTP originals failed. |
+| Full daemon failure receipts | 4,373 passed, nine failed, 40 ignored in 2,102.96s. Five original HTTP cases and two original Source status cases failed; a new Source waiter-cancellation case and the new serving-fence cancellation control also failed. Source startup receipts identify the unchanged three-second replicated Store timeout at activation writes; one first authority refusal occurred earlier. The late writer replies include actual successful transactions and a guarded SQL refusal. Full-load Source closure remains open. |
+| Serial media on `9971299d6` | Both complete exact bodies passed with safe cleanup: VFR command 3.722s, bitmap command 3.235s. |
+| Tray accounting correction | Preserve interleaved parent verdicts, including failures; remove only the exact source-bound child header, outcome and footer. Ambiguous/unknown children, missing parents, changed owners and mismatched counts remain refusals. Secondary reparse is complete and still red with ten outer failures. |
+| F6 cancellation controller correction | Construct the actual fixture and satisfy the original ten-second real-media precondition before transferring it to the observer. Retain the receipt before transfer; the existing 15-second handshake observes actual ownership. Always cancel/join and check cleanup before propagating a handshake failure. All seven focused serving-fence cases pass in 18.06s with default stack. The failed old control did not reach its cleanup assertions. |
+| Dropped transaction reply correction | Two real-writer regressions reproduce the old success/error reply panics deterministically, then pass after late reply delivery stops panicking the writer. Ten pairs pass with strict exact-body accounting. Actual commit, rollback and later writes are verified; neither the Store deadline nor unknown-outcome semantics changes. Hiqlite generic patch 27 remains pending upstream tracking. The next Linux static phase repeats and accounts for both bodies ten times. |
+| Follow-up local native cohort | All 14 Core cases passed in 22.96s and all 18 platform-applicable daemon cases passed in 58.87s, including every original failed identity and the new waiter case. Default stack and 22 test threads were retained. Three additional controls remain Linux-only. Workspace strict Clippy passed in 214s; 47 evidence/workflow/ledger/docs checks passed with one existing skip. |
+| Controlled resource comparison | Diagnostic branch `codex/full-pr-suite-contention`, commit `ffbed0dd3`, differs from failed `9971299d6` only by full-run `RUST_TEST_THREADS=4` instead of 22. Cohort invocations remain explicitly 22 threads; Rust source, assertions and deadlines are identical. Run 5698 is in progress. Its outcomes cannot qualify the newer repair candidate. |
+| K06-only candidate disposition | `fef12d2f5` passed exact-source Linux all-target Clippy in 370s; run 5691 was cancelled while queued with no test execution after the older full run reproduced Source failures. Fresh complete qualification remains owed after the follow-up corrections. |
+| Independent review | Earlier schema, proof and task-ownership changes reviewed. Follow-up writer, parser and F6 corrections are being verified; unresolved Source full-load failures block closure. |
 | Exact-head effort gate | Pending. |
 
 Closure requires every original failure to execute and pass, all declared

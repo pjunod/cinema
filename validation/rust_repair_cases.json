@@ -188,6 +188,11 @@
       "target": "plurxd",
       "name": "transcode::manager_create::processed_reuse_tests::processed_reuse_real_driver_cancels_registration_after_teardown",
       "owner": "crates/plurxd/src/transcode/manager/processed_reuse_tests.rs"
+    },
+    {
+      "target": "plurxd",
+      "name": "transcode::source_actor::tests::source_status_waiter_cancellation_retains_owned_observation",
+      "owner": "crates/plurxd/src/transcode/tests/source_actor.rs"
     }
   ]
 }

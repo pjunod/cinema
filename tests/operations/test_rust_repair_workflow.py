@@ -95,6 +95,17 @@ class RepairWorkflowCase(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 load_policy(path)
 
+    def test_writer_cancellation_bodies_are_predeclared_and_exactly_accounted(self):
+        script = self.api['writer_checks'](Path(self.temp.name))
+        self.assertEqual(script.count('--manifest-path vendor/hiqlite/Cargo.toml'), 11)
+        self.assertEqual(script.count('--exact'), 10)
+        self.assertEqual(script.count('-m validation.rust_writer_evidence'), 10)
+        self.assertIn('dropped_transaction_success_reply_preserves_commit_and_writer', script)
+        self.assertIn('dropped_transaction_error_reply_preserves_rollback_and_writer', script)
+        for repetition in range(1, 11):
+            self.assertIn(f'writer-round-{repetition:02d}.log', script)
+            self.assertIn(f'writer-round-{repetition:02d}.json', script)
+
     def test_bounds_allow_every_declared_cell_and_keep_job_reserve(self):
         cells, _ = self.api['cohort'](self.inventory)
         self.assertEqual(sum(cell['timeout_seconds'] for cell in cells), self.api['BUDGETS']['cohort'])

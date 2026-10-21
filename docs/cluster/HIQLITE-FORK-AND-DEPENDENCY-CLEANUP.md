@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, nine generic rows pending as of 2026-10-13 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress (M1-M3 merged, M4 merged as far as candle allows; M0 measured and M5 (d) in [#558](http://forge.lan:3000/noirr/plurx/pulls/558), M5 (b)-(c) declined on M0's numbers); M6 two accepted mechanisms, ten generic rows pending as of 2026-10-21 · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -1166,12 +1166,13 @@ maintainer acceptance. Row 19 remains `pending M6`; its kind/drop condition,
 the nine incomplete generic rows, M6's formal dispositions and M5 (d)'s fleet
 acceptance remain unchanged. No public filing, upgrade or patch removal.
 
-**M6 current inventory and row 26 receipt, 2026-10-13.** The current ledgers
-contain eleven generic rows: Hiqlite 1, 8, 9, 10, 11, 17, 19 and 26, plus
-WAL 1, 2 and 3. Hiqlite 26 was added in `d2c32394d`; the earlier ten-row
-inventory is historical. Two rows now have verified accepted mechanisms:
-WAL 2 and Hiqlite 26. The same nine combined rows remain pending; partial
-Hiqlite 1 / WAL 3 and the H19 constructor boundary are not reclassified.
+**M6 inventory — updated 2026-10-21.** The ledgers contain twelve generic rows:
+Hiqlite 1, 8, 9, 10, 11, 17, 19, 26 and 27; WAL 1, 2 and 3. WAL 2 and
+Hiqlite 26 have accepted mechanisms; ten rows remain pending. New row 27
+prevents abandoned transaction replies from killing the SQLite writer.
+Real commit/rollback regressions reproduce the old panic and pass the fix;
+Source timeouts remain open in the [Rust repair ledger](../ci/RUST-SUITE-REPAIR-2026-10-20.md).
+The earlier ten- and eleven-row inventories are historical.
 
 [Upstream PR 374](https://github.com/sebadob/hiqlite/pull/374) merged on
 2026-10-05 as
@@ -1191,11 +1192,9 @@ the local staged-startup policy. The retained source SHA256 values are
 released source were read without authentication or public writes.
 
 `HiqlitePatchLedgerCase.test_upstream_disposition_inventory_includes_the_listener_fix`
-pins all eleven rows, the two real URLs and the nine pending dispositions.
-Its first run failed on the unrecorded row 26 URL. No older reproduction,
-denied H8/H9/WAL1 action, provider constructor, dependency build or fleet
-measurement was replayed. No public filing, upgrade or patch removal occurred;
-M6 and M5 (d)'s separate fleet acceptance remain open.
+pins the current rows, two URLs and pending dispositions. Its first run
+exposed the missing row 26 URL; no runtime/fleet evidence was replayed.
+M6 and M5 (d)'s fleet acceptance remain open; no filing, upgrade or removal.
 
 ### 5.8 2026-09-21 implementation boundary
 

@@ -1,8 +1,8 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-six patches for clustered deployments. An
-upstream release can retire the eight generic bugs and the one dependency-only
+Apache-2.0. Plurx carries twenty-seven patches for clustered deployments. An
+upstream release can retire the nine generic bugs and the one dependency-only
 constraint; it cannot retire the seventeen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
@@ -37,6 +37,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 24 | Source layout guard rollback certificate | plurx policy | — | Never; rolling Source activation requires a definitive pre-application rollback without changing deployed transaction payloads. |
 | 25 | Bounded snapshot transport observations and RPC budgets | plurx policy | — | Never; Plurx owns this process-local observation surface and its configured chunk, transfer and install budgets. |
 | 26 | `TCP_NODELAY` on accepted Raft and API streams | generic bug | https://github.com/sebadob/hiqlite/pull/374 | Upstream release disables Nagle on the streams its Raft and API listeners accept. |
+| 27 | Preserve the SQLite transaction writer after an abandoned reply | generic bug | pending M6 | Upstream release tolerates dropped success/error transaction reply receivers without terminating the writer. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -440,8 +441,17 @@ upstream maintainer disposition or the whole drop condition. The original
 patch description remains the historical/local contract; row 19 stays
 `generic bug` / `pending M6`, and all kinds, counts and removal rules remain.
 
+- A bounded caller may drop a transaction reply receiver before the writer
+  commits or rolls back. Reply delivery no longer panics the SQLite writer;
+  the actual commit/rollback remains authoritative and later requests keep
+  working. Deterministic real-writer tests abandon success and constraint-error
+  replies, verify the persisted rows and submit another write. No operation
+  is retried and no caller timeout changes. This does not classify a timed-out
+  Source activation as successful.
+  File: `src/store/state_machine/sqlite/writer.rs`.
+
 Remove this vendor when both halves of its exit hold. First, the rows an
-upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19 and 26: the
+upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18, 19, 26 and 27: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
 (rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24 and 25) still needs a patch. Their

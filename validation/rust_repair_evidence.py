@@ -66,18 +66,30 @@ def reviewed_rows(lines, binary, full_cases, root, policy):
                          if RESULT.fullmatch(lines[n])), None)
             require(stop is not None, "Incomplete inherited Tray child")
             payload = lines[index + 1:stop]
-            events = [OUTCOME.fullmatch(row) for row in payload if OUTCOME.fullmatch(row)]
-            require(len(events) == 1 and native_name(events[0]) in policy["tray_children"],
-                    "Unknown inherited Tray child identity")
+            require(not any(HEADER.fullmatch(row) or RUNNING.fullmatch(row.strip())
+                            or DOC_TESTS.fullmatch(row.strip()) for row in payload),
+                    "Ambiguous nested header inside inherited Tray child")
+            events = [(n, event) for n in range(index + 1, stop)
+                      if (event := OUTCOME.fullmatch(lines[n]))]
+            children = [(n, event) for n, event in events
+                        if native_name(event) in policy["tray_children"]]
+            require(len(children) == 1, "Unknown or ambiguous inherited Tray child identity")
+            child_index, child = children[0]
             summary = RESULT.fullmatch(lines[stop])
             require(int(summary[2]) + int(summary[3]) == 1 and summary.group(4, 5) == ("0", "0")
                     and int(summary[6]) == len(full_cases) - 1,
                     "Inherited Tray child footer differs from its exact selection")
-            require((events[0][2] == "ok") == (summary[2] == "1"),
+            require((child[2] == "ok") == (summary[2] == "1"),
                     "Inherited Tray child status differs from footer")
-            excluded.update(range(index, stop + 1))
-            blocks.append({"kind": "inherited_tray_child", "name": native_name(events[0]),
-                           "start": index + 1, "end": stop + 1})
+            # Inherited stdout is shared with parallel parent tests. Remove
+            # only the exact child rows; every interleaved parent outcome must
+            # still satisfy the complete outer inventory and footer below.
+            child_lines = {index, child_index, stop}
+            excluded.update(child_lines)
+            blocks.append({"kind": "inherited_tray_child", "name": native_name(child),
+                           "start": index + 1, "end": stop + 1,
+                           "excluded_lines": sorted(n + 1 for n in child_lines),
+                           "preserved_outcome_lines": [n + 1 for n, _ in events if n != child_index]})
     return [line for n, line in enumerate(lines) if n not in excluded], blocks
 
 

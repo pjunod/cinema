@@ -2781,35 +2781,72 @@
     #[tokio::test]
     async fn serving_fence_real_media_cleanup_survives_observer_cancellation() {
         super::require_ffmpeg();
+        use futures_util::FutureExt;
+        // This negative controls cancellation after real media exists, just
+        // as the panic control above does. Schema/manager setup is not part
+        // of the observer-possession handshake. The publisher still gets its
+        // original single ten-second first-segment deadline, with no retry.
+        let setup_started = std::time::Instant::now();
+        let mut fixture = F6MediaFixture::start().await;
+        let setup_elapsed = setup_started.elapsed();
+        let media_started = std::time::Instant::now();
+        let publisher_readiness =
+            std::panic::AssertUnwindSafe(f6_next_decodable_segment(&fixture.media, None))
+                .catch_unwind()
+                .await;
+        if let Err(original) = publisher_readiness {
+            let cleanup = fixture.finish().await;
+            eprintln!("F6 cancellation setup failed; actual cleanup: {cleanup:?}");
+            std::panic::resume_unwind(original);
+        }
+        println!(
+            "F6 cancellation precondition setup_ms={} first_segment_ms={}",
+            setup_elapsed.as_millis(),
+            media_started.elapsed().as_millis()
+        );
+        // Retain the receipt independently before transferring the actual
+        // fixture. A failed possession handshake must still observe cleanup.
+        let receipt = fixture
+            .cleanup_receiver
+            .take()
+            .expect("one cleanup observer");
         let (ready, observing) = tokio::sync::oneshot::channel();
         let observer = tokio::spawn(async move {
-            let mut fixture = F6MediaFixture::start().await;
-            let _ = f6_next_decodable_segment(&fixture.media, None).await;
-            let receipt = fixture
-                .cleanup_receiver
-                .take()
-                .expect("one cleanup observer");
             assert!(
-                ready.send(receipt).is_ok(),
-                "cancellation controller is live"
+                fixture
+                    .existing
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .expect("owned actual publisher")
+                    .try_wait()
+                    .expect("observe live publisher at ownership transfer")
+                    .is_none(),
+                "cancellation must target an observer owning a live publisher"
             );
+            assert!(ready.send(()).is_ok(), "cancellation controller is live");
             std::future::pending::<()>().await;
             drop(fixture);
         });
         let readiness = tokio::time::timeout(Duration::from_secs(15), observing).await;
-        // Always cancel AND join this observer, even when media setup fails.
-        // The guard's own cleanup is bounded independently of this observer.
+        // Always cancel AND join this observer, even when ownership transfer
+        // fails; its cleanup guard owns the real publisher independently.
         observer.abort();
         let cancelled = tokio::time::timeout(Duration::from_secs(5), observer)
-            .await.expect("bounded observer cancellation join");
-        let receipt = readiness.expect("real media before cancelling observer")
-            .expect("observer readiness");
-        assert!(cancelled.expect_err("observer must be cancelled").is_cancelled());
+            .await
+            .expect("bounded observer cancellation join");
         let cleanup = f6_cleanup_receipt(receipt).await;
         assert!(
             cleanup.as_ref().is_ok_and(|receipt| receipt.qualified()),
             "cancel cleanup must reap and join: {cleanup:?}"
         );
+        readiness
+            .expect("ready-media fixture owned before cancelling observer")
+            .expect("observer readiness");
+        assert!(cancelled
+            .expect_err("observer must be cancelled")
+            .is_cancelled());
     }
 
     /// The 2026-10-04 incident: a leader restart and a one-second leader stall

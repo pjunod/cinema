@@ -10,11 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LEDGERS = (
-    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 26),
+    (ROOT / "vendor/hiqlite/PLURX-PATCH.md", 27),
     (ROOT / "vendor/hiqlite-wal/PLURX-PATCH.md", 6),
 )
 
-NUMBER_WORDS = {6: "six", 26: "twenty-six"}
+NUMBER_WORDS = {6: "six", 27: "twenty-seven"}
 
 # A path a row bullet names, relative to the vendored crate root, written in
 # backticks: `src/writer.rs`, `Cargo.toml`. A repository path such as
@@ -124,7 +124,7 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
             for row in table_rows(path.read_text(encoding="utf-8"))
             if row[2] == "generic bug"
         }
-        self.assertEqual(len(generic), 11)
+        self.assertEqual(len(generic), 12)
         self.assertEqual(
             {key: url for key, url in generic.items() if url != "pending M6"},
             {
@@ -135,14 +135,14 @@ class HiqlitePatchLedgerCase(unittest.TestCase):
         self.assertEqual(
             {key for key, url in generic.items() if url == "pending M6"},
             {
-                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19)
+                ("hiqlite", number) for number in (1, 8, 9, 10, 11, 17, 19, 27)
             } | {("hiqlite-wal", 1), ("hiqlite-wal", 3)},
         )
         plan = (ROOT / "docs/cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("M6 two accepted mechanisms, nine generic rows pending", plan)
-        self.assertIn("eleven generic rows", plan)
+        self.assertIn("M6 two accepted mechanisms, ten generic rows pending", plan)
+        self.assertIn("twelve generic rows", plan)
         self.assertIn("https://github.com/sebadob/hiqlite/pull/374", plan)
 
     def test_each_prose_patch_has_one_owned_ledger_row(self):
