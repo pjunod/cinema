@@ -6,6 +6,7 @@ an actual acceptance result. Temporary fixtures use durable owned target paths.
 from dataclasses import replace
 import errno
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -31,9 +32,14 @@ class SyntheticEngine:
         self.rust_version = "rustc 1.97.1 (synthetic fixture)"
         self.sentinel_readable = False
         self.callback_count = 0
+        self.family_outcome = "passed"
+        self.missing_dependency = False
+        self.resource_failure = False
+        self.oom_killed = False
+        self.structured_packet = True
 
     def inspect(self, config, name):
-        return [{"Image": self.image_id, "State": {"Running": True},
+        return [{"Image": self.image_id, "State": {"Running": True, "OOMKilled": self.oom_killed},
             "HostConfig": {"NetworkMode": self.network, "ReadonlyRootfs": True, "Privileged": False,
                 "CapDrop": ["ALL"], "CapAdd": None, "SecurityOpt": ["no-new-privileges"], "Init": True,
                 "AutoRemove": True, "PidsLimit": config.pids_limit, "Memory": config.memory_bytes,
@@ -72,6 +78,25 @@ class SyntheticEngine:
                                  "rustc": {"returncode": 0, "output": self.rust_version},
                                  "cargo": {"returncode": 0, "output": "cargo 1.97.1 (synthetic fixture)"}}}
             return result(json.dumps(data).encode())
+        if arguments[0] == "exec" and isolation._OUTCOME_CONTROLLER in arguments:
+            self.callback_count += 1
+            if self.exit_code or not self.structured_packet:
+                return isolation._Command(self.exit_code, b"untrusted child stdout: assertion failed", b"Docker exec unavailable")
+            source, digest, mode, argv, context, limit = arguments[-6:]
+            context = json.loads(context)
+            auth = json.loads(bounds["input_data"])
+            classification = "prerequisite-passed" if mode == "prerequisite" else self.family_outcome
+            if self.missing_dependency:
+                classification = "unavailable"
+            evidence = "prerequisite" if mode == "prerequisite" else "compile" if classification == "compile-failed" else "inert-bytes"
+            body = {"nonce": auth["nonce"], "argv": json.loads(argv), "mode": mode, "context": context,
+                    "driver_sha256": digest, "driver_started": True, "driver_completed": True,
+                    "hardened": True, "resources_verified": True, "resource_failure": self.resource_failure,
+                    "result": {"protocol": 1, "outcome": classification, "completed": classification != "unavailable",
+                               "evidence": {"kind": evidence, "identity": "synthetic actual completed check", "sha256": "d" * 64}},
+                    "stdout_base64": "", "stderr_base64": ""}
+            signature = hmac.new(bytes.fromhex(auth["secret"]), isolation._json(body).encode(), hashlib.sha256).hexdigest()
+            return isolation._Command(0, isolation._json({"body": body, "hmac": signature}).encode(), b"", self.timed_out, self.output_limited)
         if arguments[0] == "exec":
             self.callback_count += 1
             return isolation._Command(self.exit_code, b"PRIVATE acceptance output\xff", b"PRIVATE stderr",
@@ -95,6 +120,7 @@ class KnowledgeIsolationTests(unittest.TestCase):
         for name in ("candidate", "grader-export", "runtime"):
             (self.root / name).mkdir()
         (self.root / "candidate/input.py").write_text("# synthetic candidate\n")
+        (self.root / "grader-export/outcome-driver.py").write_text("# synthetic protocol fixture only; never actual qualification\n")
         (self.root / "grader-export/check.py").write_text("# synthetic grader, never executed\n")
         engine = self.root / "engine-fixture"
         engine.write_text("synthetic executable fixture; never run")
@@ -104,12 +130,30 @@ class KnowledgeIsolationTests(unittest.TestCase):
             image="registry.example/knowledge@sha256:" + "a" * 64, owned_root=self.root,
             candidate_root=self.root / "candidate", grader_root=self.root / "grader-export",
             runtime_root=self.root / "runtime", acceptance_argv=(self.argv,))
+        self.plan = isolation.FamilyPlan("synthetic-inert-family", (self.argv,), (self.argv,),
+            isolation.TrustedSourceFile("outcome-driver.py", hashlib.sha256((self.root / "grader-export/outcome-driver.py").read_bytes()).hexdigest()))
+        self.family_cache = {}
         self.engine = SyntheticEngine()
         self.mock = patch("validation.knowledge.evaluation_isolation._command", side_effect=self.engine)
         self.mock.start()
         self.addCleanup(self.mock.stop)
         self.addCleanup(isolation._ISSUED.clear)
+        self.addCleanup(isolation._QUALIFIED.clear)
         self.addCleanup(isolation._OWNED_CONTAINERS.clear)
+
+    def family_state(self, config):
+        key = (config.image, config.acceptance_argv, config.require_rust)
+        if key not in self.family_cache:
+            plan = replace(self.plan, prerequisite_argv=config.acceptance_argv, acceptance_argv=config.acceptance_argv)
+            receipt = isolation.probe(config)
+            prerequisite = isolation.qualify_family(config, plan, receipt)
+            self.family_cache[key] = (plan, prerequisite)
+            self.engine.callback_count = 0
+        return self.family_cache[key]
+
+    def execute(self, config, argv, receipt):
+        plan, prerequisite = self.family_state(config)
+        return isolation.execute(config, argv, receipt, family=plan, prerequisite=prerequisite)
 
     def test_valid_synthetic_probe_records_observations_then_exact_callback_and_cleanup(self):
         receipt = isolation.probe(self.config)
@@ -117,7 +161,7 @@ class KnowledgeIsolationTests(unittest.TestCase):
         recorded = json.loads(receipt.private_path.read_text())
         self.assertEqual(recorded["observations"]["observed_probes"]["versions"]["python"], "3.13.0")
         self.assertTrue(recorded["cleanup_proved"])
-        result = isolation.execute(self.config, self.argv, receipt)
+        result = self.execute(self.config, self.argv, receipt)
         self.assertEqual(result.status, "passed")
         self.assertEqual(self.engine.callback_count, 1)
         self.assertEqual(self.engine.alive, set())
@@ -130,7 +174,7 @@ class KnowledgeIsolationTests(unittest.TestCase):
         config = replace(self.config, image=self.engine.image_id)
         receipt = isolation.probe(config)
         self.assertEqual(receipt.status, "verified")
-        self.assertEqual(isolation.execute(config, self.argv, receipt).status, "passed")
+        self.assertEqual(self.execute(config, self.argv, receipt).status, "passed")
 
     def test_archive_bound_quiet_wrapper_preserves_exact_argv_and_rejects_changes(self):
         wrapper = self.config.candidate_root / "scripts/quiet"
@@ -143,9 +187,9 @@ class KnowledgeIsolationTests(unittest.TestCase):
                          source_commit="a" * 40, source_archive_sha256="c" * 64)
         receipt = isolation.probe(config)
         self.assertEqual(receipt.status, "verified")
-        self.assertEqual(isolation.execute(config, argv, receipt).status, "passed")
-        callback = [args for args, _ in self.engine.calls if args[0] == "exec" and isolation._PROBE_CODE not in args][-1]
-        self.assertEqual(tuple(callback[3:]), argv)
+        self.assertEqual(self.execute(config, argv, receipt).status, "passed")
+        callback = [args for args, _ in self.engine.calls if args[0] == "exec" and isolation._OUTCOME_CONTROLLER in args][-1]
+        self.assertEqual(tuple(json.loads(callback[-3])), argv)
         with self.assertRaises(isolation.IsolationError):
             isolation.probe(replace(config, source_archive_sha256=""))
         with self.assertRaises(isolation.IsolationError):
@@ -265,7 +309,7 @@ class KnowledgeIsolationTests(unittest.TestCase):
         self.engine.image_available = False
         receipt = isolation.probe(self.config)
         self.assertEqual(receipt.status, "unavailable")
-        result = isolation.execute(self.config, self.argv, receipt)
+        result = self.execute(self.config, self.argv, receipt)
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(self.engine.callback_count, 0)
 
@@ -289,35 +333,76 @@ class KnowledgeIsolationTests(unittest.TestCase):
 
     def test_forged_tampered_or_changed_receipt_cannot_execute(self):
         receipt = isolation.probe(self.config)
-        self.assertEqual(isolation.execute(self.config, self.argv, replace(receipt)).status, "unavailable")
-        self.assertEqual(isolation.execute(replace(self.config, pids_limit=32), self.argv, receipt).status, "unavailable")
+        self.assertEqual(self.execute(self.config, self.argv, replace(receipt)).status, "unavailable")
+        self.assertEqual(self.execute(replace(self.config, pids_limit=32), self.argv, receipt).status, "unavailable")
         receipt.private_path.write_text('{"status":"verified","cleanup_proved":true}')
-        self.assertEqual(isolation.execute(self.config, self.argv, receipt).status, "unavailable")
+        self.assertEqual(self.execute(self.config, self.argv, receipt).status, "unavailable")
         self.assertEqual(self.engine.callback_count, 0)
 
     def test_source_change_after_probe_or_unregistered_argv_refuses(self):
         receipt = isolation.probe(self.config)
         with self.assertRaises(isolation.IsolationError):
-            isolation.execute(self.config, ("/usr/bin/python3", "-c", "unregistered"), receipt)
+            self.execute(self.config, ("/usr/bin/python3", "-c", "unregistered"), receipt)
         (self.config.candidate_root / "input.py").write_text("# changed candidate\n")
-        self.assertEqual(isolation.execute(self.config, self.argv, receipt).status, "unavailable")
+        self.assertEqual(self.execute(self.config, self.argv, receipt).status, "unavailable")
         self.assertEqual(self.engine.callback_count, 0)
 
     def test_bounded_output_timeout_and_cleanup_failure_are_unavailable_not_model_regression(self):
         receipt = isolation.probe(self.config)
         self.engine.output_limited = True
-        self.assertEqual(isolation.execute(self.config, self.argv, receipt).status, "unavailable")
+        self.assertEqual(self.execute(self.config, self.argv, receipt).status, "unavailable")
         self.engine.output_limited = False
         self.engine.timed_out = True
-        self.assertEqual(isolation.execute(self.config, self.argv, receipt).status, "unavailable")
+        self.assertEqual(self.execute(self.config, self.argv, receipt).status, "unavailable")
         self.engine.timed_out = False
         self.engine.cleanup_fails = True
+        self.assertEqual(self.execute(self.config, self.argv, receipt).status, "unavailable")
+
+    def test_r4_security_probe_is_not_dependency_or_family_qualification(self):
+        receipt = isolation.probe(self.config)
+        self.assertEqual(receipt.status, "verified")
         self.assertEqual(isolation.execute(self.config, self.argv, receipt).status, "unavailable")
+        unsupported = replace(self.plan, driver=None)
+        prerequisite = isolation.qualify_family(self.config, unsupported, receipt)
+        self.assertEqual(prerequisite.status, "unavailable")
+        self.assertEqual(isolation.execute(self.config, self.argv, receipt, family=unsupported, prerequisite=prerequisite).status, "unavailable")
+        self.assertEqual(self.engine.callback_count, 0)
+
+    def test_r4_missing_dependency_executor_failure_and_oom_stay_unavailable(self):
+        receipt = isolation.probe(self.config)
+        plan, prerequisite = self.family_state(self.config)
+        self.assertEqual(prerequisite.status, "qualified")
+        for field, value in (("missing_dependency", True), ("exit_code", 1), ("oom_killed", True), ("resource_failure", True), ("structured_packet", False)):
+            with self.subTest(field=field):
+                before = getattr(self.engine, field)
+                setattr(self.engine, field, value)
+                result = isolation.execute(self.config, self.argv, receipt, family=plan, prerequisite=prerequisite)
+                self.assertEqual(result.status, "unavailable")
+                self.assertEqual(result.classification, "unavailable")
+                setattr(self.engine, field, before)
+        self.assertEqual(self.engine.alive, set())
+
+    def test_r4_genuine_completed_assertion_and_compile_failure_require_issued_family(self):
+        receipt = isolation.probe(self.config)
+        plan, prerequisite = self.family_state(self.config)
+        self.assertEqual(prerequisite.status, "qualified")
+        for classification in ("assertion-failed", "compile-failed"):
+            with self.subTest(classification=classification):
+                self.engine.family_outcome = classification
+                result = isolation.execute(self.config, self.argv, receipt, family=plan, prerequisite=prerequisite)
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.classification, classification)
+                self.assertEqual(result.prerequisite_digest, prerequisite.digest)
+                self.assertTrue(json.loads(result.private_path.read_text())["cleanup_proved"])
+        forged = replace(prerequisite)
+        self.assertEqual(isolation.execute(self.config, self.argv, receipt, family=plan, prerequisite=forged).status, "unavailable")
+        self.engine.cleanup_fails = True
+        self.assertEqual(isolation.execute(self.config, self.argv, receipt, family=plan, prerequisite=prerequisite).status, "unavailable")
 
     def test_callback_failure_preserves_failed_only_after_cleanup_proof(self):
         receipt = isolation.probe(self.config)
-        self.engine.exit_code = 7
-        result = isolation.execute(self.config, self.argv, receipt)
+        self.engine.family_outcome = "assertion-failed"
+        result = self.execute(self.config, self.argv, receipt)
         self.assertEqual(result.status, "failed")
         self.assertTrue(json.loads(result.private_path.read_text())["cleanup_proved"])
         self.assertEqual(self.engine.alive, set())

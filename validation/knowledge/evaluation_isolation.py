@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import base64
 import errno
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -99,6 +100,30 @@ class IsolationConfig:
 
 
 @dataclass(frozen=True)
+class FamilyPlan:
+    family: str
+    prerequisite_argv: tuple[tuple[str, ...], ...]
+    acceptance_argv: tuple[tuple[str, ...], ...]
+    driver: TrustedSourceFile | None = None
+
+    def __post_init__(self):
+        for name in ("prerequisite_argv", "acceptance_argv"):
+            object.__setattr__(self, name, tuple(tuple(argv) for argv in getattr(self, name)))
+
+
+@dataclass(frozen=True)
+class PrerequisiteReceipt:
+    status: str
+    digest: str
+    private_path: Path | None
+    family: str
+    binding_digest: str
+
+    def public(self):
+        return {"status": self.status, "digest": self.digest}
+
+
+@dataclass(frozen=True)
 class ProbeReceipt:
     status: str
     digest: str
@@ -114,6 +139,8 @@ class ExecutionResult:
     status: str
     digest: str
     private_path: Path | None
+    classification: str = "unavailable"
+    prerequisite_digest: str = ""
 
     def public(self):
         return {"status": self.status, "digest": self.digest}
@@ -142,6 +169,7 @@ class _Cleanup:
 # manufacture an attestation or revive one after a custodian process restart.
 _ISSUED: dict[int, tuple[ProbeReceipt, dict[str, Any]]] = {}
 _OWNED_CONTAINERS: set[str] = set()
+_QUALIFIED: dict[int, tuple[PrerequisiteReceipt, dict[str, Any]]] = {}
 _IMAGE = re.compile(r"(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}\Z")
 # These are tracked Rust sources, never credential stores. Adding an exception
 # or wrapper family requires a source change and review, not a model tool flag.
@@ -184,6 +212,63 @@ if rust_required == "yes":
 print(json.dumps({"outside":outside,"network":{"interfaces":sorted(name for _,name in socket.if_nameindex()),"errno":network_errno},"versions":versions,"filesystem":filesystem},sort_keys=True))
 '''
 
+
+_OUTCOME_CONTROLLER = r'''
+import base64,contextlib,ctypes,hashlib,hmac,json,os,sys
+source,digest,mode,argv,context,limit=sys.argv[1:]
+argv=json.loads(argv);context=json.loads(context);limit=int(limit)
+auth=json.loads(sys.stdin.buffer.read(4097));secret=bytes.fromhex(auth["secret"])
+def canonical(value):
+    return json.dumps(value,sort_keys=True,separators=(",",":"),allow_nan=False)
+def resources():
+    result={}
+    try:
+        for name in ("memory.events","pids.events"):
+            with open("/sys/fs/cgroup/"+name) as stream:
+                result[name]={key:int(value) for key,value in (line.split() for line in stream)}
+    except (OSError,ValueError):
+        return None
+    return result
+captured_bytes=0
+class Bounded:
+    def __init__(self):self.raw=bytearray()
+    def write(self,value):
+        global captured_bytes
+        value=value.encode("utf-8","replace")
+        if captured_bytes+len(value)>limit:raise RuntimeError("driver output bound")
+        captured_bytes+=len(value)
+        self.raw.extend(value);return len(value)
+    def flush(self):pass
+out=Bounded();err=Bounded();started=completed=hardened=False
+result={"protocol":1,"outcome":"unavailable","completed":False}
+before=resources()
+try:
+    libc=ctypes.CDLL(None,use_errno=True)
+    hardened=libc.prctl(4,0,0,0,0)==0 and libc.prctl(3,0,0,0,0)==0
+    if not hardened:raise RuntimeError("controller protection unavailable")
+    with open(source,"rb") as stream:code=stream.read(8*1024*1024+1)
+    if len(code)>8*1024*1024 or hashlib.sha256(code).hexdigest()!=digest:raise RuntimeError("driver identity changed")
+    namespace={"__name__":"_trusted_family_driver","__file__":source}
+    with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+        exec(compile(code,source,"exec"),namespace)
+        started=True
+        result=namespace["run"](mode,argv,context)
+        completed=True
+    if len(canonical(result))>8192:raise RuntimeError("driver result bound")
+except BaseException:
+    result={"protocol":1,"outcome":"unavailable","completed":False}
+after=resources()
+verified=before is not None and after is not None
+failure=not verified
+if verified:
+    failure=any(after[name].get(key,0)>before[name].get(key,0) for name,keys in
+        (("memory.events",("oom","oom_kill","max")),("pids.events",("max",))) for key in keys)
+body={"nonce":auth["nonce"],"argv":argv,"mode":mode,"context":context,"driver_sha256":digest,
+      "driver_started":started,"driver_completed":completed,"hardened":hardened,
+      "resources_verified":verified,"resource_failure":failure,"resources_before":before,"resources_after":after,
+      "result":result,"stdout_base64":base64.b64encode(out.raw).decode(),"stderr_base64":base64.b64encode(err.raw).decode()}
+print(canonical({"body":body,"hmac":hmac.new(secret,canonical(body).encode(),hashlib.sha256).hexdigest()}))
+'''
 
 def _no_symlinks(path: Path, *, directory=False) -> Path:
     _require(path.is_absolute() and "," not in str(path) and "\n" not in str(path), "absolute literal path required")
@@ -378,7 +463,8 @@ def _prepare(config: IsolationConfig):
                "source_archive": {"commit": config.source_commit, "sha256": config.source_archive_sha256,
                                   "exceptions": sorted(exceptions.items()), "wrappers": sorted(wrappers.items())},
                "user": [config.uid, config.gid], "runtimes": [config.python_executable, config.rustc_executable, config.cargo_executable, config.require_rust],
-               "supervisor": _bytes_digest(_SUPERVISOR.encode()), "probe": _bytes_digest(_PROBE_CODE.encode())}
+               "supervisor": _bytes_digest(_SUPERVISOR.encode()), "probe": _bytes_digest(_PROBE_CODE.encode()),
+               "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode())}
     return private, payload
 
 
@@ -404,13 +490,24 @@ def _engine_environment(config):
             "TMPDIR": str(home / "tmp"), "TMP": str(home / "tmp"), "TEMP": str(home / "tmp")}
 
 
-def _command(config, arguments, *, timeout=20, limit=1024 * 1024):
+def _command(config, arguments, *, timeout=20, limit=1024 * 1024, input_data=None):
     """Bound both output streams together; Docker cleanup is a separate proof."""
     try:
-        process = subprocess.Popen([str(config.engine), *arguments], stdin=subprocess.DEVNULL,
+        process = subprocess.Popen([str(config.engine), *arguments], stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_engine_environment(config), close_fds=True)
     except OSError:
         return _Command(None, b"", b"engine unavailable")
+    if input_data is not None:
+        _require(isinstance(input_data, bytes) and len(input_data) <= 4096, "bounded private controller input required")
+        try:
+            os.set_blocking(process.stdin.fileno(), False)
+            _require(os.write(process.stdin.fileno(), input_data) == len(input_data), "controller input incomplete")
+        except (OSError, IsolationError):
+            process.kill()
+            process.wait(timeout=5)
+            return _Command(None, b"", b"controller input unavailable")
+        finally:
+            process.stdin.close()
     output = {"stdout": bytearray(), "stderr": bytearray()}
     selector = selectors.DefaultSelector()
     for name in output:
@@ -600,10 +697,36 @@ def probe(config: IsolationConfig) -> ProbeReceipt:
     return receipt
 
 
-def execute(config: IsolationConfig, argv: tuple[str, ...], receipt: ProbeReceipt) -> ExecutionResult:
-    private, payload = _prepare(config)
-    _require(isinstance(argv, tuple) and argv in config.acceptance_argv, "callback argv not registered")
-    path = private / ("execution-" + uuid.uuid4().hex + ".json")
+def _plan_data(plan: FamilyPlan):
+    _require(isinstance(plan, FamilyPlan) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", plan.family), "fixed family plan required")
+    for commands in (plan.prerequisite_argv, plan.acceptance_argv):
+        _require(0 < len(commands) <= 32, "bounded family commands required")
+        for argv in commands:
+            _require(0 < len(argv) <= 256 and all(isinstance(arg, str) and "\0" not in arg for arg in argv)
+                     and sum(map(len, argv)) <= 32768, "literal family command required")
+    driver = plan.driver
+    if driver is not None:
+        _require(isinstance(driver, TrustedSourceFile) and re.fullmatch(r"[a-f0-9]{64}", driver.sha256), "pinned family driver required")
+        _require(isinstance(driver.path, str) and not driver.path.startswith("/")
+                 and all(part not in {"", ".", ".."} and not _private_name(part) for part in driver.path.split("/"))
+                 and "\\" not in driver.path and len(driver.path) <= 1024, "safe immutable driver path required")
+    return {"family": plan.family, "prerequisite_argv": plan.prerequisite_argv, "acceptance_argv": plan.acceptance_argv,
+            "driver": None if driver is None else {"path": driver.path, "sha256": driver.sha256}}
+
+
+def _family_binding(payload, plan, baseline_source_digest, observed_runtime):
+    # Candidate bytes intentionally differ after patching; baseline bytes are
+    # retained separately. Every dependency/runtime/grader/policy input remains
+    # bound, including full offline-cache membership and image identity.
+    return {"plan": _plan_data(plan), "baseline_source_digest": baseline_source_digest,
+            "observed_runtime": observed_runtime, "image": payload["image"], "engine": payload["engine_digest"],
+            "source_archive": payload["source_archive"], "grader": payload["sources"]["grader"],
+            "runtime_dependencies": payload["sources"]["runtime"], "caches": payload["sources"]["caches"],
+            "runtimes": payload["runtimes"], "environment": payload["environment"],
+            "limits": payload["limits"], "user": payload["user"], "controller": _bytes_digest(_OUTCOME_CONTROLLER.encode())}
+
+
+def _issued_probe(receipt, private, payload):
     issued = _ISSUED.get(id(receipt))
     valid = (issued is not None and issued[0] is receipt and receipt.status == "verified"
              and receipt.config_digest == _digest(payload) and receipt.private_path is not None)
@@ -614,34 +737,167 @@ def execute(config: IsolationConfig, argv: tuple[str, ...], receipt: ProbeReceip
             valid = _bytes_digest(receipt.private_path.read_bytes()) == receipt.digest
         except (OSError, IsolationError):
             valid = False
-    if not valid:
-        body = {"status": "unavailable", "reason": "unverified-or-changed-isolation", "probe_digest": getattr(receipt, "digest", "")}
+    return issued if valid else None
+
+
+def _qualified_for(receipt, payload, plan, observed_runtime):
+    issued = _QUALIFIED.get(id(receipt))
+    if issued is None or issued[0] is not receipt or receipt.status != "qualified" or receipt.family != plan.family:
+        return None
+    try:
+        _no_symlinks(receipt.private_path)
+        _require(_bytes_digest(receipt.private_path.read_bytes()) == receipt.digest, "prerequisite receipt changed")
+        _require(receipt.binding_digest == _digest(_family_binding(payload, plan, issued[1]["baseline_source_digest"], observed_runtime)), "qualified family inputs changed")
+    except (IsolationError, OSError):
+        return None
+    return issued[1]
+
+
+def _driver_packet(config, name, argv, plan, mode, context):
+    driver = plan.driver
+    _require(driver is not None, "family has no reviewed structured outcome driver")
+    path = config.grader_root / driver.path
+    _no_symlinks(path)
+    _require(_read_member(config.grader_root, path, path.lstat()) == driver.sha256, "family driver changed")
+    secret = os.urandom(32)
+    nonce = uuid.uuid4().hex
+    arguments = ["exec", "--interactive", "--workdir=/", name, config.python_executable, "-I", "-S", "-c", _OUTCOME_CONTROLLER,
+                 "/grader/" + driver.path, driver.sha256, mode, _json(argv), _json(context), str(config.max_output_bytes)]
+    result = _command(config, arguments, timeout=config.timeout_seconds, limit=2 * config.max_output_bytes + 16384,
+                      input_data=_json({"secret": secret.hex(), "nonce": nonce}).encode())
+    if result.returncode != 0 or result.timed_out or result.output_limited:
+        return result, None
+    try:
+        packet = json.loads(result.stdout)
+        body = packet["body"]
+        expected = hmac.new(secret, _json(body).encode(), hashlib.sha256).hexdigest()
+        _require(isinstance(packet["hmac"], str) and hmac.compare_digest(expected, packet["hmac"]), "untrusted outcome packet")
+        _require(body["nonce"] == nonce and body["argv"] == list(argv) and body["mode"] == mode
+                 and body["context"] == context and body["driver_sha256"] == driver.sha256, "outcome packet binding mismatch")
+        return result, body
+    except (ValueError, KeyError, TypeError, IsolationError):
+        return result, None
+
+
+def _completed_classification(packet, mode):
+    if packet is None or packet.get("driver_started") is not True or packet.get("driver_completed") is not True:
+        return "unavailable"
+    if packet.get("hardened") is not True or packet.get("resources_verified") is not True or packet.get("resource_failure") is not False:
+        return "unavailable"
+    result = packet.get("result", {})
+    if not isinstance(result, dict) or type(result.get("protocol")) is not int or result.get("protocol") != 1 or result.get("completed") is not True:
+        return "unavailable"
+    evidence = result.get("evidence", {})
+    if not isinstance(evidence, dict) or not (isinstance(evidence.get("identity"), str) and evidence["identity"]
+            and isinstance(evidence.get("sha256"), str) and re.fullmatch(r"[a-f0-9]{64}", evidence["sha256"])):
+        return "unavailable"
+    outcome = result.get("outcome")
+    if mode == "prerequisite":
+        return "prerequisite-passed" if outcome == "prerequisite-passed" and evidence.get("kind") == "prerequisite" else "unavailable"
+    allowed = {"passed": {"inert-bytes", "assertion", "compile"}, "assertion-failed": {"inert-bytes", "assertion"}, "compile-failed": {"compile"}}
+    return outcome if outcome in allowed and evidence.get("kind") in allowed[outcome] else "unavailable"
+
+
+def _execute_family(config, argv, receipt, plan, *, mode, prerequisite=None, baseline_source_digest=""):
+    private, payload = _prepare(config)
+    _require(isinstance(argv, tuple) and argv in config.acceptance_argv, "callback argv not registered")
+    plan_data = _plan_data(plan)
+    commands = plan.prerequisite_argv if mode == "prerequisite" else plan.acceptance_argv
+    _require(argv in commands, "callback outside frozen family plan")
+    path = private / ("execution-" + uuid.uuid4().hex + ".json")
+    issued = _issued_probe(receipt, private, payload)
+    runtime = issued[1]["observations"]["observed_probes"]["versions"] if issued is not None else None
+    qualified = _qualified_for(prerequisite, payload, plan, runtime) if mode == "acceptance" else None
+    if issued is None or plan.driver is None or (mode == "acceptance" and qualified is None):
+        body = {"status": "unavailable", "classification": "unavailable", "reason": "unqualified-or-unsupported-family",
+                "probe_digest": getattr(receipt, "digest", ""), "plan": plan_data}
         return ExecutionResult("unavailable", _write_private(path, body), path)
-    outcome = None
-    observed = None
+    prerequisite_digest = prerequisite.digest if qualified is not None else ""
+    context = {"family": plan.family, "plan_digest": _digest(plan_data), "prerequisite_digest": prerequisite_digest,
+               "baseline_source_digest": qualified["baseline_source_digest"] if qualified is not None else baseline_source_digest}
+    outcome = packet = observed = engine_state = None
     cleaned = False
     name = None
     try:
         name, observed = _configuration_probe(config, private)
         previous = issued[1]["observations"]
-        # Ignore the new random sentinel's content digest, retaining every
-        # observed security/runtime/network/filesystem condition.
         _require({k: v for k, v in observed.items() if k != "sentinel_digest"} ==
                  {k: v for k, v in previous.items() if k != "sentinel_digest"}, "observed isolation changed")
         _require(_prepare(config)[1] == payload, "configuration changed before callback")
-        outcome = _command(config, ["exec", "--workdir=/work", name, *argv],
-                           timeout=config.timeout_seconds, limit=config.max_output_bytes)
+        outcome, packet = _driver_packet(config, name, argv, plan, mode, context)
+        inspected = _command(config, ["inspect", name])
+        _require(inspected.returncode == 0 and not inspected.timed_out and not inspected.output_limited, "executor state unavailable")
+        state = json.loads(inspected.stdout)[0]["State"]
+        engine_state = {"running": state.get("Running"), "oom_killed": state.get("OOMKilled")}
+        _require(engine_state == {"running": True, "oom_killed": False}, "executor resource/start failure")
     except (IsolationError, OSError, ValueError, KeyError, TypeError):
-        pass
+        packet = None
     finally:
         if name is not None:
             cleaned = _cleanup(config, name)
-    status = "unavailable"
-    if outcome is not None and cleaned and not outcome.timed_out and not outcome.output_limited and outcome.returncode is not None:
-        status = "passed" if outcome.returncode == 0 else "failed"
-    body = {"status": status, "probe_digest": receipt.digest, "config_digest": _digest(payload),
-            "cleanup_proved": bool(cleaned), "cleanup_observations": getattr(cleaned, "observations", None), "observations": observed,
+    classification = _completed_classification(packet, mode) if cleaned else "unavailable"
+    status = "passed" if classification in {"passed", "prerequisite-passed"} else "failed" if classification in {"assertion-failed", "compile-failed"} else "unavailable"
+    body = {"status": status, "classification": classification, "mode": mode, "family": plan.family,
+            "prerequisite_digest": prerequisite_digest, "probe_digest": receipt.digest, "config_digest": _digest(payload),
+            "plan_digest": _digest(plan_data), "baseline_source_digest": context["baseline_source_digest"],
+            "cleanup_proved": bool(cleaned), "cleanup_observations": getattr(cleaned, "observations", None),
+            "observations": observed, "engine_state": engine_state, "structured_outcome": packet,
             "output": None if outcome is None else {"stdout_base64": base64.b64encode(outcome.stdout).decode("ascii"),
                 "stderr_base64": base64.b64encode(outcome.stderr).decode("ascii"), "returncode": outcome.returncode,
                 "timed_out": outcome.timed_out, "output_limited": outcome.output_limited}}
-    return ExecutionResult(status, _write_private(path, body), path)
+    return ExecutionResult(status, _write_private(path, body), path, classification, prerequisite_digest)
+
+
+def qualify_family(config: IsolationConfig, family: FamilyPlan, receipt: ProbeReceipt) -> PrerequisiteReceipt:
+    """Actually qualify baseline prerequisites; security/version probes do not.
+
+    Frozen gold assertions need not pass on the baseline. Only separately named
+    import/build/dependency prerequisites with a reviewed completion driver can
+    qualify. Unsupported families remain unavailable without scoring a patch.
+    """
+    private, initial = _prepare(config)
+    plan = _plan_data(family)
+    _require(all(argv in config.acceptance_argv for argv in family.prerequisite_argv), "baseline prerequisites not registered")
+    paths = []
+    qualified = family.driver is not None and _issued_probe(receipt, private, initial) is not None
+    baseline = initial["sources"]["candidate"]
+    if qualified:
+        for number, argv in enumerate(family.prerequisite_argv):
+            current_probe = receipt if number == 0 else probe(config)
+            result = _execute_family(config, argv, current_probe, family, mode="prerequisite", baseline_source_digest=baseline)
+            paths.append({"digest": result.digest, "classification": result.classification})
+            if result.classification != "prerequisite-passed":
+                qualified = False
+                break
+    final_probe = probe(config) if qualified else None
+    final_payload = _prepare(config)[1]
+    final_issued = _issued_probe(final_probe, private, final_payload) if final_probe is not None else None
+    qualified = qualified and final_issued is not None
+    runtime = final_issued[1]["observations"]["observed_probes"]["versions"] if final_issued is not None else None
+    binding_data = _family_binding(final_payload, family, baseline, runtime)
+    binding = _digest(binding_data)
+    body = {"status": "qualified" if qualified else "unavailable", "family": family.family, "plan": plan,
+            "binding": binding_data, "binding_digest": binding,
+            "baseline_source_digest": baseline, "baseline_configuration": initial, "executions": paths}
+    path = private / ("prerequisite-" + uuid.uuid4().hex + ".json")
+    result = PrerequisiteReceipt(body["status"], _write_private(path, body), path, family.family, binding)
+    if qualified:
+        _QUALIFIED[id(result)] = (result, body)
+    return result
+
+
+def execute(config: IsolationConfig, argv: tuple[str, ...], receipt: ProbeReceipt, *,
+            family: FamilyPlan | None = None, prerequisite: PrerequisiteReceipt | None = None) -> ExecutionResult:
+    """A raw exit code is never a validated patch outcome (R4).
+
+    Missing dependencies, Docker exec/start errors, OOM/resource failures,
+    unsupported families and absent authenticated completion remain unavailable.
+    A completed trusted assertion/compiler failure is retained only after the
+    exact family's baseline/dependency prerequisites actually qualified.
+    """
+    if family is None:
+        private, _ = _prepare(config)
+        path = private / ("execution-" + uuid.uuid4().hex + ".json")
+        body = {"status": "unavailable", "classification": "unavailable", "reason": "family-prerequisite-required"}
+        return ExecutionResult("unavailable", _write_private(path, body), path)
+    return _execute_family(config, argv, receipt, family, mode="acceptance", prerequisite=prerequisite)
