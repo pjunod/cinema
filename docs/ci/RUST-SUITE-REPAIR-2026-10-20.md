@@ -5,10 +5,18 @@
 failures and 49 unchanged ignores; seven doctest targets, 400 cohort bodies,
 20 writer bodies and both serial media cases also passed with qualified
 cleanup. Those receipts remain evidence for that exact older source.
-Effort development gate 5728 then refused the stale effort/main ancestry
-before compilation. Current `main` at `00c74cd8` is being integrated into
-the effort base and repair candidate; new exact-source compiler, focused,
-full native and development-gate acceptance are required before merge.
+Effort development gate 5728 refused stale effort/main ancestry before
+compilation. Main `00c74cd8` is integrated in `6a6d55099`; effort gate 5733
+then passed history/catalog checks and correctly refused the operation-progress
+model's old whole-file writer pin. The reviewed metadata refresh preserves
+the existing application/reply/timeout abstraction, model, configurations
+and guards; [the wait map](../../verification/operation-progress/WAIT-MAP.md)
+records its scope. Both package mapping checks and 39 focused formal
+runner/CI controls pass; TLC has not been rerun for this refresh. Both failed
+gates and old formal receipts retain their original verdicts and source
+bindings. Fresh exact-source compiler, focused,
+full native and development-gate acceptance remain required before merge;
+any new TLC qualification claim needs a new input-bound formal receipt.
 Current receipts are recorded in
 [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
 The every-PR rollout remains a later milestone. **Owner:** Codex. **Branch:**
