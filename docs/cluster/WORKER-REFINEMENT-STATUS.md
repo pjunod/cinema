@@ -11,10 +11,10 @@ No whole-cluster deadlock theorem or removal of existing tests is claimed.
 
 | Deliverable | Owner | State |
 |---|---|---|
-| Source transitions, held resources and real conformance schedules | GPT-6 Luna | Tracing actual daemon/storage paths; pinned compiler available |
-| Model scope, assumptions and correspondence design | Fable 5.1 | Advice requested; private-source access explicitly authorized |
-| Two complete workers, temporal properties and controls | GPT-6.1 Sol | Architecture inspected; awaits design advice |
-| Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Extension inspected; implementation awaits package contract |
+| Source transitions, held resources and real conformance schedules | GPT-6 Luna | Building real storage and worker schedules; pinned 1.97.1 all-target daemon compile passed |
+| Model scope, assumptions and correspondence design | Fable 5.1 | Design delivered; authority split, real-worker schedules and correspondence obligations recorded |
+| Two complete workers, temporal properties and controls | GPT-6.1 Sol | Building two full pipelines with shared durable requests and separate local locks |
+| Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Building third-package selection, correspondence validation and CI integration |
 | Integration, ledger, PR and exact-tree qualification | Codex coordinator | Owned clone established at `c2d5aa257` |
 | Independent final adversarial review | Fresh Fable 5.1 session | Runs once the complete candidate is frozen |
 
@@ -64,3 +64,27 @@ No runtime correction is planned without a concrete source defect. No product
 watchdog, optional feature switch, broad testing framework or test deletion
 belongs to this work. Final evidence will identify exactly which assumptions
 were discharged and which remain.
+
+## 6. Design decisions recorded on 2026-10-21
+
+Fable 5.1 advice task `t_e1470e0f` separates finite model results,
+implementation correspondence and selected conformance schedules. It does
+not claim that passing tests establishes formal Rust refinement. A fresh
+independent session will review the complete candidate later.
+
+The source permits two real queue jobs for one library: scan and metadata
+refresh have different dedupe keys and can occupy the two resource slots,
+then contend on the same domain lease. Locks remain per worker; the domain
+and durable backend authority are shared. The model will preserve both
+complete pipelines. Removing a stage from the second worker to reduce
+checking cost was considered in advice and declined by the coordinator.
+
+Local revocation cannot roll back an already submitted mutation. New local
+dispatch must stop; durable guards govern subsequent application. Renewal
+holds its publication writer through backend return. Release revokes and
+joins renewal before exact-token retirement; no deadline is inferred.
+
+Before Rust edits, Luna verified `rustup run 1.97.1 cargo check -p plurxd
+--all-targets` with an owned warm target directory: exit zero in 2m 42s.
+No unit tests or model qualification have run in this phase. The default
+shell compiler is newer and will not be used as qualification evidence.
