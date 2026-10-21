@@ -228,6 +228,33 @@ async fn replicated_planning_read_downgrades_optional_schema_but_not_mandatory_e
     .expect("remote contract client");
     client
         .execute(
+            "UPDATE resource_settings_schema SET write_claim='unfinished'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("unsettled writer fixture");
+    assert!(
+        store
+            .resource_capacity_snapshot()
+            .await
+            .expect("one scalar authority read")
+            .is_none(),
+        "active claim refuses typed authority"
+    );
+    client
+        .execute(
+            "UPDATE resource_settings_schema SET write_claim=NULL",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("settled writer fixture");
+    assert!(store
+        .resource_capacity_snapshot()
+        .await
+        .expect("one scalar read")
+        .is_some());
+    client
+        .execute(
             "INSERT INTO settings(key,value,updated_at) VALUES('transcode.max_hw_sessions','0',0)",
             hiqlite::params!(),
         )
@@ -252,6 +279,11 @@ async fn replicated_planning_read_downgrades_optional_schema_but_not_mandatory_e
         .execute("DROP TABLE resource_settings_schema", hiqlite::params!())
         .await
         .expect("absent adjunct");
+    assert!(store
+        .resource_capacity_snapshot()
+        .await
+        .expect("recognized optional absence")
+        .is_none());
     client.execute("INSERT INTO settings(key,value,updated_at) VALUES('transcode.max_hw_sessions.provenance',$1,0)", hiqlite::params!(r#"{"schema":1,"mode":"automatic","bound_value":"0"}"#)).await.expect("schema-less restored companion");
     let snapshot = store
         .playback_planning_snapshot(file, &[])

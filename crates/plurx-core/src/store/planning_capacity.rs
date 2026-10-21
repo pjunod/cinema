@@ -169,6 +169,41 @@ pub(super) fn selected_keys(keys: &[&str]) -> Result<String, StoreError> {
 /// table, not even in a CASE subquery (SQLite resolves all names at prepare).
 /// FILE_COLS comes from each backend's fixed source projection, never a caller.
 pub(super) fn statement(file_cols: &str, fallback: bool) -> String {
+    let evidence = evidence_projection(fallback);
+    format!(
+        "WITH input AS (SELECT $1 AS file_id,$2 AS keys) SELECT {file_cols}, probe_json AS planning_probe, \
+         (SELECT generation FROM playback_input_generation WHERE singleton=1) AS planning_generation, \
+         (SELECT json_group_object(key,value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings, \
+         (SELECT title FROM items WHERE items.id=files.item_id) AS planning_item_title, \
+         {evidence} FROM files WHERE id=(SELECT file_id FROM input)"
+    )
+}
+
+/// Settings-only readers/importers need the same atomic proof, not a catalog
+/// preflight whose result can race a later settings/marker read.
+pub(super) fn settings_statement() -> String {
+    let evidence = evidence_projection(false);
+    format!("SELECT (SELECT json_group_object(key,value) FROM settings WHERE key IN \
+        ('transcode.max_hw_sessions','transcode.software_pool_threads','transcode.max_hw_sessions.provenance','transcode.software_pool_threads.provenance')) AS planning_settings, {evidence}")
+}
+
+pub(super) fn verified_snapshot(
+    encoded: &str,
+    catalog: &str,
+    marker: Option<&str>,
+) -> Result<Option<crate::resource_settings::CapacitySnapshot>, StoreError> {
+    let values =
+        serde_json::from_str(encoded).map_err(|error| StoreError::Database(error.to_string()))?;
+    let capacity = PlanningCapacity::from_statement(&values, catalog, marker);
+    Ok(match capacity.installation {
+        CapacityInstallation::Ready { revision } => {
+            Some(crate::resource_settings::CapacitySnapshot { revision, values })
+        }
+        _ => None,
+    })
+}
+
+fn evidence_projection(fallback: bool) -> String {
     let catalog_limit = OBJECTS.len() + 1;
     let marker = if fallback {
         "NULL".to_owned()
@@ -188,16 +223,12 @@ pub(super) fn statement(file_cols: &str, fallback: bool) -> String {
           FROM (SELECT resource_marker.singleton,resource_marker.version,resource_marker.revision,resource_marker.write_claim FROM main.resource_settings_schema AS resource_marker LIMIT 2) AS capacity_marker) ELSE NULL END")
     };
     format!(
-        "WITH input AS (SELECT $1 AS file_id,$2 AS keys) SELECT {file_cols}, probe_json AS planning_probe, \
-         (SELECT generation FROM playback_input_generation WHERE singleton=1) AS planning_generation, \
-         (SELECT json_group_object(key,value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings, \
-         (SELECT title FROM items WHERE items.id=files.item_id) AS planning_item_title, \
-         (SELECT json_group_array(json_array(\
+        "(SELECT json_group_array(json_array(\
             CASE WHEN length(name)<=128 THEN name END,type,\
             CASE WHEN length(tbl_name)<=128 THEN tbl_name END,\
             CASE WHEN length(sql)<=4096 THEN sql END)) FROM \
           (SELECT name,type,tbl_name,sql FROM sqlite_master WHERE name GLOB 'resource_settings_*' ORDER BY name,type,tbl_name,sql LIMIT {catalog_limit})) AS planning_capacity_catalog, \
-         {marker} AS planning_capacity_marker FROM files WHERE id=(SELECT file_id FROM input)"
+         {marker} AS planning_capacity_marker"
     )
 }
 

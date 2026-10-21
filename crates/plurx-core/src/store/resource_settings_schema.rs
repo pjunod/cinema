@@ -11,7 +11,7 @@ pub(super) const MARKER_SQL: &str =
 pub(super) const INSERT_MARKER: &str =
     "INSERT INTO resource_settings_schema(singleton,version,revision) VALUES(1,1,0)";
 pub(super) const CLEAR_UNVERSIONED: &str = "DELETE FROM settings WHERE key IN ('transcode.max_hw_sessions.provenance','transcode.software_pool_threads.provenance')";
-pub(super) const SNAPSHOT_SQL: &str = "SELECT r.revision,s.key,s.value FROM resource_settings_schema r LEFT JOIN settings s ON s.key IN ('transcode.max_hw_sessions','transcode.software_pool_threads','transcode.max_hw_sessions.provenance','transcode.software_pool_threads.provenance') WHERE r.singleton=1 AND r.version=1 ORDER BY s.key";
+
 pub(super) const CLAIM_SQL: &str = "UPDATE resource_settings_schema SET write_claim=$1 WHERE singleton=1 AND version=1 AND revision=$2 AND write_claim IS NULL";
 pub(super) const WRITE_SQL: &str = "INSERT INTO settings(key,value,updated_at) SELECT $1,$2,$3 WHERE EXISTS(SELECT 1 FROM resource_settings_schema WHERE singleton=1 AND version=1 AND write_claim=$4) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at";
 pub(super) const CLEAR_CLAIM_SQL: &str =
@@ -95,26 +95,21 @@ pub(super) fn install_sqlite(conn: &Connection) -> Result<(), StoreError> {
 pub(super) fn sqlite_snapshot(
     conn: &Connection,
 ) -> Result<Option<crate::resource_settings::CapacitySnapshot>, StoreError> {
-    if !sqlite_ready(conn)? {
-        return Ok(None);
-    }
-    let mut statement = conn.prepare(SNAPSHOT_SQL)?;
-    let mut rows = statement.query([])?;
-    let mut snapshot = None;
-    while let Some(row) = rows.next()? {
-        let revision = row.get(0)?;
-        let current = snapshot.get_or_insert_with(|| crate::resource_settings::CapacitySnapshot {
-            revision,
-            values: Default::default(),
-        });
-        if let (Some(key), Some(value)) = (
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ) {
-            current.values.insert(key, value);
+    use super::planning_capacity as capacity;
+    let result = conn.query_row(&capacity::settings_statement(), [], |row| {
+        Ok((
+            row.get::<_, String>("planning_settings")?,
+            row.get::<_, String>("planning_capacity_catalog")?,
+            row.get::<_, Option<String>>("planning_capacity_marker")?,
+        ))
+    });
+    match result {
+        Ok((values, catalog, marker)) => {
+            capacity::verified_snapshot(&values, &catalog, marker.as_deref())
         }
+        Err(error) if capacity::sqlite_missing_optional(&error) => Ok(None),
+        Err(error) => Err(StoreError::from(error)),
     }
-    Ok(snapshot)
 }
 
 #[cfg(test)]

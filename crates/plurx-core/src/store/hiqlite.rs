@@ -5810,33 +5810,23 @@ impl SettingsStore for HiqliteAuthStore {
     async fn resource_capacity_snapshot(
         &self,
     ) -> Result<Option<crate::resource_settings::CapacitySnapshot>, StoreError> {
-        use super::resource_settings_schema as schema;
-        // authority: schema integrity and exact revision fence typed settings writes.
-        let shape = self
+        use super::planning_capacity as capacity;
+        // authority: exact catalog, marker and all four raw keys share ONE
+        // committed settings-only read. No prior shape check can race restore.
+        let Some(mut rows) = self
             .client()
-            .query_consistent_map::<RemoteShapeRow, _>(schema::SHAPE_SQL, params!())
+            .query_planning_map::<ResourceCapacityRow>(capacity::settings_statement(), params!())
             .await?
-            .into_iter()
-            .map(|row| (row.name, row.sql))
-            .collect::<Vec<_>>();
-        if !matches!(schema::verify_shape(&shape), Ok(true)) {
-            return Ok(None);
-        }
-        // authority: revision and all four keys come from ONE replicated snapshot.
-        let rows = self
-            .client()
-            .query_consistent_map::<ResourceCapacityRow, _>(schema::SNAPSHOT_SQL, params!())
-            .await?;
-        let Some(first) = rows.first() else {
+        else {
             return Ok(None);
         };
-        Ok(Some(crate::resource_settings::CapacitySnapshot {
-            revision: first.revision,
-            values: rows
-                .into_iter()
-                .filter_map(|row| row.key.zip(row.value))
-                .collect(),
-        }))
+        if rows.len() != 1 {
+            return Err(StoreError::Database(
+                "capacity scalar snapshot returned an invalid row count".into(),
+            ));
+        }
+        let row = rows.pop().expect("one scalar row");
+        capacity::verified_snapshot(&row.values, &row.catalog, row.marker.as_deref())
     }
 
     async fn put_resource_capacity(
@@ -7268,17 +7258,17 @@ impl From<&mut Row<'_>> for SettingValueRow {
 }
 
 struct ResourceCapacityRow {
-    revision: i64,
-    key: Option<String>,
-    value: Option<String>,
+    values: String,
+    catalog: String,
+    marker: Option<String>,
 }
 
 impl From<&mut Row<'_>> for ResourceCapacityRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
-            revision: row.get("revision"),
-            key: row.get("key"),
-            value: row.get("value"),
+            values: row.get("planning_settings"),
+            catalog: row.get("planning_capacity_catalog"),
+            marker: row.get("planning_capacity_marker"),
         }
     }
 }

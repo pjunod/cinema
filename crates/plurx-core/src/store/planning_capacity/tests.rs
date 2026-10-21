@@ -285,6 +285,49 @@ fn malformed_optional_marker_and_companion_never_become_playback_errors_or_autho
 }
 
 #[test]
+fn settings_only_snapshot_uses_same_catalog_marker_and_raw_settings_authority() {
+    use super::super::resource_settings_schema::{install_sqlite, sqlite_snapshot};
+    let conn = database();
+    automatic(&conn);
+    assert!(sqlite_snapshot(&conn)
+        .expect("absent schema is not a baseline failure")
+        .is_none());
+    install_sqlite(&conn).expect("independent installation");
+    automatic(&conn);
+    let installed = sqlite_snapshot(&conn)
+        .expect("one statement")
+        .expect("ready");
+    assert_eq!(installed.values[keys::MAX_HW_SESSIONS], "0");
+    let planning = read(&conn, false).expect("same authority in planning");
+    assert_eq!(installed.values, planning.values);
+    assert_eq!(
+        planning.capacity.installation,
+        CapacityInstallation::Ready {
+            revision: installed.revision
+        }
+    );
+    conn.execute("UPDATE resource_settings_schema SET write_claim='held'", [])
+        .expect("unsettled claim");
+    assert!(
+        sqlite_snapshot(&conn).expect("ordinary read").is_none(),
+        "unfinished writer is not verified authority"
+    );
+    conn.execute("UPDATE resource_settings_schema SET write_claim=NULL", [])
+        .expect("clear");
+    conn.execute("DROP TRIGGER resource_settings_numeric_au", [])
+        .expect("partial shape");
+    assert!(sqlite_snapshot(&conn)
+        .expect("preserve partial schema")
+        .is_none());
+    conn.execute("DROP TABLE settings", [])
+        .expect("mandatory table broken");
+    assert!(
+        sqlite_snapshot(&conn).is_err(),
+        "mandatory SQL errors are never optional compatibility"
+    );
+}
+
+#[test]
 fn only_exact_optional_name_resolution_allows_fallback_not_step_or_baseline_errors() {
     let conn = database();
     let missing = read(&conn, false).err().expect("optional table absent");
