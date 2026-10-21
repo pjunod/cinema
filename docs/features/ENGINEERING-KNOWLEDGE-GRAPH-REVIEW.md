@@ -83,7 +83,7 @@ whitespace checks. These are author checks, not Fable approval.
 Plan approval closes this review only. It does not authorize a build, source
 changes, benchmark execution or broader rollout.
 
-## Implementation review — Astra R1, corrections in progress
+## Implementation review — Astra R1, corrected source awaiting recheck
 
 Independent Astra (`gpt-6-astra`, `openai-codex`, `hdr-astra`) returned
 **REQUEST_CHANGES** in Hermes task `t_ff338f21` on 2026-10-21. Reviewed
@@ -102,16 +102,24 @@ The private gold, case views, acceptance scripts and answers were withheld.
 | ID | Required correction / current disposition |
 |---|---|
 | R1 | Smoke receipt inputs now bind reviewed physical source/test and governing document bytes/modes, with membership retained separately. Draft regression covers in-place doc/split-child edits and unrelated bodies. |
-| R2 | Prune pristine semantic payloads unsupported by sealed visible bytes; regenerate structural metadata. Assigned to Sol graph author. |
-| R3 | Bind the actual launched graph to the frozen manifest knowledge identity before spending. Assigned to independent evaluator. |
-| R4 | Qualify frozen acceptance families and distinguish completed assertion failure from unavailable infrastructure. Assigned to executor/evaluator authors; unsupported families must remain unavailable and uncacheable. |
+| R2 | Prune pristine semantic payloads unsupported by sealed visible bytes; regenerate structural metadata. Source corrected; synthetic controls drafted. |
+| R3 | Bind the actual launched graph to the frozen manifest knowledge identity before spending. Source corrected; synthetic controls drafted. |
+| R4 | Qualify frozen acceptance families and distinguish completed assertion failure from unavailable infrastructure. Source corrected; unsupported families remain unavailable and uncacheable. |
 | R5 | Enabled/adaptive thinking configurations now refuse before counting or spending; unexpected signed reasoning responses refuse instead of producing invalid tool history. |
 | R6 | Consensus now includes an opaque per-obligation judgment digest. Private scorers must supply it; equal counts with different judgments remain disagreement. |
-| R7 | Historical intermediates must not confer governing authority; preserve discovery and independent current routes. Assigned to Sol graph author. |
-| R8 | Publish the numeric eligibility, medians, intervals and uncertainty metadata supporting token decisions. Assigned to independent evaluator. |
+| R7 | Historical intermediates must not confer governing authority; preserve discovery and independent current routes. Source corrected; synthetic controls drafted. |
+| R8 | Publish the numeric eligibility, medians, intervals and uncertainty metadata supporting token decisions. Source corrected; synthetic controls drafted. |
 | O1 | Removed extra final blank lines in authored data. |
-| O2 | Descriptor-relative no-follow discovery reads assigned as source hardening. |
+| O2 | Descriptor-relative no-follow discovery reads implemented; bounded snapshot retry handles observed write-and-restore races. |
 | O3 | Cold-index/warm-query performance remains unmeasured; optional paperwork shortcut stays unused. |
+
+All eight corrections are now integrated or frozen as exact generic evaluator
+source commitments. Three of four frozen acceptance bundle shapes remain
+unsupported; the full study must refuse before spending. A review-gated
+prerequisite-only entry point can witness this capability refusal without
+asserting actual OS or dependency qualification. No threshold or frozen case
+has changed. Missing scorer commitments also remain unscored, rather than
+establishing consensus from matching aggregate counts.
 
 All source corrections require the same reviewer's exact-source recheck.
 No unit test, container, provider study or implementation approval is claimed

@@ -8,7 +8,7 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — addressing independent implementation review
+## Current work — corrected source ready for same-task recheck
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
@@ -19,10 +19,10 @@ updates are implementation status, not a new claim of Fable approval.
 
 | Owner | Scope | State / next action |
 |---|---|---|
-| Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; graph-record author | Active. R1/R5/R6 corrections; no private gold access. |
+| Codex integrator | Public manifest, status/docs, source baseline and Git/PR integration; graph-record author | Integrated all eight corrections; same-task recheck next. No private gold access. |
 | Sol 6.1 curator A | Private routing gold; no source or graph-record writes | Done. Six routing cases sealed; independent B/C approval. |
 | Sol 6.1 curator B | Private evidence gold; no source or graph-record writes | Done. Six evidence cases sealed; independent A/C approval. |
-| Sol 6.1 scorer C | Independent gold/rubric adjudication, private corpus projection and trusted study driver; no record writes | Projection independently approved; generic driver source frozen for final review. No gold enters record-author or solver context. |
+| Sol 6.1 scorer C | Independent gold/rubric adjudication, private corpus projection and trusted study driver; no record writes | Projection independently approved; six generic source files frozen for exact recheck. No gold enters record-author or solver context. |
 | Sol 6.1 model/snapshot/query authors | M1–M3 model, adapters, snapshots and boundary-test drafts | Source integrated; final review and qualification pending. No gold access. |
 | Luna CLI/capture/skill authors | Thin CLI, capture-test drafts and repository skill | Source integrated; final review and qualification pending. |
 | Sol 6.1 evaluation/executor authors | Closed corpus proxy, finite budgets, result analysis and OCI boundary | Source integrated with synthetic/mock test drafts; review and runtime qualification pending. |
@@ -42,7 +42,7 @@ Astra returned **REQUEST_CHANGES** on candidate `ac7a72c9e` in Hermes
 `t_ff338f21`: eight findings concern receipt byte coverage, sealed semantic
 visibility, actual graph identity, acceptance infrastructure classification,
 thinking protocol settings, per-obligation scorer agreement, historical path
-authority and public token evidence. All are assigned for correction and a
+authority and public token evidence. All eight source corrections are prepared for a
 same-task exact-source recheck. This is implementation review; the earlier
 Fable approval remains specification-only. No test or study result is implied.
 
@@ -147,6 +147,17 @@ isolation probes remain unverified until final review. Identical complete
 patch/proof inputs may reuse an actual acceptance result; all reuse and
 failed runs remain visible. No image pull, container or new service has run.
 
+**D12, 2026-10-21:** Astra R1's eight findings are corrected in source,
+with draft negative controls. Semantic projection requires unchanged visible
+governing bytes, authority propagates through current paths only, and receipt
+witnesses bind source bytes as well as membership. Acceptance requires an
+exact-family prerequisite and trusted completed outcome. One inert-byte
+bundle shape is supported in source; three imported-Python/Rust shapes remain
+unsupported. The full frozen study refuses model spending until every family
+qualifies. A capability-refusal witness is separate from OS/dependency proof.
+This may yield an explicit inconclusive evaluation; it cannot yield savings.
+Main remains `00c74cd8c` at recheck freeze; study baseline remains unchanged.
+
 ## Publication — one owner and an honest landing state
 
 Owner: Codex integrator. PR: not opened; this avoids spending draft-CI units
@@ -161,6 +172,6 @@ Generic study-driver sources are retained privately by exact
 [review-input commitments](../../validation/knowledge/evaluation-driver-source.json);
 they contain no gold literals, and runtime still requires reviewed source,
 queued admission, calibrated finite budget and observed isolation/toolchain
-proof. Final independent source review is the next action.
+proof. Same-task independent source recheck is the next action.
 No merge or deployment has occurred. Any pause after a PR
 exists must end with a current status update on that PR.
