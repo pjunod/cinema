@@ -1,6 +1,6 @@
 # Operation progress — source waits to a repeatable progress argument
 
-**Status:** implementation complete; independent final review and qualification pending · **Date:** 2026-10-21 · **Owner:** Codex coordinator.
+**Status:** independently approved; comment clarification and qualification pending · **Date:** 2026-10-21 · **Owner:** Codex coordinator.
 
 [The status page](OPERATION-PROGRESS-STATUS.md) records current ownership, evidence and delivery. This is the next phase after [the bounded formal verification pilot](FORMAL-VERIFICATION-PILOT-PROPOSAL.md); its safety checks remain unchanged unless an explicit reviewed correction requires otherwise.
 
@@ -28,7 +28,7 @@ The PR identifies coordinator ownership, current stage, review findings, qualifi
 
 ## 5. Selected design and model ownership
 
-[The source wait map](../../verification/operation-progress/WAIT-MAP.md) and 45 hashed anchors cover 19 files. Fable 5.1 supplied design advice and a correcting addendum: expiry revokes authority but both heartbeat cancellation and expiry still await renewal. Cleanup depends on the actual lock queue and returning dependencies; assuming a lease deadline directly frees the lock would be unsound.
+[The source wait map](../../verification/operation-progress/WAIT-MAP.md) and 45 wait anchors cover 19 files; the Tokio lockfile pin makes 46 package anchors across 20 files. Fable 5.1 supplied design advice and a correcting addendum: expiry revokes authority but both heartbeat cancellation and expiry still await renewal. Cleanup depends on the actual lock queue and returning dependencies; assuming a lease deadline directly frees the lock would be unsound.
 
 The new `verification/operation-progress` package preserves the original pilot. Sol owns its model/configurations/mapping and contract. Luna owns the shared runner, focused runner tests, existing CI workflows and validation point paths. A separate Luna source tracer owns the wait map and source-anchor data. Coordinator alone owns these plan/status files, indexes, backlog and PR.
 
@@ -37,3 +37,5 @@ The model represents one selected request's full operation and a bounded competi
 The fixed package has two positive configurations, four deliberate non-progress controls and three normal reachability witnesses. Controls cover an added reverse lock edge, continued heartbeat without worker progress, withheld external return and lost settlement without expiry recovery. Normal witnesses cover success, committed-but-lost acknowledgement reconciliation and cooperative cancellation cleanup. TLC deadlock detection stays enabled; local stuck operations may require temporal checks because unrelated transitions can continue. No event horizon, symmetry or state quotient is planned.
 
 Smoke uses the same small positive and success-witness inputs as full qualification. Final evidence may combine current-input CI smoke receipts with individual receipts for remaining configurations, avoiding a second execution of a configuration that already passed. No new runtime behavior change is planned without a concretely identified source defect.
+
+Fable approved the complete candidate without blocking findings. The status ledger records twelve comments and their dispositions. The clarification batch changes documentation/registry metadata only; the reviewed TLA and configuration bytes remain frozen. Effort compile-only mode now skips toolchain provisioning and both package smokes, while still validating both source mappings.
