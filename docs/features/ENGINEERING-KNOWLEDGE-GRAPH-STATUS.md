@@ -8,7 +8,7 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — corrected source ready for same-task recheck
+## Current work — narrow R9 correction ready for same-task recheck
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
@@ -45,6 +45,10 @@ thinking protocol settings, per-obligation scorer agreement, historical path
 authority and public token evidence. All eight source corrections are prepared for a
 same-task exact-source recheck. This is implementation review; the earlier
 Fable approval remains specification-only. No test or study result is implied.
+Astra R2 subsequently confirmed all eight corrections, then found R9 in the
+capability-only source loader. Its verified-buffer execution fix and inert
+cache/replacement controls are now frozen for the same-task narrow recheck.
+No public graph/query or product source changed for R9.
 
 ## Milestone acceptance — distinguish source from qualification
 

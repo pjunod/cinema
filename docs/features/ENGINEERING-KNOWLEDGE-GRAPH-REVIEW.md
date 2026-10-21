@@ -125,3 +125,31 @@ All source corrections require the same reviewer's exact-source recheck.
 No unit test, container, provider study or implementation approval is claimed
 by these dispositions. The [live status](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md)
 records acceptance and publication as they occur.
+
+## Implementation recheck — Astra R2 and narrow R9 correction
+
+R2 reviewed head `7ff429573757a2a9c18c527618e6edee075eb239`, tree
+`efa5b2337c023274ac09f4369f33ecfef6795ac9`, with the same integration base.
+Astra confirmed **all eight original findings addressed** in the expressly
+limited capability scope. R4 does not require implementing the three
+unsupported families or running a favorable subset. O1/O2 are closed within
+their stated scope; O3 remains unmeasured acceptance.
+
+R2 remained **REQUEST_CHANGES** for one new R9: ordinary Python loading could
+execute a valid cached module or reopened replacement despite checking the
+source hash. The corrected loader now retains the verified buffer, registers
+its module metadata, compiles/executes those exact bytes, detects later
+mutation and unregisters failed loads. Draft inert controls cover conflicting
+valid cached bytecode and path replacement. Frozen prior sources are preserved.
+
+O4 was a nonblocking description mismatch. The capability entry enforces
+APPROVE, reviewer independence, the exact six-source map and study baseline.
+The trusted coordinator separately verifies reviewer profile/model/provider,
+implementation-approval/hash-verification flags and integration base/head/tree
+before invocation. Source review never substitutes for runtime authorization.
+
+Actual R2 report SHA-256
+`8e1b6d3e818cca790586c912fb97f93105cadeaa141f577d9078ef8c847e5e41`;
+verdict `4b0592c76b5eb2a740e72177ef2fd1919542a6ee54fd6870f5d74b6bb12c0ce5`.
+R9's exact refreshed source commitments require the same Astra task's narrow
+recheck before any implementation imports, units or capability witness.
