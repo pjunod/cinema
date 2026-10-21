@@ -108,6 +108,18 @@ async fn retire_failed_rendition(shared: &Shared, rendition: &Arc<Rendition>) {
 
 fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
     if let Some(encoding) = &rendition.recipe.encoding {
+        use plurx_core::resource_observation::WorkPhase;
+        let phase = match step {
+            Step::Start { .. } => Some(WorkPhase::Preparing),
+            Step::Restart { .. } => Some(WorkPhase::Retrying),
+            Step::Resume => Some(WorkPhase::Producing),
+            Step::Stop => Some(WorkPhase::BufferPaced),
+            Step::Terminate { .. } => Some(WorkPhase::Retiring),
+            _ => None,
+        };
+        if let Some(phase) = phase {
+            encoding.note_resource_phase(rendition.gen_epoch.load(Relaxed), phase);
+        }
         match step {
             Step::Start { .. } | Step::Restart { .. } => {
                 #[cfg(target_os = "linux")]

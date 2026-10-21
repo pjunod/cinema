@@ -3380,6 +3380,9 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(plurx_core::process::observation::sample_loop(
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::remote::invitations::worker::run(
         state.clone(),
         background_shutdown.clone(),

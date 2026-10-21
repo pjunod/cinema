@@ -252,6 +252,9 @@ pub async fn setup(
 #[derive(Serialize)]
 pub struct SystemDto {
     pub platform: &'static str,
+    /// Measured effective constraints where supported; missing containment
+    /// data is tagged Unknown, never replaced with unconstrained host totals.
+    pub resource_limits: plurx_core::resource_limits::EffectiveLimits,
     pub application_executable: Option<String>,
     pub runtime_location: Option<String>,
     pub graphics_devices: Vec<plurx_core::transcode::GraphicsDevice>,
@@ -447,6 +450,7 @@ pub async fn system_info(
     let executable = std::env::current_exe().ok();
     Ok(Json(SystemDto {
         platform: std::env::consts::OS,
+        resource_limits: plurx_core::resource_limits::snapshot(),
         application_executable: executable.as_ref().map(|path| path.display().to_string()),
         runtime_location: executable
             .as_ref()

@@ -417,28 +417,46 @@ pub fn running() -> Vec<RunningChild> {
         })
         .collect::<Vec<_>>();
     rows.into_iter()
-        .map(|(pid, work, program, started_at_ms, stoppable, resources)| {
-            let policy = work.class.policy();
-            let observed = observe(pid);
-            let resources = resources
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .snapshot(std::time::Instant::now());
-            RunningChild {
-                pid,
-                class: work.class,
-                purpose: work.purpose,
-                reason: work.class.reason(),
-                program,
-                started_at_ms,
-                requested: cfg!(unix).then_some(policy),
-                applied: observed.applied(policy),
-                observed,
-                stoppable,
-                resources,
-            }
-        })
+        .map(
+            |(pid, work, program, started_at_ms, stoppable, resources)| {
+                let policy = work.class.policy();
+                let observed = observe(pid);
+                let resources = resources
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .snapshot(std::time::Instant::now());
+                RunningChild {
+                    pid,
+                    class: work.class,
+                    purpose: work.purpose,
+                    reason: work.class.reason(),
+                    program,
+                    started_at_ms,
+                    requested: cfg!(unix).then_some(policy),
+                    applied: observed.applied(policy),
+                    observed,
+                    stoppable,
+                    resources,
+                }
+            },
+        )
         .collect()
+}
+
+/// Sample owned children without depending on Activity polling. The registry
+/// mutex is released before any observer lock or OS read.
+pub fn sample_resources() {
+    let observers = registry()
+        .entries
+        .values()
+        .map(|entry| Arc::clone(&entry.resources))
+        .collect::<Vec<_>>();
+    for observer in observers {
+        observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot(std::time::Instant::now());
+    }
 }
 
 /// Kill one listed child. `Ok(false)` when no listed child has that pid.

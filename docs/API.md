@@ -592,6 +592,15 @@ applied at startup; `encoder_selected` and `tone_map` report what its probes
 actually selected. `hwaccel_requested` is the saved node preference, and
 `hwaccel_restart_required` distinguishes a pending change from active state.
 
+`resource_limits` reports node-local `available_threads`, `cpu_ns_per_second`,
+`memory_ceiling_bytes`, `open_file_ceiling` and `age_ms`. Dimensioned values use
+`{"state":"known","value":123}` or `{"state":"unknown","value":"reason"}`;
+unknown is never zero, idle, or permission to expand. Thread width is not measured
+CPU demand. Linux cgroup-v2 constraints include visible ancestor ceilings;
+inaccessible, hidden, unsupported or unbounded containment stays Unknown rather
+than falling back to host RAM/core counts. The read-only snapshot is cached for
+one second and does not change admission or configure the host.
+
 `ffmpeg_support` reports `executable`, optional `expected_executable`,
 `required_package`, `expected_version`, `executable_version`,
 `source_revision` (the required source pin), `package_verification`,
@@ -788,6 +797,12 @@ viewer or a recording waits on it, `background` otherwise), its purpose, the
 program, the requested and kernel-reported `nice` / I/O / `oom_score_adj`,
 whether the class was applied, and whether it can be stopped. It lists this
 node's children only, not its peers'.
+
+Each process also carries `resources`: tagged identity-bound cumulative leader
+CPU nanoseconds/resident bytes, CPU ns per wall second, sample age and explicit
+incomplete-tree Unknown. A readable leader counter is not a graph-total,
+playable-output or spare-capacity claim. Samples share a one-second per-child
+cache; unavailable counters, pid reuse and stale windows never become zero.
 
 Analysis progress may include paired `durable_job_id` and `durable_fence`
 fields for an explicitly correlated execution attempt. Job summaries include

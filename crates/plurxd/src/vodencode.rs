@@ -366,6 +366,9 @@ pub(crate) struct ActiveProductionWindow {
     processed_reservation: std::sync::Weak<EncodeReservation>,
     points: VecDeque<(Instant, u32, i64)>,
     evidence: Option<ActiveProductionEvidence>,
+    /// Instrumentation-only, dimensioned useful-output observations. Existing
+    /// recipe proof and admission policy do not consume these diagnostics.
+    service: plurx_core::resource_observation::ServiceWindow,
 }
 
 impl ActiveProductionWindow {
@@ -412,6 +415,26 @@ impl ActiveProductionWindow {
         }) {
             self.points.clear();
             self.evidence = None;
+            self.service = Default::default();
+        }
+        if let Ok(completed) = u64::try_from(end_ms) {
+            use plurx_core::process::observation::{Metric, UnknownReason};
+            use plurx_core::resource_observation::{ServiceUnit, WorkPhase, WorkSample};
+            if let Some(observation) = self.service.observe(WorkSample {
+                generation,
+                phase: WorkPhase::Producing,
+                unit: ServiceUnit::MediaMilliseconds,
+                completed,
+                deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
+                queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+                at: now,
+            }) {
+                tracing::trace!(target: "plurxd::resources", generation,
+                    phase = ?observation.phase, unit = ?observation.unit,
+                    rate = ?observation.units_per_second,
+                    interval_ms = observation.interval_ms,
+                    "verified VOD output resource observation");
+            }
         }
         while self
             .points
@@ -874,6 +897,34 @@ impl Encoding {
     pub(crate) fn mark_speculative(&self) {
         self.speculative
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The physical executor records state changes independently of encoder
+    /// speed. This diagnostic does not alter recipe proofs or admission.
+    pub(crate) fn note_resource_phase(
+        &self,
+        generation: u64,
+        phase: plurx_core::resource_observation::WorkPhase,
+    ) {
+        use plurx_core::process::observation::{Metric, UnknownReason};
+        use plurx_core::resource_observation::{ServiceUnit, WorkSample};
+        let mut window = self.active_production.lock().expect("active production");
+        let now = Instant::now();
+        let completed = window
+            .service
+            .snapshot(now)
+            .map_or(0, |sample| sample.completed);
+        window.service.observe(WorkSample {
+            generation,
+            phase,
+            unit: ServiceUnit::MediaMilliseconds,
+            completed,
+            deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            at: now,
+        });
+        tracing::trace!(target: "plurxd::resources", generation, ?phase,
+            "VOD producer resource phase");
     }
 
     pub(crate) fn reset_active_production(&self, generation: u64, active: bool) {

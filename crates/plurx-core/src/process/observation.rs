@@ -11,10 +11,13 @@ pub enum UnknownReason {
     Inaccessible,
     InvalidCounter,
     IdentityChanged,
+    UnboundIdentity,
     FirstSample,
     Stale,
     CounterRegressed,
     IncompleteTree,
+    InsufficientEvidence,
+    Unbounded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -60,14 +63,19 @@ pub struct ProcessObserver {
 
 impl ProcessObserver {
     pub fn new(pid: u32) -> Self {
+        // Capture identity once while the launcher still owns the child. If
+        // that fails, never bind a later, possibly recycled numeric pid.
+        let counters = read(pid);
         let mut observer = Self {
             pid,
-            identity: None,
+            identity: match counters {
+                Metric::Known(value) => Some(value.identity),
+                Metric::Unknown(_) => None,
+            },
             previous: None,
             cached: None,
         };
-        // Bind the creation marker while the launcher still owns this child.
-        observer.snapshot(Instant::now());
+        observer.record(Instant::now(), counters);
         observer
     }
 
@@ -84,13 +92,13 @@ impl ProcessObserver {
 
     fn record(&mut self, now: Instant, counters: Metric<ProcessCounters>) -> ProcessObservation {
         let counters = match counters {
+            Metric::Known(_) if self.identity.is_none() => {
+                Metric::Unknown(UnknownReason::UnboundIdentity)
+            }
             Metric::Known(value) if self.identity.is_some_and(|id| id != value.identity) => {
                 Metric::Unknown(UnknownReason::IdentityChanged)
             }
-            Metric::Known(value) => {
-                self.identity.get_or_insert(value.identity);
-                Metric::Known(value)
-            }
+            Metric::Known(value) => Metric::Known(value),
             unknown => unknown,
         };
         let rate = match (self.previous, counters) {
@@ -139,6 +147,20 @@ fn rate(
     u64::try_from(value)
         .map(Metric::Known)
         .unwrap_or(Metric::Unknown(UnknownReason::InvalidCounter))
+}
+
+/// Node-local sampler owned by the daemon's ordinary shutdown token. Missed
+/// ticks are skipped instead of replayed as fabricated observations.
+pub async fn sample_loop(shutdown: tokio_util::sync::CancellationToken) {
+    let mut timer = tokio::time::interval(Duration::from_secs(1));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            _ = timer.tick() => super::priority::sample_resources(),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -288,7 +310,7 @@ mod tests {
         let now = Instant::now();
         let mut observer = ProcessObserver {
             pid: 42,
-            identity: None,
+            identity: Some(counter(0, 1).identity),
             previous: None,
             cached: None,
         };
@@ -319,6 +341,25 @@ mod tests {
         assert_eq!(
             reused.graph_cpu_ns,
             Metric::Unknown(UnknownReason::IncompleteTree)
+        );
+    }
+
+    #[test]
+    fn failed_initial_identity_binding_cannot_attach_to_a_later_pid() {
+        let mut observer = ProcessObserver {
+            pid: 42,
+            identity: None,
+            previous: None,
+            cached: None,
+        };
+        let observed = observer.record(Instant::now(), Metric::Known(counter(10, 2)));
+        assert_eq!(
+            observed.counters,
+            Metric::Unknown(UnknownReason::UnboundIdentity)
+        );
+        assert_eq!(
+            observed.cpu_ns_per_second,
+            Metric::Unknown(UnknownReason::UnboundIdentity)
         );
     }
 
@@ -359,5 +400,48 @@ mod tests {
         assert!(parse_linux(43, stat, 100, 4096).is_none());
         assert!(parse_linux(42, stat, 0, 4096).is_none());
         assert!(parse_linux(42, "truncated", 100, 4096).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_owned_child_has_identity_bound_counters_until_reap() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "exec sleep 30"]).kill_on_drop(true);
+        let (mut child, job) = crate::process::spawn_job_owned(
+            &mut command,
+            crate::process::ChildWork::background("resource_observation_fixture"),
+        )
+        .expect("owned fixture");
+        let mut observer = ProcessObserver::new(child.id().expect("pid"));
+        let first = observer.snapshot(Instant::now());
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let second = observer.snapshot(Instant::now());
+        // Clean up even when a platform's observation assertion will fail.
+        child.start_kill().expect("kill");
+        child.wait().await.expect("reap");
+        drop(job);
+        let Metric::Known(a) = first.counters else {
+            panic!("first counters: {first:?}");
+        };
+        let Metric::Known(b) = second.counters else {
+            panic!("second counters: {second:?}");
+        };
+        assert_eq!(a.identity, b.identity);
+        assert!(b.cpu_ns >= a.cpu_ns);
+        assert!(matches!(b.resident_bytes, Metric::Known(_)));
+        assert!(matches!(second.cpu_ns_per_second, Metric::Known(_)));
+        assert_eq!(
+            second.graph_cpu_ns,
+            Metric::Unknown(UnknownReason::IncompleteTree)
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_sampler_exits_on_ordinary_daemon_shutdown() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), sample_loop(shutdown))
+            .await
+            .expect("sampler stopped");
     }
 }
