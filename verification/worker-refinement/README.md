@@ -39,13 +39,10 @@ has a 900-second hard cap; each of the other thirteen configurations has a
 cap. Fourteen full configurations have a maximum combined cap of 80 minutes;
 the CI preflight job has a 35-minute timeout.
 
-This package uses TLC `-lncheck final`: all declared temporal properties
-remain enabled and are checked after the reachable graph completes, rather
-than repeatedly during exploration. One bounded retry follows the recorded
-300-second timeout. These are resource ceilings and a scheduling choice,
-not measured feasibility or a pass. A timeout or an incomplete final
-liveness check fails qualification; both complete pipelines and their
-properties remain mandatory.
+These limits are ceilings, not completion guarantees. A positive timeout or
+incomplete final liveness check fails qualification. Both complete pipelines
+and every configured property remain mandatory.
+
 Positive worker-refinement runs use TLC's `-lncheck final` strategy, retaining
 every temporal property while deferring liveness checking until state
 exploration completes. Controls and witnesses use TLC's default checking

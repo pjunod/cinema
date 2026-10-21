@@ -218,3 +218,12 @@ and the current-candidate Main promotion gate. The PR records their actual
 results; incomplete exploration never qualifies. CI owns those two outcomes
 to avoid executing a successful local smoke twice. No additional test gate,
 product switch, watchdog or test deletion was introduced.
+
+Twelve local outcomes matched their registry: complete fault-free contention
+exploration (398,166 distinct states, zero queued), five temporal controls,
+one finite stale-commit control and five reachability witnesses. One stale
+control receipt first rejected a mismatched trace-preamble entry; correcting
+that single metadata string and rerunning only that case produced the
+expected finite violation. The parser remained strict. Successful cases were
+retained. The two CI-owned smoke outcomes and promotion/landing receipt are
+recorded in the linked PR, alongside each run's actual source candidate.
