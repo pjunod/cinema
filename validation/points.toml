@@ -469,6 +469,7 @@ paths = [
   "crates/plurx-core/src/content_analysis.rs",
   "crates/plurx-core/src/resource_limits.rs",
   "crates/plurx-core/src/resource_observation.rs",
+  "crates/plurx-core/src/resource_policy.rs",
   "crates/plurx-core/src/resource_settings.rs",
   "crates/plurx-core/src/store/resource_settings_schema.rs",
   "crates/plurx-core/src/store/hiqlite_import/resource_settings_tests.rs",

@@ -45,6 +45,7 @@ pub mod process;
 pub mod remote_control;
 pub mod resource_limits;
 pub mod resource_observation;
+pub mod resource_policy;
 pub mod resource_settings;
 pub mod scan;
 pub mod secrets;
