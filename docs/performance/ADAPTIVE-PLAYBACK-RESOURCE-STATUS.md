@@ -1,12 +1,13 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · M0 source contracts in progress; M1–M7 not complete.
+**Status:** open · M0/M1 partial; M2 capacity and M3 custody slices compiled.
 **Owner:** Sol 6.1 (`hdr-sol`, `gpt-6.1-sol`, `openai-codex`), task
-`t_161f6652`. Manager owns design checks and final review scheduling. One writer,
+`t_161f6652`. Controller owns coordination and final review scheduling. One writer,
 one integration branch `effort/adaptive-playback-resources`, one final PR.
 No deployment. No implementation units, integration campaigns or qualification
-have run. Final independent Fable 5.1 implementation review, fixes and explicit
-manager handoff precede qualification and landing.
+have run. Complete implementation, actual independent Fable 5.1 review and fixes
+precede qualification and landing. The owner confirms management transfer is
+already complete: no additional pre-test handoff or controller-stop gate exists.
 
 Normative [plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md),
 [acceptance](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) and
@@ -21,32 +22,37 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-Latest runtime `5160af863` verifies settings-only capacity in one statement;
-`8ddae0e39` carries raw intent, exact catalog/marker readiness and typed capacity
-through both backend planning snapshots and frozen rolling admission. Only verified
-Automatic ignores rollback cache; unknown installations retain numeric/zero rules.
-One optional-schema parse fallback discards the entire failed snapshot; baseline,
-transport and stepping errors propagate. Vendored owned/mapped/serde reads no
-longer return partial success on stepping failure. Planning admission digest v2
-binds raw four-key presence/bytes and installation identity; old bindings mismatch.
-Settings-only verification also protects VOD/copy, typed preflight and imports.
-SQLite already had transaction-coherent reads; Hiqlite's split-read race is fixed.
-No installed schema bytes, ordinals or recipe-content identities were changed.
+Latest runtime `cad6f18ae` transfers exclusive reservation custody to a core graph
+before launch. The bounded ledger retains actual Child/Job handles and writer
+JoinHandles independently of cancelled waiters. Sealing fences acquisition; root
+count respects the reserved process bound. Partial attachment/resume errors retain
+their actual child/job; any launch error seals further entry. Generation, process
+instance, OS boot and actual root creation identity are distinct. No public receipt
+mint exists, and leader wait or task abandonment cannot release physical capacity.
+Unsupported containment refuses trials before launch; normal possible acquisition
+stays UnknownHeld after real root waits/joins. Positive containment, concrete typed
+nonprocess adapters, daemon integration and restart-persistent reconciliation are
+NOT implemented by this slice. In-memory custody is not a restart journal.
+
+Retained `5160af863`/`8ddae0e39` capacity snapshots bind raw four-key intent and exact
+same-statement catalog/marker readiness. Verified Automatic alone ignores rollback
+cache; unknown installations keep numeric/zero policy. Narrow optional-schema
+fallback discards the entire failed snapshot; baseline/transport/step errors
+propagate. Admission digest v2 fences installation changes and old peers. SQLite
+already had coherent transactions; Hiqlite split authority reads were repaired.
 
 Earlier `e213a4c83` bounded instance-owned priors and `740f4f30a` advisory trial
 policy remain, not production growth authority. `ebf46fa55` generic provenance
 replay guards and independent settings/CAS/import installation remain intact.
-Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS100s (`133924`),
-SHA `fb80ae087e4e10111e7bedd43368d986eb66c67612a769791b7896efbea2d183`.
-New SQL/restore/mode/stepping/binding fixtures compile; bodies NOT RUN. Earlier
-source-scoped compiles and corrected type/placeholder failures remain in evidence.
-Targeted rustfmt binds edition2021/skip_children. No physical-close minting or
-production learning/controller integration yet. Astra's bounded M3 design requires
-core graph custody and real kernel containment; unprovable Unix stays UnknownHeld,
-not a leader-wait receipt or permission to expand. M0–M7 remain incomplete.
-PR1248 remains draft; controller owns newer-source transport/status and review.
-Management transfer is NOT final test handoff. Native Linux e9 receipts remain
-e9-only; no repeated frozen native run, implementation tests or qualification claim.
+Pinned combined daemon/core all-target Hiqlite-contract Clippy PASS181s (`142044`),
+SHA `ea3cfad00623adde5bf789800ba6f95819522a7c45b00318aa7995a01f356a12`.
+New custody fixtures and retained storage fixtures compile; bodies NOT RUN. Earlier
+M3 compiles (`141006`, `141635`) predate the final partial-launch/root-budget/seal
+audit repairs; their logs remain source-scoped evidence, not runtime acceptance.
+Targeted rustfmt binds edition2021/skip_children. Native Linux e9 receipts remain
+e9-only; no new Linux or Windows containment qualification. M0–M7 remain incomplete.
+PR1248 stays draft; controller owns publication/status and review, then coordinates
+once-only affected tests/qualification/authorized merge without another handoff.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
@@ -234,7 +240,7 @@ transport errors remain unknown and require status reconciliation before conflic
 
 ### Transaction crash matrix / concrete regression targets
 
-Tests are to be authored and compiled, not executed before final handoff.
+Tests are authored and compiled now; execute after complete-candidate review/fixes.
 `store/adaptive_resource_attempts_tests.rs` is the planned shared behavioral
 contract exercised on SQLite and Hiqlite with `--features hiqlite-store`.
 
@@ -263,12 +269,13 @@ this table does not claim tests already exist or pass.
   refine schema guards and assign runnable fixtures for current storage layout.
 - M1: implement portable observations and truthful diagnostics, no policy changes.
 - M2: atomic dimensioned policy, retained physical custody, history and settings migration.
-- M3: every adapter above, two-family overlap, real background yield/reap, Live/DVR.
+- M3: connect core custody to every adapter above; positive containment, typed
+  nonprocess closure and restart persistence; real background yield/reap, Live/DVR.
 - M4: guarded durable worker preparation/adoption and mixed-version behavior.
 - M5: same-quality ranking/budgets, shared NAS/relay domains and maintenance.
 - M6: settings/client/operator docs and accurate drain/placement diagnostics.
 - M7: acceptance implementation, complete-candidate independent review/fixes,
-  explicit manager handoff, one affected batch and real-process/cluster/platform
+  one affected batch and real-process/cluster/platform
   qualification, unavailable hardware list, promotion/merge. No physical deployment.
 
 ## Actual M1 delta (not complete)
@@ -352,10 +359,11 @@ These decisions supersede ambiguous prose above. Manager accepted the direction
 for implementation with the mandatory INSERT-guard refinement below. This is
 not final adversarial review or M0/M4 completion; no M4 behavior is enabled.
 
-Draft PR #1248 is open, owner task `t_161f6652`; manager/root owns authenticated
-transport until final handoff. Keep it draft through complete implementation,
-independent Fable review and fixes. Paperwork-only draft CI is allowed; no ready
-transition, implementation units or qualification before the manager handoff.
+Draft PR #1248 is open, owner task `t_161f6652`; controller owns authenticated
+transport and ongoing coordination. Keep it draft through complete implementation,
+independent Fable review and fixes. Paperwork-only draft CI is allowed. The owner
+superseded the former extra handoff gate; no additional transfer or controller
+stop is required before post-review tests/qualification/authorized merge.
 
 ### Database enforcement, including old SQL and retention
 
