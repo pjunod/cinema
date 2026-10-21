@@ -703,7 +703,12 @@ STATE_RE = re.compile(
 DEPTH_RE = re.compile(r"depth of the complete state graph search is\s+(\d+)", re.IGNORECASE)
 COMPLETE_RE = re.compile(r"Model checking completed\. No error has been found\.", re.IGNORECASE)
 TEMPORAL_FINISHED_RE = re.compile(r"^Finished checking temporal properties in\s+\S+", re.MULTILINE)
-TEMPORAL_TRACE_END_RE = re.compile(r"^(?:State\s+\d+:\s+Stuttering|Back to state\s+\d+)\s*$", re.MULTILINE)
+TEMPORAL_TRACE_END_RE = re.compile(
+    r"^(?:State\s+\d+:\s+Stuttering|Back to state\s+\d+(?:: "
+    r"<[A-Za-z_][A-Za-z0-9_!']* line [1-9]\d*, col [1-9]\d* to "
+    r"line [1-9]\d*, col [1-9]\d* of module [A-Za-z_][A-Za-z0-9_]*>)?)[ \t]*$",
+    re.MULTILINE,
+)
 ERROR_RE = re.compile(r"^Error:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
 FATAL_RE = re.compile(
     r"(?:Parsing Error|Semantic Error|OutOfMemoryError|Exception in thread|TLC encountered an error|No such file|cannot find module)",
