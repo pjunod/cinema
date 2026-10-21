@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import copy
 import tempfile
@@ -11,10 +12,11 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("check_formal", ROOT / "scripts/check-formal")
+LOADER = importlib.machinery.SourceFileLoader("check_formal", str(ROOT / "scripts/check-formal"))
+SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 assert SPEC is not None and SPEC.loader is not None
 formal = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(formal)
+LOADER.exec_module(formal)
 
 
 PASS = {
