@@ -1038,6 +1038,7 @@ paths = [
   "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dv_segment,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,rolling_output,rolling_provenance,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/playback_control/**",
   "crates/plurxd/src/prodrun/**",
+  "crates/plurxd/src/decoder_health/**",
   "crates/plurxd/src/decode_facts/**",
   "crates/plurxd/src/pipeprobe/**",
   "crates/plurxd/src/transcode/**",

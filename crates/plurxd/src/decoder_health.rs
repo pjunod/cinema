@@ -68,6 +68,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod owned_drain_tests;
+
 // The receipt and its vocabulary live in `plurx-core`, because the generation
 // manifest carries them and the manifest is core's. Re-exported here so every
 // caller keeps naming them where they are produced.
@@ -1601,39 +1604,63 @@ impl ObservedDiagnostics {
     /// Wait for the diagnostic stream to reach EOF, bounded, and produce the
     /// attempt's receipt.
     ///
-    /// The budget is what stops a reader that never finishes from holding a
-    /// publication open forever. What expiry produces is an *incomplete*
-    /// observation — a refusal to qualify — rather than a hang or a guess.
+    /// The budget bounds evidence collection. Expiry aborts the readers and
+    /// joins their actual tasks before returning an *incomplete* observation.
+    /// Abort is not proof of completion: an unresponsive task stays owned,
+    /// never a false settled/physical-close receipt. Cancelling the waiter
+    /// cannot cancel this drain owner or detach its already-taken handles.
     /// A reader that panicked produces the same answer for the same reason:
     /// §7.1 requires reader failure to be observable, and the observable form
     /// of it is an attempt that cannot claim its output is clean.
     pub async fn settle(
-        mut self,
+        self,
         budget: std::time::Duration,
         exit_disposition: ExitDisposition,
     ) -> ProducerHealthReceipt {
-        // One deadline for the whole settle, not one per reader. Two sequential
-        // budgets would let a teardown spend twice what the caller was told it
-        // could, and the caller is holding a publication open behind this.
+        let plan_digest = self.plan_digest.clone();
         let deadline = tokio::time::Instant::now() + budget;
+        let (completed, result) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let receipt = self.settle_owned(deadline, budget, exit_disposition).await;
+            let _ = completed.send(receipt);
+        });
+        result
+            .await
+            .unwrap_or_else(|_| ProducerHealthReceipt::unobserved(plan_digest, exit_disposition))
+    }
+
+    async fn settle_owned(
+        mut self,
+        deadline: tokio::time::Instant,
+        budget: std::time::Duration,
+        exit_disposition: ExitDisposition,
+    ) -> ProducerHealthReceipt {
+        // The caller's one evidence deadline survives scheduling and both
+        // readers; actual cancellation joins remain owned after its expiry.
+        let mut progress_incomplete = false;
         if let Some(mut progress) = self.progress.take() {
-            // The progress reader ends when the pipe closes, which the child's
-            // exit already guaranteed. Awaited by reference so that expiry can
-            // *abort* it: dropping a `JoinHandle` detaches its task, which is
-            // precisely the reader-outlives-its-producer shape this milestone
-            // exists to remove.
-            if tokio::time::timeout_at(deadline, &mut progress)
-                .await
-                .is_err()
-            {
-                tracing::warn!("producer progress reader did not finish inside the drain budget");
-                progress.abort();
+            // Root exit need not close a pipe inherited by a descendant. On
+            // deadline, abort AND join, never drop a still-running handle.
+            match tokio::time::timeout_at(deadline, &mut progress).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("producer progress reader failed: {error}");
+                    progress_incomplete = true;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "producer progress reader did not finish inside the drain budget"
+                    );
+                    progress_incomplete = true;
+                    progress.abort();
+                    let _ = progress.await;
+                }
             }
         }
         let Some(mut reader) = self.reader.take() else {
             return ProducerHealthReceipt::unobserved(self.plan_digest.clone(), exit_disposition);
         };
-        let accumulator = match tokio::time::timeout_at(deadline, &mut reader).await {
+        let mut accumulator = match tokio::time::timeout_at(deadline, &mut reader).await {
             Ok(Ok(accumulator)) => accumulator,
             Ok(Err(error)) => {
                 // Panicked or cancelled. There is no accumulator to read, and
@@ -1650,12 +1677,18 @@ impl ObservedDiagnostics {
                     "producer diagnostics did not reach EOF inside the drain budget"
                 );
                 reader.abort();
+                let _ = reader.await;
                 return ProducerHealthReceipt::unobserved(
                     self.plan_digest.clone(),
                     exit_disposition,
                 );
             }
         };
+        if progress_incomplete {
+            // Keep real diagnostic faults, but never certify a complete
+            // attempt after its owned telemetry task failed or timed out.
+            accumulator.mark_observation_incomplete();
+        }
         accumulator.settle_receipt(
             self.plan_digest.clone(),
             self.contract_id.clone(),
@@ -2995,17 +3028,9 @@ mod tests {
         assert!(!receipt.observation_complete);
         assert!(!receipt.permits_reuse());
 
-        // Aborting is not instantaneous, but it is bounded: yield until the
-        // runtime has dropped the task, and fail rather than hang.
-        for _ in 0..1_000 {
-            if gone.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!(
-            "the reader outlived the attempt that owned it — dropping a JoinHandle \
-             detaches its task, which is the shape §7.1 refuses"
+        assert!(
+            gone.load(std::sync::atomic::Ordering::SeqCst),
+            "the actual aborted reader is joined BEFORE settlement returns"
         );
     }
 
