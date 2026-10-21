@@ -65,12 +65,21 @@ def _safe_selection(path: str) -> str:
     return path
 
 
+def _document_bytes(root: Path, path: str) -> bytes:
+    item = _read(root, path)
+    require(item.data is not None, "missing discovery source: " + path)
+    return item.data
+
+
 def _preflight(root: Path) -> None:
     """Reject private literal declarations before the read-only M1 discovery."""
     for path in BASE_PATHS:
         checked_path(root, path)
-    pilot = json.loads(_read(root, BASE_PATHS[0]).data)
-    authored = tomllib.loads(_read(root, BASE_PATHS[1]).data.decode("utf-8"))
+    try:
+        pilot = json.loads(_document_bytes(root, BASE_PATHS[0]))
+        authored = tomllib.loads(_document_bytes(root, BASE_PATHS[1]).decode("utf-8"))
+    except (ValueError, UnicodeError) as error:
+        raise KnowledgeError("invalid discovery metadata") from error
     literals = set()
     for anchor in authored.get("anchors", ()):
         literals.update((anchor["path"], anchor.get("owner_module", anchor["path"])))
@@ -84,7 +93,10 @@ def _preflight(root: Path) -> None:
         _safe_selection(path)
         if not any(c in path for c in "*?[]"):
             checked_path(root, path)
-    routes = tomllib.loads(_read(root, routing["manifest"]).data.decode("utf-8"))
+    try:
+        routes = tomllib.loads(_document_bytes(root, routing["manifest"]).decode("utf-8"))
+    except (ValueError, UnicodeError) as error:
+        raise KnowledgeError("invalid routing discovery metadata") from error
     for row in routes.get("decisions", ()):
         if row["id"] in routing["ids"]:
             for path in (row["source"], row["test"]):

@@ -277,6 +277,18 @@ checks=["fixture-check"]
         result = self.assessed(receipt, descriptor_complete=True, dependency_paths=["src/input.rs"])
         self.assertEqual(result["source_compatibility"], "stale")
 
+    def test_missing_and_malformed_discovery_metadata_refuse_explicitly(self):
+        path = self.root / "validation/knowledge/records.toml"
+        original = path.read_bytes()
+        path.unlink()
+        with self.assertRaises(KnowledgeError):
+            capture(self.root)
+        path.write_text("not a TOML document = [")
+        with self.assertRaises(KnowledgeError):
+            capture(self.root)
+        path.write_bytes(original)
+        self.assertTrue(capture(self.root).verify(self.root))
+
     def test_private_environment_metadata_and_materialization_escape_refuse(self):
         for environment in ({"token": "private"}, {"runtime": "/owner/private-path"}):
             with self.assertRaises(KnowledgeError):
