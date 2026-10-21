@@ -5,6 +5,12 @@ use plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED;
 use plurx_core::store::adaptive_resource_attempts::*;
 use uuid::Uuid;
 
+#[path = "contract_adversarial.rs"]
+mod adversarial;
+
+#[path = "restart_tests.rs"]
+mod restart;
+
 struct AttemptFixture {
     claim: AttemptClaim,
 }
@@ -406,6 +412,14 @@ async fn drain_includes_every_unclosed_attempt() {
 }
 
 async fn ready_adoption(store: &dyn Store, fixture: &AttemptFixture) -> AdaptiveAdoption {
+    ready_adoption_recipe(store, fixture, "{}").await
+}
+
+async fn ready_adoption_recipe(
+    store: &dyn Store,
+    fixture: &AttemptFixture,
+    recipe: &str,
+) -> AdaptiveAdoption {
     let claimed = applied(
         store
             .claim_adaptive_attempt(&fixture.claim)
@@ -414,7 +428,7 @@ async fn ready_adoption(store: &dyn Store, fixture: &AttemptFixture) -> Adaptive
     );
     let mut prepared = fixture.prepared(&claimed);
     prepared.worker.selected_recipe_digest =
-        selected_recipe_digest("{}").expect("bounded canonical recipe");
+        selected_recipe_digest(recipe).expect("bounded canonical recipe");
     let sealed = applied(
         store
             .record_adaptive_prepared(&prepared)
@@ -454,18 +468,21 @@ async fn ready_adoption(store: &dyn Store, fixture: &AttemptFixture) -> Adaptive
             principal: prepared.binding.principal,
             playback_id: prepared.binding.playback_id,
             recovery_epoch: prepared.binding.recovery_epoch.to_string(),
-            expected_predecessor_incarnation_id: None,
+            expected_predecessor_incarnation_id: prepared
+                .binding
+                .expected_predecessor_incarnation_id
+                .map(|id| id.to_string()),
             fence_predecessor: true,
             request_id: Some(prepared.binding.key.request_id),
             request_fingerprint: prepared.binding.request_fingerprint,
             owner_node_id: prepared.key.worker_node_id,
-            recipe_json: "{}".into(),
+            recipe_json: recipe.into(),
             response_json: "{}".into(),
             publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: 10_004,
             lease_expires_at_ms: 30_000,
-            expected_desired_revision: None,
+            expected_desired_revision: prepared.binding.expected_desired_revision,
         },
     }
 }

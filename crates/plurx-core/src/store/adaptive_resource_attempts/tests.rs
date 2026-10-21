@@ -8,6 +8,9 @@ use crate::store::{MediaSessionStore, SqliteStore, UserStore};
 use async_trait::async_trait;
 use uuid::Uuid;
 
+#[path = "migration_tests.rs"]
+mod migration;
+
 async fn fixture() -> (SqliteStore, AttemptClaim) {
     let store = SqliteStore::open_in_memory().expect("actual store");
     store
