@@ -632,7 +632,9 @@ mod tests {
                 ))
             })
             .collect();
-        assert!(env.contains(&("XDG_CACHE_HOME".to_owned(), "/cache".to_owned())));
+        assert!(env.contains(&("XDG_CACHE_HOME".to_owned(), "/cache/gpu-cache".to_owned())));
+        assert!(env.contains(&("CUDA_CACHE_DISABLE".to_owned(), "1".to_owned())));
+        assert!(env.contains(&("MESA_SHADER_CACHE_DISABLE".to_owned(), "true".to_owned())));
     }
 
     #[test]

@@ -582,7 +582,9 @@ where
         ),
         None => None,
     };
-    let _playback_pin = crate::playback_cache::pin(&shared.accounting_dir)
+    // Pin this object, not its entire generation: playlist promotion must
+    // still be able to retire expired segments under their own fences.
+    let _playback_pin = crate::playback_cache::pin(&shared.accounting_dir.join(&request.name))
         .map_err(|error| Refused::new("507 Insufficient Storage", error.to_string()))?;
     enter_lane(shared, request.lane).await?;
     if shared.is_closed() {
@@ -820,14 +822,16 @@ where
                 Some(grants) => Some(authorize(shared, grants, request, read_bytes).await?),
                 None => None,
             };
-            let playback_write =
-                crate::playback_cache::reserve(&shared.accounting_dir, read as u64)
-                    .await
-                    .map_err(|error| {
-                        let refused = Refused::new("507 Insufficient Storage", error.to_string());
-                        shared.fail_lane(request.lane, refused.reason.clone());
-                        refused
-                    })?;
+            let playback_write = crate::playback_cache::reserve(
+                &shared.accounting_dir.join(&request.name),
+                read as u64,
+            )
+            .await
+            .map_err(|error| {
+                let refused = Refused::new("507 Insufficient Storage", error.to_string());
+                shared.fail_lane(request.lane, refused.reason.clone());
+                refused
+            })?;
             // Flushed before it is landed: a tokio file write returns before
             // the bytes reach the file, and a directory walk that started
             // after `landed` must be able to see them.

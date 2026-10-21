@@ -1,6 +1,6 @@
 # Playback cache budget — one allocation authority for every playback writer
 
-**Status:** built; compiler, focused regressions and Astra PR review in progress · **Owner:** Codex · **Updated:** 2026-10-21
+**Status:** built; Astra review addressed; fleet acceptance pending · **Owner:** Codex · **Updated:** 2026-10-21
 
 Companion to [OPERATIONS.md](../OPERATIONS.md#split-durable-state-persistent-cache-and-scratch) (storage paths) — this records the shared playback disk policy and the repair for completed renditions filling a server disk.
 

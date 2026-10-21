@@ -67,7 +67,18 @@ async fn bind_ordinary_directory(path: &Path) -> io::Result<Option<OrdinaryDirec
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(None);
     };
-    let parent = plurx_core::fs_secure::SecureDirectory::open(parent_path).await?;
+    let parent = match plurx_core::fs_secure::SecureDirectory::open(parent_path).await {
+        Ok(parent) => parent,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
     let parent_identity = parent.identity().await?;
     let directory = match parent.open_child_directory(name).await {
         Ok(directory) => directory,
@@ -310,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn pressure_directory_requires_owned_regular_members() {
-        let temp = tempfile::tempdir().expect("temp");
+        let temp = crate::test_tempdir().expect("canonical temporary root");
         tokio::fs::write(temp.path().join("seg00000.m4s"), b"media")
             .await
             .expect("media");
