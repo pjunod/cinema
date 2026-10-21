@@ -15,7 +15,7 @@ Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). Th
 | Final independent adversarial review | Fresh Fable 5.1 reviewer | APPROVE on `3da7e0a34`; no blockers; all 12 comments dispositioned |
 | Qualification, PR and merge | Codex coordinator | PR #1249 owns live promotion/landing; all nine formal outcomes and 1,862 Python methods have passing evidence |
 
-Persistent work uses agent-owned clones. One accidental tooling write to the operator checkout was reversed with explicit approval and an exact captured patch; the affected file has no remaining diff. Subsequent editing is confined to explicit owned paths. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
+Persistent work uses agent-owned clones. One accidental tooling write to the operator checkout was reversed with explicit approval and an exact captured patch; the affected file has no remaining diff. Subsequent editing is confined to explicit owned paths. The initial integration base was `c7d78b119b88fa6523824fdde5e84bc21e088a3d`; the live PR records the current integrated main. The Hermes `plurx-formal` board records live task ownership and comments.
 
 The source map is [WAIT-MAP.md](../../verification/operation-progress/WAIT-MAP.md). No concrete application lock cycle was established in the inspected path; the model will exercise a deliberate cycle as a coverage control. Filesystem return and unknown lower-layer dependencies remain explicit premises. Lease expiry revokes authority but still drains renewal; it is not itself a cleanup deadline.
 
