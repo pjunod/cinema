@@ -1,6 +1,6 @@
 # Worker refinement — connecting Rust execution to two-worker progress
 
-**Status:** building · **Updated:** 2026-10-21 · **Owner:** Codex coordinator · **Branch:** `codex/worker-progress-refinement` · **PR:** pending initial plan commit.
+**Status:** review findings addressed; qualification pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator · **Branch:** `codex/worker-progress-refinement` · **PR:** opens after the post-review fix batch.
 
 Companion to [the previous progress ledger](OPERATION-PROGRESS-STATUS.md).
 This phase connects the selected library worker model to production Rust
@@ -13,10 +13,10 @@ No whole-cluster deadlock theorem or removal of existing tests is claimed.
 |---|---|---|
 | Source transitions, held resources and real conformance schedules | GPT-6 Luna | Committed seven real schedules and explicit gaps; pinned daemon/core compiles, Clippy and formatting pass |
 | Model scope, assumptions and correspondence design | Fable 5.1 | Design delivered; authority split, real-worker schedules and correspondence obligations recorded |
-| Two complete workers, temporal properties and controls | GPT-6.1 Sol | Committed 596-line model and 17 configurations; static SANY passed |
+| Two complete workers, temporal properties and controls | GPT-6.1 Sol | Committed two-worker model; duplicate cancellation witnesses consolidated after review |
 | Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Integrated strict 57-action/18-boundary checks; all three source mappings pass static validation |
 | Integration, ledger, PR and exact-tree qualification | Codex coordinator | Owned clone established at `c2d5aa257` |
-| Independent final adversarial review | Fresh Fable 5.1 session | Runs once the complete candidate is frozen |
+| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings being addressed |
 
 ## 2. Implementation correspondence is an explicit obligation
 
@@ -105,8 +105,8 @@ retry. Local queue-loss, domain-loss and admission-pressure schedules await
 the real processing future before cleanup; their barrier is before scanner
 dispatch, so they do not demonstrate joining a blocked filesystem walker.
 The lost completion acknowledgement schedule uses the actual worker reread.
-The backend captured-token example checks durable guards after local revoke;
-it does not observe a facade dispatch before that revoke. Rejection after
+The backend captured-token example checks current durable-owner predicates;
+it does not exercise local revocation or a prior facade dispatch. Rejection after
 durable release and higher-fence rebinding is checked independently.
 
 Ambiguous renewal, repeated release failures, spawned heartbeat ordering,
@@ -119,3 +119,47 @@ module from shared lease source compiled by the cluster checker. The unused
 hook was removed, rather than adding another conditional build mechanism.
 Pinned cluster-check compilation and Clippy now pass. The integration hook
 will check the exact candidate across the workspace before review.
+
+## 8. Independent review and the bounded correction batch
+
+Fresh Fable 5.1 task `t_7e8715bf` returned **CHANGES_REQUESTED** on
+`3eee032ad42d15f7b1b34dcbb50c3d747e80abca`. It read the complete model,
+configurations, Rust/tooling diffs, semantic correspondence, ledger and source
+excerpts. It did not independently read the raw mapping, prior-pin diff,
+outlines or index-only hunks; those limits accompany the report. No tests
+were run by the reviewer. No reviewer approval is inferred from this verdict.
+
+| Finding | Required correction | Owner / state |
+|---|---|---|
+| F1 · overstated action coverage | Mark unobserved work-fault, heartbeat, release retry/ambiguity and lost-settlement transitions unchecked with explicit gaps | Luna / corrected; all 18 flagged rows unchecked with gaps |
+| F2 · duplicate cancellation configurations | Replace four identical model runs with one abstract cancellation witness; keep distinct Rust schedules | Sol and Luna / model, registry and mapping integrated |
+| F3 · misleading local-revoke test history | Remove unused local fence/revoke and name the test for current durable-owner predicates | Luna / renamed current-durable-owner test and corrected ledger |
+
+The corrected registry contains **14 outcomes**: two positives, five temporal
+controls, one safety control and six reachability witnesses. This removes
+three redundant model runs while preserving both complete worker pipelines.
+Static SANY passed for the consolidation. Unit and model execution remain
+pending completion of all findings; passing compile/link checks are not unit
+or model results.
+
+## 9. Nonblocking review comments have explicit dispositions
+
+| Comment | Disposition |
+|---|---|
+| C1 · livelock name | README explains it removes scan-finish fairness while renewal may continue. |
+| C2 · dead stale term | Retained as the documented by-construction ordinary apply guard; no unrelated rewrite. |
+| C3 · cancellation after dispatched completion | Recorded ordering abstraction: model can settle then release, while Rust loss/pressure releases then yields. |
+| C4 · Retry versus Yield | Recorded omitted settlement-kind and failed-attempt accounting; no claim about retry metrics. |
+| C5 · model feasibility | Qualification runs the exact smoke pair out of band before relying on CI; timeout is failure. |
+| C6 · 5.1-second delay | Retain the real production eligibility-clock delay; fake Tokio time would not advance it. |
+| C7 · renewal fault overlap | Retain named actions for separate source boundaries; overlap is documented and harmless. |
+| C8 · selected cancellation | Contract explicitly limits the abstract signal to worker one and assumes no fair cancellation. |
+| C9 · no additional gate | Corrected the data; no new validator policy or product gate. |
+| C10 · replicated coverage | Focused core command explicitly enables `hiqlite-contract-tests`. |
+| C11 · barrier placement | Module documentation warns never to pause inside selected loss/pressure arms. |
+| C12 · hash verification | Strict mapping validation checks actual model/config/source/test hashes; review did not recompute them. |
+
+The sole final review requested corrections; the coordinator has checked the
+specified changes and preserves that verdict rather than relabelling it
+reviewer approval. The next gate is affected qualification on the corrected
+candidate. Existing successful static checks remain identified separately.
