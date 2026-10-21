@@ -85,7 +85,7 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Allows the 20-minute worker formal smoke, other package smokes, toolchain
+    # Allows the 5-minute worker witness smoke, other package smokes, toolchain
     # provisioning and preflight validation to finish with headroom.
     timeout-minutes: 35
     steps:

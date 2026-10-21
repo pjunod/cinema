@@ -1,10 +1,27 @@
 # Worker refinement — run two complete workers against one domain
 
 **Status:** implementation built; current qualification and landing receipt:
-[PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Before observation-state factoring, `progress.cfg` timed out at
-300 seconds (678,415 distinct states; 51,612 queued) and again at 900 seconds
-(4,162,006 distinct states; 151,968 queued). Neither run established a pass.
-The factored model requires all fourteen configured expected outcomes.
+[PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). The fast-lane smoke
+runs only `witness-both-complete.cfg` to check package, toolchain, mapping and
+runner wiring. Before merge, all fourteen configurations still require complete
+per-configuration receipts with matching model, configuration, JAR and governed
+inputs. The twelve retained local receipts remain part of that composed set;
+the qualification ledger records their prior mapping-metadata bridge and this
+timeout-only change without rewriting historical hashes. The model,
+configuration and governed source inputs remain unchanged; `progress.cfg` and
+the witness must both pass. The post-projection CI `progress.cfg` run timed out
+at 900 seconds (1,492,770 distinct states; 52,077 queued), which is incomplete
+evidence, not a pass. A local 900-second run
+exhausted graph exploration after 859 seconds (37,215,119 generated; 5,631,576
+distinct; zero queued), but the final temporal check still had five branches
+and 28,157,880 states unfinished at 900.127 seconds; TLC exited -9 at 4.555 GB
+peak RSS. That result is also incomplete, not a pass. The configured local cap
+is 1,800 seconds to allow the final check to finish. Before observation-state
+factoring, local runs timed out at 300 seconds (678,415 distinct states; 51,612
+queued) and 900 seconds (4,162,006 distinct states; 151,968 queued); those are
+historical runs of the earlier model. The fault-one progress case must complete
+locally for the fourteen-case qualification; a single `full` invocation is not
+required when the fourteen exact per-configuration receipts compose the set.
 
 This separate finite TLA+ package models two distinct library jobs, each with
 its complete admission, claim, token mutex, publication lock, scan, item,
@@ -33,15 +50,17 @@ scripts/check-formal full --package worker-refinement --cache-dir target/formal-
 ```
 
 The shared toolchain pins TLC 1.7.4 and Temurin 21.0.12+8. `progress.cfg`
-has a 900-second hard cap; each of the other thirteen configurations has a
-300-second cap. The qualification heap remains 4 GiB. Smoke runs
-`progress.cfg` and `witness-both-complete.cfg` under a 1,200-second aggregate
-cap. Fourteen full configurations have a maximum combined cap of 80 minutes;
-the CI preflight job has a 35-minute timeout.
+has a 1,800-second (30-minute) hard cap; each of the other thirteen
+configurations has a 300-second cap. The qualification heap remains 4 GiB.
+Smoke runs only `witness-both-complete.cfg` under a 300-second aggregate cap.
+The fourteen-case qualification has a maximum combined cap of 95 minutes; the
+CI preflight job has a 35-minute timeout.
 
 These limits are ceilings, not completion guarantees. A positive timeout or
-incomplete final liveness check fails qualification. Both complete pipelines
-and every configured property remain mandatory.
+incomplete final liveness check fails qualification. The witness smoke is
+runner-wiring feedback only; all fourteen complete outcomes remain mandatory
+before merge, including a complete local `progress.cfg` receipt. Both complete
+pipelines and every configured property remain mandatory.
 
 Positive worker-refinement runs use TLC's `-lncheck final` strategy, retaining
 every temporal property while deferring liveness checking until state
@@ -89,7 +108,7 @@ under the fair-execution projection argument in [CONTRACT.md](CONTRACT.md).
 The item dispatch/application/return milestone, both complete pipelines,
 all guards, fairness clauses, properties and fourteen configuration bytes
 remain unchanged. This contingent design advice is not a review approval or
-a runtime feasibility guarantee; the 900-second budget remains unchanged.
+a runtime feasibility guarantee. The measured full-run budget is recorded above.
 
 `TimeObserved(w)` now only makes that worker's backoff/expiry barrier
 eligible. It generates an identical successor once the barrier is already

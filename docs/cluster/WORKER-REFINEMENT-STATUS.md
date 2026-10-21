@@ -152,7 +152,7 @@ remain under correction. Passing compile/link checks are separate evidence.
 | C2 · dead stale term | Retained as the documented by-construction ordinary apply guard; no unrelated rewrite. |
 | C3 · cancellation after dispatched completion | Recorded ordering abstraction: model can settle then release, while Rust loss/pressure releases then yields. |
 | C4 · Retry versus Yield | Recorded omitted settlement-kind and failed-attempt accounting; no claim about retry metrics. |
-| C5 · model feasibility | Both bounded positive attempts timed out. After observer projection, twelve configurations run locally and CI owns the two smoke outcomes, avoiding duplicate successful runs; all fourteen remain mandatory. |
+| C5 · model feasibility | The two original bounds timed out. After projection, twelve local outcomes match; CI then timed out, and local exploration completed but its final temporal check exceeded 900 seconds. Full local qualification has an 1,800-second bound; CI owns the unrun completion witness only. All fourteen remain mandatory. |
 | C6 · 5.1-second delay | A real yield requires the production clock; the corrected queue-refusal fixture does not yield or incur its five-second delay. |
 | C7 · renewal fault overlap | Retain named actions for separate source boundaries; overlap is documented and harmless. |
 | C8 · selected cancellation | Contract explicitly limits the abstract signal to worker one and assumes no fair cancellation. |
@@ -212,18 +212,36 @@ counts before duplicate filtering. `TimeObserved` still emits that explicit
 self-loop, so the existing global checker remains enabled and vacuous.
 The temporal properties and negative controls carry the progress evidence.
 
-The revised execution plan requires twelve local outcomes, then the two
-existing CI smoke outcomes (`progress.cfg` and `witness-both-complete.cfg`)
-and the current-candidate Main promotion gate. The PR records their actual
-results; incomplete exploration never qualifies. CI owns those two outcomes
-to avoid executing a successful local smoke twice. No additional test gate,
-product switch, watchdog or test deletion was introduced.
-
 Twelve local outcomes matched their registry: complete fault-free contention
 exploration (398,166 distinct states, zero queued), five temporal controls,
 one finite stale-commit control and five reachability witnesses. One stale
 control receipt first rejected a mismatched trace-preamble entry; correcting
 that single metadata string and rerunning only that case produced the
-expected finite violation. The parser remained strict. Successful cases were
-retained. The two CI-owned smoke outcomes and promotion/landing receipt are
-recorded in the linked PR, alongside each run's actual source candidate.
+expected finite violation. The parser remained strict and successful cases
+were retained with their original execution revisions and hashes.
+
+The post-projection CI positive timed out at 900.227 seconds with 1,492,770
+distinct states and 52,077 queued. A local retry exhausted exploration after
+about 859 seconds: 37,215,119 generated, 5,631,576 distinct and zero queued.
+It then hit 900.127 seconds during the five-branch temporal check, before a
+verdict. Neither attempt passes. Fable design `t_c2d34adb` separates full
+qualification from fast smoke; it is advice, not another adversarial review.
+
+Full `progress.cfg` qualification now has a bounded 1,800-second ceiling
+based on that measured exploration cost and the unfinished final check.
+Only that failed positive is retried locally. CI smoke owns the still-unrun
+`witness-both-complete.cfg` under 300 seconds; it checks wiring and supplies
+a reachability trace, rather than establishing temporal progress. The other
+thirteen configuration ceilings remain 300 seconds and the heap stays 4 GiB.
+No TLA, configuration bytes, fault bounds, fairness, actions or properties
+changed for this execution-policy correction.
+
+All fourteen expected outcomes remain mandatory before merge, composed from
+per-configuration receipts and the current-candidate Main promotion gate.
+This does not assert one successful fourteen-config runner invocation. The
+PR records the actual positive, witness, gate and landing results. Historical
+receipts retain their distinct runner and mapping hashes; an explicit
+model/configuration/JAR/governed-input bridge accounts for metadata changes
+without relabelling old results. Incomplete exploration or final temporal
+checking never qualifies. No product switch, watchdog or test deletion was
+introduced.
