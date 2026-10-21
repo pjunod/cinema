@@ -29,14 +29,28 @@ class KnowledgePilotSmokeTests(unittest.TestCase):
         self.assertTrue(any(r['provenance']['source_digest'] for r in answer['records']))
 
     def test_both_cohorts_return_real_multi_edge_paths(self):
-        # M3 promises bounded code-to-document paths for both pilot cohorts.
-        for path in ('crates/plurx-core/src/playback/caps.rs', 'validation/main_unit_receipts.py'):
-            with self.subTest(path=path):
-                response = self.command('context', '--path', path, '--max-depth', '6', '--max-bytes', '8192')
+        import hashlib
+
+        # Context prioritizes direct obligations; multi-hop paths can be on
+        # later bounded pages. Section 5 requires multi-hop discovery in why.
+        for code_path in ('crates/plurx-core/src/playback/caps.rs', 'validation/main_unit_receipts.py'):
+            with self.subTest(path=code_path):
+                response = self.command('context', '--path', code_path, '--max-depth', '6', '--max-bytes', '8192')
                 self.assertLessEqual(len(response.stdout.encode('utf-8')), 8192)
                 answer = json.loads(response.stdout)
                 self.assertIn(answer['status'], {'ok', 'partial'})
-                self.assertTrue(any(len(p['steps']) >= 2 for p in answer['relationship_paths']))
+                self.assertEqual(answer['coverage']['level'], 'curated')
+                self.assertTrue(answer['records'])
+                self.assertTrue(all(record['provenance']['source_digest'] for record in answer['records']))
+
+        artifact = 'plurx:artifact:' + hashlib.sha256(b'validation/main_unit_receipts.py').hexdigest()[:20]
+        for identity in ('plurx:route:server.learned-decode-limit-expiry', artifact):
+            with self.subTest(identity=identity):
+                response = self.command('why', identity, '--max-depth', '6', '--max-bytes', '32768')
+                self.assertLessEqual(len(response.stdout.encode('utf-8')), 32768)
+                answer = json.loads(response.stdout)
+                self.assertIn(answer['status'], {'ok', 'partial'})
+                self.assertTrue(any(len(path['steps']) >= 2 for path in answer['relationship_paths']))
                 for path in answer['relationship_paths']:
                     self.assertTrue(all(step['provenance']['source_digest'] for step in path['steps']))
 
