@@ -1,6 +1,6 @@
 # Operation progress — wait mapping and model delivery
 
-**Status:** source tracing and design advice in progress · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** not opened; implementation and independent review precede qualification.
+**Status:** source wait map and design advice complete; model and tooling implementation in progress · **Updated:** 2026-10-21 · **Owner:** Codex coordinator, thread `01a15aca-f39a-7ca3-9899-bf5bced43755` · **PR:** not opened; implementation and independent review precede qualification.
 
 Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). This phase extends the [completed bounded pilot](FORMAL-VERIFICATION-PILOT-STATUS.md) with a source-backed wait map and a finite-state model that permits repeated execution. It does not yet establish operation progress or cluster deadlock freedom.
 
@@ -8,13 +8,16 @@ Companion to [the implementation plan](OPERATION-PROGRESS-IMPLEMENTATION.md). Th
 
 | Work | Owner | State |
 |---|---|---|
-| Waits, resources and completing tasks | GPT-6 Luna | Tracing current source; no conclusion yet |
-| Property, fairness and abstraction design | Fable 5.1 | Advice only; source-dependent choices pending |
-| Model and checker implementation | Lower-model builders | Pending source map and design |
+| Waits, resources and completing tasks | GPT-6 Luna | 45 source anchors across 19 files committed; map interpretation corrections being applied |
+| Property, fairness and abstraction design | Fable 5.1 | Advice and source-corrected addendum delivered; no coding or final review |
+| Repeated-operation model and contract | GPT-6.1 Sol | Explicit waits, lock intent and return actions being implemented |
+| Checker and existing CI integration | GPT-6 Luna | Separate package selection and fail-closed receipts being implemented |
 | Final independent adversarial review | Fresh Fable 5.1 reviewer | Pending complete candidate |
 | Qualification, PR and merge | Codex coordinator | Pending review and fixes |
 
 All clones and working files are agent-owned; the owner's checkout is untouched. The integration base is `c7d78b119b88fa6523824fdde5e84bc21e088a3d`. The Hermes `plurx-formal` board records live task ownership and comments.
+
+The source map is [WAIT-MAP.md](../../verification/operation-progress/WAIT-MAP.md). No concrete application lock cycle was established in the inspected path; the model will exercise a deliberate cycle as a coverage control. Filesystem return and unknown lower-layer dependencies remain explicit premises. Lease expiry revokes authority but still drains renewal; it is not itself a cleanup deadline.
 
 ## Evidence and remaining acceptance
 
