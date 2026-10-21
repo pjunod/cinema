@@ -1,6 +1,6 @@
 # Worker refinement — connecting Rust execution to two-worker progress
 
-**Status:** review findings addressed; qualification pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator · **Branch:** `codex/worker-progress-refinement` · **PR:** opens after the post-review fix batch.
+**Status:** review findings addressed; qualification pending · **Updated:** 2026-10-21 · **Owner:** Codex coordinator · **Branch:** `codex/worker-progress-refinement` · **PR:** [#1251](http://forge.lan:3000/noirr/plurx/pulls/1251), draft; coordinator owns qualification and merge.
 
 Companion to [the previous progress ledger](OPERATION-PROGRESS-STATUS.md).
 This phase connects the selected library worker model to production Rust
@@ -16,7 +16,7 @@ No whole-cluster deadlock theorem or removal of existing tests is claimed.
 | Two complete workers, temporal properties and controls | GPT-6.1 Sol | Committed two-worker model; duplicate cancellation witnesses consolidated after review |
 | Closed package registry, strict receipts and existing CI wiring | GPT-6 Luna | Integrated strict 57-action/18-boundary checks; all three source mappings pass static validation |
 | Integration, ledger, PR and exact-tree qualification | Codex coordinator | Owned clone established at `c2d5aa257` |
-| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings being addressed |
+| Independent final adversarial review | Fresh Fable 5.1 session | Review delivered on `3eee032ad`; three findings addressed; qualification found fixture corrections |
 
 ## 2. Implementation correspondence is an explicit obligation
 
@@ -69,15 +69,16 @@ were discharged and which remain.
 
 Fable 5.1 advice task `t_e1470e0f` separates finite model results,
 implementation correspondence and selected conformance schedules. It does
-not claim that passing tests establishes formal Rust refinement. A fresh
-independent session will review the complete candidate later.
+not claim that passing tests establishes formal Rust refinement. The fresh
+independent final review and its findings are recorded below.
 
-The source permits two real queue jobs for one library: scan and metadata
-refresh have different dedupe keys and can occupy the two resource slots,
-then contend on the same domain lease. Locks remain per worker; the domain
-and durable backend authority are shared. The model will preserve both
-complete pipelines. Removing a stage from the second worker to reduce
-checking cost was considered in advice and declined by the coordinator.
+Scan and metadata refresh have different dedupe keys and can both be queued
+for one library. Qualification corrected the initial claim that both could
+hold the source reservation concurrently: normal same-root library work is
+serialized by the `source_io` claim predicate. The model admits both claims
+as an explicit abstraction. Its domain-overlap witness is model evidence;
+a simulation and fairness argument remains necessary before transferring
+its temporal result to Rust. Both complete pipelines remain in the model.
 
 Local revocation cannot roll back an already submitted mutation. New local
 dispatch must stop; durable guards govern subsequent application. Renewal
@@ -86,7 +87,7 @@ joins renewal before exact-token retirement; no deadline is inferred.
 
 Before Rust edits, Luna verified `rustup run 1.97.1 cargo check -p plurxd
 --all-targets` with an owned warm target directory: exit zero in 2m 42s.
-No unit tests or model qualification have run in this phase. The default
+This was compile-only evidence before the qualification runs below. The default
 shell compiler is newer and will not be used as qualification evidence.
 
 The conformance implementation exposed another distinction: a local queue-loss
@@ -100,14 +101,15 @@ Spawned-heartbeat scope limitations remain explicitly unchecked where relevant.
 ## 7. Candidate acceptance distinguishes observations from assumptions
 
 Seven inventoried Rust tests cover five actual daemon schedules and two
-backend schedules. The paired-worker daemon test includes contention and
-retry. Local queue-loss, domain-loss and admission-pressure schedules await
+backend schedules. The paired-worker daemon fixture is being corrected to observe real queue
+contention and subsequent retry, rather than unreachable domain contention. Local queue-loss, domain-loss and admission-pressure schedules await
 the real processing future before cleanup; their barrier is before scanner
 dispatch, so they do not demonstrate joining a blocked filesystem walker.
 The lost completion acknowledgement schedule uses the actual worker reread.
 The backend captured-token example checks current durable-owner predicates;
-it does not exercise local revocation or a prior facade dispatch. Rejection after
-durable release and higher-fence rebinding is checked independently.
+it does not exercise local revocation or a prior facade dispatch. The release rejection is isolated; a replacement-owner schedule must retire
+the first queue claim before obtaining the second. Its stale queue and
+domain predicates will therefore both reject the old call.
 
 Ambiguous renewal, repeated release failures, spawned heartbeat ordering,
 durable queue expiry in the worker, actual blocked-child joins, arbitrary
@@ -138,9 +140,9 @@ were run by the reviewer. No reviewer approval is inferred from this verdict.
 The corrected registry contains **14 outcomes**: two positives, five temporal
 controls, one safety control and six reachability witnesses. This removes
 three redundant model runs while preserving both complete worker pipelines.
-Static SANY passed for the consolidation. Unit and model execution remain
-pending completion of all findings; passing compile/link checks are not unit
-or model results.
+Static SANY passed for the consolidation. The findings were addressed before affected execution began. Three daemon
+cancellation checks passed; four fixture/assertion failures and a TLC timeout
+remain under correction. Passing compile/link checks are separate evidence.
 
 ## 9. Nonblocking review comments have explicit dispositions
 
@@ -151,7 +153,7 @@ or model results.
 | C3 · cancellation after dispatched completion | Recorded ordering abstraction: model can settle then release, while Rust loss/pressure releases then yields. |
 | C4 · Retry versus Yield | Recorded omitted settlement-kind and failed-attempt accounting; no claim about retry metrics. |
 | C5 · model feasibility | Qualification runs the exact smoke pair out of band before relying on CI; timeout is failure. |
-| C6 · 5.1-second delay | Retain the real production eligibility-clock delay; fake Tokio time would not advance it. |
+| C6 · 5.1-second delay | A real yield requires the production clock; the corrected queue-refusal fixture does not yield or incur its five-second delay. |
 | C7 · renewal fault overlap | Retain named actions for separate source boundaries; overlap is documented and harmless. |
 | C8 · selected cancellation | Contract explicitly limits the abstract signal to worker one and assumes no fair cancellation. |
 | C9 · no additional gate | Corrected the data; no new validator policy or product gate. |
@@ -163,3 +165,30 @@ The sole final review requested corrections; the coordinator has checked the
 specified changes and preserves that verdict rather than relabelling it
 reviewer approval. The next gate is affected qualification on the corrected
 candidate. Existing successful static checks remain identified separately.
+
+## 10. Qualification is running on the corrected candidate
+
+On `2ffb56b86`, the first Rust batch passed the three domain-loss,
+queue-loss and admission-pressure ordering tests. The paired-worker test
+missed a checkpoint and the reread assertion expected a storage label where
+the API projects a success label. Both core tests stopped on in-memory SQLite
+before Hiqlite: one terminal-result label assertion and one refused claim.
+The four failed tests are under concrete fixture/predicate diagnosis; three
+passing cases are preserved. No replicated-backend evidence is claimed yet.
+Formal smoke is running separately. The draft PR records live progress and
+will stay draft until qualification and required main-gate preparation permit
+promotion. No failing result is counted as a pass.
+
+Qualification correction: the initial `progress.cfg` run hit its 300-second cap
+with 678,415 distinct states and 51,612 queued; it is incomplete, not a pass.
+Same-root `source_io` admission also prevents the originally proposed paired
+library-job fixture. Fable design task `t_3aed651f` is advising on reachable
+schedules and bounded TLC feasibility; production admission will remain intact.
+The initial ready-event CI attempt refused units after draft conversion.
+
+Design recovery `t_3aed651f` confirms two independent physical pools with
+shared durable admission: the second claim is refused, remains uncharged,
+and can retry after the first settles. The proposed TLC retry defers
+liveness analysis until graph completion, retains all properties and both
+pipelines, and is capped at 900 seconds. Incomplete execution will remain
+a failed qualification; simulation or safety-only runs cannot replace it.
