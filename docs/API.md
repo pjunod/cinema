@@ -593,6 +593,8 @@ actually selected. `hwaccel_requested` is the saved node preference, and
 `hwaccel_restart_required` distinguishes a pending change from active state.
 
 `ffmpeg_support` reports `executable`, optional `expected_executable`,
+`required_package`, `expected_version`, `executable_version`,
+`source_revision` (the required source pin), `package_verification`,
 `package_verified`, `package_problems`, `checked_at` (Unix seconds), and
 `rows`. Each row carries `id`, `label`, `required_for`, `applicable`,
 `required`, `included`, `missing`, `runtime` and optional `runtime_detail`.
@@ -619,21 +621,53 @@ the legacy cluster preference on that node after restart. Saving does not
 change active sessions. Restart selects the encoder and probes its HDR graph
 together; unavailable preferred hardware uses the existing encoder fallback.
 
+`platform`, `application_executable` and `runtime_location` identify the
+running application and its containing directory. `graphics_devices` lists
+observed PCI identities, vendor/device IDs, optional model and render node.
+`encoder_device_bindings` distinguishes configured bindings, driver defaults
+and unresolved physical identity. Inventory alone never proves a backend used
+that card. Missing model names remain unknown.
+
+`transcoding_facts` contains six rows (`hardware_decoding`,
+`hardware_encoding`, `tone_mapping`, `hardware_scaling`, `subtitle_burn_in`,
+`deinterlacing`) with `label`, `enabled`, `hardware`, `backend`, `device_ids`
+and terse `detail`. Enabled combines current configuration and detected
+support; it does not describe a running session or require external acceptance.
+`additional_media_support` lists `ac4`, `dolby_vision`, `vulkan` and `opencl`
+with `support_available` and `detail`. Available alternative backends are not
+claimed as selected. Linux package integrity remains separately unverified;
+Mac package verification is not evidence for Linux.
+
 `transcoder_optimization` contains `running`, `error`, `restart_required`, and
-`report`. A report has `measured_at` (Unix seconds) and `results`, ordered
-fastest first. Each result has `backend`, `fps`, and `relative_to_cpu` (CPU is
-1.0). Startup creates a fresh measurement after capability detection; Auto
-selects its fastest supported backend before probing the active HDR graph.
-Results are stored under `node.<node_id>.transcode.benchmark` for diagnostics;
-previous-boot measurements are never used as capability evidence.
+`report`. Its versioned `comparison` measures identical real-media frame
+ranges through decode → processing → H.264 encoding against a software
+baseline. Results compare production-default backend pipelines rather than
+physical devices. Cases cover 1080p H.264 SDR → 720p SDR, 4K HEVC SDR → 1080p SDR and
+4K HEVC HDR10 → 1080p SDR. Results contain `case_id`, `backend`, optional
+`device_id`, `pipeline`, `decoder`, sanitized `command`, `completion`,
+`fallback`, `median_seconds`, optional
+`cpu_percent`, `realtime_ratio`, `relative_to_cpu`, `runs` and `error`.
+`fixture_source` carries the title, attribution, public source page and
+license link from the versioned fixture manifest. Missing measurements remain
+null. FFmpeg process CPU excludes operating-system
+and driver services; it does not rank Auto or measure total system energy.
+
+Auto prefers working hardware and ranks eligible hardware using representative
+playback speed. An explicit preference is preserved. CPU remains the fallback
+when hardware is unavailable or rejects the workload. Legacy synthetic encode
+rates remain diagnostic and cannot select CPU over working hardware. Partial,
+aborted, fallback or stale results cannot become Auto evidence. Reading System
+uses cached facts and never starts probing or FFmpeg.
 
 `POST /api/v1/system/transcoder` accepts `{"node_id":"…"}` and returns
 `{"running":true}`. Only an administrator may start it. A different node,
 active playback, or an already running optimization returns 409. Poll
 `GET /api/v1/system` for completion; disconnecting does not cancel the job.
-Background admission contention, playback preemption and timeouts appear in
-`error`; the last complete report remains visible. A changed Auto winner
-requires restart so the active encoder and HDR graph stay paired.
+The bounded idle-node lifecycle yields to playback. A changed Auto winner
+requires restart so the active encoder and HDR graph stay paired. The source
+fixtures are versioned and hash-checked; source acquisition and preparation
+are excluded from measurement. See the
+[System settings ledger](clients/SYSTEM-SETTINGS-STATUS.md) for qualification.
 
 Two of its sub-objects are shaped by a diagnostic argument rather than by
 convenience.

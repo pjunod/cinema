@@ -5933,32 +5933,42 @@ advisory evidence only. An unmet or unavailable row never disables the switch.
 
 ## Hardware transcode & recent Intel GPUs
 
-**Settings → System → Transcoding backend** selects Auto, NVIDIA NVENC,
-Intel Quick Sync, VA-API, Apple VideoToolbox or CPU for the responding node.
-Only supported backends appear in the menu. Each measured option shows frames
-per second and its speed relative to CPU, where CPU is 1.00×. Auto names its
-measured winner and shows the same numbers.
+**Settings → System → Transcoding** selects Auto, NVIDIA NVENC, Intel Quick
+Sync, VA-API, Apple VideoToolbox or CPU for the responding node. Supported
+backends appear independently of historical benchmark speed. Save records a
+node-specific preference; restart Cinema to apply it with its matching HDR
+graph. Existing sessions retain their pipeline. Nodes without an override
+retain the legacy `PLURX_HWACCEL`/stored cluster preference.
 
-Every startup checks encoder support and benchmarks a fixed 720p H.264 VBR
-workload: 240 frames at 4 Mb/s, one warm-up and the median of three timed runs.
-Auto chooses the fastest successful backend, including CPU when it wins. An
-explicit preference is preserved. The benchmark measures encoding, process
-startup and frame upload; it does not predict every source decoder or HDR
-workload. The startup benchmark has a 180-second total deadline; if CPU cannot
-complete or the deadline expires, startup uses the validated fallback order.
+Versions separates Cinema from Jellyfin FFmpeg, with each package's build and
+location behind its own disclosure. The required package pin and executable
+version come from the backend contract. Linux does not inherit the Mac package
+integrity verdict. Transcoding rows show configured enablement and device or
+backend details; they do not claim a session is currently running. Additional
+media support describes available facilities and alternative backends.
 
-**Optimize** reruns support checks, benchmarks, and each available backend's
-HDR pipeline. It runs once per node, yields to playback, and stops after ten
-minutes. Failed or interrupted reruns retain the last complete results. You
-can leave Settings while it runs; return to see its status and measurements.
+**Run comparison** measures the same real-media frames through decoding,
+scaling or HDR processing, and H.264 encoding. The three workloads are 1080p
+H.264 SDR → 720p SDR, 4K HEVC SDR → 1080p SDR and 4K HEVC HDR10 → 1080p SDR.
+The table reports elapsed seconds per pipeline: CPU, NVIDIA NVENC, Intel
+Quick Sync and VA-API on Linux; CPU and VideoToolbox on macOS. Test
+details separate realtime rate, CPU-relative speed and FFmpeg process CPU.
+Driver and operating-system services are outside that CPU measurement.
 
-Save records a node-specific preference. Restart that node to activate a new
-backend and its matching HDR graph; the next startup measures speeds again.
-The card reports a pending restart when a rerun changes Auto's winner. Existing
-sessions keep their original pipeline. A saved backend that is no longer
-supported is omitted from the menu and explained separately. Other nodes
-retain their own preferences. Nodes without an override keep the legacy
-`PLURX_HWACCEL`/stored cluster preference.
+Auto prefers working hardware; representative playback speed ranks hardware
+options, with CPU fallback when needed. Explicit saved choices stay explicit.
+The old short synthetic encoding test cannot make CPU the Auto winner. Stale,
+partial or fallback measurements cannot qualify a hardware choice. Physical
+card inventory and bindings remain separate diagnostics. Performance measures
+each production-default pipeline, with no per-card grouping or selection.
+
+The comparison runs only while idle and yields to playback under the existing
+bounded optimization lifecycle. You can leave Settings and return to its
+status. A changed Auto winner needs a restart. Versioned fixture preparation
+is outside the timed workload. Storage and logs start collapsed; logs are
+fetched only while expanded. Warnings stay visible with full detail available
+on expansion. The [System settings ledger](clients/SYSTEM-SETTINGS-STATUS.md)
+separates implementation and platform acceptance.
 
 Speculative jobs explicitly pinned to a different encoder family remain for
 compatible workers. A node advertises the backend it will execute, and CPU

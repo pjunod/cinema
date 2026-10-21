@@ -1,3 +1,13 @@
+# System comparison ownership review (PR #1243, 2026-10-20):
+# The shared launcher/guard was adversarially reviewed by Astra; Sol reviewed
+# this exact census delta. comparison.rs adds one background job-owned FFmpeg
+# Command, kill_on_drop and awaited child.wait. Its job guard spans that wait
+# and the two joined 64 KiB tail readers; timeout/cancellation drop that owner.
+# The 60s production run timeout and 600s operator-test timeout replace the
+# removed 180s startup synthetic-benchmark timeout: net +1 namespaced timer.
+# No new task, producer authority, independent reader or cleanup loop is added.
+# Structural patterns, scan roots and exact-equality requirements stay intact.
+
 # Media support ownership review (PR #1239, 2026-10-20; Astra reviewed):
 # ffmpeg_support.rs adds one awaited spawn_blocking for local package hashing.
 # It owns only paths/hash inputs, no child or producer authority. An already
@@ -4797,7 +4807,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # vod/driver.rs:1290/1348 (5s held/exited observations). Timeout is failure,
 # never cleanup evidence. -2 removed refresh timeout/expiry sleep in
 # manager/create.rs and serve/delivery.rs. Net +4; no new shipped timer.
-expected_occurrences = 1825
+expected_occurrences = 1826
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5254,7 +5264,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # a three-frame control. Each output future is directly awaited and has
 # kill_on_drop(true); no separate per-command timeout or process-group/reap
 # guarantee on cancellation is asserted. No production launcher is added.
-expected_occurrences = 291
+expected_occurrences = 292
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6179,7 +6189,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # the existing supervisor result, not an OS process. The other five are the
 # two test helper children's actual wait/start_kill sites (three in the shared
 # capture fixture, two in the backpressure fixture); each child is awaited.
-expected_occurrences = 346
+expected_occurrences = 347
 # 316 -> 317 for the same continuous-family admission race regression:
 # its barrier.wait() synchronizes the two finite threads before acquisition.
 # This broad .wait() sentinel matches a Barrier, not a process lifecycle;
@@ -6393,7 +6403,7 @@ pattern = "kill_on_drop\\s*\\("
 # PR1225: +3 in manager/processed_reuse_tests.rs:825/845/1103, the same
 # directly awaited test mux/probe/control commands. These guards request child
 # kill if their output future drops; they are not confirmed-reap receipts.
-expected_occurrences = 109
+expected_occurrences = 110
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
