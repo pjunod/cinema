@@ -91,6 +91,50 @@ async fn generic_writers_cannot_replay_provenance_or_partially_apply_a_settings_
 }
 
 #[tokio::test]
+async fn admission_modes_ignore_only_automatic_cache_and_revalidate_old_writer_intent() {
+    for_each_backend(|store, backend| async move {
+        use plurx_core::resource_settings::admission_pair;
+        store
+            .put_settings(&[(keys::MAX_HW_SESSIONS, "0"), (keys::SW_POOL_THREADS, "0")])
+            .await
+            .expect("legacy ceilings");
+        assert_eq!(
+            admission_pair(store.as_ref()).await.expect("legacy"),
+            (Some("0".into()), Some("0".into())),
+            "{backend}"
+        );
+        let before = store
+            .resource_capacity_snapshot()
+            .await
+            .expect("snapshot")
+            .expect("schema");
+        assert!(store
+            .put_resource_capacity(&CapacityUpdate {
+                expected_revision: before.revision,
+                hardware_sessions: Some(LimitChoice::Automatic),
+                software_pool_threads: Some(LimitChoice::Explicit { value: 0 }),
+            })
+            .await
+            .expect("different key-specific modes"));
+        assert_eq!(
+            admission_pair(store.as_ref()).await.expect("current"),
+            (None, Some("0".into())),
+            "{backend}"
+        );
+        store
+            .put_setting(keys::MAX_HW_SESSIONS, "0")
+            .await
+            .expect("same-value legacy write");
+        assert_eq!(
+            admission_pair(store.as_ref()).await.expect("legacy wins"),
+            (Some("0".into()), Some("0".into())),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn typed_modes_preserve_absence_zero_and_rollback_and_legacy_writes_win() {
     for_each_backend(|store, backend| async move {
         let initial = store

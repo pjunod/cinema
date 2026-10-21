@@ -837,10 +837,7 @@ impl EncodePermit {
 async fn source_copy_policy(store: &dyn plurx_core::store::Store) -> Option<(usize, usize)> {
     let Ok(Ok((hardware, software))) = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        store.get_setting_pair(
-            plurx_core::store::keys::MAX_HW_SESSIONS,
-            plurx_core::store::keys::SW_POOL_THREADS,
-        ),
+        plurx_core::resource_settings::admission_pair(store),
     )
     .await
     else {
@@ -1019,9 +1016,8 @@ impl Encoding {
 
     pub async fn try_permit(&self) -> Option<EncodePermit> {
         self.hooks.before_admission().await;
-        self.try_permit_after(self.store.get_setting_pair(
-            plurx_core::store::keys::MAX_HW_SESSIONS,
-            plurx_core::store::keys::SW_POOL_THREADS,
+        self.try_permit_after(plurx_core::resource_settings::admission_pair(
+            self.store.as_ref(),
         ))
         .await
     }
@@ -1034,10 +1030,7 @@ impl Encoding {
     ) -> Option<EncodePermit> {
         self.hooks.before_admission().await;
         self.try_permit_with_priority(
-            self.store.get_setting_pair(
-                plurx_core::store::keys::MAX_HW_SESSIONS,
-                plurx_core::store::keys::SW_POOL_THREADS,
-            ),
+            plurx_core::resource_settings::admission_pair(self.store.as_ref()),
             None,
             async {
                 demand
@@ -1064,10 +1057,7 @@ impl Encoding {
     /// it never registers foreground demand or borrows a handoff claim.
     pub(crate) async fn try_background_permit(&self) -> Option<EncodePermit> {
         self.try_permit_with_priority(
-            self.store.get_setting_pair(
-                plurx_core::store::keys::MAX_HW_SESSIONS,
-                plurx_core::store::keys::SW_POOL_THREADS,
-            ),
+            plurx_core::resource_settings::admission_pair(self.store.as_ref()),
             Some(Priority::Background),
             async { Some((None, ())) },
         )
@@ -2092,6 +2082,53 @@ mod source_copy_admission_tests {
         assert_eq!(admissions.software_in_use(), SOURCE_COPY_CPU_THREADS);
         drop(admitted);
         assert_eq!(admissions.software_in_use(), 0);
+    }
+
+    #[tokio::test]
+    async fn source_copy_policy_consumes_modes_without_treating_rollback_cache_as_intent() {
+        use plurx_core::resource_settings::{CapacityUpdate, LimitChoice};
+        use plurx_core::store::keys;
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("policy store");
+        store
+            .put_settings(&[(keys::MAX_HW_SESSIONS, "0"), (keys::SW_POOL_THREADS, "0")])
+            .await
+            .expect("legacy conservative zeros");
+        assert_eq!(source_copy_policy(&store).await, Some((0, 0)));
+        let snapshot = store
+            .resource_capacity_snapshot()
+            .await
+            .expect("snapshot")
+            .expect("schema");
+        assert!(store
+            .put_resource_capacity(&CapacityUpdate {
+                expected_revision: snapshot.revision,
+                hardware_sessions: Some(LimitChoice::Automatic),
+                software_pool_threads: Some(LimitChoice::Automatic),
+            })
+            .await
+            .expect("explicit Automatic choice"));
+        assert_eq!(
+            source_copy_policy(&store).await,
+            Some((
+                crate::admission::DEFAULT_MAX_HW_SESSIONS,
+                crate::admission::software_budget()
+            ))
+        );
+        assert_eq!(
+            store
+                .get_setting(keys::SW_POOL_THREADS)
+                .await
+                .expect("rollback cache"),
+            Some("0".into())
+        );
+        store
+            .put_setting(keys::SW_POOL_THREADS, "0")
+            .await
+            .expect("old same-value writer");
+        assert_eq!(
+            source_copy_policy(&store).await,
+            Some((crate::admission::DEFAULT_MAX_HW_SESSIONS, 0))
+        );
     }
 
     /// A budget below the copy's own estimate cannot change during one wait,

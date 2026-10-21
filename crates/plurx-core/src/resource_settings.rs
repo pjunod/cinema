@@ -34,6 +34,33 @@ pub struct CapacitySnapshot {
     pub values: BTreeMap<String, String>,
 }
 
+/// Coherent settings input for the existing conservative admission paths.
+/// Automatic ignores only the numeric rollback cache; it grants no measured
+/// expansion and does not change thread limits or physical safety caps.
+pub async fn admission_pair(
+    store: &dyn crate::store::SettingsStore,
+) -> Result<(Option<String>, Option<String>), StoreError> {
+    let Some(snapshot) = store.resource_capacity_snapshot().await? else {
+        // Partial/future schema cannot authorize Automatic. Old numeric limits
+        // remain effective and ordinary legacy playback stays available.
+        return store
+            .get_setting_pair(keys::MAX_HW_SESSIONS, keys::SW_POOL_THREADS)
+            .await;
+    };
+    let modes = ResourceSettings::from_snapshot(&snapshot.values);
+    let effective = |key: &str, limit: StoredLimit| {
+        if limit.state == ReadState::Automatic {
+            None
+        } else {
+            snapshot.values.get(key).cloned()
+        }
+    };
+    Ok((
+        effective(keys::MAX_HW_SESSIONS, modes.hardware_sessions),
+        effective(keys::SW_POOL_THREADS, modes.software_pool_threads),
+    ))
+}
+
 /// Explicit operator intent only. Omitted fields are not rewritten. Automatic
 /// preserves the stored conservative rollback cache, never a resolved local
 /// core count; selecting a mode is not a capacity permit.
