@@ -1,18 +1,38 @@
 # Worker refinement contract — qualify conditional progress and authority
 
-**Status:** candidate; independent review and qualification pending.
+**Status:** reviewed candidate with corrections; exhaustive qualification remains incomplete.
 Companion to [README.md](README.md), which owns commands and the configuration
 registry. The correspondence files own production anchors and schedule gaps.
 
 ## Two complete pipelines share one durable domain
 
-Workers `w1` and `w2` denote two distinct runnable jobs for the same library:
-`library_scan` and `metadata_refresh` have different dedupe keys and can hold
-two queue reservations while contending on `scan:library:<id>`. Fixed worker
-to job/request pairing models a selected request batch, not migration or
-arbitrary scheduling of jobs. The production request query is filtered by
-claimed job ID; `request[w]` and `waiter[w]` are never completed by another
-worker. Both pipelines retain the same item and completion milestones.
+Workers `w1` and `w2` denote two distinct selected library jobs with fixed
+job/request pairing. `library_scan` and `metadata_refresh` have different
+dedupe keys and may both be queued for one library. The model intentionally
+overapproximates admission and claim by permitting both to run and contend
+on `scan:library:<id>`; this is a domain-contention stress abstraction, not a
+reachable paired production schedule.
+
+Production admission has two earlier gates. Each node's background-heavy
+physical semaphore has capacity one. Even with separate node-local pools,
+the durable `CLAIM_SQL` source-reader gate rejects a second same-root
+non-live background job while the first holds its reservation. The supported
+`enqueue_library_work` API supplies a `library_work` waiter and does not
+attach the qualifying live-demand waiter that would permit that second
+reader. Different dedupe keys and a generic resource capacity of two do not
+make both library claims eligible.
+
+The real paired-worker schedule therefore covers two nodes, durable
+claim refusal without domain yield, and sequential completion after the
+first worker settles. It does not exercise the model's simultaneous claims
+or domain-overlap/reacquisition witness. A separate single-worker source
+schedule with a foreign domain holder can cover domain refusal, without
+establishing this paired model history.
+
+The production request query is filtered by claimed job ID; `request[w]`
+and `waiter[w]` are never completed by another worker. Fixed pairing models
+a selected request batch, not migration or arbitrary job scheduling. Both
+modeled pipelines retain the same item and completion milestones.
 
 Every worker has separate physical admission, local claim, durable queue
 state, token mutex with FIFO intent queue, publication read/write conflict
@@ -30,6 +50,27 @@ domain heartbeat join/release, queue heartbeat join, local retirement and
 admission drop. The branch ordering follows `afterSettle`: failed work
 releases before settlement, successful completion settles before release.
 The walker must return and join before physical admission drops.
+
+## Source correspondence does not automatically transfer progress
+
+The intended admission/claim overapproximation adds contention histories,
+but no state/action simulation proof currently relates this entire model
+to the production queue. Such a proof must account for physical refusal,
+durable claim refusal without a queue mutation, reservation lifetime and
+request assignment. Safety transfer requires an explicit state and step
+mapping. Liveness transfer additionally requires showing how fair source
+executions map to model executions satisfying the specific action-fairness
+and stable-demand premises; removing source paths or adding modeled paths
+alone supplies no such argument. The model's progress checks therefore stay
+conditional model results. Source schedules are independent conformance
+evidence for the observations they actually drive.
+
+A source stale-write schedule that invalidates both old queue authority and
+the old domain fence tests rejection under that conjunction; it does not
+isolate the higher-fence predicate. Likewise a direct durable-token call
+with current owners does not schedule a facade call across local revocation.
+The correspondence ledger identifies which predicate and timing histories
+each source schedule actually distinguishes.
 
 ## Local revocation and durable authority are different facts
 
@@ -115,7 +156,9 @@ Cleanup for one worker does not assume that the other worker releases its
 lease or completes its work: a contender that loses acquisition settles,
 retires and releases admission. The global useful-progress argument does
 require fair dependency completion for the incumbent worker. Witnesses for
-both completion and overlap are reachability evidence, not per-job liveness.
+both completion and overlap are model reachability evidence, not per-job
+liveness. In particular, domain overlap is model-only; the corrected paired
+Rust schedule refuses the second claim and then completes sequentially.
 Monotone history markers are enabled only in witness scenarios; they do not
 bound execution or prune paths.
 
@@ -130,7 +173,7 @@ cancellation and detached lower application are not forced to occur.
 | Boundary | Premise and scope |
 |---|---|
 | `ProbeReturn`, `WalkReturn` | PRM-fs: selected filesystem operations eventually return; no local finite bound |
-| `Admission` | PRM-admission: two suitable physical capacities and capable workers exist |
+| `Admission`, successful modeled claim | PRM-admission/model abstraction: two independently admitted capable workers may hold claims; production node-local capacity and durable same-root eligibility are omitted, not established by this premise |
 | Authority actions | PRM-authority: selected local/remote authority checks return |
 | Store and heartbeat apply/reply actions | PRM-backend: stable quorum/transport permits remaining normal calls to apply and return |
 | Individual lock, dispatch, poll, join, retire and drop actions | PRM-runtime: continuously enabled selected task steps eventually run |

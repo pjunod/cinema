@@ -1,20 +1,26 @@
 # Worker refinement — run two complete workers against one domain
 
-**Status:** implementation candidate; static parsing passed. Independent final
-review and all model-checking qualification remain pending. No TLC result is
-claimed by this document.
+**Status:** reviewed candidate with corrections; exhaustive qualification is
+incomplete. The first `progress.cfg` run timed out at 300 seconds, with
+678,415 distinct states and 51,612 states still queued. It found no property
+counterexample, but did not establish a pass.
 
 This separate finite TLA+ package models two distinct library jobs, each with
 its complete admission, claim, token mutex, publication lock, scan, item,
-completion, heartbeat, retry, settlement and cleanup pipeline. Both contend
-on one `scan:library:<id>` domain. Each job owns its own selected durable
+completion, heartbeat, retry, settlement and cleanup pipeline. Admission and
+claim intentionally overapproximate production eligibility so both can
+contend on one `scan:library:<id>` domain. The production same-root queue
+gate instead refuses the second background library claim; the paired Rust
+schedule covers that refusal and sequential completion. Domain overlap is
+model-only evidence. Each job owns its own selected durable
 request and waiter. Repeated demand and retries remain cyclic without an
 event horizon, state constraint, `VIEW` or symmetry reduction.
 
 Read [CONTRACT.md](CONTRACT.md) for exact properties and premises. The
 source-owned `CORRESPONDENCE.md` and `correspondence.json` identify Rust
 anchors, tested schedules and remaining gaps; they are maintained separately.
-This package does not establish a mathematical refinement of Rust. The prior
+There is no proved state/action/fairness simulation from production to this
+model, so model progress does not automatically transfer to Rust. The prior
 [operation-progress](../operation-progress/README.md) and
 [durable-jobs](../durable-jobs/README.md) executable packages are unchanged.
 
@@ -26,14 +32,19 @@ scripts/check-formal full --package worker-refinement --cache-dir target/formal-
 ```
 
 The shared toolchain pins TLC 1.7.4 and Temurin 21.0.12+8. `progress.cfg`
-has a 900-second hard cap; the other thirteen configurations have 300 seconds
-each. The qualification heap is 4 GiB. Smoke runs `progress.cfg` and
-`witness-both-complete.cfg` under a 1,200-second aggregate cap. Fourteen full
-configurations have a maximum combined cap of 80 minutes. Worker-refinement
-uses TLC's `-lncheck final` strategy: all configured temporal properties remain
-checked, with liveness checking deferred until state exploration completes.
-These are resource ceilings, not completion guarantees. A timeout fails
-qualification; both complete pipelines remain mandatory.
+has a 900-second hard cap; each of the other thirteen configurations has a
+300-second cap. The qualification heap remains 4 GiB. Smoke runs
+`progress.cfg` and `witness-both-complete.cfg` under a 1,200-second aggregate
+cap. Fourteen full configurations have a maximum combined cap of 80 minutes;
+the CI preflight job has a 35-minute timeout.
+
+This package uses TLC `-lncheck final`: all declared temporal properties
+remain enabled and are checked after the reachable graph completes, rather
+than repeatedly during exploration. One bounded retry follows the recorded
+300-second timeout. These are resource ceilings and a scheduling choice,
+not measured feasibility or a pass. A timeout or an incomplete final
+liveness check fails qualification; both complete pipelines and their
+properties remain mandatory.
 
 **How to read results:** positives need complete exploration, zero queued
 states and no errors. A temporal control needs its sole named property to
@@ -60,7 +71,7 @@ budget is therefore at most one across the entire repeated execution.
 | `control-no-useful-progress.cfg` | `UsefulProgress` fails without scan-finish fairness for either worker |
 | `control-stale-commit.cfg` | `NoStaleCommit` fails on a pending request changed by an old detached completion |
 | `witness-both-complete.cfg` | Both workers apply a durable request completion and reach cleanup |
-| `witness-overlap-reacquire.cfg` | `w2` acquires between `w1` release and reacquisition; both complete and clean up |
+| `witness-overlap-reacquire.cfg` | Model-only: `w2` acquires between `w1` release and reacquisition; both complete and clean up |
 | `witness-detached-before-release.cfg` | Detached completion applies after local revocation and before durable release |
 | `witness-stale-after-release.cfg` | A detached completion is rejected after durable invalidation; request stays pending |
 | `witness-cancel.cfg` | One abstract cancellation action reaches cleanup; distinct signals are covered only by Rust schedules |
