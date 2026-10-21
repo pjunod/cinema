@@ -25,6 +25,9 @@ use super::{
 use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, UnknownReason};
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
+mod source_files;
+pub use source_files::GraphSourceFile;
+
 const MAX_ROOTS: usize = 32;
 const MAX_WRITERS: usize = 32;
 static PROCESS_INSTANCE: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
@@ -74,12 +77,15 @@ struct Members {
     writers: Vec<JoinHandle<()>>,
     joined_writers: usize,
     abandoned_writers: usize,
+    source_files: Vec<source_files::SourceFile>,
 }
 
 pub(super) struct GraphCustody {
     binding: ReservationBinding,
     identity: GraphIdentity,
     root_limit: usize,
+    source_limit: usize,
+    source_read_limit: usize,
     sealed: AtomicBool,
     members: Mutex<Members>,
 }
@@ -110,6 +116,7 @@ pub struct SealedPhysicalGraph {
 pub enum GraphHoldReason {
     ContainmentUnavailable,
     RootWaitFailed,
+    SourceCloseFailed,
     LedgerUnavailable,
 }
 
@@ -131,6 +138,8 @@ pub struct GraphCustodySnapshot {
     pub writers: usize,
     pub joined_writers: usize,
     pub abandoned_writers: usize,
+    pub source_files: usize,
+    pub closed_source_files: usize,
 }
 
 impl ResourceReservation {
@@ -171,12 +180,22 @@ impl ResourceReservation {
         {
             return Err(AdmissionRefusal::InvalidTransition);
         }
+        let source_limit = usize::try_from(entry.resources.handles)
+            .unwrap_or(usize::MAX)
+            .min(source_files::MAX_SOURCE_FILES);
         let custody = Arc::new(GraphCustody {
             binding: self.binding,
             identity,
             root_limit: usize::try_from(entry.resources.processes)
                 .unwrap_or(usize::MAX)
                 .min(MAX_ROOTS),
+            source_limit,
+            // Every source may retain one completed/pending read after waiter
+            // cancellation. Divide the buffer budget across the entire bounded
+            // inventory, not just the caller currently holding the async lock.
+            source_read_limit: usize::try_from(entry.resources.peak_memory_bytes)
+                .unwrap_or(usize::MAX)
+                / source_limit.max(1),
             sealed: AtomicBool::new(false),
             members: Mutex::new(Members {
                 acquired: false,
@@ -184,6 +203,7 @@ impl ResourceReservation {
                 writers: Vec::new(),
                 joined_writers: 0,
                 abandoned_writers: 0,
+                source_files: Vec::new(),
             }),
         });
         entry.custody = Some(Arc::clone(&custody));
@@ -503,6 +523,12 @@ impl SealedPhysicalGraph {
             writers: members.writers.len(),
             joined_writers: members.joined_writers,
             abandoned_writers: members.abandoned_writers,
+            source_files: members.source_files.len(),
+            closed_source_files: members
+                .source_files
+                .iter()
+                .filter(|source| source.closed())
+                .count(),
         }
     }
 
@@ -550,6 +576,11 @@ impl SealedPhysicalGraph {
             let abandoned = (&mut members.writers[index]).await.is_err();
             members.joined_writers += 1;
             members.abandoned_writers += usize::from(abandoned);
+        }
+        for source in &mut members.source_files {
+            if source.close().await.is_err() {
+                return GraphCloseOutcome::UnknownHeld(GraphHoldReason::SourceCloseFailed);
+            }
         }
         GraphCloseOutcome::UnknownHeld(GraphHoldReason::ContainmentUnavailable)
     }

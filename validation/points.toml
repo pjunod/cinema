@@ -482,6 +482,8 @@ paths = [
   "crates/plurx-core/src/adaptive_resources.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/tests.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/source_files.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/source_files/tests.rs",
   "crates/plurx-core/src/store/mod.rs",
   "crates/plurx-core/src/store/scan_identity_repair.rs",
   "crates/plurx-core/src/store/dv_conversion.rs",
