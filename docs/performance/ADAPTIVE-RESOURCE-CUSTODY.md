@@ -1,12 +1,12 @@
 # Adaptive resource custody — storage, startup and recovery limits
 
-Status: open; journal and initial startup reconstruction compiled, not production
+Status: open; journal, startup and private owned-operation bridge compiled, not production
 physical admission or qualified recovery. Integration owner Sol 6.1; existing
 PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 
-## What exists at c39c30542
+## What exists at 66291c562
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -18,7 +18,8 @@ A bounded blocking owner retains the actual data-directory daemon lock, SQLite
 connection and queued commands independently of an async waiter's lifetime.
 The journal's typed private API supplies atomic family prepare, arm-before-
 acquisition, identity enrichment, seal, hold and durable settlement. This API is
-not yet connected to production acquisition/settlement. In particular, the
+connected through a private retained-operation book, not ordinary production.
+In particular, the
 existence of a PREPARED/ACQUISITION_POSSIBLE row is not a launch capability.
 
 Startup obtains single-use inputs from the actual SelectedStore and checks the
@@ -35,6 +36,21 @@ All trial members retain their latch. New runtime bindings are minted locally;
 old receipts and disk UUIDs cannot refund them. Complete old-owner records and
 protected paths remain available for future positive reconciliation. No current
 public accessor exposes the ledger, journal, an acquisition owner or receipt.
+
+The runtime owns complete provisional families before the first wait, including
+actual graph generations and pending journal receivers. Dropping a waiter cannot
+refund or replay a named root. Prepare commits before current epoch/drain/deadline
+recheck; every root slot arms before the actual retained launcher and enriches
+its identity afterward. Ambiguous failure seals/holds rather than retrying a slot.
+Task/typed-resource durable adapters remain absent and cannot use legacy graph
+entry points to bypass write-ahead custody.
+
+Private cleanup consumes the original nonclone proof, retains it on queue refusal
+or uncertain commit, and refunds only after exact durable settlement. A public
+cleanup refusal returns that original proof. Reservation/graph Drop cannot refund
+a durable tag; restart reconstruction installs tags too. Retained successor pins
+fence owner retirement until users close or transfer. Corrected data-only facts
+require definite rollback; unknown operations retain their exact payload/UUID.
 
 ## Current refusal and platform behavior
 
@@ -83,15 +99,17 @@ cannot prove that a copied source host's processes or external resources ended.
 ## Evidence and remaining work
 
 The released journal was serially adopted with original authorship. Its 28
-regression bodies plus 10 startup/runtime/lock/namespace bodies are compile-
-checked, NOT executed. Pinned Rust1.97.1 core+daemon all-target Hiqlite-contract
-cargo check passes at c39c30542. Private journal APIs still produce warnings;
+regression bodies, 10 startup/runtime/lock/namespace bodies and 12 new owned-
+operation/worker contracts are compile-checked, NOT executed. Pinned Rust1.97.1
+core+daemon all-target Hiqlite-contract cargo check passes at 66291c562 (95.955s).
+Private APIs still produce warnings because production composition is missing;
 there is no current Clippy -Dwarnings, independent full-candidate review,
 behavioral qualification or platform physical-close pass.
 
-Remaining work includes cancellation-independent write-ahead acquisition and
-settle-before-refund integration; positive normal/restart/fencing and typed-resource
-backends; real production demands and all adapters; safe learning/pacing, M4
+Synthetic private test receipts prove only protocol shape, not kernel or physical
+closure. Remaining work includes existing-supervisor/production composition of
+the retained bridge; positive normal/restart/fencing and typed-resource backends;
+shared-role transfer, real production demands and all adapters; safe learning/pacing, M4
 remote runtime and M5 peer/deadline/domain/drain policy; diagnostics; independent
 complete-candidate Fable review/fixes and once-only affected tests/fast lane before
 an authorized merge. R2/R3 targeted design decisions are not that final review.

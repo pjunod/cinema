@@ -24,44 +24,46 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`c39c30542` composes one core runtime under the actual retained SelectedStore
-lock, before scratch/probes. Every recovered full charge is cleanup-only
-UnknownHeld with fresh nonexported bindings, original allocation epochs, complete
-family edges, trial membership and protected paths; no cap clamping or old receipt
-refund. Graph and journal share the actual daemon process instance. Startup inputs
-are single-use and verify the retained lock inode. Pending/unreadable authority
-currently refuses startup before cleanup or legacy competitors: safe interim
-refusal, NOT final recovery availability. Fresh unsupported Windows has NO ledger.
-See [custody operations and limits](ADAPTIVE-RESOURCE-CUSTODY.md).
+`66291c562` adds the private retained-operation bridge: atomic whole-family
+prepare, actual-graph identity, borrowed cancellation-safe result receivers,
+epoch/drain/deadline recheck, arm before the actual root launcher, enrichment,
+memory-first sealing and committed settlement BEFORE one matching refund.
+Queue rejection and uncertain commit retain exact commands/original proof.
+Successor pins serialize against retirement; durable tags prevent reservation/
+graph Drop and public cleanup from bypassing persistence. Public refusal returns
+the original receipt; only definite failure permits corrected settlement facts.
+No proof, graph launch owner or refund capability is deserialized or exported.
 
-Journal `t_5034245a` explicitly RELEASED READ_ONLY; author-preserving adoption
-`c51994671`/`4eaef3f5c`/`31d5c1df8` corresponds to original
-`4c080843`/`a84439e9`/`f9ba37af`. No scratch providers adopted. Its 28 bodies plus
-10 new runtime/lock/namespace bodies COMPILED NOT RUN. Current pinned Rust1.97.1
-core+daemon all-target Hiqlite-contract cargo check exit0 PASS56.276s, log `182510`,
-source-stable receipt `evidence/compile-run66-182510.json`. This is NOT a current
-Clippy -Dwarnings pass: 15 private journal API warnings await write-ahead wiring.
-Fixture-only `06e2282be` models a distinct prior daemon UUID; invalidated core test
-targets compile PASS63.378s, NOT RUN. Retained daemon/source checks were not replayed.
+Current pinned Rust1.97.1 core+daemon all-target Hiqlite-contract cargo check
+exit0 PASS95.955s, source-stable `evidence/compile-run68-185646.json` (eight changed
+source hashes). Earlier147.326s compile is superseded by actual static fixes,
+not replayed for a reviewer. Ten new runtime-operation and two worker contracts
+COMPILED NOT RUN; synthetic private test receipts are protocol fixtures, NOT
+positive physical evidence. Private APIs remain unused by ordinary production
+and warn; NO current Clippy -Dwarnings or behavioral qualification pass.
 
-R2/R3 are design clarifications, not final implementation review. The v1 Unix
-installation-location witness rejects detectable moves/replacements, not coherent
-clones/rollback or same-directory old DB+witness restoration; equality grants no
-continuity, owner fence or refund. Never retry missing authority as a new install.
-Positive normal closure, recovery and write-ahead/settle-before-refund integration
-remain missing. Ordinary production is legacy, not finite physical demands.
+Retained `c39c30542` opens one lock-bound runtime before scratch/probes; all
+recovered full charges/epochs/edges/trials/paths remain cleanup-only UnknownHeld
+with fresh durable-tagged bindings. Pending/unreadable authority still refuses
+startup BEFORE cleanup/legacy competition: safe interim refusal, NOT final
+selective recovery/unaffected serving. Fresh unsupported Windows has NO ledger.
+Journal adoption `c51994671`/`4eaef3f5c`/`31d5c1df8` preserves original
+`4c080843`/`a84439e9`/`f9ba37af` authorship. Earlier 28 journal and ten startup
+fixtures/logs remain retained; no behavior rerun. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
 
-Retained `936ea9490` source-handle custody, `68287923c`/`5b6330c43` rolling joins,
-`71b405efb` VOD pre-spawn ownership and `0c50b9593` diagnostic drain remain source-
-scoped, NOT physical-close proofs. Earlier Clippy/log receipts stay retained, not
-replayed; interrupted `165805` remains INVALID. Capacity/settings/history guards
-are unchanged. M4 `t_8c190a7a` exclusively owns backend sessions; its registration-
-only scratch is authorized, authoritative shared seams remain integration-owned.
-No component adoption before release. Native Linux e9 evidence is e9-only;
-Windows compiler/physical qualification remain unavailable, not waived. M0–M7
-remain incomplete. PR1248 stays draft; controller publishes status and coordinates
-final independent Fable review/fixes, then affected tests/fast lane/authorized merge
-once. No extra handoff gate, deployment or successful behavioral-test replay.
+R2/R3 are design decisions, not final implementation review. Installation-location
+equality proves NO host continuity, clone/rollback absence, fence or extinction.
+Missing authority never becomes a new empty install. Positive physical/recovery
+backends, concrete task/typed-resource adapters, supervisor/production composition,
+shared-role transfer and all remaining M0–M7 still remain. Ordinary production
+is legacy, not finite demands; unsupported trials cannot launch.
+
+M4 `t_8c190a7a` retains exclusive backend/session ownership; authorized scratch
+composition is not released adoption. Native e9 receipts remain e9-only; Windows
+compiler/physical qualification remain unavailable, not waived. PR1248 stays
+draft; controller owns publication and final independent Fable review/fixes,
+then affected tests/fast lane/authorized merge once. No extra handoff gate,
+deployment or successful behavioral-test replay.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
