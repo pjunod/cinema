@@ -61,8 +61,10 @@ fn snapshot(phases: &[Phase], trial: bool) -> RecoverySnapshot {
                 trial_group_id: trial_id,
                 phase: *phase,
                 sequence: 1,
-                manifest,
-                members: Vec::new(),
+                inventory: crate::resource_custody::ObligationInventory::LegacyV1 {
+                    manifest,
+                    members: Vec::new(),
+                },
                 hold_reason: None,
                 cleanup_only: true,
             }
@@ -85,6 +87,7 @@ fn snapshot(phases: &[Phase], trial: bool) -> RecoverySnapshot {
         trial_groups: trial_id.into_iter().collect(),
         protected_paths: Vec::new(),
         owners: vec![owner],
+        retained_assets: Vec::new(),
     }
 }
 

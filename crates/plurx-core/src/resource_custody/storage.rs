@@ -372,7 +372,7 @@ impl Storage {
             let tx = connection.transaction()?;
             tx.execute_batch(schema::DDL)?;
             tx.execute(
-                "INSERT INTO journal_meta VALUES(1,1,?1,?2,?3,?4,0,NULL)",
+                "INSERT INTO journal_meta VALUES(1,2,?1,?2,?3,?4,0,NULL)",
                 rusqlite::params![
                     witness.journal_id.as_bytes(),
                     witness.installation_id.as_bytes(),
@@ -416,7 +416,7 @@ impl Storage {
             witness: secure_file(&witness_path, false)?,
             ancestors,
         };
-        let storage = Self {
+        let mut storage = Self {
             connection,
             witness,
             #[cfg(test)]
@@ -424,6 +424,13 @@ impl Storage {
             guard,
         };
         storage.verify()?;
+        // Finish a never-ready v1 installation above before upgrading. Preserve
+        // the ready witness, database inode, location guard and installation IDs.
+        schema::upgrade(&mut storage.connection, &storage.witness)?;
+        storage.verify().map_err(|mut error| {
+            error.certainty = super::CommitCertainty::Unknown;
+            error
+        })?;
         Ok(storage)
     }
 

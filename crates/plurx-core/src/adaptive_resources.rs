@@ -61,7 +61,7 @@ impl ResourceVector {
         })
     }
 
-    fn checked_sub(self, other: Self) -> Option<Self> {
+    pub(crate) fn checked_sub(self, other: Self) -> Option<Self> {
         Some(Self {
             cpu_ns_per_second: self
                 .cpu_ns_per_second

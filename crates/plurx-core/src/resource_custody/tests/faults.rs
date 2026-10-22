@@ -418,7 +418,10 @@ async fn late_identity_after_seal_is_recorded_but_no_new_acquisition_is_allowed(
         CustodyJournal::open(options(root.path(), owner(), InstallationContext::Existing))
             .expect("restart");
     assert_eq!(snapshot.obligations[0].phase, Phase::Sealed);
-    assert!(snapshot.obligations[0].members[0].observed.is_some());
+    let ObligationInventory::LegacyV1 { members, .. } = &snapshot.obligations[0].inventory else {
+        panic!("v1 fixture inventory");
+    };
+    assert!(members[0].observed.is_some());
     assert_eq!(snapshot.total, vector(1));
     restarted.drain().expect("drain");
 }

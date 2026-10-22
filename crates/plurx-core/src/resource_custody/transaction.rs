@@ -1,4 +1,6 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
+mod assets;
+mod inventory;
 use super::*;
 use codec::{MemberEnvelope, SettlementRecord};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -105,6 +107,7 @@ pub(super) fn snapshot(
     }
     let mut obligations = Vec::new();
     let mut all_ids = BTreeMap::new();
+    let mut legacy_ids = BTreeSet::new();
     let mut last_operations = BTreeMap::new();
     let mut graphs = BTreeSet::new();
     let mut total = ResourceVector::default();
@@ -125,17 +128,10 @@ pub(super) fn snapshot(
         let phase = Phase::parse(&row.get::<_, String>(6)?)?;
         let sequence: i64 = row.get(7)?;
         let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(8)?)?;
-        let manifest: Manifest = codec::decode(&row.get::<_, String>(9)?)?;
+        let manifest_json: String = row.get(9)?;
         let reason: Option<String> = row.get(10)?;
         let settlement: Option<String> = row.get(11)?;
-        let settlement = settlement
-            .as_deref()
-            .map(codec::decode::<SettlementRecord>)
-            .transpose()?;
-        codec::validate_manifest(&manifest)?;
         if !owners.contains(&owner)
-            || graph != manifest.graph_id
-            || owner != manifest.owner_id
             || sequence < 1
             || sequence > next
             || resources == ResourceVector::default()
@@ -152,72 +148,17 @@ pub(super) fn snapshot(
             codec::text(reason)?;
         }
         last_operations.insert(id, (operation, graph, sequence, phase, trial));
-        let mut member_stmt = connection.prepare("SELECT member_id,kind,adapter,adapter_version,phase,identity_json,proof_json FROM members WHERE obligation_id=?1 ORDER BY member_id")?;
-        let mut member_rows = member_stmt.query([id.as_bytes()])?;
-        let mut members = Vec::new();
-        while let Some(member) = member_rows.next()? {
-            let mid = codec::uuid_from_bytes(&member.get::<_, Vec<u8>>(0)?)?;
-            let kind: String = member.get(1)?;
-            let adapter: String = member.get(2)?;
-            let version: u32 = member.get(3)?;
-            let member_phase: String = member.get(4)?;
-            let envelope: MemberEnvelope = codec::decode(&member.get::<_, String>(5)?)?;
-            let proof: Option<String> = member.get(6)?;
-            let Some(plan) = manifest.members.iter().find(|m| m.member_id == mid) else {
-                return Err(codec::invalid());
-            };
-            if envelope.version != 1
-                || &envelope.planned != plan
-                || kind != plan.kind.as_str()
-                || adapter != plan.adapter.as_str()
-                || version != plan.adapter_version
-            {
-                return Err(codec::invalid());
-            }
-            if let Some(identity) = &envelope.observed {
-                codec::validate_observed(plan, identity)?;
-            }
-            if !["planned", "acquisition_possible", "acquired", "closed"]
-                .contains(&member_phase.as_str())
-                || (member_phase == "acquired" && envelope.observed.is_none())
-                || (member_phase == "planned" && envelope.observed.is_some())
-                || (member_phase == "acquisition_possible" && envelope.observed.is_some())
-                || (member_phase == "closed") != proof.is_some()
-            {
-                return Err(codec::invalid());
-            }
-            if phase == Phase::Prepared && member_phase != "planned" {
-                return Err(codec::invalid());
-            }
-            if phase == Phase::Settled && member_phase != "closed" {
-                return Err(codec::invalid());
-            }
-            if phase != Phase::Settled && member_phase == "closed" {
-                return Err(codec::invalid());
-            }
-            if let Some(proof) = proof {
-                let proof: SettlementRecord = codec::decode(&proof)?;
-                if settlement.as_ref() != Some(&proof) {
-                    return Err(codec::invalid());
-                }
-            }
-            members.push(MemberRecord {
-                plan: plan.clone(),
-                phase: member_phase,
-                observed: envelope.observed,
-            });
-            if members.len() > 129 {
-                return Err(codec::invalid());
-            }
-        }
-        if members.len() != manifest.members.len() {
-            return Err(codec::invalid());
-        }
-        if phase == Phase::AcquisitionPossible && members.iter().all(|m| m.phase == "planned") {
-            return Err(codec::invalid());
-        }
-        if let Some(settlement) = &settlement {
-            validate_settlement_record(&manifest, &members, settlement)?;
+        let inventory = inventory::load(
+            connection,
+            id,
+            owner,
+            graph,
+            phase,
+            &manifest_json,
+            settlement.as_deref(),
+        )?;
+        if matches!(inventory, ObligationInventory::LegacyV1 { .. }) {
+            legacy_ids.insert(id);
         }
         all_ids.insert(id, phase);
         if phase != Phase::Settled {
@@ -231,9 +172,7 @@ pub(super) fn snapshot(
             if let Some(group) = trial {
                 trials.insert(group);
             }
-            for member in &manifest.members {
-                protected.extend(member.protected_paths.iter().map(PathBuf::from));
-            }
+            protected.extend(inventory::protected_paths(&inventory));
             obligations.push(ObligationRecord {
                 obligation_id: id,
                 graph_id: graph,
@@ -243,8 +182,7 @@ pub(super) fn snapshot(
                 trial_group_id: trial,
                 phase,
                 sequence,
-                manifest,
-                members,
+                inventory,
                 hold_reason: reason,
                 cleanup_only: true,
             });
@@ -280,7 +218,22 @@ pub(super) fn snapshot(
             });
         }
     }
-    if referenced.len() != all_ids.len() || trials.len() > 1 {
+    let retained_assets = assets::load(connection, &all_ids, &referenced)?;
+    let asset_ids: BTreeSet<_> = retained_assets.iter().map(|a| a.obligation_id).collect();
+    let active_ids: BTreeSet<_> = all_ids
+        .iter()
+        .filter_map(|(id, phase)| (*phase != Phase::Settled).then_some(*id))
+        .collect();
+    let active_references: BTreeSet<_> = referenced
+        .intersection(&active_ids)
+        .copied()
+        .chain(asset_ids.iter().copied())
+        .collect();
+    if active_references != active_ids
+        || !asset_ids.is_disjoint(&referenced)
+        || !legacy_ids.is_subset(&referenced)
+        || trials.len() > 1
+    {
         return Err(codec::invalid());
     }
     // Validate operation records too: unknown/truncated codecs cannot be ignored.
@@ -346,6 +299,51 @@ pub(super) fn snapshot(
                     validated_last.insert(ack.obligation_id);
                 }
             }
+            DiskResult::RetiredWithAssets(ack) => {
+                let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+                if version != 2
+                    || ack.version != 2
+                    || ack.operation_id.uuid() != operation_id
+                    || ack.sequence < 1
+                    || ack.sequence > next
+                    || !operation_sequences.insert(ack.sequence)
+                    || ack.source_obligation_id == ack.target_obligation_id
+                {
+                    return Err(codec::invalid());
+                }
+                let source = last_operations
+                    .get(&ack.source_obligation_id.uuid())
+                    .ok_or_else(codec::invalid)?;
+                let target = last_operations
+                    .get(&ack.target_obligation_id.uuid())
+                    .ok_or_else(codec::invalid)?;
+                if source.1 != ack.source_graph_id.uuid()
+                    || target.1 != ack.target_graph_id.uuid()
+                    || source.2 != ack.sequence
+                    || source.3 != Phase::Settled
+                    || source.0 != operation_id
+                    || target.2 < ack.sequence
+                    || source.4 != target.4
+                {
+                    return Err(codec::invalid());
+                }
+                let custody_json: String = connection.query_row("SELECT custody_json FROM retained_asset_owners WHERE obligation_id=?1 AND asset_id=?2", params![ack.target_obligation_id.uuid().as_bytes(), ack.asset_id.uuid().as_bytes()], |r| r.get(0))?;
+                let custody: codec_v2::RetainedAssets = codec::decode(&custody_json)?;
+                if custody.transfer_operation_id != ack.operation_id
+                    || custody.producer_obligation_id != ack.source_obligation_id
+                    || custody.producer_graph_id != ack.source_graph_id
+                    || custody.target_graph_id != ack.target_graph_id
+                {
+                    return Err(codec::invalid());
+                }
+                validated_last.insert(ack.source_obligation_id.uuid());
+                if target.0 == operation_id {
+                    if target.2 != ack.sequence || target.3 != Phase::Sealed {
+                        return Err(codec::invalid());
+                    }
+                    validated_last.insert(ack.target_obligation_id.uuid());
+                }
+            }
         }
     }
     // v1 retains all operation history; a gap is missing authority, not a
@@ -364,6 +362,7 @@ pub(super) fn snapshot(
         installation_id: witness.installation_id,
         obligations,
         families,
+        retained_assets,
         total,
         trial_groups: trials.into_iter().collect(),
         protected_paths: protected.into_iter().collect(),
@@ -439,6 +438,20 @@ enum DiskResult {
         trial: Option<Uuid>,
     },
     Changed(CommitAck),
+    RetiredWithAssets(RetirementAck),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetirementAck {
+    version: u32,
+    operation_id: codec_v2::Id,
+    sequence: i64,
+    source_obligation_id: codec_v2::Id,
+    source_graph_id: codec_v2::Id,
+    target_obligation_id: codec_v2::Id,
+    target_graph_id: codec_v2::Id,
+    asset_id: codec_v2::Id,
 }
 
 pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {

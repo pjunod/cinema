@@ -1,8 +1,13 @@
-//! Canonical v1 schema. No permissive repair or down-migration.
+//! Exact versioned schemas. Recognized v1 upgrades in place, never by repair.
+mod migration;
+#[cfg(test)]
+mod tests;
 use super::{CustodyError, ErrorKind};
+pub(super) use migration::upgrade;
 use rusqlite::Connection;
 
-pub(super) const DDL: &str = r#"
+// Frozen: old documents and retry history retain the original interpretation.
+pub(super) const DDL_V1: &str = r#"
 CREATE TABLE journal_meta (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
  format_version INTEGER NOT NULL CHECK(format_version=1),
@@ -65,6 +70,8 @@ CREATE TABLE operations (
 PRAGMA user_version=1;
 "#;
 
+pub(super) const DDL: &str = include_str!("schema/v2.sql");
+
 fn shape(connection: &Connection) -> Result<Vec<(String, String, String)>, CustodyError> {
     let mut statement = connection.prepare(
         "SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
@@ -75,16 +82,20 @@ fn shape(connection: &Connection) -> Result<Vec<(String, String, String)>, Custo
 
 pub(super) fn validate(connection: &Connection) -> Result<(), CustodyError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version != 1 {
-        return Err(CustodyError::new(
-            ErrorKind::UnreadableAuthority,
-            "unrecognized custody schema version",
-        ));
-    }
+    let ddl = match version {
+        1 => DDL_V1,
+        2 => DDL,
+        _ => {
+            return Err(CustodyError::new(
+                ErrorKind::UnreadableAuthority,
+                "unrecognized custody schema version",
+            ))
+        }
+    };
     // Compare SQLite's own canonical catalog output against the exact known DDL,
     // including indexes/constraints/triggers; numeric version alone is insufficient.
     let expected = Connection::open_in_memory()?;
-    expected.execute_batch(DDL)?;
+    expected.execute_batch(ddl)?;
     if shape(connection)? != shape(&expected)? {
         return Err(CustodyError::new(
             ErrorKind::UnreadableAuthority,

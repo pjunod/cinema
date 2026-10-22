@@ -4,6 +4,7 @@
 //! never receipt or launch authority. Initialize under the existing daemon lock
 //! before startup cleanup. No journal operation touches the accounting mutex.
 mod codec;
+pub(crate) mod codec_v2;
 mod schema;
 mod storage;
 #[cfg(test)]
@@ -177,6 +178,27 @@ pub struct MemberRecord {
     pub observed: Option<ObservedIdentity>,
 }
 #[derive(Clone, Debug)]
+pub(crate) struct TypedMemberRecord {
+    pub envelope: codec_v2::Envelope,
+    pub phase: String,
+}
+#[derive(Clone, Debug)]
+pub(crate) enum ObligationInventory {
+    LegacyV1 {
+        manifest: Manifest,
+        members: Vec<MemberRecord>,
+    },
+    TypedV2 {
+        manifest: codec_v2::Manifest,
+        members: Vec<TypedMemberRecord>,
+    },
+}
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedAssetOwner {
+    pub obligation_id: Uuid,
+    pub custody: codec_v2::RetainedAssets,
+}
+#[derive(Clone, Debug)]
 pub struct ObligationRecord {
     pub obligation_id: Uuid,
     pub graph_id: Uuid,
@@ -186,8 +208,7 @@ pub struct ObligationRecord {
     pub trial_group_id: Option<Uuid>,
     pub phase: Phase,
     pub sequence: i64,
-    pub manifest: Manifest,
-    pub members: Vec<MemberRecord>,
+    pub(crate) inventory: ObligationInventory,
     pub hold_reason: Option<String>,
     /// Reconstruction is cleanup-only regardless of the persisted phase.
     pub cleanup_only: bool,
@@ -206,6 +227,7 @@ pub struct RecoverySnapshot {
     pub installation_id: Uuid,
     pub obligations: Vec<ObligationRecord>,
     pub families: Vec<FamilyEdge>,
+    pub(crate) retained_assets: Vec<RetainedAssetOwner>,
     pub total: ResourceVector,
     pub trial_groups: Vec<Uuid>,
     pub protected_paths: Vec<PathBuf>,

@@ -245,6 +245,33 @@ fn restore_accounting(
         }
         referenced.insert(edge.obligation_id);
     }
+    let mut asset_ids = BTreeSet::new();
+    let mut assets = BTreeSet::new();
+    for asset in &recovered.retained_assets {
+        if !ids.contains(&asset.obligation_id)
+            || referenced.contains(&asset.obligation_id)
+            || !asset_ids.insert(asset.obligation_id)
+            || !assets.insert(asset.custody.asset_id)
+            || asset.custody.target_obligation_id.uuid() != asset.obligation_id
+        {
+            return Err(invalid);
+        }
+        let record = recovered
+            .obligations
+            .iter()
+            .find(|r| r.obligation_id == asset.obligation_id)
+            .ok_or(invalid)?;
+        let crate::resource_custody::ObligationInventory::TypedV2 { manifest, .. } =
+            &record.inventory
+        else {
+            return Err(invalid);
+        };
+        crate::resource_custody::codec_v2::validate_retained_assets(manifest, &asset.custody)
+            .map_err(|_| invalid)?;
+        crate::resource_custody::codec_v2::validate_retained_resources(manifest, record.resources)
+            .map_err(|_| invalid)?;
+    }
+    referenced.extend(asset_ids);
     if referenced != ids {
         return Err(invalid);
     }
