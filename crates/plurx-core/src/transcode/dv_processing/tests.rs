@@ -875,6 +875,66 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
     }
 }
 #[test]
+fn resolved_source_floor_is_the_completed_plan_black_level_and_semantic_identity() {
+    use crate::scan::dv_title::*;
+    let stats = DvTitleStats {
+        schema: SCHEMA,
+        complete: true,
+        decoded_frames: 1,
+        valid_l1_frames: 1,
+        missing_l1_frames: 0,
+        invalid_l1_frames: 0,
+        max_l1_pq: Some(4095),
+        mastering_luminance: TitleConstant::Unknown,
+        mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+            index: 0,
+            custom_xy: None,
+        }),
+    };
+    let DvDisplayTargetChoice::Target(proposal) =
+        DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+    else {
+        panic!("target");
+    };
+    let export = |target| DvExportPolicy::DisplayTargetYuv420p10V1 {
+        raster: (64, 64),
+        target,
+    };
+    assert!(
+        completed_target_policy(export(proposal)).is_err(),
+        "no unresolved completed plan"
+    );
+    let source = DvSourceMastering {
+        primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+        min_1e4_nits: 17,
+    };
+    let resolved = proposal.resolve_source(Some(source)).expect("source floor");
+    let fallback = proposal.resolve_source(None).expect("renderer floor");
+    let mut source_plan = plan(DvDestination::Hdr10);
+    source_plan.capability.target =
+        completed_target_policy(export(resolved)).expect("completed target");
+    let mut fallback_plan = source_plan.clone();
+    fallback_plan.capability.target =
+        completed_target_policy(export(fallback)).expect("fallback target");
+    assert_eq!(source_plan.capability.target.black_1e4_nits, Some(17));
+    assert_eq!(source_plan.capability.target.black_millinit, 1);
+    assert_eq!(fallback_plan.capability.target.black_1e4_nits, Some(50));
+    assert_eq!(
+        source_plan.capability.target.parameters,
+        export(resolved).target_parameters()
+    );
+    assert_ne!(
+        source_plan.semantic_digest(),
+        fallback_plan.semantic_digest()
+    );
+    assert_eq!(
+        serde_json::to_value(&source_plan.capability.target).expect("completed report target")
+            ["black_1e4_nits"],
+        17
+    );
+}
+
+#[test]
 fn successor_generations_do_not_reset_recovery_episode() {
     let mut episode = DvRecoveryEpisode::default();
     episode

@@ -401,7 +401,6 @@ impl PrivateWindow {
         source_level: Option<u8>,
         runtime_cache: &Path,
         audio_channels: Option<u32>,
-        source_mastering: Option<plurx_core::transcode::dv_processing::DvSourceMastering>,
     ) -> Result<VerifiedWindow, String> {
         use plurx_core::transcode::dv_processing::{
             dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
@@ -421,7 +420,7 @@ impl PrivateWindow {
             DvDestination::Hdr10 => match self.display_target {
                 Some(target) => {
                     let metadata = target
-                        .output_metadata(source_mastering)
+                        .output_metadata()
                         .map_err(|error| error.to_string())?;
                     plurx_core::transcode::dv_processing::dv_author_hdr10_window(
                         &self.encoded,
@@ -684,6 +683,21 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// Physical/internal callers resolve before constructing the export policy;
+    /// a frozen live target is rechecked and cannot acquire another floor.
+    pub(crate) fn resolve_display_target(
+        &self,
+        target: plurx_core::transcode::dv_processing::DvDisplayTarget,
+    ) -> Result<plurx_core::transcode::dv_processing::DvDisplayTarget, String> {
+        let source = if target.needs_source_mastering() {
+            self.source_mastering.clone()?
+        } else {
+            None
+        };
+        target
+            .resolve_source(source)
+            .map_err(|error| error.to_string())
+    }
     pub(crate) fn clear_published_window(&self) {
         self.published_receipt
             .lock()
@@ -919,19 +933,9 @@ impl RuntimeRecipe {
                 "DV processing previously failed for this playback/source/settings/backend".into(),
             );
         }
-        let source_mastering =
-            if display_target.is_some_and(|target| target.needs_source_mastering()) {
-                self.source_mastering.clone()?
-            } else {
-                None
-            };
-        // Refuse missing/contradictory source facts before spending an encoder
-        // window; the exact same policy is consumed again at final authoring.
-        if let Some(target) = display_target {
-            target
-                .output_metadata(source_mastering)
-                .map_err(|error| error.to_string())?;
-        }
+        let display_target = display_target
+            .map(|target| self.resolve_display_target(target))
+            .transpose()?;
         let cancellation = cancel.clone();
         let result: Result<_, String> = async {
             use plurx_core::transcode::dv_processing::{
@@ -1159,7 +1163,6 @@ impl RuntimeRecipe {
                     plan.options()
                         .input_has_audio
                         .then_some(plan.options().audio_channels),
-                    source_mastering,
                 )
                 .await?;
             if !self.source.unchanged() || !self.tools.is_current().await {
@@ -2003,6 +2006,46 @@ mod helper_decoder_tests {
             assert!(parse(forged).validate(target, raw).is_err(), "{field}");
         }
         assert!(parse(valid).validate(target, b"not an RPU").is_err());
+    }
+
+    #[test]
+    fn resolved_source_floor_is_required_by_the_helper_trace() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+        else {
+            panic!("target");
+        };
+        let target = target
+            .resolve_source(Some(DvSourceMastering {
+                primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+                min_1e4_nits: 17,
+            }))
+            .expect("source floor");
+        assert_eq!(target.endpoint_args(), ["17", "4000"]);
+        let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
+        let (max, avg) = target.validate_rpu(raw).expect("retained L1");
+        let mut row = serde_json::json!({"frame":0,"nits":1600,"method":DISPLAY_TARGET_METHOD,
+            "curve":"annex-b2-rgb","max_pq":max,"avg_pq":avg,"max0_fallback":max==0,
+            "title_min_1e4":17,"title_peak":4000});
+        let parse = |row| serde_json::from_value::<super::DisplayTargetRow>(row).expect("trace");
+        assert!(parse(row.clone()).validate(target, raw).is_ok());
+        row["title_min_1e4"] = 50.into();
+        assert!(
+            parse(row).validate(target, raw).is_err(),
+            "old default floor cannot describe source17 execution"
+        );
     }
 
     #[test]
