@@ -204,6 +204,49 @@ The four raw `summary.json` digests are:
 - Current optimized 02: `2e48e4c85a8bec23a743a8835b181074b2ac1f3720a8d48f467ffd4359569b85`.
 - Fresh 15-control receipt: `df06a210cf6e1e9e6bdc3928389d841a6dc1b15e63feb45ba34e4891a5b4e0b5`.
 
+### 2.3 Fresh-controller samples measure the memory tradeoff separately
+
+A separate alternating baseline/optimized pair measures each native test's
+peak resident memory. Each case starts in a fresh forked Python controller
+with zero prior child CPU and maximum-RSS counters. The controller launches
+the one native executable, retains the original exit and owned cleanup,
+then reads Linux child resource usage after reaping it. These SQLite cases
+have no external worker processes. This measures the largest waited native
+child's peak, including its threads; it does not measure a process-group
+sum, container peak or whole-runner memory.
+
+The timing baseline remains `9acf0c5dc`; optimized source is
+`e0fc5b9334a9a7b5ccb0732b45fcbddc7f4921dc`, whose Rust inputs are identical
+to measured `45ffd543`. All four samples retain the same respective
+executable hashes, full native listings, compiler/features/profile, actual
+work counters and scheduling as §2.2. All 12 native bodies and the fresh
+15-control receipt pass with qualified cleanup. No local compilation runs
+concurrently with these samples.
+
+| Case | Baseline peak KiB, both samples | Optimized peak KiB, both samples | Median increase KiB |
+|---|---:|---:|---:|
+| History | 46,636 / 46,512 | 48,060 / 48,828 | 1,870 |
+| Overflow | 58,360 / 58,368 | 61,404 / 60,188 | 2,432 |
+| Catalogue | 45,548 / 45,548 | 52,600 / 51,508 | 6,506 |
+
+The measured speed improvements therefore have a small memory cost in
+these isolated cases. Two samples establish their observed range, not a
+stable production or full-suite memory bound. Statement caching and the
+initialized fixture remain bounded, but full host admission and shard
+memory measurements remain acceptance work in the canonical plan.
+
+The strict memory comparison binds raw native logs, phase rows, individual
+controller receipts and all workload counts to the frozen timing report.
+Its ignored report is
+`target/rust-performance-local/current-base-memory-comparison.json`, SHA-256
+`1b958d30a954e72886367c847272d9860ac7af1820a124ec4c0771a53950edcb`.
+The raw `summary.json` SHA-256 digests are:
+
+- Memory baseline 01: `61f4a7ad154fa15cae6da8caaecadb227a8c8536333b729a5dc5ef2122fabd60`.
+- Memory optimized 01: `32e897d799e8a8aef48af53f4e6c00b3ed9a2cb835636b02071de658dd00647a`.
+- Memory baseline 02: `143cbf9f1220b8c4517cb3e08b8d9485ef7c114ed3f5109b55acc2ad6259e390`.
+- Memory optimized 02: `d55d0fa138a0a562a5af58e18f8b1cbf596831e80dd05b18b8ce171500be3512`.
+
 ## 3. The candidate keeps implementation ownership narrow
 
 The following changes are committed in `45ffd5434162b0f448e670073a19595e90d5e4a1`,
