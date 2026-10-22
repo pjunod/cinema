@@ -297,9 +297,10 @@ async fn native_job_and_unclaimed_pipes_mint_only_one_bound_receipt() {
     {
         let members = sealed.custody.members.lock().await;
         assert!(members.receipt_issued);
-        assert!(members.roots.iter().all(|root| root.child.stdin.is_none()
-            && root.child.stdout.is_none()
-            && root.child.stderr.is_none()));
+        assert!(
+            members.roots.is_empty(),
+            "native Child and Job owners dropped, not just pipes"
+        );
     }
     assert!(sealed.try_live_close_receipt().await.is_err());
     assert_eq!(
@@ -336,7 +337,10 @@ async fn native_job_audited_task_and_source_compose_without_synthetic_proof() {
     let sealed = graph.seal();
     let receipt = native_receipt(&sealed).await;
     let snapshot = sealed.snapshot().await;
-    assert_eq!(snapshot.waited_roots, 1);
+    assert_eq!(
+        snapshot.roots, 0,
+        "waited native root/Job handles also disposed"
+    );
     assert_eq!(snapshot.joined_writers, 1);
     assert_eq!(snapshot.closed_source_files, 1);
     assert_eq!(ledger.snapshot().expect("not yet refunded").held, 1);

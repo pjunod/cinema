@@ -42,6 +42,10 @@ impl SealedPhysicalGraph {
             drop(root.child.stdout.take());
             drop(root.child.stderr.take());
         }
+        // Waited Child/Job owners may still retain native process/containment
+        // handles. Dispose the actual owners, not just their pipes or counters,
+        // AFTER observing every original Job empty and BEFORE minting proof.
+        members.roots.clear();
         // No await between issuing the one nonclone proof and handing it back.
         // Concurrent reconciliation sees the same marker under this graph lock.
         members.receipt_issued = true;
