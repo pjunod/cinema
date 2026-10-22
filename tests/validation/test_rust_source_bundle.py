@@ -39,8 +39,34 @@ class RustSourceBundleTests(unittest.TestCase):
         self.source = self.root / 'source'
         self.source.mkdir()
         archive = self.git('archive', '--format=tar', 'HEAD')
+        # This archive comes directly from the fixture's committed Git tree.
+        # Copy only checked source entries; Python 3.11.2 has no tar filter API.
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(self.source, filter='data')
+            seen = set()
+            for member in tar:
+                parts = member.name.rstrip('/').split('/')
+                self.assertTrue(parts and all(part and part not in ('.', '..')
+                                             and part.casefold() != '.git' for part in parts))
+                name = '/'.join(parts)
+                self.assertNotIn(name, seen)
+                seen.add(name)
+                destination = self.source.joinpath(*parts)
+                self.assertTrue(destination.parent.resolve().is_relative_to(self.source))
+                self.assertFalse(destination.exists() or destination.is_symlink())
+                if member.isdir():
+                    destination.mkdir()
+                elif member.isfile():
+                    payload = tar.extractfile(member)
+                    self.assertIsNotNone(payload)
+                    with payload:
+                        destination.write_bytes(payload.read())
+                    destination.chmod(member.mode & 0o777)
+                elif member.issym():
+                    self.assertFalse(Path(member.linkname).is_absolute())
+                    self.assertTrue((destination.parent / member.linkname).resolve().is_relative_to(self.source))
+                    destination.symlink_to(member.linkname)
+                else:
+                    self.fail('unsupported fixture archive member type')
         self.path = self.root / 'manifest.json'
         self.save()
 
