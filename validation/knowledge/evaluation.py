@@ -525,12 +525,16 @@ class ManifestReceipt:
 def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFactory,
               count_input: InputCounter, query_factory: QueryFactory,
               manifest_receipt: ManifestReceipt, *,
-              navigation_factory: NavigationFactory | None = None) -> BatchLog:
+              navigation_factory: NavigationFactory | None = None,
+              observer: Callable[[Mapping[str, Any]], None] | None = None) -> BatchLog:
     """One new backend/session per scheduled run; never pass another transcript.
 
     The factory receives the same frozen model/settings for every arm. Repeats
     are order labels, not claimed provider sampling seeds. The caller persists
     the manifest (including its digest) before invoking this function.
+    An observer is a synchronous private checkpoint boundary: reservation and
+    response events must be durably written before dispatch or processing.
+    Observer failure stops spending and retains any prior reservation.
     """
     manifest_receipt.verify(manifest)
     planned = schedule(cases, manifest)
@@ -538,6 +542,21 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
     budget = Budget(manifest.limits)
     results = []
     stopped = None
+
+    def emit(event: str, spec: RunSpec | None = None, **payload: Any) -> None:
+        if observer is None:
+            return
+        # JSON copying prevents the observer from changing live model state.
+        value = {"event": event, "manifest_sha256": manifest.sha256,
+                 "run_id": None if spec is None else spec.id, **payload}
+        try:
+            observer(json.loads(_json(value)))
+        except Exception:
+            # Prior reservations stay charged. No new request may follow a
+            # failed durable write, including failures before model dispatch.
+            budget.uncertain = True
+            raise EvaluationError("JournalWriteFailed") from None
+
     for spec in planned:
         if stopped is not None:
             results.append(RunLog(spec, "not_started", "", (), (), (), 0.0, stopped))
@@ -557,6 +576,7 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
         navigation_cleanup_failed = False
         started = time.monotonic()
         try:
+            emit("run-start", spec, run_spec=asdict(spec))
             if navigation_factory is not None:
                 navigation_backend = navigation_factory(spec, case)
                 navigation_close = getattr(navigation_backend, "close", None)
@@ -566,24 +586,34 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
             query = None if spec.arm == "A" else query_factory(spec, case)
             proxy = CorpusProxy(case, spec.arm, query, navigation=navigation_backend)
             backend = factory(spec, manifest)
-            for _ in range(manifest.limits.steps):
+            for ordinal in range(1, manifest.limits.steps + 1):
                 predicted = count_input(tuple(messages), proxy.tool_names)
                 reservation = budget.reserve(spec.id, predicted, manifest.limits.output_tokens)
+                emit("request-reserved", spec, request_ordinal=ordinal,
+                     predicted_input_tokens=predicted, max_output_tokens=manifest.limits.output_tokens,
+                     reserved_tokens=reservation, charged_tokens=budget.charged_tokens,
+                     messages=[asdict(message) for message in messages], tool_names=list(proxy.tool_names))
                 request_started = time.monotonic()
                 try:
                     response = backend.respond(tuple(messages), proxy.tool_names,
                                                max_output_tokens=manifest.limits.output_tokens,
                                                timeout_seconds=manifest.limits.request_timeout_seconds)
+                    emit("response-received", spec, request_ordinal=ordinal,
+                         reserved_tokens=reservation, response=asdict(response))
                 except Exception as exc:
                     budget.uncertain = True
                     requests.append(RequestLog(None, None, Usage(), reservation,
                                                time.monotonic() - request_started, type(exc).__name__))
+                    emit("request-failed", spec, request_ordinal=ordinal,
+                         reserved_tokens=reservation, usage_unknown=True, error_class=type(exc).__name__)
                     raise
                 requests.append(RequestLog(response.request_id, response.cache_state, response.usage,
                                            reservation, time.monotonic() - request_started,
                                            model=response.model, stop_reason=response.stop_reason))
                 budget.settle(spec.id, reservation, response.usage)
                 if budget.uncertain:
+                    emit("unknown-usage", spec, request_ordinal=ordinal,
+                         reserved_tokens=reservation, charged_tokens=budget.charged_tokens)
                     status, stopped = "usage_unavailable", "request usage unavailable"
                     break
                 if response.usage.output_tokens > manifest.limits.output_tokens:
@@ -632,8 +662,20 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
                     navigation_cleanup_failed = True
                     stopped = "navigation cleanup failed"
         edits = () if navigation_cleanup_failed or proxy is None else proxy.edits
-        results.append(RunLog(spec, status, answer, edits, tuple(requests), tuple(tool_logs),
-                              time.monotonic() - started, error))
+        result = RunLog(spec, status, answer, edits, tuple(requests), tuple(tool_logs),
+                        time.monotonic() - started, error)
+        try:
+            emit("run-finished", spec, run=asdict(result), charged_tokens=budget.charged_tokens)
+        except EvaluationError:
+            result = RunLog(spec, "error", "", (), tuple(requests), tuple(tool_logs),
+                            time.monotonic() - started, "JournalWriteFailed")
+            stopped = "durable journal unavailable"
+        results.append(result)
+    try:
+        emit("batch-stopped" if stopped else "batch-finished", charged_tokens=budget.charged_tokens,
+             stopped_reason=stopped, planned_runs=len(planned), uncertain=budget.uncertain)
+    except EvaluationError:
+        stopped = "durable journal unavailable"
     return BatchLog(manifest, planned, tuple(results), budget.charged_tokens, stopped)
 
 

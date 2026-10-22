@@ -504,3 +504,62 @@ class ComparativeAnalysisTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DurableJournalTests(unittest.TestCase):
+    def run_observed(self, observer, factory=None):
+        items = cases()
+        frozen = manifest(items)
+        return run_batch(items, frozen, factory or (lambda spec, frozen: FinalBackend()),
+                         lambda messages, names: 10, query_factory, receipt(frozen), observer=observer)
+
+    def test_reservation_precedes_dispatch_and_response_precedes_completion(self):
+        events = []
+        class Backend(FinalBackend):
+            def respond(inner, *args, **kwargs):
+                self.assertEqual(events[-1]['event'], 'request-reserved')
+                return super().respond(*args, **kwargs)
+        batch = self.run_observed(events.append, lambda spec, frozen: Backend())
+        self.assertEqual(len(batch.runs), 9)
+        for identity in (r.spec.id for r in batch.runs):
+            rows = [e for e in events if e['run_id'] == identity]
+            self.assertEqual([e['event'] for e in rows],
+                             ['run-start', 'request-reserved', 'response-received', 'run-finished'])
+            self.assertEqual(rows[1]['reserved_tokens'], 60)
+            self.assertEqual(rows[2]['response']['usage']['input_tokens'], 10)
+        self.assertEqual(events[-1]['event'], 'batch-finished')
+        self.assertEqual(batch.charged_tokens, 135)
+
+    def test_failed_reservation_checkpoint_never_dispatches(self):
+        called = []
+        def observe(event):
+            if event['event'] == 'request-reserved': raise OSError('synthetic disk failure')
+        batch = self.run_observed(observe, lambda spec, frozen: called.append('constructed'))
+        self.assertIsNotNone(batch.stopped_reason)
+        self.assertEqual(called, ['constructed'])
+        self.assertEqual(batch.charged_tokens, 60)
+        self.assertEqual(sum(run.status == 'not_started' for run in batch.runs), 8)
+
+    def test_failed_response_checkpoint_retains_reservation_and_stops(self):
+        calls = []
+        class Backend(FinalBackend):
+            def respond(inner, *args, **kwargs):
+                calls.append(1)
+                return super().respond(*args, **kwargs)
+        def observe(event):
+            if event['event'] == 'response-received': raise OSError('synthetic disk failure')
+        batch = self.run_observed(observe, lambda spec, frozen: Backend())
+        self.assertEqual(calls, [1])
+        self.assertEqual(batch.charged_tokens, 60)
+        self.assertIsNotNone(batch.stopped_reason)
+        self.assertIsNone(batch.runs[0].requests[0].usage.total_tokens)
+
+    def test_journal_cannot_mutate_live_messages(self):
+        class Backend(FinalBackend):
+            def respond(inner, messages, *args, **kwargs):
+                self.assertNotEqual(messages[0].text, 'tampered')
+                return super().respond(messages, *args, **kwargs)
+        def observe(event):
+            if event['event'] == 'request-reserved': event['messages'][0]['text'] = 'tampered'
+        batch = self.run_observed(observe, lambda spec, frozen: Backend())
+        self.assertIsNone(batch.stopped_reason)
