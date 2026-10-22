@@ -214,7 +214,10 @@ they do not establish proprietary renderer equivalence.
 
 **Decoded source association:**
 [`compare_trim_software_reference.py`](../../tools/dv_processing/controls/compare_trim_software_reference.py)
-verifies complete transferred acquisition packets and true zero exits. A
+verifies bounded transferred acquisition packets against both transport hashes
+and immutable acquisition `RESULT.json.files` hashes, with explicit RESULT and
+OUTER-RESULT transfer coverage and true zero exits. Recomputed transport hashes
+cannot authorize replacement source pixels or a replacement input manifest. A
 pinned public FFmpeg TIFF decoder reads the exact vendor-input source image and
 reference image as RGB16, preserving full-range channels without a color
 transform. The source codes are divided by 65535 and imported into native

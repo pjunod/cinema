@@ -26,7 +26,28 @@ def bind(path):
     return {'path': str(path), 'sha256': sha(path), 'size': path.stat().st_size}
 
 
+MAX_PACKET_FILES = 2048
+MAX_PACKET_FILE_BYTES = 8 * 1024 * 1024
+MAX_PACKET_BYTES = 64 * 1024 * 1024
+MAX_TRANSFER_MANIFEST_BYTES = 2 * 1024 * 1024
+# These outer transport records are intentionally not self-bound by acquisition
+# RESULT.json. No image, XML, input manifest or numerical-QC input is exempt.
+TRANSPORT_ONLY = {'RESULT.json', 'OUTER-RESULT.json', 'outer.stdout', 'outer.stderr'}
+
+
+def packet_record(relative, record):
+    if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or '..' in Path(relative).parts:
+        raise ValueError('packet artifact path must be relative and contained')
+    if not isinstance(record, dict) or type(record.get('size')) is not int or not (
+            0 <= record['size'] <= MAX_PACKET_FILE_BYTES):
+        raise ValueError('packet artifact size exceeds bounded record')
+    digest = record.get('sha256')
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+        raise ValueError('packet artifact requires exact SHA256 record')
+
+
 def packet_file(root, relative, record):
+    packet_record(relative, record)
     root = Path(root).resolve(strict=True)
     path = (root / relative).resolve(strict=True)
     if not path.is_relative_to(root) or not path.is_file() or (
@@ -37,11 +58,34 @@ def packet_file(root, relative, record):
 
 def acquisition(root):
     root = Path(root).resolve(strict=True)
-    transfer = json.loads((root / 'TRANSFER-SHA256.json').read_text())
+    manifest_path = (root / 'TRANSFER-SHA256.json').resolve(strict=True)
+    if not manifest_path.is_relative_to(root) or not manifest_path.is_file() or not (
+            0 < manifest_path.stat().st_size <= MAX_TRANSFER_MANIFEST_BYTES):
+        raise ValueError('transfer manifest exceeds bounded path/size')
+    transfer = json.loads(manifest_path.read_text())
+    if not isinstance(transfer, dict) or not 2 <= len(transfer) <= MAX_PACKET_FILES or not {
+            'RESULT.json', 'OUTER-RESULT.json'}.issubset(transfer):
+        raise ValueError('transfer coverage requires RESULT.json and OUTER-RESULT.json')
+    for name, record in transfer.items():
+        packet_record(name, record)
+    if sum(record['size'] for record in transfer.values()) > MAX_PACKET_BYTES:
+        raise ValueError('transfer packet exceeds bounded total size')
     for name, record in transfer.items():
         packet_file(root, name, record)
     result_path = packet_file(root, 'RESULT.json', transfer['RESULT.json'])
     result = json.loads(result_path.read_text())
+    receipt_files = result.get('files')
+    if not isinstance(receipt_files, dict) or not 1 <= len(receipt_files) <= MAX_PACKET_FILES:
+        raise ValueError('immutable acquisition receipt file records required')
+    if not set(receipt_files).issubset(transfer) or not set(transfer).difference(TRANSPORT_ONLY).issubset(receipt_files):
+        raise ValueError('transfer coverage must include every acquisition artifact receipt')
+    for name, record in receipt_files.items():
+        packet_record(name, record)
+        if (record['size'], record['sha256']) != (transfer[name]['size'], transfer[name]['sha256']):
+            raise ValueError('immutable acquisition receipt disagrees with transfer artifact identity')
+        # The transfer may have been recomputed over replacement pixels. The
+        # acquisition's immutable records are the authority for original bytes.
+        packet_file(root, name, record)
     if result['status'] != 'pass' or json.loads((root / 'OUTER-RESULT.json').read_text()) != {'exit_code': 0}:
         raise ValueError('reference acquisition did not finish successfully')
     names = [c['name'] for c in result['commands']]

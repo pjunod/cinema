@@ -14,7 +14,7 @@ import unittest
 from annex_b2 import oetf
 from compare_trim_software_reference import check_selected
 from trim_software_metrics import (acquisition, bind, comparison, metrics,
-    non_l8_rpu_identity, packet_file, rgb16, rgba32, xml_contract, xyz)
+    non_l8_rpu_identity, packet_file, rgb16, rgba32, sha, xml_contract, xyz, MAX_PACKET_FILE_BYTES)
 
 
 class SoftwareReferenceTests(unittest.TestCase):
@@ -108,13 +108,76 @@ class SoftwareReferenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 packet_file(root, 'data', bound)
             result = {'status': 'pass', 'commands': [{'name': 'synthetic-test',
-                'exit_code': 0, 'binary_sha256': '0'*64, 'argv': ['synthetic-test']}]}
+                'exit_code': 0, 'binary_sha256': '0'*64, 'argv': ['synthetic-test']}],
+                'files': {'data': bind(root/'data')}}
             (root/'RESULT.json').write_text(json.dumps(result))
             (root/'OUTER-RESULT.json').write_text('{"exit_code":1}')
-            transfer = {name: bind(root/name) for name in ('RESULT.json', 'OUTER-RESULT.json')}
+            transfer = {name: bind(root/name) for name in ('RESULT.json', 'OUTER-RESULT.json', 'data')}
             (root/'TRANSFER-SHA256.json').write_text(json.dumps(transfer))
             with self.assertRaises(ValueError):
                 acquisition(root)
+
+    def source_packet(self, root):
+        # Valid uncompressed 1x1 RGB16 TIFFs; acquisition checks happen before
+        # image decoding, so the counterexample changes actual pixel payloads.
+        tags = [(256, 4, 1, 1), (257, 4, 1, 1), (258, 3, 3, 134),
+                (259, 3, 1, 1), (262, 3, 1, 2), (273, 4, 1, 140),
+                (277, 3, 1, 3), (278, 4, 1, 1), (279, 4, 1, 6), (284, 3, 1, 1)]
+        image = b'II' + struct.pack('<HIH', 42, 8, len(tags))
+        image += b''.join(struct.pack('<HHII', *tag) for tag in tags)
+        image += struct.pack('<IHHHHHH', 0, 16, 16, 16, 0, 32768, 65535)
+        (root/'inputs').mkdir()
+        for index in range(3):
+            (root/'inputs'/f'frame_{index:06}.tif').write_bytes(image)
+        (root/'INPUT-MANIFEST.json').write_text(json.dumps({
+            'source_sha256': sha(root/'inputs/frame_000000.tif')}))
+        files = {str(p.relative_to(root)): bind(p) for p in root.rglob('*') if p.is_file()}
+        result = {'status': 'pass', 'files': files, 'commands': [{
+            'name': 'synthetic-artifact-boundary-test', 'exit_code': 0,
+            'binary_sha256': '0'*64, 'argv': ['synthetic-artifact-boundary-test']}]}
+        (root/'RESULT.json').write_text(json.dumps(result))
+        (root/'OUTER-RESULT.json').write_text('{"exit_code":0}')
+        self.transfer_packet(root)
+
+    def transfer_packet(self, root):
+        files = {str(p.relative_to(root)): bind(p) for p in root.rglob('*')
+                 if p.is_file() and p.name != 'TRANSFER-SHA256.json'}
+        (root/'TRANSFER-SHA256.json').write_text(json.dumps(files))
+
+    def test_recomputed_transfer_cannot_replace_acquired_source_pixels(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['PLURX_DV_CONTROL_SCRATCH']) as folder:
+            root = Path(folder); self.source_packet(root)
+            acquisition(root)  # The original source/receipt/transport tuple is valid.
+            receipt = sha(root/'RESULT.json')
+            for index in range(3):
+                path = root/'inputs'/f'frame_{index:06}.tif'
+                path.write_bytes(path.read_bytes()[:-6] + struct.pack('<HHH', 100, 200, 300))
+            manifest = root/'INPUT-MANIFEST.json'
+            manifest.write_text(json.dumps({'source_sha256': sha(root/'inputs/frame_000000.tif')}))
+            self.transfer_packet(root)  # Attacker updates every transport binding.
+            self.assertEqual(sha(root/'RESULT.json'), receipt)
+            with self.assertRaisesRegex(ValueError, 'immutable acquisition receipt'):
+                acquisition(root)
+
+    def test_outer_result_requires_explicit_transfer_coverage(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['PLURX_DV_CONTROL_SCRATCH']) as folder:
+            root = Path(folder); self.source_packet(root)
+            path = root/'TRANSFER-SHA256.json'
+            transfer = json.loads(path.read_text()); del transfer['OUTER-RESULT.json']
+            path.write_text(json.dumps(transfer))
+            self.assertEqual(json.loads((root/'OUTER-RESULT.json').read_text()), {'exit_code': 0})
+            with self.assertRaisesRegex(ValueError, 'coverage requires'):
+                acquisition(root)
+
+    def test_packet_records_bound_size_and_reject_parent_paths(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['PLURX_DV_CONTROL_SCRATCH']) as folder:
+            root = Path(folder); (root/'data').write_bytes(b'x')
+            record = bind(root/'data')
+            with self.assertRaisesRegex(ValueError, 'contained'):
+                packet_file(root, '../data', record)
+            record['size'] = MAX_PACKET_FILE_BYTES + 1
+            with self.assertRaisesRegex(ValueError, 'bounded'):
+                packet_file(root, 'data', record)
 
 
 if __name__ == '__main__':
