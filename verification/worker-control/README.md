@@ -114,3 +114,7 @@ package proves local controller safety, with no SQL/Store correctness, Tokio/OS
 fairness, external-operation termination, fair simulation or cluster-wide
 progress/deadlock theorem. The existing model's durable source-I/O fairness gap
 remains open.
+
+## Review amendments and result interpretation
+
+Fable task `t_e69efaca` approved the production extraction with proof/runner amendments. T4 additionally pins the exact interruption effect list; T3 requires every outcome-producing effect to end its list, matching the driver handoff. Positive qualification requires present theorem-labelled specification assertions to report `SUCCESS`. Only unmarked compiler panic/expect checks may report `UNREACHABLE`; unexpected statuses or inconsistent summary counts reject the result. The pinned tool's actual positive output is preserved as a parser fixture with recorded provenance. A partial native parser-calibration run is not full package acceptance.

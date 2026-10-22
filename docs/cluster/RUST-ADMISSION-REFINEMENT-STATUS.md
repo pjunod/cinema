@@ -1,6 +1,6 @@
 # Rust worker controller — verify the post-claim lifecycle
 
-**Status:** open; design selected; production controller implementation in progress · **Updated:** 2026-10-22 · **Owner:** Codex coordinator · **Branch:** `codex/admission-rust-refinement` · **PR:** [#1260](http://forge.lan:3000/noirr/plurx/pulls/1260), draft; coordinator owns implementation integration, qualification and merge.
+**Status:** open; implementation integrated; final Fable review delivered; review amendments implemented; parser calibration and qualification pending · **Updated:** 2026-10-22 · **Owner:** Codex coordinator · **Branch:** `codex/admission-rust-refinement` · **PR:** [#1260](http://forge.lan:3000/noirr/plurx/pulls/1260), draft; coordinator owns implementation integration, qualification and merge.
 
 Companion to [worker refinement](WORKER-REFINEMENT-STATUS.md), which delivered two complete model workers and selected Rust conformance. This phase starts a machine-checked implementation proof; it does not claim complete Rust simulation or cluster-wide deadlock freedom.
 
@@ -76,3 +76,17 @@ Production extraction commit `a14a269c354f17677098f6886d4effb631e1568b` passed p
 The proof adapter stages complete production Rust files byte-for-byte into an isolated zero-dependency package and checks hashes before and after analysis. Its standalone manifest is a recorded packaging envelope, avoiding unrelated workspace dependency resolution. No second controller implementation is maintained. Ordinary production Rust compilation remains separate evidence.
 
 The main fast lane gains an affected-input proof job with checksum-pinned native Kani and a scoped nightly; its result is required by the promotion gate. The complete registry remains six positive harnesses and three semantic controls. Strict per-target receipt reuse must preserve the original candidate and log while rerunning only missing, failed or invalidated targets. Final Fable review precedes affected qualification.
+
+## 9. Independent review disposition
+
+Fable 5.1 reviewed candidate `58a10429c57847ea4539ac763a01cb837d4de156` in task `t_e69efaca`, run 19, and **approved with amendments**. It found no defect in the production controller or driver operation order. It did not execute tests or proofs.
+
+- A1: pin exact interruption effects in T4: loss/pressure revoke, cancel and join; normal completion joins only.
+- A2: require outcome-producing effects to be last in their effect list, matching the driver's event handoff.
+- A3: validate the result parser against an actual pinned-tool positive log and state a nonvacuity/reachability policy. Specification assertions must succeed; only unmarked compiler panic/expect checks may be unreachable. Preserve strict semantic counterexample attribution.
+- A4: record actual first-run provisioning/solver timings and tool availability. Raise a timeout explicitly if needed; do not weaken proof bounds.
+- A5: update this ledger to the delivered review and next acceptance steps.
+
+The lower-model proof lane owns A1–A3; the coordinator owns A4/A5, exact-candidate qualification and merge. The controller and driver remain frozen. Fable requires another review only if their DAG or operation order changes. One post-review native positive target calibrates the parser against the real tool; the first full six-positive/three-control qualification is reserved for the Linux CI job.
+
+A1/A2 proof assertions and A3 explicit parser policy are integrated without changing the production controller/driver. A native T2 positive calibration will capture the actual pinned output before committing its fixture. No full package acceptance or post-change runtime qualification has run yet.

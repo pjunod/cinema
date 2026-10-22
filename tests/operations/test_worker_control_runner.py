@@ -82,6 +82,37 @@ class WorkerControlVerdictTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(RuntimeError):
                 runner.verdict(log(status=status), 0, HARNESS, None)
 
+    def test_nonmarker_panic_unreachable_is_explicitly_counted(self) -> None:
+        extra = ('Check 2: core::result::unwrap_failed.assertion.1\n'
+                 '\t - Status: UNREACHABLE\n'
+                 '\t - Description: "reachable process-gating event accepted"\n')
+        output = log().replace('SUMMARY:', extra + 'SUMMARY:').replace('0 of 1 failed', '0 of 2 failed (1 unreachable)')
+        result = runner.verdict(output, 0, HARNESS, None)
+        self.assertEqual(result["status_counts"], {"SUCCESS": 1, "UNREACHABLE": 1, "FAILURE": 0})
+        for altered in (
+            output.replace('core::result::unwrap_failed.assertion.1', 'slice.array_bounds.1'),
+            output.replace('reachable process-gating event accepted', 'T3 unreachable specification'),
+            output.replace('(1 unreachable)', ''),
+            output.replace('(1 unreachable)', '(2 unreachable)'),
+            output.replace('(1 unreachable)', '(1 unreachable,1 unreachable)'),
+            output.replace('(1 unreachable)', '(1 ignored)'),
+        ):
+            with self.subTest(altered=altered), self.assertRaises(RuntimeError):
+                runner.verdict(altered, 0, HARNESS, None)
+
+    def test_vacuous_or_absent_specification_assertions_reject(self) -> None:
+        unreachable = log(status="UNREACHABLE").replace('1 of 1 failed', '0 of 1 failed (1 unreachable)')
+        for output in (unreachable, log(description="compiler-generated bounds check")):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                runner.verdict(output, 0, HARNESS, None)
+
+    def test_parenthetical_undetermined_counts_never_create_a_pass(self) -> None:
+        checks = [("guard.assertion.1", "UNDETERMINED", "guard")]
+        output = log(status="UNDETERMINED").replace('1 of 1 failed', '0 of 1 failed (1 undetermined)')
+        runner.check_summary(output, checks)
+        with self.assertRaises(RuntimeError):
+            runner.verdict(output, 0, HARNESS, None)
+
     def test_control_requires_named_semantic_assertion_counterexample(self) -> None:
         result = runner.verdict(log(failed=True), 1, HARNESS, ASSERTION, [ASSERTION])
         self.assertEqual(result["outcome"], "semantic_counterexample")

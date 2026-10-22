@@ -263,32 +263,84 @@ def parse_inventory(data: dict) -> list[str]:
     return names
 
 
+SPEC_MARKER = re.compile(r"\bT[1-6]\b")
+
+
+def allowed_unreachable(name: str, description: str) -> bool:
+    """Only compiler unreachable/panic/expect guards may be unreachable.
+
+    T-labelled specification assertions must actually be checked, even when
+    the solver calls their unexecuted path unreachable rather than failing it.
+    """
+    if SPEC_MARKER.search(description):
+        return False
+    if re.search(r"\.unreachable\.\d+$", name) and description == "unreachable code":
+        return True
+    return (".assertion." in name and
+            re.search(r"(?:panicking|panic_fmt|panic_nounwind|unwrap_failed|expect_failed|::expect\b)", name) is not None)
+
+
+def check_summary(log: str, checks: list[tuple[str, str, str]]) -> None:
+    lines = re.findall(r"^\s*\*\*[^\n]*failed[^\n]*$", log, re.M)
+    if len(lines) != 1:
+        raise RuntimeError("missing or duplicate property result summary")
+    match = re.fullmatch(r"\s*\*\* (\d+) of (\d+) failed(?: \(([^()]*)\))?\s*", lines[0])
+    if match is None:
+        raise RuntimeError("malformed property result summary")
+    failures = sum(status == "FAILURE" for _, status, _ in checks)
+    if (int(match[1]), int(match[2])) != (failures, len(checks)):
+        raise RuntimeError("inconsistent failed/total property summary")
+    reported = {}
+    if match[3] is not None:
+        for entry in match[3].split(","):
+            count = re.fullmatch(r"\s*([1-9][0-9]*) (undetermined|unreachable)\s*", entry)
+            if count is None or count[2] in reported:
+                raise RuntimeError("unknown or duplicate parenthetical summary count")
+            reported[count[2]] = int(count[1])
+    expected = {}
+    for status in ("UNDETERMINED", "UNREACHABLE"):
+        count = sum(actual == status for _, actual, _ in checks)
+        if count:
+            expected[status.lower()] = count
+    if reported != expected:
+        raise RuntimeError("parenthetical summary counts do not match property statuses")
+
+
 def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list[str] | None = None) -> dict:
     checks = re.findall(r'Check \d+: ([^\n]+)\n\s*- Status: ([A-Z_]+)\n\s*- Description: "([^\n]*)"', log)
     indices = re.findall(r'^Check (\d+):', log, re.M)
     if indices != [str(index) for index in range(1, len(checks) + 1)]:
         raise RuntimeError("incomplete, duplicate or malformed property results")
-    failures = [(name, status, description) for name, status, description in checks if status != "SUCCESS"]
     checked = re.findall(r'^Checking harness ([^\n]+)\.\.\.$', log, re.M)
-    if checked != [harness]:
+    if checked != [harness] or harness not in HARNESSES:
         raise RuntimeError(f"missing, duplicate or unexpected executed harness: {checked}")
     if not checks:
         raise RuntimeError("missing property results")
-    summaries = re.findall(r'\*\* (\d+) of (\d+) failed', log)
-    if summaries != [(str(len(failures)), str(len(checks)))]:
-        raise RuntimeError("missing or inconsistent property result summary")
+    check_summary(log, checks)
+    failures = [(name, status, description) for name, status, description in checks if status == "FAILURE"]
+    for name, status, description in checks:
+        if status == "UNREACHABLE" and allowed_unreachable(name, description):
+            continue
+        if status not in {"SUCCESS", "FAILURE"}:
+            raise RuntimeError(f"unchecked, vacuous or unknown property status: {name}: {status}")
     complete = re.findall(r'Complete - (\d+) successfully verified harnesses, (\d+) failures, (\d+) total\.', log)
     expected_complete = [("1", "0", "1")] if not failures else [("0", "1", "1")]
     if complete != expected_complete:
         raise RuntimeError("missing or inconsistent complete harness summary")
+    labelled = [(name, status, description) for name, status, description in checks if SPEC_MARKER.search(description)]
+    theorem_marker = f"T{HARNESSES.index(harness) + 1}"
+    if not any(re.search(rf"\b{theorem_marker}\b", description) and ".assertion." in name
+               for name, _, description in labelled):
+        raise RuntimeError("missing reachable theorem-labelled specification assertions")
     if marker is None:
         if code != 0 or failures or "VERIFICATION:- SUCCESSFUL" not in log:
             raise RuntimeError(f"positive harness did not completely pass: {harness}")
+        if any(status != "SUCCESS" or ".assertion." not in name for name, status, _ in labelled):
+            raise RuntimeError("every theorem-labelled specification assertion must be SUCCESS")
         outcome = "proved"
     else:
-        # Every failing property must be a specification assertion from the
-        # expected theorem. Compile errors, timeouts, unwinding, memory/overflow
-        # errors and missing harnesses cannot count as mutation detection.
+        # Every failing property must be the intended semantic assertion.
+        # Compiler, unwind, unsupported, timeout and unknown results reject.
         if code != 1 or not failures or "VERIFICATION:- FAILED" not in log:
             raise RuntimeError("mutation failed to produce an assertion counterexample")
         if any(status != "FAILURE" or ".assertion." not in name or not any(text in description for text in (allowed or [marker]))
@@ -298,7 +350,11 @@ def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list
             raise RuntimeError("required semantic assertion counterexample absent")
         outcome = "semantic_counterexample"
     return {"harness": harness, "outcome": outcome, "exit_code": code,
-            "property_count": len(checks), "failures": failures}
+            "property_count": len(checks), "failures": failures,
+            "status_counts": {status: sum(actual == status for _, actual, _ in checks)
+                              for status in ("SUCCESS", "UNREACHABLE", "FAILURE")},
+            "specification_assertions": len(labelled),
+            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only nonmarker compiler panic/expect guards"}
 
 
 def mutate_source(original: str, control: dict) -> str:

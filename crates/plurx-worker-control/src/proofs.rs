@@ -146,7 +146,8 @@ fn t2_every_reachable_prefix_gates_process() {
         if matches!(input, Event::BindOutcome { accepted: true }) {
             accepted_bind = true;
         }
-        let (next, effects) = step(current, input).expect("T2 reachable event accepted");
+        let (next, effects) =
+            step(current, input).expect("reachable process-gating event accepted");
         assert!(rank(next) > rank(current), "T2 accepted DAG rank increases");
         for effect in effects.as_slice() {
             match effect {
@@ -211,10 +212,21 @@ fn t3_every_prefix_retains_resources_terminal_cleanup_ordered() {
             }
             _ => {}
         }
-        let (next, effects) = step(current, input).expect("T3 reachable event accepted");
+        let (next, effects) =
+            step(current, input).expect("reachable resource-lifetime event accepted");
         assert!(rank(next) > rank(current), "T3 accepted DAG rank increases");
         for (index, effect) in effects.as_slice().iter().enumerate() {
             assert!(admission, "T3 admission is last effect");
+            if matches!(
+                effect,
+                Effect::AcquireDomain | Effect::Bind | Effect::Process | Effect::ReleaseDomain
+            ) {
+                assert_eq!(
+                    index + 1,
+                    effects.as_slice().len(),
+                    "T3 outcome-producing effect is last in its list"
+                );
+            }
             match effect {
                 Effect::AcquireDomain => assert!(
                     queue && !domain && !publisher,
@@ -359,7 +371,24 @@ fn t4_refusal_interrupt_and_completion_settlement_policy() {
         &[Effect::DropPublisher, Effect::ReleaseDomain],
         "T4 bind refusal releases without processing"
     );
-    let (processing, _) = step(State::Bound, Event::Interrupt(cause)).expect("interrupt accepted");
+    let (processing, interrupt_effects) =
+        step(State::Bound, Event::Interrupt(cause)).expect("interrupt accepted");
+    match cause {
+        Interrupt::QueueLoss | Interrupt::DomainLoss | Interrupt::Pressure => assert_eq!(
+            interrupt_effects.as_slice(),
+            &[
+                Effect::RevokeDomain,
+                Effect::CancelWork,
+                Effect::AwaitWorkJoin
+            ],
+            "T4 loss interrupts revoke cancel and join in order"
+        ),
+        Interrupt::Completed => assert_eq!(
+            interrupt_effects.as_slice(),
+            &[Effect::AwaitWorkJoin],
+            "T4 completed work only joins without revocation or cancellation"
+        ),
+    }
     let (releasing, _) = step(processing, Event::WorkJoined { ok }).expect("work join accepted");
     let expected_kind = match cause {
         Interrupt::DomainLoss | Interrupt::Pressure => SettlementKind::Interrupted,
