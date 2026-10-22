@@ -1,6 +1,6 @@
 # Engineering knowledge pilot status — owners, evidence and next work
 
-**Status:** open · **Updated:** 2026-10-21 · **Owner:** Codex integrator
+**Status:** open · **Updated:** 2026-10-22 · **Owner:** Codex integrator
 
 Companion to the [approved pilot plan](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md)
 and [review closure](ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md). This is the live
@@ -30,6 +30,13 @@ pre-answer descriptive documentation metric. Independent audit/sealing,
 completed-source adversarial review, one affected check batch and runtime
 qualification precede calibration and 108 solver/216 blind scorer contexts.
 No savings claim follows from prerequisite implementation alone.
+
+The secondary documentation reference packet and policy now have independent
+approval: twelve cases, 32 role units, two undefined empty denominators and
+zero open audit findings. All 626 locked dependencies have verified archive
+checksums and a dependency-only immutable image. Operational source review,
+runtime acceptance, calibrated budget and comparison execution remain open;
+no count or study inference calls have run.
 
 ## Previous pilot qualification snapshot — retained historical evidence
 

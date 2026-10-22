@@ -1,6 +1,6 @@
 # Engineering knowledge efficiency study — measured cost and documentation reliability
 
-**Status:** open · **Updated:** 2026-10-21 · **Owner:** Codex integrator
+**Status:** open · **Updated:** 2026-10-22 · **Owner:** Codex integrator
 
 Companion to the [pilot contract](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md)
 and [execution ledger](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md). This document
@@ -86,8 +86,22 @@ thresholds. The independent custodian derives expected source-path and
 heading units from the immutable authority references and visible baseline
 sources, without consulting the curated graph. A nonauthor auditor must
 check authority, applicability and visibility before the derivation is sealed.
-The current draft contains 36 per-case reference units across twelve cases;
-its draft digest is not a final independent approval.
+The independently approved packet contains **32 grouped documentation-role
+units, 43 propositions, 46 acceptable alternatives and 62 source spans across
+twelve cases**. Two cases have undefined empty denominators. A role unit asks
+whether the answer locates and applies its governing documentation; it is
+not a count of unique filenames. Partial support from an overlapping
+alternative does not earn full unit credit.
+
+Independent audit closed all findings before any count request or model
+answer. Approved packet SHA-256:
+`703fc9afaf2dc7e1d524add3d166dbe48d70c0f9006abb68218264670209cc97`;
+embedded policy:
+`00a5e45652640282bfe3f20803db2a3e33ec4af63f66f74a13a765fb6f0afda4`;
+safe audit receipt:
+`5dff121ac1d8e587d6111671c2d60297f935cee177ba2deda9117c14c3212c36`.
+This approves the reference derivation and rubric. It does not establish
+operational scorer independence or comparative results.
 
 The same citation request appears in the common instructions for every arm:
 identify the governing document and section and apply the supported constraint
@@ -108,6 +122,24 @@ The final report must distinguish scorer agreement, adjudication and missing
 scores. It must publish counts and arm differences, not equate a governing
 requirement score with exact-document identification. This small fixed sample
 supports a bounded pilot result, not a population-wide accuracy claim.
+
+## Offline dependencies — immutable image, unchanged checks
+
+The acquisition step verified all **626** locked registry archives against
+`Cargo.lock`; 27,193 complete source files totaling 522,397,189 bytes then
+matched their archived bytes. The derivative toolchain image contains only
+those public dependency sources above the pinned base. Source workspaces,
+build targets, private assertions and account credentials are separate.
+Public example certificates remain ordinary checksum-bound dependency source.
+They require no exception to the runtime credential-name guard.
+
+The runtime Cargo home contains a deterministic configuration pointing to
+`/opt/locked-crates` in that immutable image. The exact frozen commands and
+lockfile remain unchanged. This uses Cargo's documented
+[directory source replacement](https://doc.rust-lang.org/cargo/reference/source-replacement.html)
+and [offline vendoring](https://doc.rust-lang.org/cargo/commands/cargo-vendor.html).
+Image acquisition is separate from actual compilation, containment probes
+and acceptance qualification.
 
 ## Results and interpretation
 
