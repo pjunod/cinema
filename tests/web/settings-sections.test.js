@@ -722,7 +722,7 @@ function developerPanels(){
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
       "const SERVER={cluster_enabled:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
       shippedSource("settingsClusterEnabled"),
-      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
+      "const hdrDisplayPeakCard=()=>'',langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
       // `directedChangeRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
       shippedSource("directedChangeRows"),

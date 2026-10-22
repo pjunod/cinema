@@ -478,10 +478,26 @@ function measuredPresentationTarget(){
   }
   return {...PRESENTATION_TARGET_RECT};
 }
-function currentCapsDocument(){
+function hdrDisplayPeakCaps(){
+  // Browsers expose HDR support, never optical luminance. Auto stays unknown.
+  try{
+    const value=localStorage.getItem("plurx.hdrDisplayPeak");
+    const peak=Number(value);
+    return [400,600,1000,1600,2000,4000].includes(peak)
+      ?{max_nits:peak,peak_source:"viewer"}:{};
+  }catch(e){return {};}
+}
+function currentCapsDocument(incumbent=null){
   const sinks=browserAudioSinks(PLAY_CAPS.acodec, browserOutputChannelsCached());
   const caps=capsDocument(sinks.length?Object.assign({}, PLAY_CAPS, {audioSinks:sinks}):PLAY_CAPS,
     decodeLimits());
+  // Re-decisions for an admitted playback keep its original peak, including
+  // Unknown. Geometry/decoder refreshes must not change the rendering target.
+  const retained=incumbent&&incumbent.capsSnapshot;
+  const peak=retained?(retained.display||{}):hdrDisplayPeakCaps();
+  if(peak.max_nits!=null&&peak.peak_source!=null){
+    Object.assign(caps.display,{max_nits:peak.max_nits,peak_source:peak.peak_source});
+  }
   const target=measuredPresentationTarget();
   if(SERVER&&SERVER.playback_display_aware_auto&&target){
     Object.assign(caps.display,{presentation_target:target});
@@ -792,7 +808,8 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
       resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
       wantsPlayback:fullIntent.wantsPlayback,
       selection:latest?playbackSelection(wanted,meta.fileContext||fileId):attempt.selection,
-      audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset};
+      audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset,
+      peakIncumbent:attempt.peakIncumbent};
     play.failedPreparation=retry;
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
     // Only a predecessor with a picture can survive a refused replacement.
@@ -875,6 +892,8 @@ function capturePlayInputs(fileId,meta,retryIntent){
         priorKbps:PLAYER.priorKbps})
     : null;
   const continuingPlayback=!!(samePlaybackFile(PLAYER,fileId,meta));
+  const peakIncumbent=retryIntent?.peakIncumbent||(continuingPlayback
+    ?{capsSnapshot:{display:{...(PLAYER.capsSnapshot?.display||{})}}}:null);
   const carriedSeek=retryIntent?.controlSeek||(continuingPlayback&&PLAYER.controlSeek);
   const replacementControlSeek=carriedSeek
     ? Object.assign({},carriedSeek,{executed:false,frameFloor:0,audioPositionMs:null})
@@ -901,7 +920,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // waiting actually experiences, and it includes every server round trip
   // this function is about to make.
   const clickedAt=performance.now();
-  return Object.freeze({requestedAttemptReason,skipDefaultSub,sessionAudioOffset,replacementBandwidthSeed,
+  return Object.freeze({requestedAttemptReason,skipDefaultSub,sessionAudioOffset,replacementBandwidthSeed,peakIncumbent,
     replacementControlSeek,replacementControlSequenceFloor,replacementControlIntentGeneration,
     selection,modal,video,playerWasOpen,playerOpener,playerOpenerClick,playerLastFocused,
     watchTicket,clickedAt});
@@ -914,7 +933,7 @@ async function decideForPlay(attempt){
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await preparation.run(signal=>askDecision(attempt.fileContext||fileId, qualityForce(), requestSelection,signal));}
+  try{ decision=await preparation.run(signal=>askDecision(attempt.fileContext||fileId, qualityForce(), requestSelection,signal,attempt.peakIncumbent));}
   catch(e){failPreparation(e,attempt);return null;}
   if(!openIsCurrent()) return null;
   let retestDecodeLimit=false;
@@ -949,7 +968,7 @@ async function decideForPlay(attempt){
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await preparation.run(signal=>askDecision(attempt.fileContext||fileId,"transcode",requestSelection,signal));
+        const d2=await preparation.run(signal=>askDecision(attempt.fileContext||fileId,"transcode",requestSelection,signal,{capsSnapshot:decision._capsSnapshot}));
         if(!openIsCurrent()) return null;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
