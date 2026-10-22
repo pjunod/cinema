@@ -17,6 +17,7 @@ use crate::resource_custody::{
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
+mod bootstrap;
 mod live_settlement;
 mod pipe_drains;
 mod plans;
@@ -70,6 +71,8 @@ struct OwnedRole {
     members: Vec<PlannedMember>,
     typed_members: Option<Vec<v2::MemberPlan>>,
     scratch: BTreeMap<Uuid, scratch::ScratchMember>,
+    // Same admitted member/ledger; V3 adds bootstrap state, not a second charge.
+    bootstrap: BTreeMap<Uuid, bootstrap::BootstrapMember>,
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
@@ -95,6 +98,7 @@ struct Transition {
 enum Effect {
     Arm(Uuid),
     Scratch(Uuid),
+    Bootstrap(Uuid),
     Enrich,
     Seal,
     Hold,
@@ -413,6 +417,7 @@ impl NodeResourceRuntime {
                 members: plan.legacy,
                 typed_members,
                 scratch: BTreeMap::new(),
+                bootstrap: BTreeMap::new(),
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),
@@ -979,8 +984,12 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
-        if let Effect::Scratch(member) = transition.effect {
-            scratch::apply_committed(role, member, ack.operation_id)?;
+        match transition.effect {
+            Effect::Scratch(member) => scratch::apply_committed(role, member, ack.operation_id)?,
+            Effect::Bootstrap(member) => {
+                bootstrap::apply_committed(role, member, ack.operation_id)?
+            }
+            _ => {}
         }
         let transition = role.transition.as_mut().ok_or(OperationError::State)?;
         if matches!(transition.effect, Effect::Cancel | Effect::Settle) {
@@ -1004,8 +1013,10 @@ impl NodeResourceRuntime {
         if let Effect::Arm(member) = transition.effect {
             role.armed.insert(member);
         }
-        if let Effect::Scratch(member) = transition.effect {
-            scratch::acknowledge(role, member)?;
+        match transition.effect {
+            Effect::Scratch(member) => scratch::acknowledge(role, member)?,
+            Effect::Bootstrap(member) => bootstrap::acknowledge(role, member)?,
+            _ => {}
         }
         role.sequence = ack.sequence;
         role.phase = ack.phase;

@@ -280,6 +280,10 @@ pub(crate) enum MemberPlan {
         slot: MemberSlot,
         plan: scratch::ScratchPlanV2,
     },
+    ScratchAssetsV3 {
+        slot: MemberSlot,
+        plan: scratch::bootstrap::ScratchPlanV3,
+    },
 }
 impl MemberPlan {
     pub(crate) fn member_id(&self) -> Uuid {
@@ -288,7 +292,8 @@ impl MemberPlan {
             Self::SourceV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
             | Self::ScratchAssetsV1 { slot, .. }
-            | Self::ScratchAssetsV2 { slot, .. } => slot.member_id.uuid(),
+            | Self::ScratchAssetsV2 { slot, .. }
+            | Self::ScratchAssetsV3 { slot, .. } => slot.member_id.uuid(),
         }
     }
     pub(crate) fn kind(&self) -> MemberKind {
@@ -303,7 +308,9 @@ impl MemberPlan {
             Self::LegacyV1 { planned } => planned.adapter.as_str(),
             Self::SourceV1 { .. } => "source_file",
             Self::VodOutputTaskV1 { .. } => "vod_output_task",
-            Self::ScratchAssetsV1 { .. } | Self::ScratchAssetsV2 { .. } => "scratch",
+            Self::ScratchAssetsV1 { .. }
+            | Self::ScratchAssetsV2 { .. }
+            | Self::ScratchAssetsV3 { .. } => "scratch",
         }
     }
     fn edges(&self) -> Vec<Uuid> {
@@ -317,7 +324,8 @@ impl MemberPlan {
             Self::SourceV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
             | Self::ScratchAssetsV1 { slot, .. }
-            | Self::ScratchAssetsV2 { slot, .. } => slot
+            | Self::ScratchAssetsV2 { slot, .. }
+            | Self::ScratchAssetsV3 { slot, .. } => slot
                 .depends_on
                 .iter()
                 .copied()
@@ -339,11 +347,24 @@ pub(crate) struct Manifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Observed {
-    LegacyV1 { identity: super::ObservedIdentity },
-    SourceV1 { source: SourceObserved },
-    VodOutputTaskV1 { task: VodOutputTask },
-    ScratchAssetsV1 { scratch: ScratchAssets },
-    ScratchAssetsV2 { state: scratch::ScratchStateV2 },
+    LegacyV1 {
+        identity: super::ObservedIdentity,
+    },
+    SourceV1 {
+        source: SourceObserved,
+    },
+    VodOutputTaskV1 {
+        task: VodOutputTask,
+    },
+    ScratchAssetsV1 {
+        scratch: ScratchAssets,
+    },
+    ScratchAssetsV2 {
+        state: scratch::ScratchStateV2,
+    },
+    ScratchAssetsV3 {
+        state: scratch::bootstrap::ScratchStateV3,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -476,6 +497,7 @@ fn validate_task(task: &VodOutputTask, manifest: &Manifest) -> Result<(), Custod
         || !manifest.members.iter().any(|m| match m {
             MemberPlan::ScratchAssetsV1 { scratch, .. } => scratch.asset_id == task.asset_id,
             MemberPlan::ScratchAssetsV2 { plan, .. } => plan.asset_id == task.asset_id,
+            MemberPlan::ScratchAssetsV3 { plan, .. } => plan.asset_id == task.asset_id,
             _ => false,
         })
         || !manifest.members.iter().any(|m| m.member_id() == task.root_member_id.uuid() && m.kind() == MemberKind::Root) { return Err(codec::invalid()); }
@@ -592,6 +614,37 @@ pub(crate) fn validate_manifest(value: &Manifest) -> Result<(), CustodyError> {
                             MemberPlan::ScratchAssetsV2 { plan: other, .. } => {
                                 other.asset_id == plan.asset_id
                             }
+                            MemberPlan::ScratchAssetsV3 { plan: other, .. } => {
+                                other.asset_id == plan.asset_id
+                            }
+                            _ => false,
+                        })
+                        .count()
+                        != 1
+                {
+                    return Err(codec::invalid());
+                }
+            }
+            MemberPlan::ScratchAssetsV3 { slot, plan } => {
+                validate_slot(slot)?;
+                scratch::bootstrap::validate_plan(plan)?;
+                if !slot
+                    .protected_paths
+                    .contains(&plan.bootstrap().protected_child_path)
+                    || plan.filesystem_domain.daemon_owner_id != value.owner_id
+                    || value
+                        .members
+                        .iter()
+                        .filter(|m| match m {
+                            MemberPlan::ScratchAssetsV1 { scratch, .. } => {
+                                scratch.asset_id == plan.asset_id
+                            }
+                            MemberPlan::ScratchAssetsV2 { plan: other, .. } => {
+                                other.asset_id == plan.asset_id
+                            }
+                            MemberPlan::ScratchAssetsV3 { plan: other, .. } => {
+                                other.asset_id == plan.asset_id
+                            }
                             _ => false,
                         })
                         .count()
@@ -672,6 +725,9 @@ pub(crate) fn validate_envelope(
         ) if scratch == observed => {}
         (MemberPlan::ScratchAssetsV2 { plan, .. }, Some(Observed::ScratchAssetsV2 { state })) => {
             scratch::validate_projection(plan, state)?
+        }
+        (MemberPlan::ScratchAssetsV3 { plan, .. }, Some(Observed::ScratchAssetsV3 { state })) => {
+            scratch::bootstrap::validate_projection(plan, state)?
         }
         _ => return Err(codec::invalid()),
     }

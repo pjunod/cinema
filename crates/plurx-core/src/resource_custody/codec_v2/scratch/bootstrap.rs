@@ -260,3 +260,19 @@ pub(crate) fn validate_plan(plan: &ScratchPlanV3) -> Result<(), CustodyError> {
     codec::encode(plan)?;
     Ok(())
 }
+
+/// Only the bounded projection shape, never evidence that native work occurred.
+/// Journal restore must replay the complete lineage and compare the entire state.
+pub(crate) fn validate_projection(
+    plan: &ScratchPlanV3,
+    state: &ScratchStateV3,
+) -> Result<(), CustodyError> {
+    if state.version != 3
+        || usize::from(state.bootstrap.next_component) > plan.bootstrap().components.len()
+    {
+        return Err(codec::invalid());
+    }
+    validate_output_projection(plan.output_view(), &state.asset)?;
+    codec::encode(state)?;
+    Ok(())
+}

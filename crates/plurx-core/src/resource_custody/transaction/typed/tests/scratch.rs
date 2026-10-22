@@ -1,7 +1,7 @@
 //! Real journal tests, authored/compiled only until final candidate review.
 use super::*;
 use crate::resource_custody::codec_v2::scratch::*;
-fn growth() -> Fixture {
+pub(super) fn growth() -> Fixture {
     let mut f = fixture(true);
     let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
         unreachable!()

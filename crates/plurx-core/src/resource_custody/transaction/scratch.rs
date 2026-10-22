@@ -2,6 +2,7 @@
 //! SQL history is audit authority; it never manufactures native proof.
 use super::*;
 use crate::resource_custody::codec_v2::{self as v2, scratch::*};
+pub(super) mod bootstrap;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,8 +84,12 @@ pub(super) fn restore(
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
-        let DiskResult::AssetChangedV2(record) = result else {
-            continue;
+        let record = match result {
+            DiskResult::AssetChangedV2(record) => record,
+            DiskResult::AssetChangedV3(record) if record.change.asset_id == plan.asset_id => {
+                return Err(codec::invalid());
+            }
+            _ => continue,
         };
         record.validate()?;
         let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;

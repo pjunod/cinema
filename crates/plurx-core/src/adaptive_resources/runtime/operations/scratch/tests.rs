@@ -20,6 +20,12 @@ fn cost() -> ResourceVector {
     }
 }
 async fn fixture(root: &Path) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
+    fixture_kind(root, false).await
+}
+async fn fixture_kind(
+    root: &Path,
+    bootstrap: bool,
+) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
     let runtime = NodeResourceRuntime::open(super::super::super::tests::options(
         root,
         daemon_owner(
@@ -79,6 +85,67 @@ async fn fixture(root: &Path) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
             },
         },
     };
+    let slot = v2::MemberSlot {
+        member_id: member,
+        owned_by: None,
+        depends_on: vec![],
+        protected_paths: vec![protected],
+    };
+    let typed = if bootstrap {
+        use v2::scratch::bootstrap::*;
+        TypedMemberPlan::ScratchV3 {
+            slot,
+            plan: ScratchPlanV3 {
+                version: 3,
+                asset_id: plan.asset_id,
+                rendition_id: plan.rendition_id,
+                generation_epoch: plan.generation_epoch,
+                filesystem_domain: plan.filesystem_domain,
+                outputs: plan.outputs,
+                limits: plan.limits,
+                directory: DirectoryOriginV1::ConfiguredRootBootstrapV1 {
+                    bootstrap: RootBootstrapPlanV1 {
+                        version: 1,
+                        authority: ConfiguredRootAuthorityV1 {
+                            installation_id: v2::Id::new(runtime.recovered.installation_id)
+                                .unwrap(),
+                            purpose: RootPurpose::RenditionCacheV1,
+                            resolved_absolute_root: root.to_str().unwrap().to_owned(),
+                            traversal: RootTraversal::NamespaceRootToConfiguredRootV1,
+                            descendant_mounts: DescendantMounts::RefuseV1,
+                        },
+                        components: root
+                            .components()
+                            .filter_map(|c| match c {
+                                std::path::Component::Normal(name) => {
+                                    Some(name.to_str().unwrap().to_owned())
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                        child_component: "owned-output".into(),
+                        protected_child_path: root
+                            .join("owned-output")
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        bounds: BootstrapBoundsV1 {
+                            max_components: 64,
+                            max_path_bytes: 4096,
+                            max_component_bytes: 255,
+                            peak_directory_handles: 2,
+                            pending_native_jobs: 1,
+                            resident_memory_bytes: 4096,
+                            child_directory_reserve_bytes: 4096,
+                            parent_entry_reserve_bytes: 4096,
+                        },
+                    },
+                },
+            },
+        }
+    } else {
+        TypedMemberPlan::ScratchV2 { slot, plan }
+    };
     let owner = runtime
         .prepare_typed_families(
             &[FamilyDemand {
@@ -95,15 +162,7 @@ async fn fixture(root: &Path) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
             }],
             vec![TypedGraphPlan {
                 attempt_id: None,
-                members: vec![TypedMemberPlan::ScratchV2 {
-                    slot: v2::MemberSlot {
-                        member_id: member,
-                        owned_by: None,
-                        depends_on: vec![],
-                        protected_paths: vec![protected],
-                    },
-                    plan,
-                }],
+                members: vec![typed],
             }],
             deadline(),
         )
@@ -113,6 +172,83 @@ async fn fixture(root: &Path) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
         .await
         .unwrap();
     (runtime, owner, member.uuid())
+}
+
+#[tokio::test]
+async fn bootstrap_runtime_known_arm_retries_same_head_without_native_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime, owner, member) = fixture_kind(root.path(), true).await;
+    runtime
+        .arm_scratch_bootstrap(&owner, 0, member, deadline())
+        .await
+        .unwrap();
+    let before = {
+        let bundle = owner.state.lock().await;
+        bundle.roles[0].sequence
+    };
+    drop(owner);
+    let owner = runtime.retained_preparations().unwrap().pop().unwrap();
+    runtime
+        .arm_scratch_bootstrap(&owner, 0, member, deadline())
+        .await
+        .unwrap();
+    let bundle = owner.state.lock().await;
+    let role = &bundle.roles[0];
+    assert_eq!(role.sequence, before);
+    assert!(role.armed.contains(&member));
+    assert!(role.transition.is_none());
+    assert!(role.roots.is_empty() && role.drains.is_empty());
+    assert!(!role.refunded && role.receipt.is_none());
+    assert!(role.scratch.is_empty() && role.bootstrap.len() == 1);
+}
+
+#[tokio::test]
+async fn bootstrap_runtime_refuses_legacy_directory_seam_and_wrong_installation() {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime, owner, member) = fixture_kind(root.path(), true).await;
+    assert!(runtime
+        .arm_scratch_directory(&owner, 0, member, deadline())
+        .await
+        .is_err());
+    {
+        let mut bundle = owner.state.lock().await;
+        let v2::MemberPlan::ScratchAssetsV3 { plan, .. } =
+            &mut bundle.roles[0].typed_members.as_mut().unwrap()[0]
+        else {
+            unreachable!()
+        };
+        let v2::scratch::bootstrap::DirectoryOriginV1::ConfiguredRootBootstrapV1 { bootstrap } =
+            &mut plan.directory;
+        bootstrap.authority.installation_id = id();
+    }
+    assert!(runtime
+        .arm_scratch_bootstrap(&owner, 0, member, deadline())
+        .await
+        .is_err());
+    let bundle = owner.state.lock().await;
+    assert!(bundle.roles[0].armed.is_empty());
+    assert!(bundle.roles[0].bootstrap.is_empty());
+}
+
+#[tokio::test]
+async fn bootstrap_runtime_drain_preserves_charged_original_member() {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime, owner, member) = fixture_kind(root.path(), true).await;
+    runtime
+        .arm_scratch_bootstrap(&owner, 0, member, deadline())
+        .await
+        .unwrap();
+    let before = runtime.accounting().unwrap();
+    runtime.begin_drain().unwrap();
+    assert!(matches!(
+        runtime
+            .arm_scratch_bootstrap(&owner, 0, member, deadline())
+            .await,
+        Err(OperationError::Draining)
+    ));
+    assert_eq!(runtime.accounting().unwrap().used, before.used);
+    let bundle = owner.state.lock().await;
+    assert!(!bundle.roles[0].refunded && bundle.roles[0].bootstrap.len() == 1);
 }
 
 async fn queue_unconsumed_directory(

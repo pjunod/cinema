@@ -26,6 +26,10 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         plan: v2::scratch::ScratchPlanV2,
     },
+    ScratchV3 {
+        slot: v2::MemberSlot,
+        plan: v2::scratch::bootstrap::ScratchPlanV3,
+    },
 }
 
 #[derive(Clone)]
@@ -87,6 +91,7 @@ impl TypedMemberPlan {
             Self::Legacy(planned) => v2::MemberPlan::LegacyV1 { planned },
             Self::ScratchV1 { slot, scratch } => v2::MemberPlan::ScratchAssetsV1 { slot, scratch },
             Self::ScratchV2 { slot, plan } => v2::MemberPlan::ScratchAssetsV2 { slot, plan },
+            Self::ScratchV3 { slot, plan } => v2::MemberPlan::ScratchAssetsV3 { slot, plan },
             Self::Source { slot, source } => {
                 let member_id = slot.member_id;
                 let copies = source

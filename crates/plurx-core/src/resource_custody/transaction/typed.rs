@@ -65,6 +65,9 @@ pub(super) fn prepare(
                     v2::MemberPlan::ScratchAssetsV2 { plan, .. } => {
                         asset_ids.insert(plan.asset_id);
                     }
+                    v2::MemberPlan::ScratchAssetsV3 { plan, .. } => {
+                        asset_ids.insert(plan.asset_id);
+                    }
                     _ => {}
                 }
             }
@@ -85,15 +88,20 @@ pub(super) fn prepare(
         // only the conserving retirement transaction may install such ownership.
         let mut scratch_minimum = ResourceVector::default();
         for member in &new.manifest.members {
-            if let v2::MemberPlan::ScratchAssetsV2 { plan, .. } = member {
-                if !asset_ids.insert(plan.asset_id) {
+            let scratch = match member {
+                v2::MemberPlan::ScratchAssetsV2 { plan, .. } => Some((plan.asset_id, &plan.limits)),
+                v2::MemberPlan::ScratchAssetsV3 { plan, .. } => Some((plan.asset_id, &plan.limits)),
+                _ => None,
+            };
+            if let Some((asset, limits)) = scratch {
+                if !asset_ids.insert(asset) {
                     return Err(codec::invalid());
                 }
                 scratch_minimum = scratch_minimum
                     .checked_add(ResourceVector {
-                        scratch_bytes: plan.limits.reserved_storage_bytes,
-                        peak_memory_bytes: plan.limits.resident_memory_bytes,
-                        handles: u64::from(plan.limits.live_handles),
+                        scratch_bytes: limits.reserved_storage_bytes,
+                        peak_memory_bytes: limits.resident_memory_bytes,
+                        handles: u64::from(limits.live_handles),
                         ..ResourceVector::default()
                     })
                     .ok_or_else(codec::invalid)?;
@@ -183,6 +191,9 @@ pub(super) fn change(
         Mutation::AssetChangeV2 { change } => {
             return super::scratch::change(tx, key, prior, manifest, change);
         }
+        Mutation::AssetChangeV3 { change } => {
+            return super::scratch::bootstrap::change(tx, key, prior, manifest, change);
+        }
         Mutation::Arm { members } => {
             if !matches!(prior, Phase::Prepared | Phase::AcquisitionPossible)
                 || members.is_empty()
@@ -210,7 +221,10 @@ pub(super) fn change(
             v2::validate_envelope(manifest, envelope)?;
             // Growing scratch observations come only from the durable event
             // fold. The generic acquisition seam cannot inject an invented head.
-            if matches!(envelope.planned, v2::MemberPlan::ScratchAssetsV2 { .. }) {
+            if matches!(
+                envelope.planned,
+                v2::MemberPlan::ScratchAssetsV2 { .. } | v2::MemberPlan::ScratchAssetsV3 { .. }
+            ) {
                 return Err(codec::invalid());
             }
             let (member_phase, json): (String, String) = tx.query_row(

@@ -330,6 +330,9 @@ pub(crate) enum Mutation {
     AssetChangeV2 {
         change: codec_v2::scratch::AssetChangeV2,
     },
+    AssetChangeV3 {
+        change: codec_v2::scratch::bootstrap::AssetChangeV3,
+    },
     Seal,
     Hold {
         reason: String,

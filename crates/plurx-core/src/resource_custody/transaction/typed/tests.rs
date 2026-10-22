@@ -1,4 +1,5 @@
 //! Real SQLite transitions with typed fixture data; no physical receipts minted.
+mod bootstrap;
 mod scratch;
 use super::*;
 use crate::adaptive_resources::ResourceReservation;
