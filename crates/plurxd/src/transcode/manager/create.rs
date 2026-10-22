@@ -1247,6 +1247,7 @@ impl TranscodeManager {
         Ok(DvSelection::KeepExisting(reason))
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn display_target_policy(
         enabled: bool,
         display: Option<&plurx_core::playback::caps::DisplayCaps>,

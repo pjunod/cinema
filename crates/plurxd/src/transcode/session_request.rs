@@ -1323,6 +1323,7 @@ impl SessionRequest {
             context.normalized_geometry,
             context.grade,
             context.profile,
+            context.display_target,
         ))
         .map_err(|error| error.to_string())?;
         Ok(Sha256::digest(bytes).into())

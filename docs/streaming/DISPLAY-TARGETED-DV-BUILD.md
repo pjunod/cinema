@@ -62,6 +62,7 @@ Authored regression anchors (not executed):
 
 - `caps.rs::display_peak_bucket_rounds_down_and_unknown_stays_master`
 - `enhancement.rs::targeted_hdr10_dyn_names_bucket_and_l1_limit`
+- `dv_processing/tests.rs::effective_target_report_rejects_ambiguous_or_unsupported_buckets`
 - `manager/create.rs::display_target_declines_are_named_and_elision_is_master`
 - `http/tests.rs::display_target_setting_defaults_off_and_saves_despite_unmet_advice`
 - `settings-sections.test.js`: editable targeting and existing independent-save,
