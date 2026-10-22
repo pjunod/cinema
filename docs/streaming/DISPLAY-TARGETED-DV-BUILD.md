@@ -129,9 +129,23 @@ Authored regression anchors (not executed):
   retained its actual `c036` listing, 17,983 valid frames, observed maximum
   3,441 nits, and passing policy results. Owner-interrupted attempt 258 stopped
   at 1,000 nits after 137/1,000 and is neither a product defect nor a pass;
-  1,600 nits was not run. Additive continuation 259 is currently running the
-  1,000-nit cell and proceeds to 1,600 only if it passes. At this snapshot there
-  are zero new mapped-P7 passes.
+  1,600 nits was not run. Additive continuation 259 completed the same
+  17,983-frame scan (zero missing/invalid, maximum 3,441 nits), then its
+  1,000-nit cell failed with true exit 101: the helper required an observed
+  zero source origin. Its 1,600-nit cell was not run; there are zero new
+  mapped-P7 passes. The unchanged original input has held FORMAT/video origin
+  0.125 seconds and audio start 0.135 seconds. Its original packet cadence
+  agrees with the output grid within the existing 1 ms source tick after
+  subtracting that common origin; input retiming is neither needed nor used.
+
+  The bounded root-cause candidate carries the exact observed common origin
+  from the held probe into absolute source windows, helper receipt validation
+  and both output-grid mappings. Original BL/EL/RPU keys and the soundtrack's
+  held FORMAT offset stay intact. Missing, negative, producer-default or
+  differing FORMAT/video origins still refuse explicitly. Candidate source,
+  authored regressions and the [origin contract](DV_PROCESSING_TOOLS.md#three-clocks-share-one-observed-common-origin)
+  await independent delta review, native helper rebuild/daemon relink and
+  focused qualification. No test or native success is inferred from source.
 
   Current-main source integration is `a316`, plus test-only missing scanner
   fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.

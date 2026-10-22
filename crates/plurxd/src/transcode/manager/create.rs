@@ -2553,6 +2553,8 @@ impl TranscodeManager {
                         .and_then(|clock| clock.split_once('/')).ok_or("held source has no rational time base")?;
                     let source_tick = (clock.0.parse::<u32>().map_err(|e| e.to_string())?,
                         clock.1.parse::<u32>().map_err(|e| e.to_string())?);
+                    let source_origin = crate::transcode::source_preparation::held_dv_source_origin(
+                        stream, source_tick, source_clock)?;
                     let dimension = |name| stream.get(name).and_then(serde_json::Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok()).ok_or("held native raster unavailable");
                     let native_bl = (dimension("width")?, dimension("height")?);
@@ -2594,7 +2596,7 @@ impl TranscodeManager {
                         }
                     }
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
-                        source_tick, native_bl, source_clock, preferences,
+                        source_tick, source_origin, native_bl, source_clock, preferences,
                         display_target,
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
                         display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),

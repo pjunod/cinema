@@ -152,6 +152,53 @@ the serving layer must separately verify its output frame grid and packaging.
 NUT preserves source PTS here but does not serialize explicit packet durations;
 `timing.tsv` remains the separate duration record.
 
+### Three clocks share one observed common origin
+
+The [display-target build ledger](DISPLAY-TARGETED-DV-BUILD.md) records the
+2026-10-22 positive-origin correction and its pending qualification. The
+[core contract](../../crates/plurx-core/src/transcode/dv_processing.rs),
+[held-probe reader](../../crates/plurxd/src/transcode/source_preparation.rs)
+and [runtime](../../crates/plurxd/src/dv_runtime.rs) keep three clocks:
+
+| Clock | Contract |
+|---|---|
+| Original source | Coded, decoded BL/EL/RPU, NUT and receipt picture keys retain original PTS and durations. |
+| Film global | Compare `source PTS - O` to the zero-based frame grid within one original source tick. |
+| Generation output | Existing AAC preroll and generation-local encoder timing remain in force. |
+
+`O` is the exact selected video's `start_pts × time_base`, validated against
+an observed held FORMAT origin. Producer-default zero is distinct from observed
+zero. Missing, negative, overflowing or differing origins explicitly refuse the
+bounded route; the selected-video clock never replaces the soundtrack clock.
+The same held source fence owns the probe and every window, and source drift
+continues to invalidate publication. The observation digest binds the common
+origin, its observed-stream provenance, selected stream, epoch and absolute
+window bounds along with original coded-picture keys and hashes.
+
+For film boundary `b`, the requested absolute endpoint is
+`O + max(0, b - source_tick)`. Seek uses that absolute endpoint in the selected
+stream's time base, preserving all three-second/frame/byte/preroll limits.
+The helper reports its actual observed stream origin; Rust compares rational
+values exactly with the frozen held origin. A first returned picture never
+establishes a new origin. Video EOF extent keeps its existing absolute endpoint
+rules (`start_time + duration` or the Matroska `DURATION` endpoint).
+
+For an observed common origin of 1/8 second at 24000/1001 fps, film window 0
+maps the original first 48 source keys to output frames 0–47. Window 1 starts
+at source 2.126 seconds and window 360 at 720.844 seconds, each including the
+existing 1 ms membership allowance. The soundtrack retains `-itsoffset
+-0.125000`, so audio starting 10 ms after the video keeps that relationship.
+Argument regressions establish clock handling; the physical harness checks
+encoded cadence/geometry and final AAC codec/rate/channels, and does not
+independently measure decoded audio/video synchronization.
+
+The authored regressions are
+`common_source_origin_preserves_absolute_keys_across_film_windows`,
+`common_source_origin_bounds_are_absolute_exact_and_seek_stable`,
+`dv_origin_requires_matching_observed_held_format_and_selected_video` and
+`renderer_receipt_requires_exact_observed_held_common_origin`. Execution and
+native acceptance are recorded separately in the build ledger.
+
 The encoder must preserve the input time base (`-enc_time_base -1` in the
 exercised FFmpeg path), source PTS and color interpretation. RGB is full-range
 BT.2020/PQ; the encoder control explicitly converts to limited BT.2020 NCL,
