@@ -52,8 +52,10 @@ growth. It cannot be declared done by adding another private proof helper.
 The final C1/SourceFile-v2/retained-output and first-root bootstrap contracts are
 delivered, not blanket design gates. `bb4979850` binds source-copy/task plans to the
 actual runtime graph before prepare; `394498d0f` implements strict V3 first-root
-audit plus shared output-policy source. V3 is not yet wired into manifest/journal
-transactions or actual native acquisition. Next is that same-owner composition,
+audit plus shared output-policy source. `d9f8f82ca` wires V3 manifest/journal/history
+and retained known-result runtime. `7c51011f1` owns an immutable configured-root
+binding and actual prearmed namespace-root job/fd; no component/child steps yet.
+Next is that same retained owner's charged traversal/child/known-outcome composition,
 then source/sink/readers and conserving atomic retirement; no typed production
 settlement or finite admission is claimed. These are source gaps, not test gates.
 Adaptive policy does NOT require a
