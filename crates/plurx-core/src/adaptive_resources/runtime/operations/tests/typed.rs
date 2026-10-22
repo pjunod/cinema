@@ -8,11 +8,11 @@ fn typed_plan() -> TypedGraphPlan {
         members: plan()
             .members
             .into_iter()
-            .map(|planned| v2::MemberPlan::LegacyV1 { planned })
+            .map(TypedMemberPlan::Legacy)
             .collect(),
     }
 }
-fn prepare_typed(
+pub(super) fn prepare_typed(
     runtime: &NodeResourceRuntime,
     plans: Vec<TypedGraphPlan>,
     trial: bool,
@@ -45,7 +45,12 @@ async fn typed_prepare_uses_actual_graph_identity_and_one_retained_runtime_charg
     let root = tempfile::tempdir().unwrap();
     let runtime = runtime(root.path());
     let plan = typed_plan();
-    let members = plan.members.clone();
+    let members: Vec<_> = plan
+        .members
+        .iter()
+        .filter_map(|m| m.legacy().cloned())
+        .map(|planned| v2::MemberPlan::LegacyV1 { planned })
+        .collect();
     let owner = prepare_typed(&runtime, vec![plan], false);
     assert_eq!(runtime.accounting().unwrap().used, vector(2));
     runtime

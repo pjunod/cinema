@@ -19,7 +19,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 mod live_settlement;
 mod pipe_drains;
+mod plans;
 mod scratch;
+pub(crate) use plans::{TypedGraphPlan, TypedMemberPlan};
 
 #[derive(Default)]
 pub(super) struct Operations {
@@ -39,16 +41,10 @@ pub(crate) struct GraphPlan {
     pub members: Vec<PlannedMember>,
 }
 
-/// The runtime supplies actual owner/graph identities, not a disk manifest.
-pub(crate) struct TypedGraphPlan {
-    pub attempt_id: Option<Uuid>,
-    pub members: Vec<v2::MemberPlan>,
-}
-
 struct PreparationPlan {
     attempt_id: Option<Uuid>,
     legacy: Vec<PlannedMember>,
-    typed: Option<Vec<v2::MemberPlan>>,
+    typed: Option<Vec<TypedMemberPlan>>,
 }
 
 /// Private process-local selection of runtime-owned state. Not a wire token or
@@ -266,10 +262,7 @@ impl NodeResourceRuntime {
                     legacy: plan
                         .members
                         .iter()
-                        .filter_map(|member| match member {
-                            v2::MemberPlan::LegacyV1 { planned } => Some(planned.clone()),
-                            _ => None,
-                        })
+                        .filter_map(|member| member.legacy().cloned())
                         .collect(),
                     typed: Some(plan.members),
                 })
@@ -363,6 +356,22 @@ impl NodeResourceRuntime {
             if identity.process_instance != self.owner.owner_id {
                 return Err(OperationError::State);
             }
+            // Resolve process-local references exactly once, BEFORE any journal
+            // command/fingerprint exists. No supplied or guessed graph ID is
+            // accepted for source-copy owners, recovery or the actual VOD task.
+            let typed_members = plan
+                .typed
+                .map(|members| {
+                    let owner_id = v2::Id::new(identity.process_instance)?;
+                    let graph_id = v2::Id::new(identity.generation)?;
+                    Ok::<_, CustodyError>(
+                        members
+                            .into_iter()
+                            .map(|member| member.bind(owner_id, graph_id))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .transpose()?;
             let resources = self
                 .ledger
                 .inner
@@ -372,7 +381,7 @@ impl NodeResourceRuntime {
                 .get(&binding.reservation)
                 .ok_or(OperationError::State)?
                 .resources;
-            if let Some(members) = &plan.typed {
+            if let Some(members) = &typed_members {
                 typed_obligations.push(TypedNewObligation {
                     runtime_binding: binding,
                     allocation_epoch: binding.allocation_epoch,
@@ -402,7 +411,7 @@ impl NodeResourceRuntime {
             roles.push(OwnedRole {
                 binding,
                 members: plan.legacy,
-                typed_members: plan.typed,
+                typed_members,
                 scratch: BTreeMap::new(),
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),

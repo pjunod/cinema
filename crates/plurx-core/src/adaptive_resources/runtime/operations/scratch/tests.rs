@@ -95,7 +95,7 @@ async fn fixture(root: &Path) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
             }],
             vec![TypedGraphPlan {
                 attempt_id: None,
-                members: vec![v2::MemberPlan::ScratchAssetsV2 {
+                members: vec![TypedMemberPlan::ScratchV2 {
                     slot: v2::MemberSlot {
                         member_id: member,
                         owned_by: None,
