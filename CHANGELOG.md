@@ -27,6 +27,10 @@ bump may break compatibility and a **patch** bump never does.
 - Processed Dolby Vision Profile 8.1 playlists include the required HDR10
   compatibility brand so Apple players can recognize the Dolby Vision enhancement.
 
+- macOS installation reports the blocking transaction and recovery command,
+  records source-upgrade failures, and can explicitly complete an interrupted
+  restoration after verifying the promoted runtime and candidate health.
+
 - Web playback automatically captures bounded frame-drop incidents with recent
   frame, buffer, lifecycle and request evidence, respecting diagnostic-history
   controls and retaining account-scoped local copies for investigation.
