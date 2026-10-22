@@ -208,11 +208,37 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
 #[derive(Debug)]
 pub struct RenditionDir {
     dir: PathBuf,
+    writes: std::sync::Arc<PendingWrites>,
+}
+
+/// One actual atomic publication, not a task ID or a boolean close assertion.
+/// Serializing here also prevents two cancelled writes reusing the same .tmp.
+#[derive(Debug, Default)]
+struct PendingWrites {
+    pending: tokio::sync::Mutex<Option<PendingWrite>>,
+}
+#[derive(Debug)]
+struct PendingWrite {
+    task: tokio::task::JoinHandle<io::Result<()>>,
+}
+
+async fn join_pending_write(pending: &mut Option<PendingWrite>) -> io::Result<()> {
+    let Some(write) = pending.as_mut() else {
+        return Ok(());
+    };
+    // Cancellation drops only the borrow. Keep the exact handle in its owner,
+    // including a completed but unconsumed blocking task, until a real join.
+    let result = (&mut write.task).await.map_err(io::Error::other);
+    *pending = None;
+    result?
 }
 
 impl RenditionDir {
     pub fn new(dir: impl Into<PathBuf>) -> RenditionDir {
-        RenditionDir { dir: dir.into() }
+        RenditionDir {
+            dir: dir.into(),
+            writes: Default::default(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -229,9 +255,31 @@ impl RenditionDir {
 
     /// Write a file so that it is absent or complete and never partial.
     async fn publish_file(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        let mut pending = self.writes.pending.lock().await;
+        join_pending_write(&mut pending).await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
-        tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, self.dir.join(name)).await
+        let destination = self.dir.join(name);
+        let bytes = bytes.to_vec();
+        let owner = std::sync::Arc::clone(&self.writes);
+        let task = tokio::task::spawn_blocking(move || {
+            // The actual operation also retains its owner. Dropping every
+            // asynchronous caller cannot destroy custody while this OS work
+            // still executes. No task mutates the bookkeeping lock itself.
+            let _owner = owner;
+            std::fs::write(&tmp, bytes)?;
+            std::fs::rename(&tmp, destination)
+        });
+        // No await from creation to retention. A cancelled writer can never
+        // leave an untracked write/rename behind a falsely completed sink.
+        *pending = Some(PendingWrite { task });
+        join_pending_write(&mut pending).await
+    }
+
+    /// Drain actual publication work, independently of trailer/output success.
+    /// This does not close cached files/readers or issue a physical receipt.
+    pub(crate) async fn join_writes(&self) -> io::Result<()> {
+        let mut pending = self.writes.pending.lock().await;
+        join_pending_write(&mut pending).await
     }
 
     pub async fn write_init(&self, bytes: &[u8]) -> io::Result<()> {
@@ -567,6 +615,10 @@ impl Reconciled {
         self.adopted.is_empty() && self.forgotten.is_empty() && self.init_present
     }
 }
+
+#[cfg(test)]
+#[path = "renditiondir/owned_writes_tests.rs"]
+mod owned_writes_tests;
 
 #[cfg(test)]
 mod tests {

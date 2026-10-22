@@ -62,7 +62,7 @@ impl VodGenerationOwner {
         // task or output-producing join result can escape its actual owner.
         let ((outcome, completed), diagnostic) = tokio::join!(
             async {
-                let outcome = run_generation(
+                let mut outcome = run_generation(
                     Arc::clone(&self.shared),
                     Arc::clone(&self.rendition),
                     Box::new(stdout),
@@ -72,6 +72,12 @@ impl VodGenerationOwner {
                     self.landing_probe,
                 )
                 .await;
+                // Sink cancellation is not blocking-I/O completion. Join the
+                // rendition's retained actual write/rename before retiring the
+                // producer; output/trailer success is a separate decision.
+                if let Err(error) = self.rendition.dir.join_writes().await {
+                    outcome.0 = Some(Outcome::Failed(Failure::Sink(error)));
+                }
                 // Request, NEVER await this task's own reap receipt.
                 let _ = super::super::driver::request_registered_driver_retirement(
                     &self.shared,
