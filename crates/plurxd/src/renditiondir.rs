@@ -38,6 +38,7 @@ use plurx_core::fmp4::{
 use sha2::{Digest, Sha256};
 
 use crate::titlestore::{Manifest, ReaderWindow, SegState};
+mod owned_publication;
 
 /// The initialization segment's name, as every other producer writes it.
 pub const INIT_NAME: &str = "init.mp4";
@@ -255,24 +256,7 @@ impl RenditionDir {
 
     /// Write a file so that it is absent or complete and never partial.
     async fn publish_file(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let mut pending = self.writes.pending.lock().await;
-        join_pending_write(&mut pending).await?;
-        let tmp = self.dir.join(format!("{name}.tmp"));
-        let destination = self.dir.join(name);
-        let bytes = bytes.to_vec();
-        let owner = std::sync::Arc::clone(&self.writes);
-        let task = tokio::task::spawn_blocking(move || {
-            // The actual operation also retains its owner. Dropping every
-            // asynchronous caller cannot destroy custody while this OS work
-            // still executes. No task mutates the bookkeeping lock itself.
-            let _owner = owner;
-            std::fs::write(&tmp, bytes)?;
-            std::fs::rename(&tmp, destination)
-        });
-        // No await from creation to retention. A cancelled writer can never
-        // leave an untracked write/rename behind a falsely completed sink.
-        *pending = Some(PendingWrite { task });
-        join_pending_write(&mut pending).await
+        self.publish_owned(name, bytes.to_vec()).await
     }
 
     /// Drain actual publication work, independently of trailer/output success.
@@ -306,6 +290,20 @@ impl RenditionDir {
         bytes: &[u8],
         at_ms: i64,
     ) -> io::Result<()> {
+        self.materialize_owned(manifest, index, bytes.to_vec(), at_ms)
+            .await
+    }
+
+    /// The ordinary VOD writer transfers its actual payload into native custody,
+    /// rather than cloning a potentially large segment into a hidden fs job.
+    /// This alone is not a finite-memory reservation or durable asset receipt.
+    pub(crate) async fn materialize_owned(
+        &self,
+        manifest: &mut Manifest,
+        index: u32,
+        bytes: Vec<u8>,
+        at_ms: i64,
+    ) -> io::Result<()> {
         if manifest.state(index).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -316,9 +314,10 @@ impl RenditionDir {
                 ),
             ));
         }
-        self.publish_file(&segment_name(u64::from(index)), bytes)
+        let len = u64::try_from(bytes.len()).map_err(io::Error::other)?;
+        self.publish_owned(&segment_name(u64::from(index)), bytes)
             .await?;
-        manifest.materialize(index, bytes.len() as u64, at_ms);
+        manifest.materialize(index, len, at_ms);
         Ok(())
     }
 

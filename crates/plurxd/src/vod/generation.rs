@@ -2121,7 +2121,7 @@ impl RenditionSink {
             }
             self.rendition
                 .dir
-                .materialize(&mut manifest, entry, &bytes, now_ms())
+                .materialize_owned(&mut manifest, entry, bytes, now_ms())
                 .await?;
             let publication =
                 credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
