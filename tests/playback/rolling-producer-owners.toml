@@ -1136,7 +1136,10 @@ pattern = "HlsPresentationResolution"
 # Architecture close-out (#814): +1 test-only match —
 # sdr_master_codecs_is_frozen_when_the_session_is_created reads the created
 # session's ready context; no new owner.
-expected_occurrences = 25
+# Processed Dolby Vision signaling (#1257): +1 test-only match in
+# processed_profile81_master_declares_hdr10_compatibility reads the admitted
+# session's ready context; no new response owner or worker.
+expected_occurrences = 26
 
 [[module_symbols]]
 id = "m4-executor-registration"
