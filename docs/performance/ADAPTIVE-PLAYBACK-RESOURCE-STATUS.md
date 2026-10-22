@@ -24,29 +24,30 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`d9f8f82ca` registers V3 in strict manifest/observed/local plans and the SAME
-journal transactions, fingerprints, streamed history/known-commit runtime fold.
-Generic acquired DTOs cannot inject bootstrap state; old V1/V2 bytes/DDL remain.
-`7c51011f1` binds actual immutable daemon rendition-root configuration and retains
-the original namespace-root blocking job BEFORE entry; actual Linux namespace
-comparison, fd/partial-fstat facts and exact observed-result retries stay owned.
-`03eda7f3c` finishes retained acknowledgement before root success. No
-component traversal/ParentReady/child/SinkReady yet; ONLY namespace-root.
-Actual graph binding `bb4979850` and bounded first-root audit `394498d0f` remain.
+`7b783effa` extends the SAME prearmed native root cell through no-follow component
+opens and exclusive child mkdir/open: actual descriptors, original job/latch,
+known Arm/Observe retries, retained parent+child and Linux descriptor mount ID.
+Entered errors/partial creation/EEXIST retain facts; no implicit adoption. The
+internal runtime can reach ParentReady/SinkReady, NOT ordinary application entry.
+`7184dcd01` rejects foreign owner/boot labels before arm. `735387e96` adapts the
+existing native publisher to consume a moved held directory and selected I/O ID,
+with no path fallback/local UUID; actual ordinary caller still uses legacy input.
+These mechanisms are NOT permission/proof constructors or completed V2 closure.
 
-Pinned1.97.1 current core all-target check PASS11.428s; combined core/daemon
-128.190s retains unchanged daemon composition. Earlier source-invalidated passes
-and ambiguous-import/missing-import failures preserved. Fourteen NEW bodies
-COMPILED NOT RUN; warnings, NOT strict Clippy. Registration/cancelled-join fixtures
-never release native entry, NOT Linux execution evidence. Controller84277 core
-Windows48.607s/b37d daemon151.38s retained; new core/daemon need SDK compilation.
-`1584a357c`/`a4465e4b0`/`521a6d5fb` retain actual Unix no-follow/no-clobber native
-publication and partial-object/drain-error/cancellation ownership. Non-Unix is
-legacy. `3e9edcdf4`/`cdf580eb0` provide bounded event/reader audit; old codec/DDL
-unchanged. Admission STILL LEGACY. Missing: component/child native steps, ordinary
-prearmed init/outcome/manifest composition, source/copy/HTTP, native/index memory,
-overage debt/fence, snapshot/RetainedAssetsV2/private-proof atomic R→S, positive
-old-domain restart and remaining M0–M7. No finite/physical-quota/behavior pass.
+Pinned1.97.1 current host core all-target check PASS11.885s; combined core/daemon
+108.631s retains unchanged daemon source. Seven new host bodies COMPILED NOT RUN;
+two Linux-only bodies authored, NOT host-compiled. Warnings, NOT strict Clippy.
+Initial closure-type compile failure preserved/fixed. Controller exact7b783effa
+Linux source compile is IN PROGRESS, NOT a pass; Windows changed scopes requested.
+No behavior/restart qualification. Earlier source/evidence remains retained.
+
+The authoritative [V1–V5 checklist](ADAPTIVE-PLAYBACK-DELIVERY.md#authoritative-first-ordinary-vod-source-checklist)
+has ALL FIVE OPEN. Missing: ordinary pre-acquisition/source/producer composition,
+actual held-child + known-output outcome before manifest/readers, markers/sync,
+bounded native/index memory and overage debt/fence, retained snapshot/private-proof
+ONE atomic R→S and same-ledger swap, exact settlement/capacity reuse. Conservative
+restored holds remain; R1 selective/positive old-domain recovery and later M0–M7
+remain separate required integration. No ordinary finite/physical-quota pass.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before

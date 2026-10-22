@@ -16,7 +16,7 @@ the existing configured root. Source-complete is not behavior-verified.
 | Item | Actual missing production connection / binary closure |
 |---|---|
 | V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
-| V2 — held output/durability — OPEN | `operations/bootstrap/native.rs` must complete retained component/parent/child acquisition; `renditiondir` publication consumes that held child and durable I/O identity. Every selected mutation is armed and its actual outcome known before manifest/readers; no reopen or local UUID substitutes for ownership. |
+| V2 — held output/durability — OPEN | `7b783effa` connects internal retained component/parent/child acquisition; `735387e96` adds held-directory/selected-ID native publisher input. Ordinary `renditiondir` still must consume THAT live child and known arm, then persist each actual outcome before manifest/readers, including markers/sync and bounded memory/overage. No request-level connection is closed yet. |
 | V3 — producer/stop — OPEN | Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
 | V4 — retained output — OPEN | Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
@@ -88,9 +88,10 @@ delivered, not blanket design gates. `bb4979850` binds source-copy/task plans to
 actual runtime graph before prepare; `394498d0f` implements strict V3 first-root
 audit plus shared output-policy source. `d9f8f82ca` wires V3 manifest/journal/history
 and retained known-result runtime. `7c51011f1` owns an immutable configured-root
-binding and actual prearmed namespace-root job/fd; no component/child steps yet.
-Next is that same retained owner's charged traversal/child/known-outcome composition,
-then source/sink/readers and conserving atomic retirement; no typed production
+binding and actual prearmed namespace-root job/fd; `7b783effa` extends that SAME
+owner through real component/child/known-outcome composition. `735387e96` adds
+held-directory native publication input, not the ordinary journal/caller bridge.
+Next is that actual source/sink/readers bridge and conserving retirement; no production
 settlement or finite admission is claimed. These are source gaps, not test gates.
 Adaptive policy does NOT require a
 custom broker. Trusted owned-workload cleanup and crash accounting remain;

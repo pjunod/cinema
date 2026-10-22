@@ -17,8 +17,8 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
-| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | V3 same-journal/runtime and retained namespace-root IO compiled NOT RUN; traversal/child, ordinary finite admission/retirement/recovery/M0–M7 remain open. | open |
-| [ADAPTIVE-PLAYBACK-DELIVERY.md](ADAPTIVE-PLAYBACK-DELIVERY.md) | Finite M0–M7 implemented/missing deliverables, dependencies, owners, application behavior and first finite VOD closure target. | open |
+| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Retained internal parent/child and held-input native publisher compiled NOT RUN; ordinary admission/publication/retirement and remaining M0–M7 open. | open |
+| [ADAPTIVE-PLAYBACK-DELIVERY.md](ADAPTIVE-PLAYBACK-DELIVERY.md) | Authoritative ordinary VOD V1–V5 OPEN/CLOSED source list; separate R1 recovery, later M0–M7 generality and final acceptance. | open |
 | [ADAPTIVE-RESOURCE-CUSTODY.md](ADAPTIVE-RESOURCE-CUSTODY.md) | Local custody storage, live-close restrictions, startup refusal and backup/recovery limits. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) | Required workload, lifecycle, cluster, platform and latency evidence for adaptive resource management. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) | Fable 5.1 findings, dispositions, reviewed hashes and remaining acceptance. | done |
