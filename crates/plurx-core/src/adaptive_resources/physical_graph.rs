@@ -26,6 +26,7 @@ use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, Unkn
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
 mod budgets;
+mod live_jobs;
 mod source_files;
 pub use source_files::GraphSourceFile;
 mod pipe_drains;
@@ -73,7 +74,7 @@ pub struct RootPipes {
 struct Root {
     child: Child,
     // Retain the actual job even after leader wait. Dropping it is not proof.
-    _job: Option<ChildJob>,
+    job: Option<ChildJob>,
     process: Metric<ProcessIdentity>,
     waited: bool,
     exit_status: Option<std::process::ExitStatus>,
@@ -82,6 +83,9 @@ struct Root {
 
 struct Members {
     acquired: bool,
+    // An incomplete launch may lack the actual child/job identity. Successful
+    // observations of other roots must never conceal that acquisition window.
+    uncertain_launch: bool,
     roots: Vec<Root>,
     writers: Vec<Writer>,
     joined_writers: usize,
@@ -216,6 +220,7 @@ impl ResourceReservation {
             sealed: AtomicBool::new(false),
             members: Mutex::new(Members {
                 acquired: false,
+                uncertain_launch: false,
                 roots: Vec::new(),
                 writers: Vec::new(),
                 joined_writers: 0,
@@ -419,7 +424,7 @@ fn retain_root(
     };
     members.roots.push(Root {
         child,
-        _job: job,
+        job,
         process,
         waited: false,
         exit_status: None,
@@ -433,6 +438,7 @@ fn retain_launch_failure(
     members: &mut Members,
     failure: OwnedSpawnFailure,
 ) -> io::Error {
+    members.uncertain_launch = true;
     if let Some(child) = failure.child {
         retain_root(custody, members, child, failure.job);
     }
@@ -633,6 +639,10 @@ impl SealedPhysicalGraph {
             };
         }
         retain_or_release_unacquired(&self.ledger, &self.custody);
+        // Terminate ORIGINAL retained Jobs, including jobs whose leader already
+        // exited. The request is not extinction proof. Unsupported Unix jobs
+        // retain the existing root-only cleanup and UnknownHeld semantics.
+        live_jobs::request_termination(&members);
         // Concrete drains own only pipes, no output flush or external work.
         // Joining their aborted futures closes those handles even if an
         // uncontained descendant keeps its other pipe end open.

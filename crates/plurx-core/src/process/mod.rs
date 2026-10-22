@@ -4,6 +4,7 @@
 pub mod bounded;
 #[cfg(test)]
 mod census;
+mod job_control;
 pub mod observation;
 pub mod priority;
 pub mod rlimit;
@@ -57,7 +58,7 @@ pub enum ProcessSignal {
 
 pub struct ChildJob {
     #[cfg(windows)]
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    job: job_control::WindowsJob,
     /// The child's row in [`priority::running`]; it leaves the list when the
     /// owner drops this job.
     _registration: Option<priority::Registration>,
@@ -124,6 +125,12 @@ pub(crate) fn spawn_job_custodied(
             }));
         }
     };
+    // Assignment succeeded while the root was still suspended. Preserve this
+    // fact even if resume fails and the actual partial launch needs cleanup.
+    #[cfg(windows)]
+    {
+        job.job.mark_pre_execution();
+    }
     if let Err(error) = resume_suspended(&child) {
         let _ = child.start_kill();
         return Err(Box::new(OwnedSpawnFailure {
@@ -368,16 +375,6 @@ pub(crate) fn resume_suspended(child: &tokio::process::Child) -> io::Result<()> 
 }
 
 #[cfg(windows)]
-unsafe impl Send for ChildJob {}
-
-#[cfg(windows)]
-impl Drop for ChildJob {
-    fn drop(&mut self) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
-    }
-}
-
-#[cfg(windows)]
 impl ChildJob {
     pub fn attach(child: &tokio::process::Child) -> io::Result<Self> {
         let pid = child
@@ -387,49 +384,8 @@ impl ChildJob {
     }
 
     pub(crate) fn attach_pid(pid: u32) -> io::Result<Self> {
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
-
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let configured = unsafe {
-            SetInformationJobObject(
-                handle,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        };
-        if configured == 0 {
-            let error = io::Error::last_os_error();
-            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-            return Err(error);
-        }
-        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
-        if process.is_null() {
-            let error = io::Error::last_os_error();
-            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-            return Err(error);
-        }
-        let assigned = unsafe { AssignProcessToJobObject(handle, process) };
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
-        if assigned == 0 {
-            let error = io::Error::last_os_error();
-            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-            return Err(error);
-        }
         Ok(Self {
-            handle,
+            job: job_control::WindowsJob::attach_pid(pid)?,
             _registration: None,
         })
     }
@@ -507,6 +463,29 @@ mod tests {
                     std::fs::rename(ready, path).expect("publish complete pid file");
                 }
                 std::thread::sleep(Duration::from_secs(300));
+            }
+            #[cfg(windows)]
+            Ok("live-job-descendant") => {
+                let pid_file = std::env::var_os("PLURX_CHILD_PID_FILE").expect("pid file");
+                // Test-only deliberate inheritance of the ORIGINAL outer Job,
+                // not a second launcher-created Job whose Drop kills the child.
+                let _descendant =
+                    std::process::Command::new(std::env::current_exe().expect("test executable"))
+                        .args(["--exact", "process::tests::child_main", "--nocapture"])
+                        .env("PLURX_CHILD_MODE", "sleep")
+                        .env("PLURX_CHILD_PID_FILE", &pid_file)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .expect("inherited descendant");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !Path::new(&pid_file).is_file() {
+                    assert!(std::time::Instant::now() < deadline, "descendant not ready");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // std::process::Child Drop does not kill. The root exits and
+                // leaves a real active descendant in the retained outer Job.
             }
             _ => {}
         }

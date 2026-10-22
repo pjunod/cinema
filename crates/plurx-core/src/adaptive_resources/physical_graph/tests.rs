@@ -424,7 +424,7 @@ async fn partial_launch_failure_retains_the_actual_child_and_optional_job_for_re
             );
             assert_eq!(error.kind(), io::ErrorKind::Other);
             assert_eq!(members.roots.len(), 1);
-            assert_eq!(members.roots[0]._job.is_some(), retain_job);
+            assert_eq!(members.roots[0].job.is_some(), retain_job);
         }
         drop(graph);
         let mut retained = ledger
