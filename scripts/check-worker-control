@@ -189,6 +189,19 @@ def toolchain(cache: Path, output: Path, provision: bool) -> tuple[dict, dict, P
                  "compiler_sha256": digest(compiler / "bin/rustc")}, driver
 
 
+def parser_stdlib_attestation(env: dict) -> dict:
+    """Additional parser evidence, deliberately separate from solver identity."""
+    channel = env["RUSTUP_TOOLCHAIN"]
+    if channel not in {"nightly-2026-08-21-aarch64-apple-darwin", "nightly-2026-08-21-x86_64-unknown-linux-gnu"}:
+        raise RuntimeError("unreviewed parser stdlib toolchain")
+    source = Path(env["RUSTUP_HOME"]) / "toolchains" / channel / "lib/rustlib/src/rust/library/core/src/slice/cmp.rs"
+    actual = digest(source)
+    if actual != SLICE_STDLIB_SHA256:
+        raise RuntimeError("pinned slice equality stdlib source is missing or differs")
+    return {"schema_version": 1, "slice_cmp_sha256": actual, "rustup_toolchain": channel,
+            "source": "library/core/src/slice/cmp.rs"}
+
+
 def stage_sources(output: Path, source: dict) -> tuple[Path, dict]:
     manifest = tomllib.loads((ROOT / CRATE / "Cargo.toml").read_text())
     workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
@@ -271,10 +284,15 @@ FMT_STDLIB_SHA256 = "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106
 FMT_GUARD_NAME = "core::fmt::Arguments::<'_>::from_str.assertion.1"
 FMT_GUARD_DESCRIPTION = "attempt to shift left with overflow"
 FMT_GUARD_LOCATION = "library/core/src/fmt/mod.rs:820:38 in function core::fmt::Arguments::<'_>::from_str"
+SLICE_STDLIB_SHA256 = "7c41479582d6cf55d342001ae1f846d240f153c23f9d148ea179af29f2467f51"
+SLICE_GUARD_NAME = "<library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.assertion.1"
+SLICE_GUARD_DESCRIPTION = "attempt to add with overflow"
+SLICE_GUARD_LOCATION = "library/core/src/slice/cmp.rs:136:13 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length"
 
 
 def allowed_unreachable(name: str, description: str, location: str = "",
-                        fmt_stdlib_sha256: str | None = None) -> bool:
+                        fmt_stdlib_sha256: str | None = None,
+                        slice_cmp_sha256: str | None = None) -> bool:
     """Only compiler unreachable/panic/expect guards may be unreachable.
 
     T-labelled specification assertions must actually be checked, even when
@@ -288,6 +306,13 @@ def allowed_unreachable(name: str, description: str, location: str = "",
     if (name == FMT_GUARD_NAME and description == FMT_GUARD_DESCRIPTION
             and location.endswith(FMT_GUARD_LOCATION)
             and fmt_stdlib_sha256 == FMT_STDLIB_SHA256):
+        return True
+    # Result<..., Stale> equality can instantiate an unused Effects slice-eq
+    # body. Only this exact source-pinned, proved-unreachable loop increment
+    # guard is allowed; reachable overflow and specification vacuity reject.
+    if (name == SLICE_GUARD_NAME and description == SLICE_GUARD_DESCRIPTION
+            and location.endswith(SLICE_GUARD_LOCATION)
+            and slice_cmp_sha256 == SLICE_STDLIB_SHA256):
         return True
     if re.search(r"\.unreachable\.\d+$", name) and description == "unreachable code":
         return True
@@ -322,7 +347,7 @@ def check_summary(log: str, checks: list[tuple[str, str, str]]) -> None:
 
 
 def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list[str] | None = None,
-            fmt_stdlib_sha256: str | None = None) -> dict:
+            fmt_stdlib_sha256: str | None = None, parser_attestation: dict | None = None) -> dict:
     observations = re.findall(r'Check \d+: ([^\n]+)\n\s*- Status: ([A-Z_]+)\n\s*- Description: "([^\n]*)"(?:\n\s*- Location: ([^\n]+))?', log)
     checks = [(name, status, description) for name, status, description, _ in observations]
     indices = re.findall(r'^Check (\d+):', log, re.M)
@@ -336,7 +361,8 @@ def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list
     check_summary(log, checks)
     failures = [(name, status, description) for name, status, description in checks if status == "FAILURE"]
     for name, status, description, location in observations:
-        if status == "UNREACHABLE" and allowed_unreachable(name, description, location, fmt_stdlib_sha256):
+        if status == "UNREACHABLE" and allowed_unreachable(name, description, location, fmt_stdlib_sha256,
+                (parser_attestation or {}).get("slice_cmp_sha256")):
             continue
         if status not in {"SUCCESS", "FAILURE"}:
             raise RuntimeError(f"unchecked, vacuous or unknown property status: {name}: {status}")
@@ -371,7 +397,7 @@ def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list
             "status_counts": {status: sum(actual == status for _, actual, _ in checks)
                               for status in ("SUCCESS", "UNREACHABLE", "FAILURE")},
             "specification_assertions": len(labelled),
-            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only nonmarker panic/expect guards or exact source-pinned panic-format guard"}
+            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only narrow nonmarker compiler guards with explicit source pins"}
 
 
 def mutate_source(original: str, control: dict) -> str:
@@ -397,7 +423,8 @@ def validate_case_sources(output: Path, source: dict, mutation: bool) -> None:
 
 
 def retain_previous(prior: Path | None, output: Path, harness: str, source: dict,
-                    tools: dict, marker: str | None, allowed: list[str] | None) -> dict | None:
+                    tools: dict, marker: str | None, allowed: list[str] | None,
+                    parser_attestation: dict | None = None) -> dict | None:
     if prior is None:
         return None
     name = harness.rsplit("::", 1)[1]
@@ -433,7 +460,7 @@ def retain_previous(prior: Path | None, output: Path, harness: str, source: dict
         if previous["command"] != expected_command or previous["unwinding_checks"] is not True or previous["default_safety_checks"] is not True:
             return None
         parsed = verdict(log_path.read_text(), previous["exit_code"], harness, marker, allowed,
-                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"))
+                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"), parser_attestation=parser_attestation)
         retained = dict(previous)
         if parsed["outcome"] != previous["outcome"]:
             if previous["outcome"] != "rejected":
@@ -450,6 +477,13 @@ def retain_previous(prior: Path | None, output: Path, harness: str, source: dict
             retained["revalidated_by_parser_sha256"] = digest(ROOT / "scripts/check-worker-control")
         retained["retained_from"] = {"receipt": str(case), "receipt_sha256": digest(case),
                                       "log": str(log_path), "log_sha256": digest(log_path)}
+        retained["parser_stdlib_attestation"] = parser_attestation
+        retained["parser_attestation_bridge"] = {
+            "original_attestation": previous.get("parser_stdlib_attestation"),
+            "current_attestation": parser_attestation,
+            "solver_tool_identity_unchanged": previous["tools"] == tools,
+            "reparsed_by_sha256": digest(ROOT / "scripts/check-worker-control"),
+        }
         retained["source_bridge"] = {"current_candidate": new_candidate,
                                      "original_candidate": old_candidate,
                                      "identical_solver_inputs": list(PROOF_INPUTS),
@@ -464,9 +498,10 @@ def retain_previous(prior: Path | None, output: Path, harness: str, source: dict
 
 def verify(driver: Path, env: dict, output: Path, harness: str, source: dict, tools: dict,
            manifest: Path | None = None, marker: str | None = None,
-           allowed: list[str] | None = None, prior: Path | None = None) -> dict:
+           allowed: list[str] | None = None, prior: Path | None = None,
+           parser_attestation: dict | None = None) -> dict:
     validate_case_sources(output, source, marker is not None)
-    retained = retain_previous(prior, output, harness, source, tools, marker, allowed)
+    retained = retain_previous(prior, output, harness, source, tools, marker, allowed, parser_attestation)
     if retained is not None:
         return retained
     name = harness.rsplit("::", 1)[1]
@@ -481,22 +516,23 @@ def verify(driver: Path, env: dict, output: Path, harness: str, source: dict, to
         code, log = command(args, output, env, log_path, executable=driver)
         validate_case_sources(output, source, marker is not None)
         result = verdict(log, code, harness, marker, allowed,
-                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"))
+                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"), parser_attestation=parser_attestation)
     except RuntimeError as error:
         write_json(output / f"{name}.json", {"harness": harness, "outcome": "rejected",
                    "error": str(error), "exit_code": code, "source": source, "tools": tools,
                    "command": args, "execution_directory": str(output),
                    "unwinding_checks": True, "default_safety_checks": True,
+                   "parser_stdlib_attestation": parser_attestation,
                    "log_sha256": digest(log_path) if log_path.exists() else None})
         raise
-    result.update({"source": source, "tools": tools, "command": args, "execution_directory": str(output), "log_sha256": digest(log_path),
+    result.update({"source": source, "tools": tools, "parser_stdlib_attestation": parser_attestation, "command": args, "execution_directory": str(output), "log_sha256": digest(log_path),
                    "unwinding_checks": True, "default_safety_checks": True})
     write_json(output / f"{name}.json", result)
     return result
 
 
 def controls(driver: Path, env: dict, output: Path, source: dict, tools: dict,
-             prior: Path | None, errors: list[str]) -> list[dict]:
+             prior: Path | None, errors: list[str], parser_attestation: dict | None = None) -> list[dict]:
     definitions = json.loads((PACKAGE / "controls.json").read_text())
     if len(definitions) != 3 or [entry["name"] for entry in definitions] != [
         "control-cleanup-order", "control-bind-gate", "control-wrapping-add"]:
@@ -523,7 +559,7 @@ def controls(driver: Path, env: dict, output: Path, source: dict, tools: dict,
             write_json(destination / "mutation.json", mutation)
             result = verify(driver, env, destination, HARNESSES[control["theorem"] - 1], mutation, tools,
                             manifest, control["assertion_marker"], control["allowed_assertions"],
-                            prior / control["name"] if prior else None)
+                            prior / control["name"] if prior else None, parser_attestation=parser_attestation)
             results.append(result)
         except (RuntimeError, OSError, ValueError) as error:
             errors.append(f"{control['name']}: {error}")
@@ -557,16 +593,18 @@ def main() -> int:
         receipt["source_staging"] = packaging
         env, tools, driver = toolchain(cache, output, args.provision)
         receipt["tools"] = tools
+        attestation = parser_stdlib_attestation(env)
+        receipt["parser_stdlib_attestation"] = attestation
         receipt["harness_inventory"] = inventory(driver, env, output, manifest)
         if args.mode == "full":
             errors = []
             receipt["proofs"] = []
             for name in HARNESSES:
                 try:
-                    receipt["proofs"].append(verify(driver, env, output, name, binding, tools, manifest=manifest, prior=prior))
+                    receipt["proofs"].append(verify(driver, env, output, name, binding, tools, manifest=manifest, prior=prior, parser_attestation=attestation))
                 except (RuntimeError, OSError, ValueError) as error:
                     errors.append(f"{name}: {error}")
-            receipt["controls"] = controls(driver, env, output, binding, tools, prior, errors)
+            receipt["controls"] = controls(driver, env, output, binding, tools, prior, errors, attestation)
             if errors:
                 receipt["target_errors"] = errors
                 raise RuntimeError(f"{len(errors)} proof/control targets failed; independent results preserved")

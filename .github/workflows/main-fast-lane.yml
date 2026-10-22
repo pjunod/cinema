@@ -111,7 +111,8 @@ jobs:
               crates/plurx-worker-control/*|verification/worker-control/*|\
               crates/plurxd/src/library_work.rs|crates/plurxd/Cargo.toml|\
               Cargo.toml|Cargo.lock|rust-toolchain.toml|\
-              scripts/check-worker-control|.github/workflows/main-fast-lane.yml)
+              scripts/check-worker-control|validation/worker_control_resume.py|\
+              .github/workflows/main-fast-lane.yml)
                 affected=true
                 break
                 ;;
@@ -139,13 +140,29 @@ jobs:
             'import platform, sys; assert sys.version_info[:3] == (3, 12, 15) and sys.platform == "linux" and platform.machine() == "x86_64"'
           rm -- "$runtime_archive"
           printf '%s\n' "$python_dir/python/bin" >> "$GITHUB_PATH"
+      - name: Prepare same-PR worker proof resumption
+        id: worker-control-resume
+        if: steps.worker-control-inputs.outputs.affected == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.worker_control_resume
       - name: Run the pinned production worker controller proof
         if: steps.worker-control-inputs.outputs.affected == 'true'
         run: >-
           python3 scripts/check-worker-control full
           --cache-dir target/worker-control-tools
           --output-dir "$GITHUB_WORKSPACE/target/verification/worker-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          --resume-from "${{ steps.worker-control-resume.outputs.resume_dir }}"
           --provision
+      - name: Attach worker proof resume provenance
+        if: always() && steps.worker-control-inputs.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          output_dir="$GITHUB_WORKSPACE/target/verification/worker-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          origin="$GITHUB_WORKSPACE/target/verification/worker-control-resume-origin-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          test -s "$output_dir/receipt.json"
+          test -s "$origin"
+          cp -- "$origin" "$output_dir/resume-origin.json"
       - name: Preserve worker controller proof receipts and logs
         if: always() && steps.worker-control-inputs.outputs.affected == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4

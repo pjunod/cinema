@@ -1431,6 +1431,7 @@ paths = [
   "verification/worker-refinement/**",
   "verification/worker-control/**",
   "scripts/check-worker-control",
+  "validation/worker_control_resume.py",
   "tests/operations/test_worker_control_runner.py",
   "tests/fixtures/worker-control/**",
   "tests/operations/test_worker_control_ci.py",

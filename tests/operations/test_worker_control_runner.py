@@ -60,7 +60,8 @@ class WorkerControlPinnedPositiveTests(unittest.TestCase):
         output, provenance = real_positive()
         result = runner.verdict(output, 0, provenance["harness"], None,
                                 fmt_stdlib_sha256=provenance["reparse_tools"]["fmt_stdlib_sha256"])
-        self.assertEqual(result, provenance["parse_result"])
+        facts = ("harness", "outcome", "exit_code", "property_count", "failures", "status_counts", "specification_assertions")
+        self.assertEqual({key: result[key] for key in facts}, {key: provenance["parse_result"][key] for key in facts})
         self.assertEqual(result["status_counts"], {"SUCCESS": 246, "UNREACHABLE": 1, "FAILURE": 0})
         self.assertEqual(result["specification_assertions"], 5)
         self.assertFalse(provenance["acceptance"])
@@ -80,6 +81,98 @@ class WorkerControlPinnedPositiveTests(unittest.TestCase):
         ):
             with self.subTest(pin=pin, changed=changed[-300:]), self.assertRaises(RuntimeError):
                 runner.verdict(changed, 0, provenance["harness"], None, fmt_stdlib_sha256=pin)
+
+
+
+def real_linux_t6() -> tuple[str, dict]:
+    directory = ROOT / "tests/fixtures/worker-control"
+    path = directory / "positive-t6-linux-kani-0.68.0.txt"
+    provenance = json.loads((directory / "positive-t6-linux-kani-0.68.0.provenance.json").read_text())
+    if hashlib.sha256(path.read_bytes()).hexdigest() != provenance["fixture_sha256"]:
+        raise AssertionError("real Linux T6 fixture digest differs")
+    return path.read_text(), provenance
+
+
+class WorkerControlLinuxT6Tests(unittest.TestCase):
+    def test_real_t6_requires_the_separate_exact_slice_source_attestation(self) -> None:
+        raw, provenance = real_linux_t6()
+        result = runner.verdict(raw, 0, provenance["harness"], None,
+            fmt_stdlib_sha256=provenance["tools"]["fmt_stdlib_sha256"],
+            parser_attestation=provenance["parser_stdlib_attestation"])
+        self.assertEqual(result["property_count"], 417)
+        self.assertEqual(result["status_counts"], {"SUCCESS": 415, "UNREACHABLE": 2, "FAILURE": 0})
+        self.assertEqual(result["specification_assertions"], 8)
+        for altered, attestation in (
+            (raw, None),
+            (raw, {"slice_cmp_sha256": "0" * 64}),
+            (raw.replace(runner.SLICE_GUARD_NAME, runner.SLICE_GUARD_NAME + "_other"), provenance["parser_stdlib_attestation"]),
+            (raw.replace(runner.SLICE_GUARD_DESCRIPTION, "attempt to subtract with overflow"), provenance["parser_stdlib_attestation"]),
+            (raw.replace(runner.SLICE_GUARD_LOCATION, runner.SLICE_GUARD_LOCATION.replace(":136:13", ":137:13")), provenance["parser_stdlib_attestation"]),
+        ):
+            with self.subTest(attestation=attestation), self.assertRaises(RuntimeError):
+                runner.verdict(altered, 0, provenance["harness"], None,
+                    fmt_stdlib_sha256=provenance["tools"]["fmt_stdlib_sha256"], parser_attestation=attestation)
+
+    def test_theorem_class_and_reachability_policy_remain_strict(self) -> None:
+        raw, provenance = real_linux_t6()
+        labelled = raw.replace(provenance["harness"] + ".assertion.7", provenance["harness"] + ".unreachable.99")
+        vacuous = raw.replace(
+            provenance["harness"] + '.assertion.7\n\t - Status: SUCCESS',
+            provenance["harness"] + '.assertion.7\n\t - Status: UNREACHABLE').replace('(2 unreachable)', '(3 unreachable)')
+        for altered in (labelled, vacuous):
+            with self.subTest(altered=altered[-300:]), self.assertRaises(RuntimeError):
+                runner.verdict(altered, 0, provenance["harness"], None,
+                    fmt_stdlib_sha256=provenance["tools"]["fmt_stdlib_sha256"],
+                    parser_attestation=provenance["parser_stdlib_attestation"])
+
+    def test_exact_slice_guard_never_allows_undetermined_or_failure(self) -> None:
+        raw, provenance = real_linux_t6()
+        prefix = runner.SLICE_GUARD_NAME + '\n\t - Status: UNREACHABLE'
+        unknown = raw.replace(prefix, runner.SLICE_GUARD_NAME + '\n\t - Status: UNDETERMINED').replace('(2 unreachable)', '(1 undetermined,1 unreachable)')
+        failed = raw.replace(prefix, runner.SLICE_GUARD_NAME + '\n\t - Status: FAILURE').replace('0 of 417 failed (2 unreachable)', '1 of 417 failed (1 unreachable)').replace('VERIFICATION:- SUCCESSFUL', 'VERIFICATION:- FAILED').replace('1 successfully verified harnesses, 0 failures', '0 successfully verified harnesses, 1 failures')
+        for altered in (unknown, failed):
+            with self.subTest(altered=altered[-300:]), self.assertRaises(RuntimeError):
+                runner.verdict(altered, 0, provenance["harness"], None,
+                    fmt_stdlib_sha256=provenance["tools"]["fmt_stdlib_sha256"],
+                    parser_attestation=provenance["parser_stdlib_attestation"])
+
+    def test_attestation_reads_the_actual_scoped_source_and_rejects_drift(self) -> None:
+        env = {"RUSTUP_HOME": "/owned/scoped/rustup", "RUSTUP_TOOLCHAIN": "nightly-2026-08-21-x86_64-unknown-linux-gnu"}
+        source = Path(env["RUSTUP_HOME"]) / "toolchains" / env["RUSTUP_TOOLCHAIN"] / "lib/rustlib/src/rust/library/core/src/slice/cmp.rs"
+        with mock.patch.object(runner, "digest", return_value=runner.SLICE_STDLIB_SHA256) as hashed:
+            self.assertEqual(runner.parser_stdlib_attestation(env)["slice_cmp_sha256"], runner.SLICE_STDLIB_SHA256)
+            hashed.assert_called_once_with(source)
+        with mock.patch.object(runner, "digest", return_value="wrong"), self.assertRaises(RuntimeError):
+            runner.parser_stdlib_attestation(env)
+        with mock.patch.object(runner, "digest", side_effect=FileNotFoundError), self.assertRaises(OSError):
+            runner.parser_stdlib_attestation(env)
+
+    def test_original_rejected_t6_is_reparsed_without_solver_or_tool_normalization(self) -> None:
+        raw, provenance = real_linux_t6()
+        base = ROOT / "target/worker-control-runner-fixtures"
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as directory:
+            prior, output = Path(directory) / "prior", Path(directory) / "next"
+            prior.mkdir(); output.mkdir()
+            harness = provenance["harness"]; name = harness.rsplit("::", 1)[1]
+            log_path = prior / f"{name}.log"; log_path.write_text(raw)
+            source, tools = provenance["source_binding"], provenance["tools"]
+            rejected = {"harness": harness, "outcome": "rejected", "error": provenance["original_parser_rejection"]["error"],
+                "exit_code": 0, "source": source, "tools": tools, "execution_directory": str(prior),
+                "command": ["cargo-kani", "--harness", harness, "--exact", "--output-format", "regular", "--manifest-path", str(prior / "source/Cargo.toml"), "--target-dir", str(prior / "build")],
+                "unwinding_checks": True, "default_safety_checks": True, "log_sha256": runner.digest(log_path)}
+            runner.write_json(prior / f"{name}.json", rejected)
+            with mock.patch.object(runner, "validate_case_sources"), mock.patch.object(runner, "command", side_effect=AssertionError("solver replay forbidden")):
+                retained = runner.verify(Path("unused"), {}, output, harness, source, tools,
+                    manifest=output / "source/Cargo.toml", prior=prior, parser_attestation=provenance["parser_stdlib_attestation"])
+                self.assertEqual(retained["outcome"], "proved")
+                self.assertEqual(retained["tools"], tools)
+                self.assertEqual(retained["original_parser_rejection"]["error"], rejected["error"])
+                self.assertTrue(retained["parser_attestation_bridge"]["solver_tool_identity_unchanged"])
+                self.assertNotIn("slice_cmp_sha256", retained["tools"])
+                changed_tools = dict(tools, driver_sha256="different-native-binary")
+                self.assertIsNone(runner.retain_previous(prior, output, harness, source, changed_tools, None, None,
+                    parser_attestation=provenance["parser_stdlib_attestation"]))
 
 
 
