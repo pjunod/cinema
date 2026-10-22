@@ -83,7 +83,7 @@ def git_identity():
 
 
 def discover(output, command, artifacts=None, compiler_exit_code=None, compile_timeout=7200, list_timeout=90,
-             *, pass_fds=(), cancel_event=None):
+             *, pass_fds=(), cancel_event=None, source_bundle=None):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     report = dict(schema=1, cell="ordinary-rust-sqlite", discovery_complete=False,
@@ -114,7 +114,12 @@ def discover(output, command, artifacts=None, compiler_exit_code=None, compile_t
             raise ValueError("compile and listing timeouts must be positive and finite")
         built_command = compile_command(command)
         report["compile_command"] = built_command
-        report["source"] = git_identity()
+        if source_bundle is None:
+            report["source"] = git_identity()
+        else:
+            from validation.rust_source_bundle import identity
+            report["source"] = identity(Path.cwd(), source_bundle)
+            report["source_kind"] = "verified-source-bundle; no repository metadata or CI authentication"
         rustc = os.environ.get("RUSTC", "rustc")
         version = subprocess.check_output([rustc, "--version"], text=True, stderr=subprocess.PIPE).strip()
         if not re.match(r"rustc " + re.escape(PINNED_RUST) + r"(?:\s|$)", version):

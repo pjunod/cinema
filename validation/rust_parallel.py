@@ -31,6 +31,7 @@ SERIAL = [
     'vodserve::tests::encoded_vod_vfr_input_is_sampled_on_the_declared_rational_grid',
     'vodserve::tests::encoded_vod_bitmap_burn_restores_cues_that_predate_video_seek_landing',
 ]
+SOURCE_BUNDLE = None
 
 
 def write(path, value):
@@ -51,7 +52,12 @@ def require(condition, message):
 
 
 def check_inputs(inventory, binary=None):
-    require(git_identity() == inventory['source'], 'source changed since discovery')
+    if SOURCE_BUNDLE is None:
+        actual = git_identity()
+    else:
+        from validation.rust_source_bundle import identity
+        actual = identity(Path.cwd(), SOURCE_BUNDLE)
+    require(actual == inventory['source'], 'source changed since discovery')
     require(inventory['discovery_complete'] and not inventory['errors'], 'discovery incomplete')
     selected = inventory['binaries']
     if binary is not None:
@@ -267,23 +273,30 @@ def normalized_runner_name(root, name):
 
 
 def main(argv=None):
+    global SOURCE_BUNDLE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('phase', choices=['capacity', 'prepare', 'legacy', 'parallel', 'nextest'])
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--admission', type=Path, default=Path('/var/lock/plurx-ci'))
     parser.add_argument('--runner-name', default=os.environ.get('RUNNER_NAME', ''))
     parser.add_argument('--label', default=None)
+    parser.add_argument('--source-bundle', type=Path, default=None,
+                        help='Externally stored, cryptographically verified source-only archive manifest')
     args = parser.parse_args(argv)
+    SOURCE_BUNDLE = args.source_bundle
     root = Path.cwd().resolve()
     output = args.output.resolve()
     require(not output.is_relative_to(root), 'pilot artifacts must be outside tested checkout')
     output.mkdir(parents=True, exist_ok=True)
     if args.phase == 'capacity':
         from validation.baseline_resources import metadata, discover_cgroup, cgroup_sample
+        counters, missing, counter_root = cgroup_sample(discover_cgroup())
         record = dict(metadata('m3-capacity'), runner=args.runner_name,
                       memory=[row for row in Path('/proc/meminfo').read_text().splitlines()
                               if row.startswith(('MemTotal:', 'MemAvailable:', 'SwapTotal:', 'SwapFree:'))],
-                      cgroup=cgroup_sample(discover_cgroup()), qualified=False,
+                      cgroup=counters, missing_counters=missing,
+                      counter_root=str(counter_root) if counter_root is not None else None,
+                      qualified=False,
                       limitation='read-only capacity observation; no native test execution or admission proof')
         write(output / 'capacity.json', record)
         print(json.dumps(record, indent=2))
@@ -299,7 +312,7 @@ def main(argv=None):
                 for number in handlers:
                     signal.signal(number, lambda _number, _frame: stop.set())
                 inventory = discover(output / 'inventory', NATIVE, compile_timeout=3600, list_timeout=20,
-                                     pass_fds=(lease['lock_fd'],), cancel_event=stop)
+                                     pass_fds=(lease['lock_fd'],), cancel_event=stop, source_bundle=SOURCE_BUNDLE)
                 require(inventory['discovery_complete'], 'compilation or inventory failed')
                 process, text = command(['cargo', 'metadata', '--format-version=1', '--locked', '--offline', '--no-deps'],
                                         output, 'metadata', 120, lease['lock_fd'], combined=False, cancel_event=stop)

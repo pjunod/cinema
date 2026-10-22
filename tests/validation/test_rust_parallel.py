@@ -1,5 +1,8 @@
 """Coordinator controls using real native parsing and tiny executable fixtures."""
 import copy
+from contextlib import redirect_stdout
+import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -28,6 +31,27 @@ def docs(*, zero=False, failed=False):
 
 
 class RustParallelCase(unittest.TestCase):
+    def test_capacity_serializes_real_counter_shape_without_claiming_test_execution(self):
+        from validation import baseline_resources
+        read_text = Path.read_text
+        def memory(path, *args, **kwargs):
+            if str(path) == '/proc/meminfo':
+                return 'MemTotal: 32000000 kB\nMemAvailable: 24000000 kB\n'
+            return read_text(path, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), \
+                patch.object(baseline_resources, 'metadata', return_value={'cell': 'm3-capacity'}), \
+                patch.object(baseline_resources, 'discover_cgroup', return_value={}), \
+                patch.object(baseline_resources, 'cgroup_sample', return_value=(
+                    {'memory.max': 'max'}, ['io.stat'], Path('/sys/fs/cgroup'))), \
+                patch.object(Path, 'read_text', memory):
+            self.assertEqual(parallel.main(['capacity', '--output', directory]), 0)
+            report = json.loads((Path(directory) / 'capacity.json').read_text())
+        self.assertEqual(report['cgroup'], {'memory.max': 'max'})
+        self.assertEqual(report['missing_counters'], ['io.stat'])
+        self.assertEqual(report['counter_root'], '/sys/fs/cgroup')
+        self.assertIs(report['qualified'], False)
+        self.assertIn('no native test execution', report['limitation'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
