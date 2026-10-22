@@ -2282,13 +2282,11 @@ async fn boot_observing(
         encoder_caps,
         system,
         logs,
+        resource_runtime,
     );
     state
         .sharing
         .observe_source_activation_at_boot(source_activation_at_boot);
-    // This exact startup owner outlives all serving/cleanup clones. Never open
-    // another journal lazily in a request or producer.
-    state.resource_runtime = resource_runtime;
     if let Some(owner) = &observation {
         let observer = owner.observer().await.ok_or_else(|| {
             anyhow::anyhow!("startup observation owner disappeared before activation")
@@ -3289,6 +3287,7 @@ fn build_state(
     encoder_caps: plurx_core::transcode::EncoderCaps,
     system: SystemInfo,
     logs: logbuf::LogBuffers,
+    resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
 ) -> AppState {
     let state = AppState::new_configured(
         crate::state::AppConfig {
@@ -3319,6 +3318,7 @@ fn build_state(
         encoder_caps,
         system,
         logs,
+        resource_runtime,
     );
     crate::telemetry::diagnostics(Arc::clone(&state.store))
         .configure_publisher(config.support.clone());

@@ -1264,6 +1264,7 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
                     &rendition.identity_path(),
                     &identity,
                     rendition.private_storage.as_ref(),
+                    Some(&rendition.dir),
                 )
                 .await
                 {
@@ -1272,7 +1273,11 @@ async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
-                    if rendition.private_storage.is_some() {
+                    #[cfg(unix)]
+                    let finite = rendition.dir.is_finite();
+                    #[cfg(not(unix))]
+                    let finite = false;
+                    if rendition.private_storage.is_some() || finite {
                         rendition.revoke_preparation();
                         drop(state);
                         return Err(Outcome::Failed(Failure::Sink(error)));

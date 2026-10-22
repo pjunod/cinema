@@ -392,7 +392,7 @@ impl HeldSource for crate::fragment_index_cluster::SourceHandle {
 }
 
 fn hash_held_source(mut handle: impl HeldSource, size: u64, mtime: i64) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::SeekFrom;
     let before = handle.metadata().ok()?;
     let stamp = crate::fragment_index_cluster::source_stamp(&before);
     if !before.is_file() || size < 128 * 1024 || stamp.size != size || stamp.mtime != mtime {

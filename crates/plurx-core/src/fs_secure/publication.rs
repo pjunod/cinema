@@ -78,6 +78,24 @@ impl PublicationRequest {
                 "publication requires a canonical name and nonnil operation",
             ));
         }
+        Self::validated(name, payload, io_id)
+    }
+
+    /// Fixed metadata names have a separate entry from media publication.
+    pub fn for_metadata_operation(
+        name: &str,
+        payload: Vec<u8>,
+        io_id: uuid::Uuid,
+    ) -> io::Result<Self> {
+        if !matches!(name, "identity.json" | "encoded-process") || io_id.is_nil() {
+            return Err(invalid(
+                "metadata publication requires a fixed name and nonnil operation",
+            ));
+        }
+        Self::validated(name, payload, io_id)
+    }
+
+    fn validated(name: &str, payload: Vec<u8>, io_id: uuid::Uuid) -> io::Result<Self> {
         let logical_end = u64::try_from(payload.len()).map_err(io::Error::other)?;
         Ok(Self {
             temporary_name: CString::new(format!(".{name}.{io_id}.tmp"))

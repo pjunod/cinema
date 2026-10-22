@@ -313,6 +313,7 @@ impl TranscodeManager {
             ffmpeg_build,
             node_id,
             None,
+            None,
         )
     }
 
@@ -330,6 +331,7 @@ impl TranscodeManager {
         ffmpeg_build: String,
         node_id: String,
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.macos_video_probe =
@@ -346,6 +348,7 @@ impl TranscodeManager {
             node_id.clone(),
             crate::fragment_index_cluster::cache_root(&self.runtime_cache),
             cluster_membership,
+            resource_runtime,
         );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(

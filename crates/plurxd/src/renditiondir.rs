@@ -583,6 +583,10 @@ impl RenditionDir {
     ///
     /// Once per rendition, off the hot path, bounded by the member count.
     pub async fn make_durable(&self, manifest: &Manifest) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Some(finite) = &self.writes.finite {
+            return finite.sync(manifest).await;
+        }
         for index in 0..manifest.len() as u32 {
             if !manifest
                 .state(index)

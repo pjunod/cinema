@@ -164,7 +164,7 @@ impl VodServe {
             .parent()
             .unwrap_or(base.as_path())
             .join(".runtime-cache");
-        Self::new_configured(base, runtime_cache, store, None, None, None)
+        Self::new_configured(base, runtime_cache, store, None, None, None, None)
     }
 
     /// Publish a producer-less VOD attachment for HTTP response-finalization
@@ -399,6 +399,7 @@ impl VodServe {
             node_id,
             cluster_index_root,
             membership,
+            None,
         )
     }
 
@@ -409,6 +410,7 @@ impl VodServe {
         node_id: String,
         cluster_index_root: PathBuf,
         membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     ) -> Arc<VodServe> {
         Self::new_configured(
             base,
@@ -417,6 +419,7 @@ impl VodServe {
             Some(node_id),
             Some(cluster_index_root),
             membership,
+            resource_runtime,
         )
     }
 
@@ -427,6 +430,7 @@ impl VodServe {
         cluster_node_id: Option<String>,
         cluster_index_root: Option<PathBuf>,
         cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     ) -> Arc<VodServe> {
         let mut encoded_generation_scanner = EncodedGenerationScanner::new(base.clone());
         let obsolete_encoded_generations = encoded_generation_scanner.discover(
@@ -440,6 +444,7 @@ impl VodServe {
                 base,
                 runtime_cache,
                 store,
+                resource_runtime,
                 local_index_demand: StdMutex::new(VecDeque::new()),
                 obsolete_encoded_generations: Mutex::new(VecDeque::from(
                     obsolete_encoded_generations,

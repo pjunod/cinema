@@ -28,6 +28,9 @@ struct PublicationResult {
     result: std::io::Result<()>,
 }
 impl Publication {
+    pub(super) fn acknowledged(&self) -> bool {
+        self.acknowledged
+    }
     async fn join(&mut self) -> Result<&PublicationResult, OperationError> {
         if self.failed_join {
             return Err(OperationError::State);
@@ -135,6 +138,7 @@ impl NodeResourceRuntime {
                 .publication
                 .as_ref()
                 .is_some_and(|p| !p.acknowledged)
+            || bootstrap.sync.as_ref().is_some_and(|s| !s.acknowledged)
             || !bootstrap.plan.outputs.contains(&output)
         {
             return Err(OperationError::State);
@@ -149,9 +153,20 @@ impl NodeResourceRuntime {
         let name = match output {
             OutputKey::Init => "init.mp4".to_owned(),
             OutputKey::Segment { index } => format!("seg{index:05}.m4s"),
+            OutputKey::IdentityMetadata => "identity.json".to_owned(),
+            OutputKey::EncodedProcessMetadata => "encoded-process".to_owned(),
         };
         let content_binding = format!("sha256:{:x}", Sha256::digest(payload.as_slice()));
-        let validated = PublicationRequest::for_operation(&name, Vec::new(), io_id.uuid())?;
+        let metadata = matches!(
+            output,
+            OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
+        );
+        let request_for = if metadata {
+            PublicationRequest::for_metadata_operation
+        } else {
+            PublicationRequest::for_operation
+        };
+        let validated = request_for(&name, Vec::new(), io_id.uuid())?;
         // Concrete Rust-owned cells and actual heap capacities. Runtime task
         // allocator/DB projection overhead still require their node-baseline
         // accounting; this calculation is not a whole-host physical quota.
@@ -198,9 +213,8 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         drop(validated);
-        let request =
-            PublicationRequest::for_operation(&name, std::mem::take(payload), io_id.uuid())
-                .expect("same already-validated name/id and bounded payload length");
+        let request = request_for(&name, std::mem::take(payload), io_id.uuid())
+            .expect("same already-validated name/id and bounded payload length");
         bootstrap.publication = Some(Publication {
             io_id,
             observe_id,
@@ -281,15 +295,29 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            let event = AssetEventV1::ArmIo {
-                io_id: publication.io_id,
-                operation: AssetIoV1::PublishNew {
+            let operation = if matches!(
+                publication.output,
+                OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
+            ) {
+                AssetIoV1::PublishMetadata {
                     slot_id: FileSlotId(publication.io_id),
                     output: publication.output.clone(),
                     logical_end: publication.logical_end,
                     payload_capacity: publication.payload_capacity,
                     copy_id: publication.copy_id,
-                },
+                }
+            } else {
+                AssetIoV1::PublishNew {
+                    slot_id: FileSlotId(publication.io_id),
+                    output: publication.output.clone(),
+                    logical_end: publication.logical_end,
+                    payload_capacity: publication.payload_capacity,
+                    copy_id: publication.copy_id,
+                }
+            };
+            let event = AssetEventV1::ArmIo {
+                io_id: publication.io_id,
+                operation,
             };
             queue_output_change(&self.journal, role, member, publication_id, event, deadline)?;
             self.finish_transition(bundle_id, role).await?;
@@ -487,7 +515,7 @@ impl NodeResourceRuntime {
     }
 }
 
-fn queue_output_change(
+pub(super) fn queue_output_change(
     journal: &CustodyJournal,
     role: &mut OwnedRole,
     member: Uuid,

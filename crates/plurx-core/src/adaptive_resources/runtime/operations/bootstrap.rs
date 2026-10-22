@@ -17,6 +17,8 @@ pub(super) struct BootstrapMember {
     native_root: Option<native::RootCell>,
     #[cfg(unix)]
     publication: Option<native::publication::Publication>,
+    #[cfg(unix)]
+    sync: Option<native::sync::Sync>,
 }
 
 impl NodeResourceRuntime {
@@ -123,6 +125,8 @@ impl NodeResourceRuntime {
                     native_root: None,
                     #[cfg(unix)]
                     publication: None,
+                    #[cfg(unix)]
+                    sync: None,
                 },
             );
         }

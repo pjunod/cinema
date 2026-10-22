@@ -1373,6 +1373,7 @@ mod tests {
                     general: Arc::new(crate::logbuf::LogBuffer::new(32)),
                     cluster: Arc::new(crate::logbuf::LogBuffer::new(32)),
                 },
+                None,
             );
             state.clock_observer = observation.observer().await.expect("startup clock owner");
             state

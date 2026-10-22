@@ -253,13 +253,14 @@ pub(super) async fn load_identity(path: &Path) -> Option<InitIdentity> {
 /// absent or complete, never partial.
 #[cfg(test)]
 pub(super) async fn store_identity(path: &Path, identity: &InitIdentity) -> io::Result<()> {
-    store_identity_observed(path, identity, None).await
+    store_identity_observed(path, identity, None, None).await
 }
 
 pub(super) async fn store_identity_observed(
     path: &Path,
     identity: &InitIdentity,
     allowance: Option<&Arc<super::copy_preparation::PreparationAllowance>>,
+    directory: Option<&RenditionDir>,
 ) -> io::Result<()> {
     let stored = StoredIdentity {
         muxer_init: identity.muxer_init.clone(),
@@ -268,6 +269,14 @@ pub(super) async fn store_identity_observed(
     };
     let bytes = serde_json::to_vec(&stored)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    #[cfg(unix)]
+    if let Some(directory) = directory.filter(|d| d.is_finite()) {
+        return directory
+            .write_finite_metadata("identity.json", bytes)
+            .await;
+    }
+    #[cfg(not(unix))]
+    let _ = directory;
     let pending = allowance
         .map(|allowance| {
             allowance

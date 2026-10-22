@@ -40,6 +40,7 @@ pub(crate) struct DirectoryPlanV2 {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OutputNamingV1 {
     FilmSegmentV1,
+    FiniteVodMetadataV2 { encoded_process: bool },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,11 +50,13 @@ pub(crate) struct OutputNamesV1 {
     pub segment_end_exclusive: u64,
     pub naming: OutputNamingV1,
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub(crate) enum OutputKey {
     Init,
     Segment { index: u32 },
+    IdentityMetadata,
+    EncodedProcessMetadata,
 }
 impl OutputNamesV1 {
     pub(crate) fn contains(&self, key: &OutputKey) -> bool {
@@ -62,6 +65,15 @@ impl OutputNamesV1 {
             OutputKey::Segment { index } => {
                 *index >= self.first_segment && u64::from(*index) < self.segment_end_exclusive
             }
+            OutputKey::IdentityMetadata => {
+                matches!(self.naming, OutputNamingV1::FiniteVodMetadataV2 { .. })
+            }
+            OutputKey::EncodedProcessMetadata => matches!(
+                self.naming,
+                OutputNamingV1::FiniteVodMetadataV2 {
+                    encoded_process: true
+                }
+            ),
         }
     }
 }
@@ -208,6 +220,15 @@ pub(crate) enum AssetIoV1 {
         copy_id: Id,
     },
     PublishNew {
+        slot_id: FileSlotId,
+        output: OutputKey,
+        logical_end: u64,
+        payload_capacity: u64,
+        copy_id: Id,
+    },
+    /// Explicit fixed-name metadata publication, under the same asset charge.
+    /// The fold rejects media keys here and metadata keys in PublishNew.
+    PublishMetadata {
         slot_id: FileSlotId,
         output: OutputKey,
         logical_end: u64,

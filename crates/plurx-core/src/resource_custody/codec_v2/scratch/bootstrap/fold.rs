@@ -42,6 +42,9 @@ impl BootstrapFold {
             bootstrap: self.bootstrap.clone(),
         }
     }
+    pub(crate) fn files(&self) -> &[FileObservedV1] {
+        &self.output.files
+    }
     fn matches_ref(
         &self,
         reference: &OwnedDirectoryRefV1,

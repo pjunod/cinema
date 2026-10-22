@@ -7,6 +7,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use tokio::task::JoinHandle;
 pub(super) mod publication;
 pub(in crate::adaptive_resources::runtime::operations) mod steps;
+pub(super) mod sync;
 #[cfg(test)]
 mod tests;
 

@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · M0/M1 partial; M2 capacity and M3 custody slices compiled.
-**Updated:** 2026-10-22 at HEAD `5ba46950a`.
+**Updated:** 2026-10-22 at committed checkpoint `ffd7f58379856a3ad31ff9789aff3520cf26cf6e`.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -47,28 +47,34 @@ The prearmed source adapter retains the actual file and original native job,
 checks scanner and `s1` identity using shared core code, and exports a nonclone
 counted lease only after the exact acquisition observation. Existing
 [`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) can hold that
-lease without reopening the legacy pathname. The daemon
-[`PendingWrites` finite adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
-is present, but the first statement in ordinary
-`build_rendition_with_storage` still selects legacy admission. This remains a
-core/runtime bridge, not ordinary source closure.
-All V1–V5 remain **OPEN**. Still missing: ordinary entry/producer composition,
-metadata and sync operations, complete memory/index and durable overage
-accounting, actual reader leases, retained-output transfer, conserving R→S and
-exact cleanup/settlement/capacity reuse.
+lease without reopening the legacy pathname. The finite-output slice following that checkpoint
+adds an explicit `PublishMetadata` journal operation for opted-in
+`identity.json` and `encoded-process` outputs; the software-transcode profile
+requires its marker, while copy omits it. The same-child native sync cell retains
+the original job through known Arm/Observe and bounds each batch to 16 files.
+The daemon [`PendingWrites` finite adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
+connects metadata durability, and startup passes the already-open runtime Arc to
+`VodServe::Shared`. These are bridge components: ordinary
+`build_rendition_with_storage` still starts with legacy admission, and the
+first metadata-marker creation caller is not fully wired.
 
-Authored regressions cover same-descriptor publication, canceled native waits,
-partial failure/retry refusal and monotonic debt/fencing. They have not executed.
-The retained stable core check passed in 52.831s (EXIT 0) at an earlier source
-snapshot; later finite-VOD API work invalidated that receipt for current core.
-The latest exact 28-file host all-target core+daemon check passed in 99.490s
-(EXIT 0; `outer/evidence/direct-check-20261022-174040.json`). It compiled the
-current source snapshot, including host-authored regression bodies; none ran.
-Linux-only statx and test bodies still need their own native compiler scope.
-Windows and restart behavior are not established by this host result. No tests,
-final independent review, behavioral qualification, fast lane or merge have run.
-Strict Clippy is not claimed; ordinary production admission/publication remains
-legacy and V1–V5 remain open. Historical receipt scopes below remain distinct.
+All V1–V5 remain **OPEN**. Still missing: ordinary entry and root producer
+ownership/task composition; the first metadata-marker caller; complete
+memory/index and durable-debt accounting; actual reader leases; retained-output
+transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
+
+The latest committed/pushed checkpoint
+`ffd7f58379856a3ad31ff9789aff3520cf26cf6e` passed pinned Rust 1.97.1 host
+core+daemon all-target compilation in 28.406s (EXIT 0, stable source). Static
+bookkeeping and 326 regression anchors resolve against that candidate; draft PR
+#1248 is updated. The next source slice adds ten authored sync/metadata
+regressions, not run. Its corrected pinned host all-target checks passed core
+in 50.486s and daemon in 139.073s (EXIT 0 each, stable source hashes). The
+receipts are `direct-check-20261022-180814.json` and
+`direct-check-20261022-180506.json` in the task evidence directory. Earlier
+compiler failures and their fixes remain retained. No behavioral tests, final independent review, qualification, fast lane
+or merge have run. Linux/Windows current-source compilation, strict Clippy,
+restart evidence and behavior qualification remain open.
 
 ## Current source and compiler receipt
 

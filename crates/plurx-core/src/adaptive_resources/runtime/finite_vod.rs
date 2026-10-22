@@ -62,6 +62,7 @@ pub struct SoftwareVodRequest {
     pub executable: PathBuf,
     pub sources: Vec<FiniteSourceRequest>,
     pub segment_count: u32,
+    pub encoded_process_marker: bool,
     pub demand: WorkloadDemand,
     pub output: FiniteOutputLimits,
 }
@@ -76,6 +77,7 @@ pub struct SoftwareVodOwner {
     scratch_member: Uuid,
     root_member: Uuid,
     directory_path: PathBuf,
+    encoded_process_marker: bool,
 }
 
 /// A bounded selection of the same custodian, not an exported File/Arc<File>.
@@ -86,15 +88,33 @@ pub struct FiniteOutput {
     preparation: OwnedPreparation,
     member: Uuid,
     directory_path: PathBuf,
+    encoded_process_marker: bool,
 }
 
 /// Opaque identity of a payload already retained by the runtime. Dropping the
 /// ticket cannot cancel native work, lose the original result or refund credit.
 pub struct PublicationTicket {
     id: Uuid,
+    kind: TicketKind,
+}
+enum TicketKind {
+    Publication,
+    Sync,
+}
+
+/// Fixed names selected from the core's actual observed inventory.
+#[derive(Clone, Copy)]
+pub enum FiniteFile {
+    Init,
+    Segment(u32),
+    IdentityMetadata,
+    EncodedProcessMetadata,
 }
 
 impl FiniteOutput {
+    pub fn has_encoded_process_metadata(&self) -> bool {
+        self.encoded_process_marker
+    }
     /// Configured location for application metadata; never native authority.
     pub fn path(&self) -> &Path {
         &self.directory_path
@@ -109,6 +129,18 @@ impl FiniteOutput {
     ) -> Result<PublicationTicket, FiniteVodError> {
         self.queue(OutputKey::Segment { index }, bytes)
     }
+    pub fn queue_identity_metadata(
+        &self,
+        bytes: &mut Vec<u8>,
+    ) -> Result<PublicationTicket, FiniteVodError> {
+        self.queue(OutputKey::IdentityMetadata, bytes)
+    }
+    pub fn queue_encoded_process_metadata(
+        &self,
+        bytes: &mut Vec<u8>,
+    ) -> Result<PublicationTicket, FiniteVodError> {
+        self.queue(OutputKey::EncodedProcessMetadata, bytes)
+    }
     fn queue(
         &self,
         output: OutputKey,
@@ -121,17 +153,53 @@ impl FiniteOutput {
             output,
             bytes,
         )?;
-        Ok(PublicationTicket { id })
+        Ok(PublicationTicket {
+            id,
+            kind: TicketKind::Publication,
+        })
+    }
+    pub fn queue_sync(&self, files: &[FiniteFile]) -> Result<PublicationTicket, FiniteVodError> {
+        if files.is_empty() || files.len() > 16 {
+            return Err(invalid());
+        }
+        let mut outputs = [OutputKey::Init; 16];
+        for (target, file) in outputs.iter_mut().zip(files) {
+            *target = match file {
+                FiniteFile::Init => OutputKey::Init,
+                FiniteFile::Segment(index) => OutputKey::Segment { index: *index },
+                FiniteFile::IdentityMetadata => OutputKey::IdentityMetadata,
+                FiniteFile::EncodedProcessMetadata => OutputKey::EncodedProcessMetadata,
+            };
+        }
+        let id = self.runtime.queue_scratch_sync(
+            &self.preparation,
+            0,
+            self.member,
+            &outputs[..files.len()],
+        )?;
+        Ok(PublicationTicket {
+            id,
+            kind: TicketKind::Sync,
+        })
     }
     pub async fn finish(
         &self,
         ticket: &PublicationTicket,
         deadline: Instant,
     ) -> Result<(), FiniteVodError> {
-        self.runtime
-            .publish_scratch_output(&self.preparation, 0, self.member, ticket.id, deadline)
-            .await
-            .map_err(Into::into)
+        match ticket.kind {
+            TicketKind::Publication => {
+                self.runtime
+                    .publish_scratch_output(&self.preparation, 0, self.member, ticket.id, deadline)
+                    .await
+            }
+            TicketKind::Sync => {
+                self.runtime
+                    .sync_scratch_outputs(&self.preparation, 0, self.member, ticket.id, deadline)
+                    .await
+            }
+        }
+        .map_err(Into::into)
     }
 }
 
@@ -179,6 +247,7 @@ impl SoftwareVodOwner {
             preparation: self.preparation.clone(),
             member: self.scratch_member,
             directory_path: self.directory_path.clone(),
+            encoded_process_marker: self.encoded_process_marker,
         })
     }
     pub async fn cancel(&self, deadline: Instant) -> Result<(), FiniteVodError> {
@@ -396,7 +465,9 @@ impl NodeResourceRuntime {
                     init: true,
                     first_segment: 0,
                     segment_end_exclusive: u64::from(request.segment_count),
-                    naming: OutputNamingV1::FilmSegmentV1,
+                    naming: OutputNamingV1::FiniteVodMetadataV2 {
+                        encoded_process: request.encoded_process_marker,
+                    },
                 },
                 limits,
             },
@@ -449,6 +520,7 @@ impl NodeResourceRuntime {
             scratch_member: scratch_member.uuid(),
             root_member: root_member.uuid(),
             directory_path,
+            encoded_process_marker: request.encoded_process_marker,
         })
     }
 }

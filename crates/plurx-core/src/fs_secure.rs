@@ -7,6 +7,7 @@
 //! with `openat(O_NOFOLLOW)` and keep the resulting descriptor as authority.
 
 pub mod publication;
+pub mod sync_files;
 
 use std::ffi::{CStr, CString, OsString};
 use std::fs::File;

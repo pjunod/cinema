@@ -1094,6 +1094,7 @@ impl AppState {
                 general: logs,
                 cluster: Arc::new(LogBuffer::default()),
             },
+            None,
         )
     }
 
@@ -1104,6 +1105,7 @@ impl AppState {
         encoder_caps: EncoderCaps,
         system: SystemInfo,
         logs: LogBuffers,
+        resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     ) -> Self {
         let AppConfig {
             sharing_network,
@@ -1228,6 +1230,7 @@ impl AppState {
                 system.ffmpeg_version.clone().unwrap_or_default(),
                 node_id.clone(),
                 Some(membership.clone()),
+                resource_runtime.clone(),
             )
             .with_subtitle_jobs(Arc::clone(&jobs))
             .with_serving_authority(serving.authority())
@@ -1268,7 +1271,7 @@ impl AppState {
         );
         live_tv.set_settings_changes(settings_changes.clone());
         AppState {
-            resource_runtime: None,
+            resource_runtime,
             store,
             sharing,
             link_receipts: Default::default(),

@@ -104,8 +104,20 @@ impl ScratchFold {
                         logical_end,
                         payload_capacity,
                         copy_id,
+                    }
+                    | AssetIoV1::PublishMetadata {
+                        slot_id,
+                        output,
+                        logical_end,
+                        payload_capacity,
+                        copy_id,
                     } => {
-                        if self.state.directory.is_none()
+                        let metadata = matches!(
+                            output,
+                            OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
+                        );
+                        if metadata != matches!(operation, AssetIoV1::PublishMetadata { .. })
+                            || self.state.directory.is_none()
                             || slot_id.0 != *io_id
                             || !plan.outputs.contains(output)
                             || *logical_end == 0
@@ -186,6 +198,13 @@ impl ScratchFold {
                     }
                     (
                         AssetIoV1::PublishNew {
+                            slot_id,
+                            output,
+                            logical_end,
+                            payload_capacity: _,
+                            copy_id,
+                        }
+                        | AssetIoV1::PublishMetadata {
                             slot_id,
                             output,
                             logical_end,
@@ -358,6 +377,11 @@ impl ScratchFold {
                         .ok_or_else(codec::invalid)?;
                 }
                 AssetIoV1::PublishNew {
+                    logical_end,
+                    payload_capacity,
+                    ..
+                }
+                | AssetIoV1::PublishMetadata {
                     logical_end,
                     payload_capacity,
                     ..

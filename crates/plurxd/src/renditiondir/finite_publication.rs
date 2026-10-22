@@ -1,6 +1,8 @@
 //! Rendition adapter for the core finite-VOD publication owner.
 use super::*;
-use plurx_core::adaptive_resources::runtime::finite_vod::{FiniteOutput, PublicationTicket};
+use plurx_core::adaptive_resources::runtime::finite_vod::{
+    FiniteFile, FiniteOutput, PublicationTicket,
+};
 use std::time::{Duration, Instant};
 
 pub(super) struct FinitePublication {
@@ -24,6 +26,58 @@ impl FinitePublication {
 
     pub(super) async fn join(&self) -> io::Result<()> {
         let mut pending = self.pending.lock().await;
+        self.finish_pending(&mut pending).await
+    }
+
+    pub(super) async fn sync(&self, manifest: &Manifest) -> io::Result<()> {
+        let mut pending = self.pending.lock().await;
+        self.finish_pending(&mut pending).await?;
+        let mut files = Vec::with_capacity(16);
+        files.extend([FiniteFile::Init, FiniteFile::IdentityMetadata]);
+        if self.output.has_encoded_process_metadata() {
+            files.push(FiniteFile::EncodedProcessMetadata);
+        }
+        for index in 0..manifest.len() {
+            let index = u32::try_from(index).map_err(io::Error::other)?;
+            if manifest.state(index).is_some_and(|s| s.is_materialized()) {
+                files.push(FiniteFile::Segment(index));
+                if files.len() == 16 {
+                    *pending = Some(
+                        self.output
+                            .queue_sync(&files)
+                            .map_err(|e| io::Error::other(e.to_string()))?,
+                    );
+                    self.finish_pending(&mut pending).await?;
+                    files.clear();
+                }
+            }
+        }
+        if !files.is_empty() {
+            *pending = Some(
+                self.output
+                    .queue_sync(&files)
+                    .map_err(|e| io::Error::other(e.to_string()))?,
+            );
+            self.finish_pending(&mut pending).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn publish_metadata(&self, name: &str, mut bytes: Vec<u8>) -> io::Result<()> {
+        let mut pending = self.pending.lock().await;
+        self.finish_pending(&mut pending).await?;
+        let ticket = match name {
+            "identity.json" => self.output.queue_identity_metadata(&mut bytes),
+            "encoded-process" => self.output.queue_encoded_process_metadata(&mut bytes),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown finite metadata name",
+                ))
+            }
+        }
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        *pending = Some(ticket);
         self.finish_pending(&mut pending).await
     }
 
@@ -67,6 +121,17 @@ impl FinitePublication {
 }
 
 impl RenditionDir {
+    pub(crate) fn is_finite(&self) -> bool {
+        self.writes.finite.is_some()
+    }
+    pub(crate) async fn write_finite_metadata(&self, name: &str, bytes: Vec<u8>) -> io::Result<()> {
+        self.writes
+            .finite
+            .as_ref()
+            .ok_or_else(|| io::Error::other("finite metadata owner absent"))?
+            .publish_metadata(name, bytes)
+            .await
+    }
     pub(crate) fn from_finite(output: FiniteOutput) -> RenditionDir {
         RenditionDir {
             dir: output.path().to_owned(),

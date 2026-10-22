@@ -1143,6 +1143,7 @@ struct Shared {
     base: PathBuf,
     runtime_cache: PathBuf,
     store: Arc<dyn Store>,
+    resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
     /// Files a start was refused `vod_index_pending` for, newest first, for
     /// the node-local fragment-index pass to examine before its round-robin
     /// backlog ([`VodServe::local_index_demand`]). Bounded: it is a priority

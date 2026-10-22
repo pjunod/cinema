@@ -2552,6 +2552,7 @@ fn booted_state(dir: &std::path::Path) -> AppState {
             general: Arc::new(logbuf::LogBuffer::new(64)),
             cluster: Arc::new(logbuf::LogBuffer::new(64)),
         },
+        None,
     )
 }
 
