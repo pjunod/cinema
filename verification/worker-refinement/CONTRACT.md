@@ -273,3 +273,9 @@ pipeline, property or fairness clause was removed or weakened. This
 preservation argument does not predict runtime, complete exploration or
 property satisfaction. Both prior timeouts remain incomplete evidence;
 all fourteen expected outcomes are still required for qualification.
+
+## Production controller proof boundary
+
+The next phase extracts the existing post-claim lifecycle into the shared Rust controller described in [worker-control](../worker-control/README.md) and its [effect correspondence](../worker-control/CORRESPONDENCE.md). Local controller safety is a separate obligation: it covers emitted process/cleanup decisions, rather than SQL, asynchronous effect completion or scheduler fairness. Source anchors and whole-file hashes are refreshed for the driver extraction; the TLA model/configuration bytes and historical model results retain their original identity.
+
+The durable source-I/O claim-enabledness mismatch above remains open. The controller does not establish fair trace inclusion, a complete Rust simulation, or cluster-wide deadlock freedom. A release-completed event records a returned local attempt, including ambiguous failure; it is not evidence of durable absence.

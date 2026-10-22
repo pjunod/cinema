@@ -3971,6 +3971,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-worker-control"
+version = "0.7.0"
+
+[[package]]
 name = "plurxd"
 version = "0.7.0"
 dependencies = [
@@ -4007,6 +4011,7 @@ dependencies = [
  "plurx-desktop-control",
  "plurx-notification-broker",
  "plurx-pgs",
+ "plurx-worker-control",
  "qrcode",
  "quick-xml",
  "rayon",

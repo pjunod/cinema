@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+"""Verify the production worker controller and three semantic mutation controls.
+
+This is a bounded package runner, not a generic proof framework. No environment
+flags or command fragments are accepted. Default Kani safety/unwind/reachability
+checks stay enabled. All verifier state belongs to --cache-dir/--output-dir.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import tomllib
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGE = ROOT / "verification/worker-control"
+CRATE = "crates/plurx-worker-control"
+CORE = f"{CRATE}/src/library_lifecycle.rs"
+HARNESS_NAMES = (
+    "t1_all_typed_inputs_total_deterministic",
+    "t2_every_reachable_prefix_gates_process",
+    "t3_every_prefix_retains_resources_terminal_cleanup_ordered",
+    "t4_refusal_interrupt_and_completion_settlement_policy",
+    "t5_all_i64_settlement_arithmetic_saturates",
+    "t6_all_typed_stale_pairs_and_terminal_reentry_rejected",
+)
+HARNESSES = tuple(f"proofs::{name}" for name in HARNESS_NAMES)
+GOVERNED = (
+    "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "crates/plurxd/Cargo.toml",
+    "crates/plurxd/src/library_work.rs", f"{CRATE}/Cargo.toml",
+    f"{CRATE}/src/lib.rs", CORE, f"{CRATE}/src/proofs.rs",
+    "scripts/check-worker-control", "verification/worker-control/toolchain.json",
+    "verification/worker-control/controls.json",
+    "tests/operations/test_worker_control_runner.py",
+)
+PROOF_INPUTS = tuple(path for path in GOVERNED if path not in {
+    "scripts/check-worker-control", "verification/worker-control/controls.json",
+    "tests/operations/test_worker_control_runner.py",
+})
+
+
+def digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_json(path: Path, value: object) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def git(*args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+
+
+def source_identity() -> dict:
+    # Committed, identical ordinary Rust sources are the proof input. Neither a
+    # dirty substitute body nor untracked files can silently become acceptance.
+    for path in GOVERNED:
+        if git("status", "--porcelain", "--", path):
+            raise RuntimeError(f"uncommitted governed input: {path}")
+        git("ls-files", "--error-unmatch", path)
+    files = {path: digest(ROOT / path) for path in GOVERNED}
+    key = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    return {"head": git("rev-parse", "HEAD"), "tree": git("rev-parse", "HEAD^{tree}"),
+            "files": files, "source_set_sha256": key}
+
+
+def scoped_environment(cache: Path, bundle: Path, toolchain: Path, output: Path) -> dict:
+    environment = dict(os.environ)
+    # Inherited compiler flags can change the analyzed program or bypass checks.
+    for name in ("RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_ENCODED_RUSTFLAGS", "KANI_FLAGS",
+                 "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTC", "CARGO_BUILD_TARGET",
+                 "CARGO_HOME", "RUSTUP_HOME", "KANI_HOME", "TMPDIR", "RUSTUP_TOOLCHAIN",
+                 "LD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
+        environment.pop(name, None)
+    environment.update({
+        "RUSTUP_HOME": str(cache / "rustup"), "CARGO_HOME": str(cache / "cargo"),
+        "KANI_HOME": str(cache / "kani-home"), "TMPDIR": str(cache / "tmp"),
+        "RUSTUP_TOOLCHAIN": toolchain.name, "CARGO_TARGET_DIR": str(output / "build"), "CARGO_INCREMENTAL": "0",
+        "PATH": os.pathsep.join([str(bundle / "bin"), str(bundle / "pyroot/bin"),
+                                 str(toolchain / "bin"), environment.get("PATH", "")]),
+        "PYTHONPATH": str(bundle / "pyroot"), "CARGO_TERM_COLOR": "never",
+    })
+    return environment
+
+
+def command(args: list[str], cwd: Path, env: dict, log: Path, executable=None,
+            timeout=600) -> tuple[int, str]:
+    with log.open("w") as sink:
+        try:
+            result = subprocess.run(args, executable=executable, cwd=cwd, env=env,
+                                    stdout=sink, stderr=subprocess.STDOUT, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"timeout: {log.name}") from error
+    return result.returncode, log.read_text(errors="replace")
+
+
+def toolchain(cache: Path, output: Path, provision: bool) -> tuple[dict, dict, Path]:
+    pin = json.loads((PACKAGE / "toolchain.json").read_text())
+    key = f"{platform.system()}-{platform.machine()}"
+    if key not in pin["platforms"]:
+        raise RuntimeError(f"unsupported verifier platform: {key}")
+    native = pin["platforms"][key]
+    archive = cache / "archives" / native["archive"]
+    existing_archive = cache / f"kani-{pin['kani']}" / native["archive"]
+    if not archive.exists() and existing_archive.is_file():
+        archive = existing_archive
+    bundle = cache / "kani-home" / f"kani-{pin['kani']}"
+    channel = f"{pin['nightly']}-{native['target']}"
+    compiler = cache / "rustup/toolchains" / channel
+    for directory in (cache / "archives", cache / "tmp", cache / "cargo", cache / "rustup", bundle.parent):
+        directory.mkdir(parents=True, exist_ok=True)
+    env = scoped_environment(cache, bundle, compiler, output)
+    if not archive.is_file():
+        if not provision:
+            raise RuntimeError(f"missing pinned archive: {archive}; provision explicitly")
+        url = f"https://github.com/model-checking/kani/releases/download/kani-{pin['kani']}/{native['archive']}"
+        partial = archive.with_suffix(".partial")
+        urllib.request.urlretrieve(url, partial)
+        if digest(partial) != native["sha256"]:
+            partial.unlink()
+            raise RuntimeError("download checksum mismatch")
+        partial.rename(archive)
+    if digest(archive) != native["sha256"]:
+        raise RuntimeError("pinned native archive checksum mismatch")
+    with tarfile.open(archive, "r:gz") as contents:
+        members = contents.getmembers()
+        prefix = f"kani-{pin['kani']}/"
+        for member in members:
+            relative = Path(member.name)
+            if relative.is_absolute() or ".." in relative.parts or not (member.name == prefix[:-1] or member.name.startswith(prefix)):
+                raise RuntimeError("unsafe archive member")
+            if member.issym() or member.islnk():
+                raise RuntimeError("unexpected archive link")
+        if not bundle.is_dir():
+            if not provision:
+                raise RuntimeError("missing extracted native bundle; provision explicitly")
+            contents.extractall(bundle.parent, filter="data")
+        # Validate extracted executables/libraries against the checksum-bound
+        # archive each run. A version string alone does not bind native tools.
+        for member in members:
+            if member.isfile():
+                actual = bundle.parent / member.name
+                expected = hashlib.sha256(contents.extractfile(member).read()).hexdigest()
+                if not actual.is_file() or digest(actual) != expected:
+                    raise RuntimeError(f"extracted bundle differs: {member.name}")
+    if (bundle / "rust-toolchain-version").read_text().strip() != channel:
+        raise RuntimeError("native bundle nightly differs from manifest")
+    if not (compiler / "bin/rustc").is_file():
+        if not provision:
+            raise RuntimeError("missing scoped nightly; provision explicitly")
+        code, _ = command(["rustup", "toolchain", "install", channel, "--profile", "minimal",
+                           "--component", "rust-src,rustc-dev,llvm-tools-preview"], ROOT, env,
+                          output / "provision-nightly.log", timeout=1200)
+        if code:
+            raise RuntimeError("scoped nightly installation failed")
+    link = bundle / "toolchain"
+    if link.is_symlink() and link.resolve() != compiler.resolve():
+        raise RuntimeError("bundle toolchain escapes selected scoped nightly")
+    if not link.exists():
+        link.symlink_to(compiler, target_is_directory=True)
+    code, rustc = command([str(compiler / "bin/rustc"), "--version"], ROOT, env, output / "rustc.log")
+    if code or rustc.strip() != pin["rustc"]:
+        raise RuntimeError("proof compiler version mismatch")
+    driver = bundle / "bin/kani-driver"
+    code, version = command(["cargo-kani", "--version"], ROOT, env, output / "verifier-version.log", executable=driver)
+    if code or version.strip().splitlines() != [f"Kani Rust Verifier {pin['kani']} (cargo plugin)", f"CBMC {pin['cbmc']}"]:
+        raise RuntimeError("Kani/CBMC version mismatch")
+    fmt_source = compiler / "lib/rustlib/src/rust/library/core/src/fmt/mod.rs"
+    if pin.get("fmt_stdlib_sha256") != FMT_STDLIB_SHA256 or digest(fmt_source) != FMT_STDLIB_SHA256:
+        raise RuntimeError("pinned panic-formatting stdlib source is missing or differs")
+    return env, {"platform": key, "fmt_stdlib_sha256": digest(fmt_source), "archive_sha256": native["sha256"],
+                 "version": version.strip(), "rustc": rustc.strip(),
+                 "driver_sha256": digest(driver), "cbmc_sha256": digest(bundle / "bin/cbmc"),
+                 "compiler_sha256": digest(compiler / "bin/rustc")}, driver
+
+
+def parser_stdlib_attestation(env: dict) -> dict:
+    """Additional parser evidence, deliberately separate from solver identity."""
+    channel = env["RUSTUP_TOOLCHAIN"]
+    if channel not in {"nightly-2026-08-21-aarch64-apple-darwin", "nightly-2026-08-21-x86_64-unknown-linux-gnu"}:
+        raise RuntimeError("unreviewed parser stdlib toolchain")
+    source = Path(env["RUSTUP_HOME"]) / "toolchains" / channel / "lib/rustlib/src/rust/library/core/src/slice/cmp.rs"
+    actual = digest(source)
+    if actual != SLICE_STDLIB_SHA256:
+        raise RuntimeError("pinned slice equality stdlib source is missing or differs")
+    return {"schema_version": 1, "slice_cmp_sha256": actual, "rustup_toolchain": channel,
+            "source": "library/core/src/slice/cmp.rs"}
+
+
+def stage_sources(output: Path, source: dict) -> tuple[Path, dict]:
+    manifest = tomllib.loads((ROOT / CRATE / "Cargo.toml").read_text())
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
+    if set(manifest) - {"package", "lints"} or "build" in manifest["package"] or (ROOT / CRATE / "build.rs").exists():
+        raise RuntimeError("the staged production crate must remain dependency/build-script free")
+    if workspace["edition"] != "2021" or manifest["package"]["edition"] != {"workspace": True}:
+        raise RuntimeError("unreviewed production edition envelope")
+    core = (ROOT / CORE).read_text()
+    if re.search(r'#\s*\[\s*cfg(?:_attr)?\b|cfg!\s*\(', core):
+        raise RuntimeError("alternate cfg-dependent production step bodies are forbidden")
+    if len(re.findall(r'\bpub fn step\s*\(', core)) != 1:
+        raise RuntimeError("production controller must have one ordinary step definition")
+    directory = output / "source"
+    (directory / "src").mkdir(parents=True)
+    staged = {}
+    for name in ("lib.rs", "library_lifecycle.rs", "proofs.rs"):
+        original = ROOT / CRATE / "src" / name
+        destination = directory / "src" / name
+        shutil.copyfile(original, destination)
+        expected = source["files"][f"{CRATE}/src/{name}"]
+        if digest(original) != expected or digest(destination) != expected:
+            raise RuntimeError("exact-source staging hash mismatch")
+        staged[name] = expected
+    envelope = ('[package]\nname="plurx-worker-control"\nversion=' + json.dumps(workspace["version"])
+                + '\nedition=' + json.dumps(workspace["edition"]) + '\n[workspace]\n[lints.rust]\nunexpected_cfgs={level="warn",check-cfg=["cfg(kani)"]}\n')
+    target = directory / "Cargo.toml"
+    target.write_text(envelope)
+    packaging = {"manifest_bytes": envelope, "manifest_sha256": digest(target),
+                 "source_files": staged, "original_manifest_sha256": source["files"][f"{CRATE}/Cargo.toml"],
+                 "workspace_manifest_sha256": source["files"]["Cargo.toml"],
+                 "boundary": "standalone dependency-free packaging; all Rust source bytes unchanged"}
+    write_json(output / "source-staging.json", packaging)
+    return target, packaging
+
+
+def validate_staging(output: Path, packaging: dict) -> None:
+    if digest(output / "source/Cargo.toml") != packaging["manifest_sha256"]:
+        raise RuntimeError("staged packaging changed during verification")
+    for name, expected in packaging["source_files"].items():
+        if digest(output / "source/src" / name) != expected:
+            raise RuntimeError("staged Rust source changed during verification")
+
+
+def inventory(driver: Path, env: dict, output: Path, manifest: Path) -> list[str]:
+    # Kani's list operation compiles metadata but performs no verification.
+    code, log = command(["cargo-kani", "--manifest-path", str(manifest), "--lib", "list", "--format", "json"],
+                        output, env, output / "inventory.log", executable=driver)
+    if code:
+        raise RuntimeError("harness inventory compilation failed")
+    # Generated JSON inventory is retained together with the complete log.
+    # Kani writes kani-list.json in its invocation directory.
+    listing = output / "kani-list.json"
+    if not listing.is_file():
+        raise RuntimeError("missing machine readable Kani inventory")
+    shutil.move(listing, output / "inventory.json")
+    return parse_inventory(json.loads((output / "inventory.json").read_text()))
+
+
+def parse_inventory(data: dict) -> list[str]:
+    expected_keys = {"kani-version", "file-version", "standard-harnesses", "contract-harnesses", "contracts", "totals"}
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        raise RuntimeError("corrupted or unsupported Kani inventory schema")
+    if data["kani-version"] != "0.68.0" or data["file-version"] != "0.1":
+        raise RuntimeError("inventory verifier/schema version mismatch")
+    if data["contract-harnesses"] or data["contracts"]:
+        raise RuntimeError("contract or replacement harnesses are not permitted")
+    groups = data["standard-harnesses"]
+    if not isinstance(groups, dict) or not all(isinstance(names, list) for names in groups.values()):
+        raise RuntimeError("malformed standard harness inventory")
+    names = [name for group in groups.values() for name in group]
+    if not all(isinstance(name, str) for name in names) or sorted(names) != sorted(HARNESSES):
+        raise RuntimeError(f"harness inventory differs from six reviewed targets: {names}")
+    if data["totals"] != {"standard-harnesses": 6, "contract-harnesses": 0, "functions-under-contract": 0}:
+        raise RuntimeError("inventory counts do not match complete reviewed target set")
+    return names
+
+
+SPEC_MARKER = re.compile(r"\bT[1-6]\b")
+FMT_STDLIB_SHA256 = "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106317c3"
+FMT_GUARD_NAME = "core::fmt::Arguments::<'_>::from_str.assertion.1"
+FMT_GUARD_DESCRIPTION = "attempt to shift left with overflow"
+FMT_GUARD_LOCATION = "library/core/src/fmt/mod.rs:820:38 in function core::fmt::Arguments::<'_>::from_str"
+SLICE_STDLIB_SHA256 = "7c41479582d6cf55d342001ae1f846d240f153c23f9d148ea179af29f2467f51"
+SLICE_GUARD_NAME = "<library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length.assertion.1"
+SLICE_GUARD_DESCRIPTION = "attempt to add with overflow"
+SLICE_GUARD_LOCATION = "library/core/src/slice/cmp.rs:136:13 in function <library_lifecycle::Effect as core::slice::cmp::SlicePartialEq<library_lifecycle::Effect>>::equal_same_length"
+
+
+def allowed_unreachable(name: str, description: str, location: str = "",
+                        fmt_stdlib_sha256: str | None = None,
+                        slice_cmp_sha256: str | None = None) -> bool:
+    """Only compiler unreachable/panic/expect guards may be unreachable.
+
+    T-labelled specification assertions must actually be checked, even when
+    the solver calls their unexecuted path unreachable rather than failing it.
+    """
+    if SPEC_MARKER.search(description):
+        return False
+    # One observed compiler panic-formatting guard, pinned to the exact source
+    # and location. This never permits reachable overflow, unknown statuses or
+    # any theorem assertion to be ignored. See the real calibration fixture.
+    if (name == FMT_GUARD_NAME and description == FMT_GUARD_DESCRIPTION
+            and location.endswith(FMT_GUARD_LOCATION)
+            and fmt_stdlib_sha256 == FMT_STDLIB_SHA256):
+        return True
+    # Result<..., Stale> equality can instantiate an unused Effects slice-eq
+    # body. Only this exact source-pinned, proved-unreachable loop increment
+    # guard is allowed; reachable overflow and specification vacuity reject.
+    if (name == SLICE_GUARD_NAME and description == SLICE_GUARD_DESCRIPTION
+            and location.endswith(SLICE_GUARD_LOCATION)
+            and slice_cmp_sha256 == SLICE_STDLIB_SHA256):
+        return True
+    if re.search(r"\.unreachable\.\d+$", name) and description == "unreachable code":
+        return True
+    return (".assertion." in name and
+            re.search(r"(?:panicking|panic_fmt|panic_nounwind|unwrap_failed|expect_failed|::expect\b)", name) is not None)
+
+
+def check_summary(log: str, checks: list[tuple[str, str, str]]) -> None:
+    lines = re.findall(r"^\s*\*\*[^\n]*failed[^\n]*$", log, re.M)
+    if len(lines) != 1:
+        raise RuntimeError("missing or duplicate property result summary")
+    match = re.fullmatch(r"\s*\*\* (\d+) of (\d+) failed(?: \(([^()]*)\))?\s*", lines[0])
+    if match is None:
+        raise RuntimeError("malformed property result summary")
+    failures = sum(status == "FAILURE" for _, status, _ in checks)
+    if (int(match[1]), int(match[2])) != (failures, len(checks)):
+        raise RuntimeError("inconsistent failed/total property summary")
+    reported = {}
+    if match[3] is not None:
+        for entry in match[3].split(","):
+            count = re.fullmatch(r"\s*([1-9][0-9]*) (undetermined|unreachable)\s*", entry)
+            if count is None or count[2] in reported:
+                raise RuntimeError("unknown or duplicate parenthetical summary count")
+            reported[count[2]] = int(count[1])
+    expected = {}
+    for status in ("UNDETERMINED", "UNREACHABLE"):
+        count = sum(actual == status for _, actual, _ in checks)
+        if count:
+            expected[status.lower()] = count
+    if reported != expected:
+        raise RuntimeError("parenthetical summary counts do not match property statuses")
+
+
+def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list[str] | None = None,
+            fmt_stdlib_sha256: str | None = None, parser_attestation: dict | None = None) -> dict:
+    observations = re.findall(r'Check \d+: ([^\n]+)\n\s*- Status: ([A-Z_]+)\n\s*- Description: "([^\n]*)"(?:\n\s*- Location: ([^\n]+))?', log)
+    checks = [(name, status, description) for name, status, description, _ in observations]
+    indices = re.findall(r'^Check (\d+):', log, re.M)
+    if indices != [str(index) for index in range(1, len(checks) + 1)]:
+        raise RuntimeError("incomplete, duplicate or malformed property results")
+    checked = re.findall(r'^Checking harness ([^\n]+)\.\.\.$', log, re.M)
+    if checked != [harness] or harness not in HARNESSES:
+        raise RuntimeError(f"missing, duplicate or unexpected executed harness: {checked}")
+    if not checks:
+        raise RuntimeError("missing property results")
+    check_summary(log, checks)
+    failures = [(name, status, description) for name, status, description in checks if status == "FAILURE"]
+    for name, status, description, location in observations:
+        if status == "UNREACHABLE" and allowed_unreachable(name, description, location, fmt_stdlib_sha256,
+                (parser_attestation or {}).get("slice_cmp_sha256")):
+            continue
+        if status not in {"SUCCESS", "FAILURE"}:
+            raise RuntimeError(f"unchecked, vacuous or unknown property status: {name}: {status}")
+    complete = re.findall(r'Complete - (\d+) successfully verified harnesses, (\d+) failures, (\d+) total\.', log)
+    expected_complete = [("1", "0", "1")] if not failures else [("0", "1", "1")]
+    if complete != expected_complete:
+        raise RuntimeError("missing or inconsistent complete harness summary")
+    labelled = [(name, status, description) for name, status, description in checks if SPEC_MARKER.search(description)]
+    theorem_marker = f"T{HARNESSES.index(harness) + 1}"
+    if not any(re.search(rf"\b{theorem_marker}\b", description) and ".assertion." in name
+               for name, _, description in labelled):
+        raise RuntimeError("missing reachable theorem-labelled specification assertions")
+    if marker is None:
+        if code != 0 or failures or "VERIFICATION:- SUCCESSFUL" not in log:
+            raise RuntimeError(f"positive harness did not completely pass: {harness}")
+        if any(status != "SUCCESS" or ".assertion." not in name for name, status, _ in labelled):
+            raise RuntimeError("every theorem-labelled specification assertion must be SUCCESS")
+        outcome = "proved"
+    else:
+        # Every failing property must be the intended semantic assertion.
+        # Compiler, unwind, unsupported, timeout and unknown results reject.
+        if code != 1 or not failures or "VERIFICATION:- FAILED" not in log:
+            raise RuntimeError("mutation failed to produce an assertion counterexample")
+        if any(status != "FAILURE" or ".assertion." not in name or not any(text in description for text in (allowed or [marker]))
+               for name, status, description in failures):
+            raise RuntimeError(f"mutation has unrelated or incomplete failures: {failures}")
+        if not any(marker in description for _, _, description in failures):
+            raise RuntimeError("required semantic assertion counterexample absent")
+        outcome = "semantic_counterexample"
+    return {"harness": harness, "outcome": outcome, "exit_code": code,
+            "property_count": len(checks), "failures": failures,
+            "status_counts": {status: sum(actual == status for _, actual, _ in checks)
+                              for status in ("SUCCESS", "UNREACHABLE", "FAILURE")},
+            "specification_assertions": len(labelled),
+            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only legacy unmarked panic/expect guards or exact source-pinned format/slice guards"}
+
+
+def mutate_source(original: str, control: dict) -> str:
+    before, after = control["before"], control["after"]
+    if original.count(before) != 1:
+        raise RuntimeError(f"mutation anchor count is not exactly one: {control['name']}")
+    mutated = original.replace(before, after)
+    if mutated == original:
+        raise RuntimeError("mutation did not alter production source")
+    return mutated
+
+
+def validate_case_sources(output: Path, source: dict, mutation: bool) -> None:
+    candidate = source["source"] if mutation else source
+    packaging = candidate["staging"]
+    if digest(output / "source/Cargo.toml") != packaging["manifest_sha256"]:
+        raise RuntimeError("case packaging manifest drift")
+    for name, expected in packaging["source_files"].items():
+        if mutation and name == "library_lifecycle.rs":
+            expected = source["mutated_core_sha256"]
+        if digest(output / "source/src" / name) != expected:
+            raise RuntimeError("case source drift")
+
+
+def retain_previous(prior: Path | None, output: Path, harness: str, source: dict,
+                    tools: dict, marker: str | None, allowed: list[str] | None,
+                    parser_attestation: dict | None = None) -> dict | None:
+    if prior is None:
+        return None
+    name = harness.rsplit("::", 1)[1]
+    case = prior / f"{name}.json"
+    log_path = prior / f"{name}.log"
+    if not case.is_file() or not log_path.is_file():
+        return None
+    try:
+        previous = json.loads(case.read_text())
+        if previous["harness"] != harness or previous["tools"] != tools:
+            return None
+        if previous["log_sha256"] != digest(log_path):
+            return None
+        old_source = previous["source"]
+        validate_case_sources(prior, old_source, marker is not None)
+        old_candidate = old_source["source"] if marker else old_source
+        new_candidate = source["source"] if marker else source
+        if any(old_candidate["files"][path] != new_candidate["files"][path] for path in PROOF_INPUTS):
+            return None
+        if marker and any(old_source[key] != source[key] for key in
+                          ("definition", "original_core_sha256", "mutated_core_sha256", "proof_sha256", "replacement_count")):
+            return None
+        # A prior weakened command cannot be laundered through a newer parser.
+        expected_command = ["cargo-kani", "--harness", harness, "--exact", "--output-format", "regular"]
+        execution_directory = Path(previous["execution_directory"])
+        expected_command += ["--manifest-path", str(execution_directory / "source/Cargo.toml"), "--target-dir", str(execution_directory / "build")]
+        if old_candidate["staging"] != new_candidate["staging"]:
+            return None
+        if marker:
+            archived = prior / "source/src"
+            if digest(archived / "library_lifecycle.rs") != old_source["mutated_core_sha256"] or digest(archived / "proofs.rs") != old_source["proof_sha256"]:
+                return None
+        if previous["command"] != expected_command or previous["unwinding_checks"] is not True or previous["default_safety_checks"] is not True:
+            return None
+        parsed = verdict(log_path.read_text(), previous["exit_code"], harness, marker, allowed,
+                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"), parser_attestation=parser_attestation)
+        retained = dict(previous)
+        if parsed["outcome"] != previous["outcome"]:
+            if previous["outcome"] != "rejected":
+                return None
+            # The solver need not run again merely because an earlier strict
+            # parser rejected its complete output. Every binding above and the
+            # current full verdict must pass before this promotion is possible.
+            retained["original_parser_rejection"] = {
+                "outcome": previous["outcome"], "error": previous.get("error"),
+                "receipt_sha256": digest(case), "receipt": str(case),
+            }
+            retained.update(parsed)
+            retained.pop("error", None)
+            retained["revalidated_by_parser_sha256"] = digest(ROOT / "scripts/check-worker-control")
+        retained["retained_from"] = {"receipt": str(case), "receipt_sha256": digest(case),
+                                      "log": str(log_path), "log_sha256": digest(log_path)}
+        retained["parser_stdlib_attestation"] = parser_attestation
+        retained["parser_attestation_bridge"] = {
+            "original_attestation": previous.get("parser_stdlib_attestation"),
+            "current_attestation": parser_attestation,
+            "solver_tool_identity_unchanged": previous["tools"] == tools,
+            "reparsed_by_sha256": digest(ROOT / "scripts/check-worker-control"),
+        }
+        retained["source_bridge"] = {"current_candidate": new_candidate,
+                                     "original_candidate": old_candidate,
+                                     "identical_solver_inputs": list(PROOF_INPUTS),
+                                     "reparsed_by_sha256": digest(ROOT / "scripts/check-worker-control")}
+        # Keep an attributable copy of the exact original log in the new artifact.
+        shutil.copyfile(log_path, output / log_path.name)
+        write_json(output / case.name, retained)
+        return retained
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+
+
+def verify(driver: Path, env: dict, output: Path, harness: str, source: dict, tools: dict,
+           manifest: Path | None = None, marker: str | None = None,
+           allowed: list[str] | None = None, prior: Path | None = None,
+           parser_attestation: dict | None = None) -> dict:
+    validate_case_sources(output, source, marker is not None)
+    retained = retain_previous(prior, output, harness, source, tools, marker, allowed, parser_attestation)
+    if retained is not None:
+        return retained
+    name = harness.rsplit("::", 1)[1]
+    log_path = output / f"{name}.log"
+    args = ["cargo-kani", "--harness", harness, "--exact", "--output-format", "regular"]
+    if manifest:
+        args += ["--manifest-path", str(manifest), "--target-dir", str(output / "build")]
+    else:
+        args += ["-p", "plurx-worker-control"]
+    code = None
+    try:
+        code, log = command(args, output, env, log_path, executable=driver)
+        validate_case_sources(output, source, marker is not None)
+        result = verdict(log, code, harness, marker, allowed,
+                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"), parser_attestation=parser_attestation)
+    except RuntimeError as error:
+        write_json(output / f"{name}.json", {"harness": harness, "outcome": "rejected",
+                   "error": str(error), "exit_code": code, "source": source, "tools": tools,
+                   "command": args, "execution_directory": str(output),
+                   "unwinding_checks": True, "default_safety_checks": True,
+                   "parser_stdlib_attestation": parser_attestation,
+                   "log_sha256": digest(log_path) if log_path.exists() else None})
+        raise
+    result.update({"source": source, "tools": tools, "parser_stdlib_attestation": parser_attestation, "command": args, "execution_directory": str(output), "log_sha256": digest(log_path),
+                   "unwinding_checks": True, "default_safety_checks": True})
+    write_json(output / f"{name}.json", result)
+    return result
+
+
+def controls(driver: Path, env: dict, output: Path, source: dict, tools: dict,
+             prior: Path | None, errors: list[str], parser_attestation: dict | None = None) -> list[dict]:
+    definitions = json.loads((PACKAGE / "controls.json").read_text())
+    if len(definitions) != 3 or [entry["name"] for entry in definitions] != [
+        "control-cleanup-order", "control-bind-gate", "control-wrapping-add"]:
+        raise RuntimeError("three reviewed mutation controls are mandatory")
+    results = []
+    original = (ROOT / CORE).read_text()
+    for control in definitions:
+        destination = output / control["name"]
+        destination.mkdir()
+        try:
+            source_dir = destination / "source/src"
+            source_dir.mkdir(parents=True)
+            for name in ("lib.rs", "library_lifecycle.rs", "proofs.rs"):
+                shutil.copyfile(output / "source/src" / name, source_dir / name)
+            mutated = mutate_source(original, control)
+            (source_dir / "library_lifecycle.rs").write_text(mutated)
+            manifest = destination / "source/Cargo.toml"
+            shutil.copyfile(output / "source/Cargo.toml", manifest)
+            mutation = {"name": control["name"], "source": source,
+                        "original_core_sha256": digest(ROOT / CORE),
+                        "mutated_core_sha256": digest(source_dir / "library_lifecycle.rs"),
+                        "proof_sha256": digest(source_dir / "proofs.rs"),
+                        "replacement_count": 1, "definition": control}
+            write_json(destination / "mutation.json", mutation)
+            result = verify(driver, env, destination, HARNESSES[control["theorem"] - 1], mutation, tools,
+                            manifest, control["assertion_marker"], control["allowed_assertions"],
+                            prior / control["name"] if prior else None, parser_attestation=parser_attestation)
+            results.append(result)
+        except (RuntimeError, OSError, ValueError) as error:
+            errors.append(f"{control['name']}: {error}")
+    return results
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("full", "inventory"))
+    parser.add_argument("--cache-dir", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--provision", action="store_true")
+    parser.add_argument("--resume-from")
+    args = parser.parse_args()
+    cache, output = args.cache_dir.resolve(), args.output_dir.resolve()
+    prior = Path(args.resume_from).resolve() if args.resume_from is not None else None
+    if prior is not None and (args.resume_from == "" or prior == ROOT or prior == output or prior in output.parents
+                              or output in prior.parents or not prior.is_dir()):
+        raise RuntimeError("resume input must be a distinct existing owned output")
+    if cache == ROOT or output == ROOT or cache == output or cache in output.parents or output in cache.parents:
+        raise RuntimeError("cache and output must be distinct owned directories")
+    output.mkdir(parents=True, exist_ok=False)
+    receipt = {"schema_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
+               "mode": args.mode, "acceptance": False, "scope": "local controller safety only",
+               "excluded": ["SQL semantics", "Tokio/OS fairness", "external operation termination", "cluster deadlock freedom", "driver effect correspondence"]}
+    started = time.monotonic()
+    try:
+        source = source_identity()
+        receipt["source"] = source
+        manifest, packaging = stage_sources(output, source)
+        binding = dict(source, staging=packaging)
+        receipt["source_staging"] = packaging
+        env, tools, driver = toolchain(cache, output, args.provision)
+        receipt["tools"] = tools
+        attestation = parser_stdlib_attestation(env)
+        receipt["parser_stdlib_attestation"] = attestation
+        receipt["harness_inventory"] = inventory(driver, env, output, manifest)
+        if args.mode == "full":
+            errors = []
+            receipt["proofs"] = []
+            for name in HARNESSES:
+                try:
+                    receipt["proofs"].append(verify(driver, env, output, name, binding, tools, manifest=manifest, prior=prior, parser_attestation=attestation))
+                except (RuntimeError, OSError, ValueError) as error:
+                    errors.append(f"{name}: {error}")
+            receipt["controls"] = controls(driver, env, output, binding, tools, prior, errors, attestation)
+            if errors:
+                receipt["target_errors"] = errors
+                raise RuntimeError(f"{len(errors)} proof/control targets failed; independent results preserved")
+            if len(receipt["proofs"]) != 6 or len(receipt["controls"]) != 3:
+                raise RuntimeError("incomplete proof/control target set")
+        validate_staging(output, packaging)
+        if source_identity() != source:
+            raise RuntimeError("governed source changed during verification")
+        receipt["acceptance"] = args.mode == "full"
+        receipt["outcome"] = "complete" if args.mode == "full" else "inventory_only_not_acceptance"
+        return 0
+    except Exception as error:
+        receipt["outcome"] = "failed"
+        receipt["error"] = str(error)
+        print(f"worker-control: {error}", file=sys.stderr)
+        return 1
+    finally:
+        receipt["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        write_json(output / "receipt.json", receipt)
+        print(f"worker-control: {receipt.get('outcome', 'failed')}; receipt {output / 'receipt.json'}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

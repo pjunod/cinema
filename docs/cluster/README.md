@@ -14,6 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
 | [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
 | [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |
 | [OPERATION-PROGRESS-STATUS.md](OPERATION-PROGRESS-STATUS.md) | Qualified progress scope, evidence, review and live PR delivery link. | built |
