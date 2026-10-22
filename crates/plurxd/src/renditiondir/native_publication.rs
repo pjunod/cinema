@@ -22,6 +22,15 @@ pub(super) struct PublicationIo {
     entered: bool,
     pub(super) acquired: Option<FileObservation>,
     pub(super) published: bool,
+    #[cfg(test)]
+    barrier: Option<NativeBarrier>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct NativeBarrier {
+    acquired: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +68,8 @@ impl PublicationIo {
             entered: false,
             acquired: None,
             published: false,
+            #[cfg(test)]
+            barrier: None,
         })
     }
 
@@ -68,6 +79,14 @@ impl PublicationIo {
 
     pub(super) fn run(&mut self) -> io::Result<()> {
         self.acquire()?;
+        #[cfg(test)]
+        if let Some(barrier) = self.barrier.take() {
+            let _ = barrier.acquired.send(());
+            barrier
+                .release
+                .recv()
+                .map_err(|_| io::Error::other("native test barrier closed after acquisition"))?;
+        }
         let result = self.write_and_publish();
         // Even partial writes and rename conflicts retain their real fstat and
         // original descriptor. Never unlink/drop an unknown partial result here.
@@ -79,6 +98,20 @@ impl PublicationIo {
         self.file = None;
         self.payload = Vec::new();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_barrier(
+        &mut self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        assert!(!self.entered && self.barrier.is_none());
+        let (acquired, observed) = tokio::sync::oneshot::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        self.barrier = Some(NativeBarrier { acquired, release });
+        (observed, resume)
     }
 
     fn acquire(&mut self) -> io::Result<()> {

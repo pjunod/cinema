@@ -138,6 +138,42 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn cancelled_native_publication_waiter_retains_actual_open_file_and_original_job() {
+        let root = crate::test_tempdir().unwrap();
+        let dir = RenditionDir::new(root.path());
+        let (write, entry) = start_publication(
+            std::sync::Arc::clone(&dir.writes),
+            root.path().into(),
+            INIT_NAME,
+            b"actual native writer".to_vec(),
+        )
+        .unwrap();
+        let native = dir.writes.native.lock().unwrap().as_ref().unwrap().clone();
+        let (acquired, resume) = native.lock().unwrap().test_barrier();
+        *dir.writes.pending.lock().await = Some(write);
+        entry.send(()).unwrap();
+        acquired.await.unwrap();
+        {
+            let join = dir.join_writes();
+            tokio::pin!(join);
+            tokio::select! {biased; _=&mut join=>panic!("actual native writer is still blocked with an open file"), _=tokio::task::yield_now()=>{},}
+        }
+        assert!(
+            dir.writes.pending.lock().await.is_some(),
+            "cancelled borrow did not detach the original blocking handle"
+        );
+        resume.send(()).unwrap();
+        dir.join_writes().await.unwrap();
+        assert!(native.lock().unwrap().published);
+        assert!(!native.lock().unwrap().has_unresolved_object());
+        assert_eq!(
+            std::fs::read(root.path().join(INIT_NAME)).unwrap(),
+            b"actual native writer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn failed_actual_publication_keeps_native_custody_and_refuses_fresh_acquisition() {
         let root = crate::test_tempdir().unwrap();
         let dir = RenditionDir::new(root.path());
