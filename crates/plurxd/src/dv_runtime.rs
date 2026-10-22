@@ -74,6 +74,7 @@ impl ToolSet {
     pub(crate) fn lifecycle_fixture(identity: DvBackendIdentity) -> Self {
         Self {
             renderer: PathBuf::from("/bin/false"),
+            scanner: PathBuf::from("/bin/false"),
             renderer_env: Vec::new(),
             identity,
             artifacts: Arc::new(Vec::new()),
