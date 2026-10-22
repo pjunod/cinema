@@ -3,15 +3,10 @@
 //! This local I/O fact is not durable acquisition or asset-close authority.
 use super::*;
 
-fn start_publication(
-    owner: std::sync::Arc<PendingWrites>,
-    directory: PathBuf,
-    name: &str,
-    bytes: Vec<u8>,
-) -> io::Result<(PendingWrite, std::sync::mpsc::Sender<()>)> {
-    #[cfg(unix)]
-    let native = {
-        let mut retained = owner
+#[cfg(unix)]
+impl PendingWrites {
+    pub(super) fn check_native_result(&self) -> io::Result<()> {
+        let retained = self
             .native
             .lock()
             .map_err(|_| io::Error::other("native publication owner poisoned"))?;
@@ -25,6 +20,24 @@ fn start_publication(
                 ));
             }
         }
+        Ok(())
+    }
+}
+
+fn start_publication(
+    owner: std::sync::Arc<PendingWrites>,
+    directory: PathBuf,
+    name: &str,
+    bytes: Vec<u8>,
+) -> io::Result<(PendingWrite, std::sync::mpsc::Sender<()>)> {
+    #[cfg(unix)]
+    let native = {
+        owner.check_native_result()?;
+        let mut retained = owner
+            .native
+            .lock()
+            .map_err(|_| io::Error::other("native publication owner poisoned"))?;
+
         let next = std::sync::Arc::new(std::sync::Mutex::new(
             native_publication::PublicationIo::new(directory, name, bytes)?,
         ));
@@ -143,6 +156,10 @@ mod tests {
         let operation = dir.writes.native.lock().unwrap().as_ref().unwrap().clone();
         let acquired = operation.lock().unwrap().acquired.unwrap().identity;
         assert!(operation.lock().unwrap().has_unresolved_object());
+        assert!(
+            dir.join_writes().await.is_err(),
+            "a consumed task error cannot hide the retained native object"
+        );
         assert!(dir
             .publish_owned("seg00000.m4s", b"later".to_vec())
             .await

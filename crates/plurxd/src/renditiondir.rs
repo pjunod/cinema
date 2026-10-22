@@ -269,7 +269,10 @@ impl RenditionDir {
     /// This does not close cached files/readers or issue a physical receipt.
     pub(crate) async fn join_writes(&self) -> io::Result<()> {
         let mut pending = self.writes.pending.lock().await;
-        join_pending_write(&mut pending).await
+        join_pending_write(&mut pending).await?;
+        #[cfg(unix)]
+        self.writes.check_native_result()?;
+        Ok(())
     }
 
     pub async fn write_init(&self, bytes: &[u8]) -> io::Result<()> {
