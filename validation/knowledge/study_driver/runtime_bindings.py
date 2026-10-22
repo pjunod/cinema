@@ -5,7 +5,7 @@ Only a reviewed supervisor may instantiate these bindings after admission.
 """
 from dataclasses import dataclass, asdict, replace
 from pathlib import Path, PurePosixPath
-import hashlib, json, os, re, shutil, stat, subprocess, tarfile, time, uuid, threading, inspect
+import hashlib, json, os, re, shutil, stat, tarfile, time, uuid, threading, inspect
 
 class BindingRefusal(RuntimeError): pass
 
@@ -512,60 +512,6 @@ class FrozenGraphLoader:
         require(sha(graph.to_json().encode())==expected_graph_sha256.removeprefix("sha256:"),"FrozenKnowledgeGraphDigestMismatch")
         return graph
 
-class OfflineRegistrySeeder:
-    """Reviewed post-gate setup copies only an immutable image's registry tree.
-
-    It never executes image code, pulls an image, or copies home/workspace/target.
-    Docker's archive copy is unpacked by the host with strict member validation.
-    """
-    def __init__(self,*,engine,endpoint,image,admission,review_gate,max_bytes=32*1024**3):
-        self.engine=no_links(engine);self.endpoint=endpoint;self.image=image;self.admission=admission;self.gate=review_gate;self.max_bytes=max_bytes
-        require(endpoint.startswith("unix://") and re.fullmatch(r"(?:sha256:|[^\s]+@sha256:)[a-f0-9]{64}",image),"ImmutableLocalImageRequired")
-    def __call__(self,runtime):
-        self.admission.assert_current();require(self.gate() is True,"RegistrySetupNotReviewed")
-        runtime=no_links(runtime);config=runtime/"engine-config";config.mkdir(mode=0o700)
-        env={"PATH":"/usr/bin:/bin","HOME":str(runtime/"home"),"DOCKER_CONFIG":str(config),"DOCKER_HOST":self.endpoint}
-        name="plurx-knowledge-registry-"+uuid.uuid4().hex
-        def run(argv):
-            self.admission.assert_current();p=subprocess.run([str(self.engine),"--host",self.endpoint,*argv],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=60,close_fds=True)
-            require(p.returncode==0,"RegistryCopyUnavailable");return p.stdout
-        created=False;archive=runtime/"registry-export.tar"
-        try:
-            run(["create","--pull=never","--name",name,"--network=none","--read-only","--user",str(os.getuid())+":"+str(os.getgid()),"--entrypoint","/usr/bin/true",self.image]);created=True
-            # Only the explicit registry subtree is exported; no image process runs.
-            self.admission.assert_current()
-            descriptor=os.open(archive,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-            errorpath=runtime/"registry-copy.stderr"
-            errfd=os.open(errorpath,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-            with os.fdopen(descriptor,"wb") as output,os.fdopen(errfd,"wb") as errors:
-                proc=subprocess.Popen([str(self.engine),"--host",self.endpoint,"cp",name+":/usr/local/cargo/registry","-"],stdin=subprocess.DEVNULL,stdout=output,stderr=errors,env=env,close_fds=True)
-                started=time.monotonic()
-                try:
-                    while proc.poll() is None:
-                        self.admission.assert_current()
-                        require(time.monotonic()-started<300 and archive.stat().st_size<=self.max_bytes and errorpath.stat().st_size<=1024**2,"RegistryExportBoundExceeded")
-                        time.sleep(.1)
-                    require(proc.returncode==0 and archive.stat().st_size<=self.max_bytes,"RegistryExportUnavailable")
-                finally:
-                    if proc.poll() is None:proc.kill();proc.wait(timeout=10)
-            total=0;members=0;destination=runtime/"cargo"
-            with tarfile.open(archive,"r:*") as tar:
-                for member in tar:
-                    path=relative(member.name.rstrip("/"));require(path.parts[0]=="registry" and not any(private_name(x) for x in path.parts),"RegistryExportScopeViolation")
-                    require(member.isfile() or member.isdir(),"RegistryLinksOrSpecialFilesRefused")
-                    total+=member.size;members+=1;require(total<=self.max_bytes and members<=1000000,"RegistryUnpackBoundExceeded")
-                    target=destination/str(path)
-                    if member.isdir():target.mkdir(parents=True,exist_ok=True,mode=0o700);continue
-                    target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-                    fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-                    source=tar.extractfile(member);require(source is not None,"RegistryMemberUnavailable")
-                    with os.fdopen(fd,"wb") as output:
-                        remaining=member.size
-                        while remaining:
-                            chunk=source.read(min(1024**2,remaining));require(chunk,"RegistryMemberTruncated");output.write(chunk);remaining-=len(chunk)
-            archive.unlink();errorpath.unlink();config.rmdir()
-        finally:
-            if created:run(["rm","--force","--volumes",name])
 
 def prepare_acceptance(*,config,graph,review_gate,admission,stager,adapter_api,cache_directory):
     """Explicit reviewed supervisor hook; never called at import or preparation."""
