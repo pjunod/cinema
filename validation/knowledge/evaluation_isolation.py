@@ -4,10 +4,15 @@ Nothing launches or imports a container engine at module import. The custodian
 supplies a pinned, trusted Linux image and exact callback argv. Raw observations
 and output stay in the owned private directory; public results expose only a
 status and digest. Missing or unproved isolation is unavailable qualification.
+
+The controller authenticates a pinned trusted driver and its report, not
+assertion integrity inside a candidate-controlled child. Drivers must keep
+candidate execution outside the controller and independently establish actual
+completed checks; child exit codes/stdout alone never qualify an outcome.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import base64
 import errno
 import hashlib
@@ -20,6 +25,7 @@ import selectors
 import stat
 import subprocess
 import time
+import threading
 from typing import Any
 import uuid
 
@@ -59,6 +65,14 @@ class TrustedSourceFile:
 
 
 @dataclass(frozen=True)
+class TrustedSourceMember:
+    """Exact tracked source export member, never a host credential exception."""
+    path: str
+    sha256: str
+    git_blob: str
+
+
+@dataclass(frozen=True)
 class IsolationConfig:
     engine: Path
     endpoint: str
@@ -87,11 +101,14 @@ class IsolationConfig:
     trusted_wrappers: tuple[TrustedSourceFile, ...] = ()
     runtime_max_bytes: int = 32 * 1024**3
     cache_max_bytes: int = 32 * 1024**3
+    working_directory: str = "/work"
+    trusted_source_members: tuple[TrustedSourceMember, ...] = ()
 
     def __post_init__(self):
         for name in ("engine", "owned_root", "candidate_root", "grader_root", "runtime_root"):
             object.__setattr__(self, name, Path(getattr(self, name)))
         object.__setattr__(self, "engine", self.engine.resolve())
+        object.__setattr__(self, "trusted_source_members", tuple(self.trusted_source_members))
         object.__setattr__(self, "trusted_source_files", tuple(self.trusted_source_files))
         object.__setattr__(self, "trusted_wrappers", tuple(self.trusted_wrappers))
         object.__setattr__(self, "acceptance_argv", tuple(tuple(argv) for argv in self.acceptance_argv))
@@ -109,6 +126,52 @@ class FamilyPlan:
     def __post_init__(self):
         for name in ("prerequisite_argv", "acceptance_argv"):
             object.__setattr__(self, name, tuple(tuple(argv) for argv in getattr(self, name)))
+
+
+@dataclass(frozen=True)
+class ExecutionStep:
+    """One sealed command; writes authorizes only declared mounted state changes."""
+    id: str
+    argv: tuple[str, ...]
+    cwd: str = "/work"
+    environment: tuple[tuple[str, str], ...] = ()
+    writes: frozenset[str] = frozenset()
+    kind: str = "assertion"
+
+    def __post_init__(self):
+        object.__setattr__(self, "argv", tuple(self.argv))
+        object.__setattr__(self, "environment", tuple(sorted(tuple(pair) for pair in self.environment)))
+        object.__setattr__(self, "writes", frozenset(self.writes))
+
+
+@dataclass(frozen=True)
+class FamilyPlanV2:
+    family: str
+    prerequisite_steps: tuple[ExecutionStep, ...]
+    acceptance_steps: tuple[ExecutionStep, ...]
+    driver: TrustedSourceFile
+    schema_version: int = 2
+
+    def __post_init__(self):
+        for name in ("prerequisite_steps", "acceptance_steps"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+
+
+@dataclass(frozen=True)
+class StepReceipt:
+    status: str
+    digest: str
+    private_path: Path
+    classification: str
+    family: str
+    plan_digest: str
+    binding_digest: str
+    mode: str
+    index: int
+    prerequisite_digest: str = ""
+
+    def public(self):
+        return {"status": self.status, "digest": self.digest}
 
 
 @dataclass(frozen=True)
@@ -170,6 +233,12 @@ class _Cleanup:
 _ISSUED: dict[int, tuple[ProbeReceipt, dict[str, Any]]] = {}
 _OWNED_CONTAINERS: set[str] = set()
 _QUALIFIED: dict[int, tuple[PrerequisiteReceipt, dict[str, Any]]] = {}
+_STEPS: dict[int, tuple[StepReceipt, dict[str, Any]]] = {}
+_CONSUMED_STEPS: set[int] = set()
+_PROBE_SEQUENCE = 0
+_CHAIN_LOCK = threading.Lock()
+_ACTIVE_ROOTS: set[str] = set()
+_RESERVED_STEPS: set[int] = set()
 _IMAGE = re.compile(r"(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}\Z")
 # These are tracked Rust sources, never credential stores. Adding an exception
 # or wrapper family requires a source change and review, not a model tool flag.
@@ -248,6 +317,10 @@ try:
     if not hardened:raise RuntimeError("controller protection unavailable")
     with open(source,"rb") as stream:code=stream.read(8*1024*1024+1)
     if len(code)>8*1024*1024 or hashlib.sha256(code).hexdigest()!=digest:raise RuntimeError("driver identity changed")
+    if context.get("protocol")==2:
+        os.chdir(context["step"]["cwd"])
+        os.environ.clear()
+        os.environ.update(context["effective_environment"])
     namespace={"__name__":"_trusted_family_driver","__file__":source}
     with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
         exec(compile(code,source,"exec"),namespace)
@@ -290,7 +363,28 @@ def _private_name(name: str):
             or name.startswith((".env", "credentials", "secret")) or name.endswith((".pem", ".key", ".fleet.json")))
 
 
-def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 1024):
+def _hard_private_name(name):
+    """Source permits never authorize host credential/control roots or gold."""
+    name = name.lower()
+    return name in {".git", ".aws", ".ssh", ".gnupg", ".codex", ".hermes", ".docker", ".isolation",
+                    "evaluation-private", "gold", "gold.json", "auth.json", "credentials", "credentials.json",
+                    "credentials.toml", "id_rsa", "id_ed25519", ".env", ".env.local", ".env.production"} or name.endswith((".pem", ".key", ".fleet.json"))
+
+
+def _workdir(value, config=None):
+    _require(isinstance(value, str) and (value == "/work" or value.startswith("/work/")) and len(value) <= 1024
+             and all(part not in {"", ".", ".."} and not _hard_private_name(part) for part in value.split("/")[1:])
+             and "\\" not in value and "\0" not in value, "sealed candidate workdir required")
+    if config is not None:
+        relative = value.removeprefix("/work").lstrip("/")
+        path = config.candidate_root / relative
+        if relative == ".runtime" or relative.startswith(".runtime/"):
+            path = config.runtime_root / relative.removeprefix(".runtime").lstrip("/")
+        _no_symlinks(path, directory=True)
+    return value
+
+
+def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 1024, git_blob=None):
     """Open through no-follow directory descriptors, including race windows."""
     parts = path.relative_to(root).parts
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -304,11 +398,16 @@ def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 102
             before = os.fstat(stream.fileno())
             _require(stat.S_ISREG(before.st_mode) and before.st_size <= max_bytes, "bounded regular mount file required")
             digest = hashlib.sha256()
+            blob = hashlib.sha1(("blob " + str(before.st_size) + "\0").encode()) if git_blob else None
             count = 0
             while chunk := stream.read(1024 * 1024):
                 count += len(chunk)
                 _require(count <= max_bytes, "mount byte bound exceeded during capture")
                 digest.update(chunk)
+                if blob is not None:
+                    blob.update(chunk)
+            if blob is not None:
+                _require(blob.hexdigest() == git_blob, "tracked source blob changed")
             after = os.fstat(stream.fileno())
         current = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
     finally:
@@ -319,12 +418,15 @@ def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 102
     return digest.hexdigest()
 
 
-def _manifest(root: Path, *, candidate=False, max_bytes=512 * 1024 * 1024, exceptions=None):
+def _manifest(root: Path, *, candidate=False, max_bytes=512 * 1024 * 1024, exceptions=None, source_members=None):
     rows = []
     total = 0
     members = 0
     exceptions = exceptions or {}
     seen_exceptions = set()
+    source_members = source_members or {}
+    seen_members = set()
+    ancestors = {str(parent) for name in source_members for parent in Path(name).parents if str(parent) != "."}
     for directory, folders, files in os.walk(root, followlinks=False):
         if candidate and Path(directory) == root and ".runtime" in folders:
             runtime = root / ".runtime"
@@ -335,19 +437,27 @@ def _manifest(root: Path, *, candidate=False, max_bytes=512 * 1024 * 1024, excep
             _require(members <= 100000, "mount path count bound exceeded")
             path = Path(directory) / name
             relative = path.relative_to(root).as_posix()
-            permitted_source = candidate and relative in exceptions and relative in _SOURCE_EXCEPTIONS
+            permitted_source = candidate and (relative in exceptions and relative in _SOURCE_EXCEPTIONS
+                or relative in source_members or relative in ancestors and name in folders)
             _require((not _private_name(name) or permitted_source) and not path.is_symlink(), "private or symlink mount member refused")
+            _require(not any(_private_name(part) for part in Path(relative).parts[:-1]) or permitted_source,
+                     "private source ancestor requires an exact permitted member")
             info = path.lstat()
             _require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "special mount member refused")
             if stat.S_ISREG(info.st_mode):
                 total += info.st_size
                 _require(total <= max_bytes and len(rows) < 100000, "mount corpus bound exceeded")
-                digest = _read_member(root, path, info, max_bytes=max_bytes)
+                member = source_members.get(relative)
+                digest = _read_member(root, path, info, max_bytes=max_bytes, git_blob=member.git_blob if member else None)
+                if member is not None:
+                    _require(digest == member.sha256, "tracked source member changed")
+                    seen_members.add(relative)
                 if relative in exceptions:
                     _require(digest == exceptions[relative], "trusted source exception content changed")
                     seen_exceptions.add(relative)
                 rows.append((relative, stat.S_IMODE(info.st_mode), digest))
     _require(seen_exceptions == set(exceptions), "trusted source exception missing")
+    _require(seen_members == set(source_members), "tracked source member missing")
     return _digest(sorted(rows))
 
 
@@ -381,7 +491,8 @@ def _prepare(config: IsolationConfig):
     _require(type(config.require_rust) is bool, "explicit Rust requirement required")
     for path in (config.python_executable, config.rustc_executable, config.cargo_executable):
         _container_executable(path)
-    trusted = (*config.trusted_source_files, *config.trusted_wrappers)
+    _workdir(config.working_directory, config)
+    trusted = (*config.trusted_source_files, *config.trusted_wrappers, *config.trusted_source_members)
     if trusted:
         _require(re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", config.source_commit)
                  and re.fullmatch(r"[a-f0-9]{64}", config.source_archive_sha256), "verified source archive provenance required")
@@ -394,6 +505,16 @@ def _prepare(config: IsolationConfig):
             _require(isinstance(entry, TrustedSourceFile) and entry.path in allowed
                      and re.fullmatch(r"[a-f0-9]{64}", entry.sha256) and entry.path not in destination, "exact trusted source member required")
             destination[entry.path] = entry.sha256
+    _require(len(config.trusted_source_members) <= 64, "tracked source permit bound exceeded")
+    source_members = {}
+    for member in config.trusted_source_members:
+        _require(isinstance(member, TrustedSourceMember) and isinstance(member.path, str)
+                 and 0 < len(member.path) <= 1024 and not member.path.startswith("/") and "\\" not in member.path
+                 and all(part not in {"", ".", ".."} and not _hard_private_name(part) for part in member.path.split("/"))
+                 and re.fullmatch(r"[a-f0-9]{64}", member.sha256) and re.fullmatch(r"[a-f0-9]{40}", member.git_blob)
+                 and member.path not in source_members and member.path not in exceptions,
+                 "exact tracked source permit required")
+        source_members[member.path] = member
     wrapper_commands = {"/work/" + relative for relative in wrappers}
     for relative, expected in wrappers.items():
         path = config.candidate_root / relative
@@ -451,17 +572,18 @@ def _prepare(config: IsolationConfig):
         engine_digest = _bytes_digest(config.engine.read_bytes())
     for mount in mounts:
         _no_symlinks(mount, directory=True)
-    sources = {"candidate": _manifest(config.candidate_root, candidate=True, exceptions=exceptions), "grader": _manifest(config.grader_root),
+    sources = {"candidate": _manifest(config.candidate_root, candidate=True, exceptions=exceptions, source_members=source_members), "grader": _manifest(config.grader_root),
                "runtime": _manifest(config.runtime_root, max_bytes=config.runtime_max_bytes),
                "caches": [_manifest(Path(cache.source), max_bytes=config.cache_max_bytes) for cache in config.readonly_caches]}
     payload = {"engine": str(config.engine), "engine_digest": engine_digest, "endpoint": config.endpoint,
                "image": config.image, "root": str(root), "mounts": [(str(p), target, ro) for p, target, ro in _mounts(config)],
                "mount_identity": [(path.stat().st_dev, path.stat().st_ino) for path in mounts],
-               "sources": sources, "argv": config.acceptance_argv, "environment": sorted(_environment(config).items()),
+               "sources": sources, "argv": config.acceptance_argv, "working_directory": config.working_directory, "environment": sorted(_environment(config).items()),
                "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit,
                           config.runtime_max_bytes, config.cache_max_bytes],
                "source_archive": {"commit": config.source_commit, "sha256": config.source_archive_sha256,
-                                  "exceptions": sorted(exceptions.items()), "wrappers": sorted(wrappers.items())},
+                                  "exceptions": sorted(exceptions.items()), "wrappers": sorted(wrappers.items()),
+                                  "members": sorted((v.path, v.sha256, v.git_blob) for v in source_members.values())},
                "user": [config.uid, config.gid], "runtimes": [config.python_executable, config.rustc_executable, config.cargo_executable, config.require_rust],
                "supervisor": _bytes_digest(_SUPERVISOR.encode()), "probe": _bytes_digest(_PROBE_CODE.encode()),
                "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode())}
@@ -551,7 +673,7 @@ def _container_arguments(config, name):
     arguments = ["run", "--detach", "--rm", "--name", name, "--pull=never", "--network=none",
                  "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit", str(config.pids_limit),
                  "--memory", str(config.memory_bytes), "--memory-swap", str(config.memory_bytes), "--cpus", str(config.cpus),
-                 "--init", "--user", f"{config.uid}:{config.gid}", "--workdir=/work", "--ipc=private", "--cgroupns=private"]
+                 "--init", "--user", f"{config.uid}:{config.gid}", "--workdir=" + config.working_directory, "--ipc=private", "--cgroupns=private"]
     for path, target, readonly in _mounts(config):
         arguments.extend(("--mount", f"type=bind,src={path},dst={target},bind-propagation=rprivate" + (",readonly" if readonly else "")))
     for key, value in sorted(_environment(config).items()):
@@ -578,7 +700,7 @@ def _observed_security(config, raw):
              and host["MemorySwap"] == config.memory_bytes and host["NanoCpus"] == int(config.cpus * 1_000_000_000), "container resource limit mismatch")
     _require(host.get("PidMode", "") == "" and host.get("UTSMode", "") == "" and host.get("UsernsMode", "") == "" and host.get("IpcMode") == "private"
              and host.get("CgroupnsMode") == "private" and not host.get("Devices") and not host.get("DeviceRequests"), "host namespace/device access refused")
-    _require(container["User"] == f"{config.uid}:{config.gid}" and container["WorkingDir"] == "/work"
+    _require(container["User"] == f"{config.uid}:{config.gid}" and container["WorkingDir"] == config.working_directory
              and container["Image"] == config.image and container["Entrypoint"] == [config.python_executable]
              and container["Cmd"] == ["-I", "-S", "-c", _SUPERVISOR], "container fixed runtime mismatch")
     actual_env = dict(row.split("=", 1) for row in container["Env"])
@@ -675,6 +797,9 @@ def _configuration_probe(config, private):
 
 
 def probe(config: IsolationConfig) -> ProbeReceipt:
+    global _PROBE_SEQUENCE
+    _PROBE_SEQUENCE += 1
+    sequence = _PROBE_SEQUENCE
     private, payload = _prepare(config)
     config_digest = _digest(payload)
     path = private / ("probe-" + uuid.uuid4().hex + ".json")
@@ -687,7 +812,7 @@ def probe(config: IsolationConfig) -> ProbeReceipt:
         _require(_prepare(config)[1] == payload, "configuration changed during probe")
     except (IsolationError, OSError, ValueError, KeyError, TypeError):
         observations = None
-    body = {"status": "verified" if observations is not None and cleaned else "unavailable",
+    body = {"status": "verified" if observations is not None and cleaned else "unavailable", "sequence": sequence,
             "config_digest": config_digest, "configuration": payload, "observations": observations,
             "cleanup_proved": bool(cleaned), "cleanup_observations": getattr(cleaned, "observations", None)}
     digest = _write_private(path, body)
@@ -848,13 +973,15 @@ def _execute_family(config, argv, receipt, plan, *, mode, prerequisite=None, bas
     return ExecutionResult(status, _write_private(path, body), path, classification, prerequisite_digest)
 
 
-def qualify_family(config: IsolationConfig, family: FamilyPlan, receipt: ProbeReceipt) -> PrerequisiteReceipt:
+def qualify_family(config: IsolationConfig, family: FamilyPlan | FamilyPlanV2, receipt: ProbeReceipt) -> PrerequisiteReceipt:
     """Actually qualify baseline prerequisites; security/version probes do not.
 
     Frozen gold assertions need not pass on the baseline. Only separately named
     import/build/dependency prerequisites with a reviewed completion driver can
     qualify. Unsupported families remain unavailable without scoring a patch.
     """
+    if isinstance(family, FamilyPlanV2):
+        return _qualify_plan(config, family, receipt)
     private, initial = _prepare(config)
     plan = _plan_data(family)
     _require(all(argv in config.acceptance_argv for argv in family.prerequisite_argv), "baseline prerequisites not registered")
@@ -886,6 +1013,323 @@ def qualify_family(config: IsolationConfig, family: FamilyPlan, receipt: ProbeRe
     return result
 
 
+def _plan_v2_data(plan):
+    _require(isinstance(plan, FamilyPlanV2) and type(plan.schema_version) is int and plan.schema_version == 2,
+             "versioned typed family plan required")
+    _require(0 < len(plan.prerequisite_steps) <= 32 and 0 < len(plan.acceptance_steps) <= 32,
+             "bounded ordered step chains required")
+    result = {"schema_version": 2, "family": plan.family}
+    for name, permitted in (("prerequisite_steps", {"setup", "prerequisite"}),
+                            ("acceptance_steps", {"setup", "assertion", "compile"})):
+        steps = getattr(plan, name)
+        ids = set()
+        rows = []
+        for step in steps:
+            _require(isinstance(step, ExecutionStep) and isinstance(step.id, str)
+                     and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", step.id) and step.id not in ids,
+                     "unique typed step identity required")
+            ids.add(step.id)
+            _workdir(step.cwd)
+            _require(step.kind in permitted and step.writes <= {"candidate", "runtime"}, "closed step kind/write policy required")
+            _require(len(step.environment) <= 32 and len(dict(step.environment)) == len(step.environment),
+                     "unique bounded step environment required")
+            rows.append({"id": step.id, "argv": step.argv, "cwd": step.cwd, "environment": step.environment,
+                         "writes": sorted(step.writes), "kind": step.kind})
+        result[name] = rows
+    _require(any(step.kind in {"assertion", "compile"} for step in plan.acceptance_steps),
+             "setup-only acceptance cannot qualify an outcome")
+    legacy = _plan_data(FamilyPlan(plan.family, tuple(s.argv for s in plan.prerequisite_steps),
+                                   tuple(s.argv for s in plan.acceptance_steps), plan.driver))
+    _require(legacy["driver"] is not None, "immutable structured family driver required")
+    result["driver"] = legacy["driver"]
+    return result
+
+
+def _step_config(config, step):
+    return replace(config, environment=step.environment, working_directory=step.cwd)
+
+
+def _v2_policy(config, payload, plan):
+    # Staging paths/inodes may differ between baseline and patched exports.
+    # Content, runtime identities and every effective step environment may not.
+    return {"plan": _plan_v2_data(plan), "image": payload["image"], "endpoint": payload["endpoint"],
+            "engine": payload["engine_digest"], "grader": payload["sources"]["grader"],
+            "caches": payload["sources"]["caches"], "source_archive": payload["source_archive"],
+            "runtimes": payload["runtimes"], "limits": payload["limits"], "user": payload["user"],
+            "registered_argv": payload["argv"], "readonly_targets": [cache.target for cache in config.readonly_caches],
+            "effective_environments": [[sorted(_environment(_step_config(config, step)).items()) for step in steps]
+                                       for steps in (plan.prerequisite_steps, plan.acceptance_steps)],
+            "supervisor": payload["supervisor"], "probe": payload["probe"], "controller": payload["outcome_controller"]}
+
+
+def _issued_step(receipt):
+    issued = _STEPS.get(id(receipt))
+    if issued is None or issued[0] is not receipt:
+        return None
+    try:
+        _no_symlinks(receipt.private_path)
+        _require(_bytes_digest(receipt.private_path.read_bytes()) == receipt.digest, "step receipt changed")
+    except (OSError, IsolationError):
+        return None
+    return issued[1]
+
+
+def _classification_v2(packet, step, mode):
+    if packet is None or not all(packet.get(key) is True for key in
+            ("driver_started", "driver_completed", "hardened", "resources_verified")) or packet.get("resource_failure") is not False:
+        return "unavailable"
+    result = packet.get("result")
+    if not isinstance(result, dict) or type(result.get("protocol")) is not int or result["protocol"] != 2 or result.get("completed") is not True:
+        return "unavailable"
+    evidence = result.get("evidence")
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("identity"), str) or not evidence["identity"]:
+        return "unavailable"
+    if not isinstance(evidence.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", evidence["sha256"]):
+        return "unavailable"
+    counts = [evidence.get(key) for key in ("completed_checks", "failed_checks", "skipped_checks")]
+    if not all(type(count) is int and 0 <= count <= 1000000 for count in counts):
+        return "unavailable"
+    completed, failed, _ = counts
+    if completed == 0 or failed > completed:
+        return "unavailable"
+    outcome = result.get("outcome")
+    if evidence.get("kind") != step.kind:
+        return "unavailable"
+    if step.kind == "setup":
+        return "setup-passed" if outcome == "setup-passed" and failed == 0 else "unavailable"
+    if mode == "prerequisite":
+        return "prerequisite-passed" if outcome == "prerequisite-passed" and failed == 0 else "unavailable"
+    if outcome == "passed" and failed == 0:
+        return "passed"
+    expected = "compile-failed" if step.kind == "compile" else "assertion-failed"
+    return expected if outcome == expected and failed > 0 else "unavailable"
+
+
+def _unavailable_step(private, plan, mode, index, reason, prerequisite=None):
+    body = {"schema_version": 2, "status": "unavailable", "classification": "unavailable", "reason": reason,
+            "plan_digest": _digest(_plan_v2_data(plan)), "mode": mode, "index": index,
+            "prerequisite_digest": getattr(prerequisite, "digest", "")}
+    path = private / ("step-" + uuid.uuid4().hex + ".json")
+    return StepReceipt("unavailable", _write_private(path, body), path, "unavailable", plan.family,
+                       body["plan_digest"], "", mode, index, body["prerequisite_digest"])
+
+
+def _run_step(config, plan, index, receipt, *, mode, prerequisite=None, previous=None):
+    # Refuse overlapping writers and concurrent reuse of the same chain link.
+    root = str(_no_symlinks(config.owned_root, directory=True))
+    with _CHAIN_LOCK:
+        _require(root not in _ACTIVE_ROOTS and (previous is None or id(previous) not in _RESERVED_STEPS),
+                 "step chain already active")
+        _ACTIVE_ROOTS.add(root)
+        if previous is not None:
+            _RESERVED_STEPS.add(id(previous))
+    try:
+        return _run_step_inner(config, plan, index, receipt, mode=mode, prerequisite=prerequisite, previous=previous)
+    finally:
+        with _CHAIN_LOCK:
+            _ACTIVE_ROOTS.discard(root)
+            if previous is not None:
+                _RESERVED_STEPS.discard(id(previous))
+
+
+def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, previous=None):
+    plan_data = _plan_v2_data(plan)
+    steps = plan.prerequisite_steps if mode == "prerequisite" else plan.acceptance_steps
+    _require(type(index) is int and 0 <= index < len(steps), "bounded step index required")
+    step = steps[index]
+    _require(config.working_directory == step.cwd and tuple(sorted(config.environment)) == step.environment,
+             "configuration must match exact sealed step cwd/environment")
+    _require(step.argv in config.acceptance_argv, "step argv not registered")
+    private, before = _prepare(config)
+    policy = _v2_policy(config, before, plan)
+    policy_digest = _digest(policy)
+    issued = _issued_probe(receipt, private, before)
+    if issued is None:
+        return _unavailable_step(private, plan, mode, index, "fresh-probe-required", prerequisite)
+    versions = issued[1]["observations"]["observed_probes"]["versions"]
+    parent = _issued_step(previous) if previous is not None else None
+    work_identity = {key: before[key] for key in ("root", "mounts", "mount_identity")}
+    baseline = before["sources"]["candidate"]
+    qualification = None
+    if mode == "acceptance":
+        entry = _QUALIFIED.get(id(prerequisite))
+        if entry is not None and entry[0] is prerequisite and prerequisite.status == "qualified":
+            try:
+                _no_symlinks(prerequisite.private_path)
+                _require(_bytes_digest(prerequisite.private_path.read_bytes()) == prerequisite.digest, "prerequisite changed")
+                qualification = entry[1]
+            except (OSError, IsolationError):
+                pass
+        if (qualification is None or qualification.get("schema_version") != 2
+                or qualification.get("policy_digest") != policy_digest or qualification.get("versions") != versions):
+            return _unavailable_step(private, plan, mode, index, "qualified-family-required", prerequisite)
+        baseline = qualification["baseline_source_digest"]
+    if index == 0:
+        valid_order = previous is None
+        if mode == "acceptance":
+            valid_order = valid_order and before["sources"]["runtime"] == qualification["after"]["runtime"]
+    else:
+        valid_order = (parent is not None and id(previous) not in _CONSUMED_STEPS and previous.status == "passed"
+                       and previous.mode == mode and previous.index == index - 1
+                       and previous.plan_digest == _digest(plan_data) and parent["policy_digest"] == policy_digest
+                       and parent["versions"] == versions and parent["after"] == before["sources"]
+                       and parent["work_identity"] == work_identity
+                       and parent["prerequisite_digest"] == getattr(prerequisite, "digest", "")
+                       and issued[1]["sequence"] >= parent["post_probe_sequence"])
+        if parent is not None:
+            baseline = parent["baseline_source_digest"]
+    if not valid_order:
+        return _unavailable_step(private, plan, mode, index, "ordered-state-lineage-required", prerequisite)
+    context = {"protocol": 2, "family": plan.family, "plan_digest": _digest(plan_data),
+               "step": plan_data["prerequisite_steps" if mode == "prerequisite" else "acceptance_steps"][index],
+               "step_index": index, "previous_step_digest": getattr(previous, "digest", ""),
+               "prerequisite_digest": getattr(prerequisite, "digest", ""), "baseline_source_digest": baseline,
+               "effective_environment": _environment(config)}
+    context = json.loads(_json(context))
+    packet = outcome = observed = state = None
+    cleaned = False
+    name = None
+    after = None
+    post_issued = None
+    try:
+        name, observed = _configuration_probe(config, private)
+        _require({k: v for k, v in observed.items() if k != "sentinel_digest"} ==
+                 {k: v for k, v in issued[1]["observations"].items() if k != "sentinel_digest"}, "observed isolation changed")
+        _require(_prepare(config)[1] == before, "step inputs changed before callback")
+        outcome, packet = _driver_packet(config, name, step.argv, plan, mode, context)
+        inspected = _command(config, ["inspect", name])
+        _require(inspected.returncode == 0 and not inspected.timed_out and not inspected.output_limited, "step executor inspection unavailable")
+        state = json.loads(inspected.stdout)[0]["State"]
+        _require(state.get("Running") is True and state.get("OOMKilled") is False, "step executor resource/start failure")
+    except (IsolationError, OSError, ValueError, KeyError, TypeError):
+        packet = None
+    finally:
+        if name is not None:
+            cleaned = _cleanup(config, name)
+    classification = _classification_v2(packet, step, mode) if cleaned else "unavailable"
+    if classification != "unavailable":
+        try:
+            _, after = _prepare(config)
+            _require(_v2_policy(config, after, plan) == policy, "immutable step policy changed")
+            for target in ("candidate", "runtime"):
+                _require(target in step.writes or before["sources"][target] == after["sources"][target], "undeclared step state change")
+            post_probe = probe(config)
+            final_private, final = _prepare(config)
+            post_issued = _issued_probe(post_probe, final_private, final)
+            _require(post_issued is not None and final == after
+                     and post_issued[1]["observations"]["observed_probes"]["versions"] == versions,
+                     "fresh post-step isolation/state proof unavailable")
+        except (IsolationError, OSError, ValueError, KeyError, TypeError):
+            classification = "unavailable"
+    status = "unavailable" if classification == "unavailable" else "failed" if classification.endswith("-failed") else "passed"
+    body = {"schema_version": 2, "status": status, "classification": classification, "family": plan.family,
+            "plan_digest": _digest(plan_data), "policy_digest": policy_digest, "policy": policy, "mode": mode, "index": index,
+            "step": context["step"], "work_identity": work_identity, "previous_step_digest": context["previous_step_digest"],
+            "prerequisite_digest": context["prerequisite_digest"], "baseline_source_digest": baseline, "versions": versions,
+            "before": before["sources"], "after": None if after is None else after["sources"],
+            "probe_digest": receipt.digest, "post_probe_digest": post_probe.digest if post_issued is not None else "",
+            "post_probe_sequence": post_issued[1]["sequence"] if post_issued is not None else 0,
+            "cleanup_proved": bool(cleaned), "cleanup_observations": getattr(cleaned, "observations", None),
+            "observations": observed, "engine_state": state, "structured_outcome": packet,
+            "output": None if outcome is None else {"stdout_base64": base64.b64encode(outcome.stdout).decode(),
+                "stderr_base64": base64.b64encode(outcome.stderr).decode(), "returncode": outcome.returncode,
+                "timed_out": outcome.timed_out, "output_limited": outcome.output_limited}}
+    semantic = {key: body[key] for key in ("plan_digest", "policy_digest", "mode", "index",
+                "baseline_source_digest", "versions", "before", "after", "classification")}
+    semantic["previous_binding"] = previous.binding_digest if previous is not None else ""
+    semantic["prerequisite_binding"] = prerequisite.binding_digest if prerequisite is not None else ""
+    binding = _digest(semantic)
+    body["binding_digest"] = binding
+    path = private / ("step-" + uuid.uuid4().hex + ".json")
+    result = StepReceipt(status, _write_private(path, body), path, classification, plan.family,
+                         body["plan_digest"], binding, mode, index, body["prerequisite_digest"])
+    if status != "unavailable":
+        _STEPS[id(result)] = (result, body)
+        if previous is not None:
+            _CONSUMED_STEPS.add(id(previous))
+    return result
+
+
+def qualify_step(config: IsolationConfig, plan: FamilyPlanV2, index: int, receipt: ProbeReceipt, *,
+                 previous: StepReceipt | None = None) -> StepReceipt:
+    """Run one ordered baseline setup/dependency step, never patch assertions."""
+    return _run_step(config, plan, index, receipt, mode="prerequisite", previous=previous)
+
+
+def seal_prerequisites(plan: FamilyPlanV2, steps: tuple[StepReceipt, ...]) -> PrerequisiteReceipt:
+    """Seal only the complete, actually completed process-issued baseline chain."""
+    plan_data = _plan_v2_data(plan)
+    _require(isinstance(steps, tuple) and len(steps) == len(plan.prerequisite_steps), "complete prerequisite chain required")
+    records = [_issued_step(step) for step in steps]
+    _require(all(record is not None for record in records), "issued prerequisite steps required")
+    for index, (step, record) in enumerate(zip(steps, records)):
+        _require(step.status == "passed" and step.mode == "prerequisite" and step.index == index
+                 and step.plan_digest == _digest(plan_data) and record["policy_digest"] == records[0]["policy_digest"]
+                 and record["previous_step_digest"] == (steps[index - 1].digest if index else "")
+                 and (index == 0 or record["before"] == records[index - 1]["after"]), "ordered complete prerequisites required")
+    final = records[-1]
+    binding_data = {"plan": plan_data, "policy_digest": final["policy_digest"], "versions": final["versions"],
+                    "baseline_source_digest": records[0]["baseline_source_digest"], "after": final["after"],
+                    "step_bindings": [step.binding_digest for step in steps]}
+    binding = _digest(binding_data)
+    body = {**binding_data, "schema_version": 2, "status": "qualified", "family": plan.family,
+            "binding_digest": binding, "steps": [step.digest for step in steps]}
+    path = steps[-1].private_path.parent / ("prerequisite-" + uuid.uuid4().hex + ".json")
+    result = PrerequisiteReceipt("qualified", _write_private(path, body), path, plan.family, binding)
+    _QUALIFIED[id(result)] = (result, body)
+    return result
+
+
+def _qualify_plan(config, plan, receipt):
+    _plan_v2_data(plan)
+    completed = []
+    previous = None
+    for index, step in enumerate(plan.prerequisite_steps):
+        current = _step_config(config, step)
+        current_probe = receipt if index == 0 else probe(current)
+        result = qualify_step(current, plan, index, current_probe, previous=previous)
+        if result.status != "passed":
+            path = result.private_path.parent / ("prerequisite-" + uuid.uuid4().hex + ".json")
+            body = {"schema_version": 2, "status": "unavailable", "failed_step_digest": result.digest}
+            return PrerequisiteReceipt("unavailable", _write_private(path, body), path, plan.family, "")
+        completed.append(result)
+        previous = result
+    return seal_prerequisites(plan, tuple(completed))
+
+
+def execute_step(config: IsolationConfig, plan: FamilyPlanV2, index: int, receipt: ProbeReceipt, *,
+                 prerequisite: PrerequisiteReceipt, previous: StepReceipt | None = None) -> StepReceipt:
+    """Run exactly the next sealed step against the freshly probed state."""
+    return _run_step(config, plan, index, receipt, mode="acceptance", prerequisite=prerequisite, previous=previous)
+
+
+def execute_plan(config: IsolationConfig, receipt: ProbeReceipt, *, family: FamilyPlanV2,
+                 prerequisite: PrerequisiteReceipt) -> ExecutionResult:
+    """Execute ordered setup/checks; setup-only or unknown completion cannot pass."""
+    _plan_v2_data(family)
+    previous = None
+    completed = []
+    status = classification = "unavailable"
+    for index, step in enumerate(family.acceptance_steps):
+        current = _step_config(config, step)
+        current_probe = receipt if index == 0 else probe(current)
+        result = execute_step(current, family, index, current_probe, prerequisite=prerequisite, previous=previous)
+        completed.append(result)
+        status, classification = result.status, result.classification
+        if status != "passed":
+            break
+        previous = result
+    if status == "passed":
+        # _plan_v2_data forbids chains with no actual assertion/compile step.
+        classification = "passed"
+    private = completed[-1].private_path.parent
+    body = {"schema_version": 2, "status": status, "classification": classification,
+            "family": family.family, "plan_digest": _digest(_plan_v2_data(family)),
+            "prerequisite_digest": prerequisite.digest, "steps": [step.digest for step in completed]}
+    path = private / ("execution-" + uuid.uuid4().hex + ".json")
+    return ExecutionResult(status, _write_private(path, body), path, classification, prerequisite.digest)
+
+
 def execute(config: IsolationConfig, argv: tuple[str, ...], receipt: ProbeReceipt, *,
             family: FamilyPlan | None = None, prerequisite: PrerequisiteReceipt | None = None) -> ExecutionResult:
     """A raw exit code is never a validated patch outcome (R4).
@@ -895,6 +1339,7 @@ def execute(config: IsolationConfig, argv: tuple[str, ...], receipt: ProbeReceip
     A completed trusted assertion/compiler failure is retained only after the
     exact family's baseline/dependency prerequisites actually qualified.
     """
+    _require(not isinstance(family, FamilyPlanV2), "version2 requires ordered execute_step/execute_plan")
     if family is None:
         private, _ = _prepare(config)
         path = private / ("execution-" + uuid.uuid4().hex + ".json")

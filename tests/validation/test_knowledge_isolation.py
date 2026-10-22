@@ -35,6 +35,10 @@ class SyntheticEngine:
         self.family_outcome = "passed"
         self.missing_dependency = False
         self.resource_failure = False
+        self.mutate_callback = None
+        self.completed_checks = 1
+        self.outcome_protocol = None
+        self.bad_hmac = False
         self.oom_killed = False
         self.structured_packet = True
 
@@ -46,7 +50,7 @@ class SyntheticEngine:
                 "MemorySwap": config.memory_bytes, "NanoCpus": int(config.cpus * 1000000000),
                 "PidMode": "", "UTSMode": "", "UsernsMode": "", "IpcMode": "private", "CgroupnsMode": "private",
                 "Devices": [], "DeviceRequests": []},
-            "Config": {"User": f"{config.uid}:{config.gid}", "WorkingDir": "/work", "Image": config.image,
+            "Config": {"User": f"{config.uid}:{config.gid}", "WorkingDir": config.working_directory, "Image": config.image,
                 "Entrypoint": [config.python_executable], "Cmd": ["-I", "-S", "-c", isolation._SUPERVISOR],
                 "Env": [key + "=" + value for key, value in isolation._environment(config).items()],
                 "Hostname": name},
@@ -85,17 +89,26 @@ class SyntheticEngine:
             source, digest, mode, argv, context, limit = arguments[-6:]
             context = json.loads(context)
             auth = json.loads(bounds["input_data"])
-            classification = "prerequisite-passed" if mode == "prerequisite" else self.family_outcome
+            version = context.get("protocol", 1)
+            step = context.get("step", {})
+            classification = ("setup-passed" if step.get("kind") == "setup" else
+                              "prerequisite-passed" if mode == "prerequisite" else self.family_outcome)
             if self.missing_dependency:
                 classification = "unavailable"
-            evidence = "prerequisite" if mode == "prerequisite" else "compile" if classification == "compile-failed" else "inert-bytes"
+            evidence = step["kind"] if version == 2 else "prerequisite" if mode == "prerequisite" else "compile" if classification == "compile-failed" else "inert-bytes"
+            if self.mutate_callback is not None:
+                self.mutate_callback(config, mode, step)
             body = {"nonce": auth["nonce"], "argv": json.loads(argv), "mode": mode, "context": context,
                     "driver_sha256": digest, "driver_started": True, "driver_completed": True,
                     "hardened": True, "resources_verified": True, "resource_failure": self.resource_failure,
-                    "result": {"protocol": 1, "outcome": classification, "completed": classification != "unavailable",
-                               "evidence": {"kind": evidence, "identity": "synthetic actual completed check", "sha256": "d" * 64}},
+                    "result": {"protocol": self.outcome_protocol or version, "outcome": classification, "completed": classification != "unavailable",
+                               "evidence": {"kind": evidence, "identity": "synthetic actual completed check", "sha256": "d" * 64,
+                                            "completed_checks": self.completed_checks,
+                                            "failed_checks": int(classification.endswith("-failed")), "skipped_checks": 0}},
                     "stdout_base64": "", "stderr_base64": ""}
             signature = hmac.new(bytes.fromhex(auth["secret"]), isolation._json(body).encode(), hashlib.sha256).hexdigest()
+            if self.bad_hmac:
+                signature = "0" * 64
             return isolation._Command(0, isolation._json({"body": body, "hmac": signature}).encode(), b"", self.timed_out, self.output_limited)
         if arguments[0] == "exec":
             self.callback_count += 1
@@ -143,6 +156,10 @@ class KnowledgeIsolationTests(unittest.TestCase):
         self.addCleanup(isolation._ISSUED.clear)
         self.addCleanup(isolation._QUALIFIED.clear)
         self.addCleanup(isolation._OWNED_CONTAINERS.clear)
+        self.addCleanup(isolation._STEPS.clear)
+        self.addCleanup(isolation._CONSUMED_STEPS.clear)
+        self.addCleanup(isolation._ACTIVE_ROOTS.clear)
+        self.addCleanup(isolation._RESERVED_STEPS.clear)
 
     def family_state(self, config):
         key = (config.image, config.acceptance_argv, config.require_rust)
@@ -409,6 +426,176 @@ class KnowledgeIsolationTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertTrue(json.loads(result.private_path.read_text())["cleanup_proved"])
         self.assertEqual(self.engine.alive, set())
+
+    def v2_plan(self):
+        setup = isolation.ExecutionStep("baseline-install", ("/usr/bin/python3", "/grader/setup.py"),
+            environment=(("PYTHONPATH", "/work"),), writes={"runtime"}, kind="setup")
+        ready = isolation.ExecutionStep("baseline-ready", ("/usr/bin/python3", "/grader/ready.py"),
+            environment=(("PYTHONPATH", "/work/installed"),), kind="prerequisite")
+        install = isolation.ExecutionStep("patch-install", ("/usr/bin/python3", "/grader/install.py"),
+            environment=(("PYTHONPATH", "/work"),), writes={"candidate"}, kind="setup")
+        check = isolation.ExecutionStep("check", self.argv, environment=(("PYTHONPATH", "/work/installed"),))
+        plan = isolation.FamilyPlanV2("synthetic-step-chain", (setup, ready), (install, check), self.plan.driver)
+        config = replace(self.config, acceptance_argv=tuple(step.argv for step in (*plan.prerequisite_steps, *plan.acceptance_steps)))
+        return config, plan
+
+    def v2_config(self, config, step):
+        return replace(config, environment=step.environment, working_directory=step.cwd)
+
+    def v2_qualified(self, config, plan):
+        first = self.v2_config(config, plan.prerequisite_steps[0])
+        result = isolation.qualify_family(first, plan, isolation.probe(first))
+        self.assertEqual(result.status, "qualified")
+        return result
+
+    def test_v2_ordered_state_changes_and_per_step_environment_are_freshly_bound(self):
+        config, plan = self.v2_plan()
+        def install(config, mode, step):
+            if step["id"] == "baseline-install":
+                (config.runtime_root / "dependency.txt").write_text("synthetic offline dependency")
+            elif step["id"] == "patch-install":
+                (config.candidate_root / "installed.py").write_text("# inert installed fixture")
+        self.engine.mutate_callback = install
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        result = isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite)
+        self.assertEqual((result.status, result.classification), ("passed", "passed"))
+        steps = [body for receipt, body in isolation._STEPS.values() if receipt.mode == "acceptance"]
+        self.assertEqual([body["index"] for body in steps], [0, 1])
+        self.assertNotEqual(steps[0]["before"]["candidate"], steps[0]["after"]["candidate"])
+        self.assertEqual(steps[0]["after"], steps[1]["before"])
+        self.assertGreaterEqual(steps[1]["post_probe_sequence"], steps[0]["post_probe_sequence"])
+        contexts = [json.loads(args[-2]) for args, _ in self.engine.calls
+                    if args[0] == "exec" and isolation._OUTCOME_CONTROLLER in args]
+        self.assertEqual([context["step"]["id"] for context in contexts],
+                         ["baseline-install", "baseline-ready", "patch-install", "check"])
+        self.assertEqual([context["effective_environment"]["PYTHONPATH"] for context in contexts],
+                         ["/work", "/work/installed", "/work", "/work/installed"])
+        self.assertEqual(self.engine.alive, set())
+        self.assertEqual(set(result.public()), {"status", "digest"})
+
+    def test_v2_skip_reorder_replay_and_copied_step_receipts_cannot_advance(self):
+        config, plan = self.v2_plan()
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        second = self.v2_config(config, plan.acceptance_steps[1])
+        self.assertEqual(isolation.execute_step(second, plan, 1, isolation.probe(second), prerequisite=prerequisite).status, "unavailable")
+        step = isolation.execute_step(first, plan, 0, isolation.probe(first), prerequisite=prerequisite)
+        self.assertEqual(step.status, "passed")
+        self.assertEqual(isolation.execute_step(second, plan, 1, isolation.probe(second), prerequisite=prerequisite, previous=replace(step)).status, "unavailable")
+        done = isolation.execute_step(second, plan, 1, isolation.probe(second), prerequisite=prerequisite, previous=step)
+        self.assertEqual(done.status, "passed")
+        self.assertEqual(isolation.execute_step(second, plan, 1, isolation.probe(second), prerequisite=prerequisite, previous=step).status, "unavailable")
+        with self.assertRaises(isolation.IsolationError):
+            isolation.execute(first, plan.acceptance_steps[0].argv, isolation.probe(first), family=plan, prerequisite=prerequisite)
+
+    def test_v2_identical_content_in_another_mount_cannot_resume_step_chain(self):
+        config, plan = self.v2_plan()
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        step = isolation.execute_step(first, plan, 0, isolation.probe(first), prerequisite=prerequisite)
+        other = config.owned_root / "other-candidate"
+        other.mkdir()
+        (other / "input.py").write_bytes((config.candidate_root / "input.py").read_bytes())
+        second = replace(self.v2_config(config, plan.acceptance_steps[1]), candidate_root=other)
+        self.assertEqual(isolation.execute_step(second, plan, 1, isolation.probe(second),
+                         prerequisite=prerequisite, previous=step).status, "unavailable")
+
+    def test_v2_changed_plan_cwd_environment_runtime_or_source_invalidates_lineage(self):
+        config, plan = self.v2_plan()
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        receipt = isolation.probe(first)
+        changed = replace(plan, acceptance_steps=(replace(plan.acceptance_steps[0], environment=(("PYTHONPATH", "/different"),)), plan.acceptance_steps[1]))
+        other = self.v2_config(config, changed.acceptance_steps[0])
+        self.assertEqual(isolation.execute_step(other, changed, 0, isolation.probe(other), prerequisite=prerequisite).status, "unavailable")
+        with self.assertRaises(isolation.IsolationError):
+            isolation.execute_step(replace(first, working_directory="/"), plan, 0, receipt, prerequisite=prerequisite)
+        (config.runtime_root / "unreviewed-dependency").write_text("changed")
+        self.assertEqual(isolation.execute_step(first, plan, 0, isolation.probe(first), prerequisite=prerequisite).status, "unavailable")
+        (config.runtime_root / "unreviewed-dependency").unlink()
+        step = isolation.execute_step(first, plan, 0, isolation.probe(first), prerequisite=prerequisite)
+        (config.candidate_root / "input.py").write_text("# outside step mutation")
+        second = self.v2_config(config, plan.acceptance_steps[1])
+        self.assertEqual(isolation.execute_step(second, plan, 1, isolation.probe(second), prerequisite=prerequisite, previous=step).status, "unavailable")
+        self.assertEqual(isolation.execute_step(first, plan, 0, receipt, prerequisite=prerequisite).status, "unavailable")
+
+    def test_v2_undeclared_changes_zero_checks_wrong_protocol_and_forged_output_are_unavailable(self):
+        config, plan = self.v2_plan()
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        for field, value in (("completed_checks", 0), ("outcome_protocol", 1), ("bad_hmac", True)):
+            with self.subTest(field=field):
+                original = getattr(self.engine, field)
+                setattr(self.engine, field, value)
+                self.assertEqual(isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite).status, "unavailable")
+                setattr(self.engine, field, original)
+        def undeclared(config, mode, step):
+            (config.runtime_root / "undeclared").write_text("must invalidate candidate-only setup")
+        self.engine.mutate_callback = undeclared
+        self.assertEqual(isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite).status, "unavailable")
+        self.assertEqual(self.engine.alive, set())
+
+    def test_v2_setup_only_cannot_pass_and_incomplete_prerequisites_cannot_seal(self):
+        config, plan = self.v2_plan()
+        setup_only = replace(plan, acceptance_steps=(plan.acceptance_steps[0],))
+        with self.assertRaises(isolation.IsolationError):
+            isolation._plan_v2_data(setup_only)
+        with self.assertRaises(isolation.IsolationError):
+            isolation.seal_prerequisites(plan, ())
+        first = self.v2_config(config, plan.prerequisite_steps[0])
+        step = isolation.qualify_step(first, plan, 0, isolation.probe(first))
+        with self.assertRaises(isolation.IsolationError):
+            isolation.seal_prerequisites(plan, (step,))
+
+    def test_v2_completed_assertion_failure_is_failed_only_with_cleanup_and_post_probe(self):
+        config, plan = self.v2_plan()
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        self.engine.family_outcome = "assertion-failed"
+        result = isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite)
+        self.assertEqual((result.status, result.classification), ("failed", "assertion-failed"))
+        self.engine.cleanup_fails = True
+        self.assertEqual(isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite).status, "unavailable")
+
+    def test_v2_fresh_receipt_identity_does_not_change_semantic_family_binding(self):
+        config, plan = self.v2_plan()
+        first = self.v2_qualified(config, plan)
+        second = self.v2_qualified(config, plan)
+        self.assertNotEqual(first.digest, second.digest)
+        self.assertEqual(first.binding_digest, second.binding_digest)
+
+    def test_v2_post_step_probe_failure_cannot_publish_completed_setup(self):
+        config, plan = self.v2_plan()
+        prerequisite = self.v2_qualified(config, plan)
+        first = self.v2_config(config, plan.acceptance_steps[0])
+        receipt = isolation.probe(first)
+        def change_isolation(config, mode, step):
+            self.engine.network = "bridge"
+        self.engine.mutate_callback = change_isolation
+        result = isolation.execute_step(first, plan, 0, receipt, prerequisite=prerequisite)
+        self.assertEqual((result.status, result.classification), ("unavailable", "unavailable"))
+        self.assertEqual(self.engine.alive, set())
+
+    def test_exact_tracked_source_permits_do_not_grant_private_ancestor_siblings(self):
+        path = self.config.candidate_root / "vendor/fixture/.cargo/config.toml"
+        path.parent.mkdir(parents=True)
+        raw = b"# synthetic tracked offline config\n"
+        path.write_bytes(raw)
+        member = isolation.TrustedSourceMember("vendor/fixture/.cargo/config.toml", hashlib.sha256(raw).hexdigest(),
+                    hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest())
+        config = replace(self.config, source_commit="c" * 40, source_archive_sha256="d" * 64, trusted_source_members=(member,))
+        self.assertEqual(isolation.probe(config).status, "verified")
+        sibling = path.parent / "unpermitted.toml"
+        sibling.write_text("# sibling not in archive permit")
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(config)
+        sibling.unlink()
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(replace(config, trusted_source_members=(replace(member, git_blob="0" * 40),)))
+        for forbidden in (".git/config", ".aws/config", ".cargo/credentials", ".env", "auth.json"):
+            with self.subTest(forbidden=forbidden), self.assertRaises(isolation.IsolationError):
+                isolation.probe(replace(config, trusted_source_members=(replace(member, path=forbidden),)))
 
 
 if __name__ == "__main__":
