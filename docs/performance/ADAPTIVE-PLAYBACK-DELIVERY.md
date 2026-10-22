@@ -44,7 +44,7 @@ growth. It cannot be declared done by adding another private proof helper.
 
 | Step | Exact source work still required | Completion condition / dependency |
 |---|---|---|
-| C1 — positive supported process backend and recovery | Extend the core launcher/`physical_graph` with the approved protected Linux pre-entry containment, retained original-object identity and nonescape validation. Journal the recovery locator before acquisition; rebind original containment after restart and prove old owner fenced. Preserve Unsupported when the already-authorized environment cannot uphold those premises; no permission/security setup is implied. | Normal and crash/restart cleanup have a real process-extinction route in the declared domain, not PID/path absence or a writable same-UID cgroup. Controller determines existing environment capability; a concrete missing contract goes to the coordinator, not the human by default. |
+| C1 — supported owned-workload cleanup and recovery | Coordinator must explicitly amend the over-constrained R2 threat model: trusted first software profile, actual owned/helper coverage and crash-accounting boundaries. Existing stronger receipt remains unchanged until that decision. Use available native authority where justified; no custom privileged broker by default. | Normal retirement must prove actual owners closed; supported restart must prove relevant old-work closure without bypassing held charges. Completed deployment teardown is distinct from a restart request. Exact first-profile/native acceptance follows the amended contract; no host setup is implied. |
 | C2 — real graph/member settlement | `feb5c2fdf` now composes exact actual root/discard-task selections plus original live receipt into the retained journal transition, preserving queue refusal/unknown commit and durable-settle-before-once-refund. Still missing: typed SourceFile/output/scratch members and recovery identities for real VOD; no omitted source handle or relabeling as Scratch is accepted. | Root/task slice is host-compiled NOT RUN, not C2 accepted. Successful normal retirement/restart must cover all actual typed owners; uncertainty remains held. Depends on C1 and concrete audited adapters, not serialized success fields. |
 | C3 — connect the existing VOD owner | Wire the one software finite path through `vodencode.rs`, `producer_spawn.rs`, `prodrun/owned.rs` and its actual output/diagnostic supervisor. Replace generic writer closure assumptions with audited owned source/output/scratch lifetimes; prepare/arm before acquisition, retire after real joins. Compose current cap/settings demand and shared role pins, without bypassing held legacy competitors. | The actual application request, not a fixture-only branch, reserves once, produces output, stops and returns its finite capacity. Depends on C1/C2 plus the necessary M1/M2 demand wiring. |
 | C4 — restart availability and acceptance | Replace the all-startup pending refusal in `resource_runtime.rs` with protected selective reconciliation and applicable admission refusal; keep unrelated serving safe. Author exact normal/cancel/crash/restart/capacity-reuse cases now; execute the required behavioral cases only after complete candidate review/fixes. | First finite path can be marked source-complete only when its normal/recovery lifecycle is wired. It is accepted only with actual applicable post-review evidence. Other M3 adapters and M4–M6 remain separate table rows. |
@@ -52,10 +52,15 @@ growth. It cannot be declared done by adding another private proof helper.
 The root/discard-task settlement slice is now source-implemented (`feb5c2fdf`),
 not positive end-to-end evidence. Next C2/C3 source is actual source/output/scratch
 ownership; existing concrete components do not supply those durable contracts.
-Current Linux environment has no protected containment authority. Astra selected
-a restricted host broker proposal: new privileged component/configuration and
-isolated qualification need security/installation review before host setup, not
-an implementation pause for independent C2 work. No setup/deployment is implied.
+Adaptive policy does NOT inherently require a custom privileged broker. Astra's
+owner-requested reassessment found earlier C1 hostile-peer/persistent-object
+premises over-constrained the inspected plan. Trusted owned-workload cleanup and
+crash accounting remain required; exact supported first-profile/restart boundaries
+need the coordinator's explicit R2 amendment before source weakens any receipt.
+Container PID-namespace init death can terminate all namespace processes, but a
+restart request/new namespace alone is not completed-teardown proof. No new
+service, host privilege/configuration or deployment is selected/authorized.
+Independent C2 work does not pause for broker selection.
 Same-host restart target means same-kernel-boot daemon restart with proven original
 object/owner continuity; reboot/rollback/foreign-domain recovery remains unsupported.
 
@@ -67,12 +72,11 @@ implementable against an actual existing native object contract. Genuine SDK-bou
 cross compilation became available and exposed real source errors, which were
 fixed. Those receipts establish compilation only; no Windows behavior was run.
 
-Linux has no equivalent positive backend implemented here. The approved cgroup
-route additionally requires pre-entry membership, enforced nonescape, protected
-original-object lineage and durable same-host restart continuity. A writable
-same-UID subtree, process-group wait or reused/missing path cannot supply that.
-Windows' unnamed Job also cannot supply restart continuity, and its durable
-storage path is unsupported. Therefore the Windows slice closes a local source
-prerequisite, not the critical Linux/recovery requirement, normal finite playback
-or any whole milestone. Continuing to count such slices as completed features
-would be misleading. C1–C4 are the explicit route to the first usable finite path.
+Linux's positive cleanup/restart backend is not implemented here. The earlier
+protected-cgroup proposal targeted stronger hostile-peer/object-continuity
+guarantees; Astra now distinguishes those from the approved trusted workload
+requirements. The coordinator must record the exact R2 amendment, not leave Sol
+to silently relax proof or build a custom service. Windows' unnamed Job and
+unsupported durable-storage path still do not prove restart recovery. The Windows
+slice is a local source prerequisite, not usable finite playback or a milestone.
+C1–C4 remain the explicit route to the first usable finite path.

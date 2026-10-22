@@ -38,9 +38,9 @@ Prior host125.139s+47.42s and Windows135.763s+73.591s remain scoped to unchanged
 source. New runtime composition not yet Windows-compiled; ALL behavior NOT RUN,
 NOT strict Clippy. `35f0d8715`/`6dc165309` still provide restricted Windows LIVE
 proof after real native-owner disposal, not Windows durable/restart support.
-Current Linux deployment has no protected cgroup authority. Astra's restricted
-host-broker proposal requires security/installation review, not inferred setup
-permission. Source/output/scratch adapters and normal finite playback remain open.
+Owner-requested C1 reassessment: custom privilege is NOT inherently required;
+earlier hostile-peer premises over-constrained the plan. Explicit R2 scope amendment
+must precede any weaker receipt. Typed owners/normal finite playback remain open.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
