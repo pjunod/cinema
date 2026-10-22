@@ -19,6 +19,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Engineering knowledge evaluation isolates candidate behavior from protected
+  assertions, supports ordered acceptance steps, and uses the same visible-only
+  Ripwire baseline across comparison arms. Token usage and applied documentation
+  identification are recorded separately, with durable request checkpoints.
+
 - Processed Dolby Vision Profile 8.1 playlists include the required HDR10
   compatibility brand so Apple players can recognize the Dolby Vision enhancement.
 
