@@ -24,26 +24,25 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`1584a357c` replaces the actual Unix VOD publisher's reusable bare-path temporary
-with a held no-follow directory, exclusive unique temporary object, checked write
-range, actual descriptor identity/size/512-byte-block allocation and native
-no-replace rename. Failed partial/conflicting objects retain their descriptor and
-facts; `a4465e4b0` keeps that unresolved state visible after consuming the job error.
-`521a6d5fb` authors deterministic cancellation inside the actual acquired-file
-native body, not only a wrapper. Success closes the writable copy; none of these
-facts mint finite acquisition, closure or refund authority. Non-Unix is legacy.
+`f51a5475f` connects typed journal preparation to the SAME retained runtime bundle
+and reservation/family/cancel/refund path. Real root/pipe adapters enrich matching
+typed envelopes; the old all-closed path refuses typed inventory before consuming
+proof. Scratch-directory member/ArmIo commands retain exact IDs/results, apply
+the local fold only after known commit, acknowledge without double application,
+and permit bounded local IO after outer seal without reopening members. No native
+parent/observation permit escapes. `5d12668d1` corrects a nontrial-only fixture.
 
-Pinned1.97.1 affected daemon all-target check PASS81.476s on current source;
-earlier invalidated scopes125.448s/29.359s/18.346s retained, not repeated passes.
-Nine new bodies COMPILED NOT RUN; warnings, NOT strict Clippy. Controller reports
-exact142b Windows core+daemon PASS149.755s; changed daemon scope not yet qualified.
-Retained `3e9edcdf4`/`cdf580eb0` provide bounded scratch-v2 event/reader audit in the
-SAME journal; old v1 equality/DDL/history unchanged. Original payload/entry-latch,
-actor/terminal/source ownership remain. Admission STILL LEGACY. Missing: actual
-prearmed storage-root/init bootstrap and scratch write-ahead/native composition,
-source/copy/HTTP leases, bounded index/native memory, allocation-overage debt/fence,
-snapshot refs/RetainedAssetsV2, ONE durable R→S/private-proof swap, positive exact
-old-domain restart and remaining M0–M7. No full growth/physical-quota/behavior pass.
+Pinned1.97.1 affected core all-target check PASS7.948s; preceding17.332s/10.759s/
+8.347s scopes were source-invalidated, retained without replay. Nine new bodies
+COMPILED NOT RUN; warnings, NOT strict Clippy. Unchanged daemon81.476s retained;
+controller reports exactb37d changed-daemon Windows PASS151.38s, not Unix execution.
+`1584a357c`/`a4465e4b0`/`521a6d5fb` retain actual Unix no-follow/no-clobber native
+publication and partial-object/drain-error/cancellation ownership. Non-Unix is
+legacy. `3e9edcdf4`/`cdf580eb0` provide bounded event/reader audit; old codec/DDL
+unchanged. Admission STILL LEGACY. Missing: actual prearmed root/init and native
+outcome/manifest composition, source/copy/HTTP leases, bounded native/index memory,
+overage debt/fence, snapshot/RetainedAssetsV2/private-proof atomic R→S, positive
+old-domain restart and remaining M0–M7. No finite/physical-quota/behavior pass.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
