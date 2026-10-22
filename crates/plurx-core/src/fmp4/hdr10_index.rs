@@ -312,6 +312,101 @@ fn normalize_hdr10_metadata(
     Ok(changed)
 }
 
+/// SDR must not inherit static HDR declarations from any encoder family.
+/// Preserve other SEI (including captions) and all coded picture/audio bytes.
+pub fn strip_sdr_hdr_init(init: &mut Init) -> Result<(), Fmp4Error> {
+    let mut candidate = init.clone();
+    let location = locate_hvcc(&candidate.bytes)?
+        .ok_or_else(|| Fmp4Error::Malformed("SDR output has no hvcC".into()))?;
+    let record = &candidate.bytes[location.payload.clone()];
+    hvcc_nal_arrays(record)?;
+    let mut rewritten = record[..23].to_vec();
+    rewritten[22] = 0;
+    let mut pos = 23;
+    for _ in 0..record[22] {
+        let header = record[pos];
+        let count = u16::from_be_bytes([record[pos + 1], record[pos + 2]]);
+        pos += 3;
+        let mut kept = Vec::new();
+        for _ in 0..count {
+            let len = usize::from(u16::from_be_bytes([record[pos], record[pos + 1]]));
+            pos += 2;
+            let nal = &record[pos..pos + len];
+            pos += len;
+            if let Some(nal) = strip_sdr_hdr_nal(nal)? {
+                kept.push(nal);
+            }
+        }
+        if !kept.is_empty() {
+            append_array(&mut rewritten, header, &kept)?;
+        }
+    }
+    let old = location.payload.len();
+    let new = rewritten.len();
+    candidate.bytes.splice(location.payload, rewritten);
+    for ancestor in location.ancestors {
+        resize_box(&mut candidate.bytes, ancestor, old, new)?;
+    }
+    let location = locate_hvcc(&candidate.bytes)?.expect("hvcC retained");
+    let entry = location.ancestors[1];
+    let children = entry.start + entry.header_len + 78..location.sample_entry_end;
+    let mut removals = Vec::new();
+    for kind in [b"mdcv", b"clli"] {
+        for (at, header) in find_children(&candidate.bytes, children.clone(), kind)? {
+            removals.push((at.start, header.size));
+        }
+    }
+    removals.sort_unstable();
+    for (start, len) in removals.into_iter().rev() {
+        candidate.bytes.drain(start..start + len);
+        for &ancestor in &location.ancestors[1..] {
+            shrink_box(&mut candidate.bytes, ancestor, len)?;
+        }
+    }
+    *init = candidate;
+    Ok(())
+}
+fn strip_sdr_hdr_nal(nal: &[u8]) -> Result<Option<Vec<u8>>, Fmp4Error> {
+    if nal.len() < 2 {
+        return malformed("truncated SDR NAL");
+    }
+    if !matches!((nal[0] >> 1) & 63, 39 | 40) {
+        return Ok(Some(nal.to_vec()));
+    }
+    let messages = sei_messages(nal)?;
+    let kept: Vec<_> = messages
+        .into_iter()
+        .filter(|(kind, _)| !matches!(kind, 137 | 144 | 147))
+        .collect();
+    Ok((!kept.is_empty()).then(|| encode_sei(&nal[..2], &kept)))
+}
+pub fn strip_sdr_hdr_fragment(fragment: &mut Fragment, init: &Init) -> Result<(), Fmp4Error> {
+    let video = init
+        .video()
+        .ok_or_else(|| Fmp4Error::Malformed("SDR has no video".into()))?;
+    rewrite_video_samples(fragment, &init.tracks, video.id, |sample| {
+        let mut output = Vec::new();
+        let mut error = None;
+        visit_length_prefixed_hevc_nals(sample, video.nal_length_size, |framed, _| {
+            let size = usize::from(video.nal_length_size);
+            match strip_sdr_hdr_nal(&framed[size..]) {
+                Ok(Some(nal)) => {
+                    let length = (nal.len() as u32).to_be_bytes();
+                    output.extend_from_slice(&length[4 - size..]);
+                    output.extend_from_slice(&nal);
+                }
+                Ok(None) => {}
+                Err(err) => error = Some(err),
+            }
+        })?;
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(output)
+    })?;
+    Ok(())
+}
+
 /// Static declarations for a completed processed HDR10 render. Coordinates are
 /// R,G,B,white x/y pairs in ST 2086 units (1/50000); luminance minimum is in
 /// 1/10000 cd/m². This deliberately has no inferred gamut or luminance defaults.
@@ -503,6 +598,117 @@ mod tests {
 
     const P3: [u16; 8] = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
 
+    #[test]
+    fn sdr_authoring_removes_hdr_declarations_without_changing_audio_pictures_or_timing() {
+        use crate::transcode::dv_processing::{dv_author_hdr10_window, dv_author_sdr_window};
+        let source = crate::testfixtures::pipe("closed-gop");
+        let stale = dv_author_hdr10_window(
+            &source,
+            Hdr10OutputMetadata::new(P3, 1600, 50, 1600).expect("HDR metadata"),
+        )
+        .expect("stale encoder declarations");
+        let output = dv_author_sdr_window(&stale).expect("SDR cleanup");
+        assert_eq!(dv_author_sdr_window(&output).expect("idempotent"), output);
+        let mut before = FragmentReader::new();
+        before.push(&source);
+        let mut after = FragmentReader::new();
+        after.push(&output);
+        let Some(Unit::Init(init)) = after.next_unit().expect("init") else {
+            panic!("init");
+        };
+        let Some(Unit::Init(original)) = before.next_unit().expect("source init") else {
+            panic!("init");
+        };
+        let location = locate_hvcc(&init.bytes).expect("config").expect("HEVC");
+        let entry = location.ancestors[1];
+        let children = entry.start + entry.header_len + 78..location.sample_entry_end;
+        for kind in [b"mdcv", b"clli"] {
+            assert!(find_children(&init.bytes, children.clone(), kind)
+                .expect("boxes")
+                .is_empty());
+        }
+        let mut video_samples = 0;
+        let mut audio_samples = 0;
+        while let Some(unit) = after.next_unit().expect("output unit") {
+            let old = before
+                .next_unit()
+                .expect("source unit")
+                .expect("matching unit");
+            let (Unit::Fragment(fragment), Unit::Fragment(old)) = (unit, old) else {
+                continue;
+            };
+            for track in &fragment.tracks {
+                let original_track = old.track(track.track_id).expect("track");
+                assert_eq!(track.base_decode_time, original_track.base_decode_time);
+                for (run, original_run) in track.runs.iter().zip(&original_track.runs) {
+                    assert_eq!(run.samples.len(), original_run.samples.len());
+                    let (mut at, mut old_at) = (run.data_offset, original_run.data_offset);
+                    for (sample, old_sample) in run.samples.iter().zip(&original_run.samples) {
+                        assert_eq!(
+                            (sample.duration, sample.cto, sample.flags),
+                            (old_sample.duration, old_sample.cto, old_sample.flags)
+                        );
+                        let bytes = &fragment.bytes[at..at + sample.size as usize];
+                        let old_bytes = &old.bytes[old_at..old_at + old_sample.size as usize];
+                        if track.track_id == init.video().expect("video").id {
+                            video_samples += 1;
+                            let nals = length_prefixed_nals(
+                                bytes,
+                                init.video().expect("video").nal_length_size,
+                            );
+                            for nal in &nals {
+                                if matches!(hevc_nal_type(nal), Some(39 | 40)) {
+                                    assert!(!sei_messages(nal)
+                                        .expect("SEI")
+                                        .iter()
+                                        .any(|(kind, _)| matches!(kind, 137 | 144 | 147)));
+                                }
+                            }
+                            let pictures = |nals: Vec<&[u8]>| {
+                                nals.into_iter()
+                                    .filter(|nal| hevc_nal_type(nal).is_some_and(|kind| kind < 32))
+                                    .map(<[u8]>::to_vec)
+                                    .collect::<Vec<_>>()
+                            };
+                            assert_eq!(
+                                pictures(nals),
+                                pictures(length_prefixed_nals(
+                                    old_bytes,
+                                    original.video().expect("video").nal_length_size
+                                ))
+                            );
+                        } else {
+                            audio_samples += 1;
+                            assert_eq!(bytes, old_bytes);
+                        }
+                        at += sample.size as usize;
+                        old_at += old_sample.size as usize;
+                    }
+                }
+            }
+        }
+        assert!(video_samples > 0 && audio_samples > 0);
+        for header in [[0x4e, 1], [0x50, 1]] {
+            let nal = encode_sei(
+                &header,
+                &[
+                    (137, vec![0; 24]),
+                    (144, vec![0; 4]),
+                    (147, vec![16]),
+                    (4, vec![9]),
+                ],
+            );
+            assert_eq!(
+                sei_messages(
+                    &strip_sdr_hdr_nal(&nal)
+                        .expect("strip")
+                        .expect("caption retained")
+                )
+                .expect("SEI"),
+                vec![(4, vec![9])]
+            );
+        }
+    }
     #[test]
     fn processed_metadata_replaces_stale_sei_on_every_irap_and_preserves_other_nals() {
         let metadata = Hdr10OutputMetadata::new(P3, 1600, 17, 1600).expect("valid metadata");

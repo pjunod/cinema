@@ -3123,8 +3123,8 @@ internal fun dynamicRangeSummary(
     if (source == null) return null
     if (delivered == null) return dynamicRangeLabel(source)
     val onScreen = rendered ?: delivered
-    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == DynamicRange.HDR10)
-        return "HDR10-E — ${effectiveProcessing.detail}"
+    if (effectiveProcessing?.matches(activeGeneration, delivered) == true && onScreen == delivered)
+        return "${effectiveProcessing.mark} — ${effectiveProcessing.detail}"
     if (onScreen == source) return "${dynamicRangeLabel(source)} (rendering)"
     val why = reasons.firstOrNull { reason ->
         reason.contains("dolby vision", ignoreCase = true) || reason.contains("hdr", ignoreCase = true) ||

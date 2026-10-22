@@ -1522,7 +1522,13 @@ pub(super) fn session_enhancement(
                 },
                 (None, None) => EnhancementRoute::Hdr10Base,
             },
-            Some("sdr") => EnhancementRoute::ToneMappedSdr,
+            Some("sdr") => match effective.filter(|report| report.sdr_processed()) {
+                Some(report) => EnhancementRoute::ProcessedSdr {
+                    fel_contributed: report.fel_contributed(),
+                    display_target: report.display_target_nits(),
+                },
+                None => EnhancementRoute::ToneMappedSdr,
+            },
             _ => EnhancementRoute::Other,
         }
     };

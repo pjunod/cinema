@@ -87,6 +87,18 @@ impl TranscodeManager {
                 _ => {}
             }
         }
+        if request.dv_processing_destination.is_none()
+            && matches!(request.kind, SessionKind::Transcode { .. })
+            && !request.hdr10
+            && request
+                .candidate_context
+                .as_ref()
+                .and_then(|context| context.canonical_caps.as_ref())
+                .and_then(|caps| caps.display.as_ref())
+                .is_some_and(|display| !display.hdr && !display.dolby_vision)
+        {
+            return Ok(Some(DvDestination::Sdr));
+        }
         Ok(Some(destination))
     }
 
@@ -188,6 +200,23 @@ impl TranscodeManager {
                 Some(DvDestination::Profile81)
             }
             Some((_, _, true)) | Some((_, true, false)) => None,
+            _ if preferences.hdr_processing
+                && query
+                    .caps
+                    .display
+                    .as_ref()
+                    .is_some_and(|display| !display.hdr && !display.dolby_vision)
+                && plurx_core::store::stored_switch(
+                    snapshot
+                        .settings
+                        .get(plurx_core::store::keys::DV_DISPLAY_TARGET)
+                        .map(String::as_str),
+                    false,
+                )
+                && matches!(snapshot.file.dolby_vision.profile, Some(5 | 7 | 8)) =>
+            {
+                Some(DvDestination::Sdr)
+            }
             _ if preferences.hdr_processing
                 && matches!(snapshot.file.dolby_vision.profile, Some(5 | 7 | 8)) =>
             {
@@ -1775,7 +1804,7 @@ pub(super) fn processed_client_compatible(
                 .effective_height()
                 .is_none_or(|height| i64::from(height) > maximum)
         })
-        || (destination == DvDestination::Hdr10
+        || (destination != DvDestination::Profile81
             && !caps
                 .hls_hevc_sample_entries
                 .as_ref()
@@ -1797,7 +1826,16 @@ pub(super) fn processed_client_compatible(
                 || entry.dv_profiles.contains(&8)
                 || caps.legacy_blanket_dolby_vision)
     });
-    encoded_client_compatible(&eligible, plan, facts)
+    encoded_client_compatible_for_grade(
+        &eligible,
+        plan,
+        facts,
+        if destination == DvDestination::Sdr {
+            OutputGrade::Sdr
+        } else {
+            OutputGrade::Hdr10
+        },
+    )
 }
 
 pub(super) fn encoded_client_compatible(
@@ -1805,12 +1843,19 @@ pub(super) fn encoded_client_compatible(
     plan: &ResolvedTranscode,
     facts: &DecodeFacts,
 ) -> bool {
+    encoded_client_compatible_for_grade(caps, plan, facts, plan.output_contract().output_grade())
+}
+fn encoded_client_compatible_for_grade(
+    caps: &plurx_core::playback::DeviceCaps,
+    plan: &ResolvedTranscode,
+    facts: &DecodeFacts,
+    grade: OutputGrade,
+) -> bool {
     let contract = plan.output_contract();
     let (Some(width), Some(height_px)) = (contract.effective_width(), contract.effective_height())
     else {
         return false;
     };
-    let grade = contract.output_grade();
     let explicit_hevc =
         plan.encoder() == Encoder::VideoToolbox && contract.output_codec() == "hevc";
     let rate = contract

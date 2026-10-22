@@ -1960,7 +1960,7 @@ fn display_target_activity(rendition: &Rendition) -> Option<DisplayTargetActivit
     #[cfg(target_os = "linux")]
     {
         let runtime = rendition.recipe.encoding.as_ref()?.dv_runtime.as_ref()?;
-        if runtime.destination != plurx_core::transcode::dv_processing::DvDestination::Hdr10 {
+        if runtime.destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
             return None;
         }
         if runtime.display_target_note.is_none() && runtime.display.is_none() {

@@ -155,8 +155,15 @@ impl CompletedReconstructedOutputContract {
     pub fn input_contract(self) -> super::pipeline::ReconstructedPqInput {
         self.input
     }
+    pub(super) fn with_sdr(mut self) -> Self {
+        self.input = super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24;
+        self
+    }
     pub fn grade(self) -> OutputGrade {
-        OutputGrade::Hdr10
+        match self.input {
+            super::pipeline::ReconstructedPqInput::Yuv420p10Bt709Gamma24 => OutputGrade::Sdr,
+            _ => OutputGrade::Hdr10,
+        }
     }
     pub fn codec(self) -> VideoCodec {
         VideoCodec::Hevc
@@ -175,6 +182,18 @@ impl CompletedReconstructedOutputContract {
         }
     }
     pub fn encode_args(
+        self,
+        bitrate_kbps: u32,
+        force_idr: bool,
+        software_threads: Option<u32>,
+    ) -> Vec<String> {
+        let mut args = self.pq_encode_args(bitrate_kbps, force_idr, software_threads);
+        if self.grade() == OutputGrade::Sdr {
+            normalize_reconstructed_sdr_args(&mut args);
+        }
+        args
+    }
+    fn pq_encode_args(
         self,
         bitrate_kbps: u32,
         force_idr: bool,
@@ -224,6 +243,37 @@ impl CompletedReconstructedOutputContract {
     }
 }
 
+/// Normalize both inherited recipe flags and the actual completed encoder.
+pub(super) fn normalize_reconstructed_sdr_args(args: &mut [String]) {
+    for index in 0..args.len().saturating_sub(1) {
+        match args[index].as_str() {
+            "-color_primaries" | "-color_trc" | "-colorspace" => args[index + 1] = "bt709".into(),
+            "-x265-params" => {
+                let mut params: Vec<_> = args[index + 1]
+                    .split(':')
+                    .filter(|p| {
+                        !p.starts_with("hdr10=")
+                            && !p.starts_with("master-display=")
+                            && !p.starts_with("max-cll=")
+                            && !p.starts_with("transfer=")
+                            && !p.starts_with("colorprim=")
+                            && !p.starts_with("colormatrix=")
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                params.extend([
+                    "hdr10=0".into(),
+                    "transfer=bt709".into(),
+                    "colorprim=bt709".into(),
+                    "colormatrix=bt709".into(),
+                ]);
+                args[index + 1] = params.join(":");
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod output_codec_contract_tests {
     use super::*;
@@ -237,6 +287,28 @@ mod output_codec_contract_tests {
         Encoder::VideoToolbox,
     ];
 
+    #[test]
+    fn reconstructed_sdr_encoders_declare_main10_bt709_without_hdr_hints() {
+        for encoder in [Encoder::Software, Encoder::Nvenc, Encoder::Vaapi] {
+            let output = CompletedReconstructedOutputContract::resolve(encoder)
+                .expect("supported encoder")
+                .with_sdr();
+            assert_eq!(output.grade(), OutputGrade::Sdr);
+            assert_eq!(output.bit_depth(), 10);
+            assert_eq!(output.input_contract().transfer(), "bt709");
+            let args = output.encode_args(4000, true, Some(1));
+            assert!(!args.iter().any(|arg| arg.contains("smpte2084")
+                || arg.contains("hdr10=1")
+                || arg.contains("bt2020")));
+            for field in ["-color_primaries", "-color_trc", "-colorspace"] {
+                let at = args
+                    .iter()
+                    .position(|arg| arg == field)
+                    .expect("explicit color field");
+                assert_eq!(args[at + 1], "bt709");
+            }
+        }
+    }
     #[test]
     fn reconstructed_nvenc_contract_preserves_ordinary_hdr_refusal_and_bounds() {
         assert!(OutputCodecContract::resolve(

@@ -86,8 +86,8 @@ class Curve:
         return oetf(self.nits(eotf(value)))
 
 
-def from_l1(max_pq, avg_pq, target, title_min_1e4=50, title_peak=4000):
-    if target not in BUCKETS or type(target) is not int:
+def from_l1(max_pq, avg_pq, target, title_min_1e4=50, title_peak=4000, *, sdr=False):
+    if (target not in BUCKETS and not (sdr and target == 100)) or type(target) is not int:
         raise ValueError("unsupported target bucket")
     if not (type(max_pq) is int and type(avg_pq) is int and 0 <= avg_pq <= max_pq <= 4095):
         raise ValueError("invalid L1; whole-session master fallback required")

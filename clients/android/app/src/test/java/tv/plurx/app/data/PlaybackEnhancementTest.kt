@@ -92,6 +92,17 @@ class PlaybackEnhancementTest {
     }
 
     @Test
+    fun sdrReceiptRequiresItsGradeAndExportOperations() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val wire = """{"generation":"$generation","hdr10_enhanced":false,"sdr_processed":true,"fel_contributed":false,"applied_operations":["RpuColorConversion","TargetMapping","Bt709Gamma24Conversion",{"DisplayTargetMapping":{"nits":100}}]}"""
+        val report = EffectiveProcessingReport.fromJson(json.parseToJsonElement(wire))
+        assertEquals(true, report?.matches(generation, "sdr"))
+        assertEquals(false, report?.matches(generation, "hdr10"))
+        assertEquals("SDR-E", report?.mark)
+        assertEquals(true, report?.detail?.contains("L1 only"))
+    }
+
+    @Test
     fun aProcessedDeliveryIsShownOnlyWithACurrentMatchingReport() {
         val generation = "11111111-1111-4111-8111-111111111111"
         val enhancement = PlaybackEnhancement(

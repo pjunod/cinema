@@ -58,10 +58,16 @@ impl DvDisplayTarget {
     }
     /// SDR conversion is required even when the source peak fits 100 nits:
     /// returning the HDR master would preserve the wrong transfer and gamut.
-    pub fn for_sdr_title(stats: Option<DvTitleStats>) -> Result<DvDisplayTargetChoice, DvContractError> {
+    pub fn for_sdr_title(
+        stats: Option<DvTitleStats>,
+    ) -> Result<DvDisplayTargetChoice, DvContractError> {
         Self::choose(100, true, stats)
     }
-    fn choose(nits: u32, sdr: bool, stats: Option<DvTitleStats>) -> Result<DvDisplayTargetChoice, DvContractError> {
+    fn choose(
+        nits: u32,
+        sdr: bool,
+        stats: Option<DvTitleStats>,
+    ) -> Result<DvDisplayTargetChoice, DvContractError> {
         if !(sdr && nits == 100 || !sdr && DISPLAY_TARGET_BUCKETS.contains(&nits)) {
             return Err(DvContractError::Invalid("display target bucket"));
         }
@@ -98,7 +104,9 @@ impl DvDisplayTarget {
     pub fn nits(self) -> u32 {
         self.nits
     }
-    pub fn is_sdr(self) -> bool { self.sdr }
+    pub fn is_sdr(self) -> bool {
+        self.sdr
+    }
     pub fn validate_rpu(self, raw: &[u8]) -> Result<(u16, u16), DvContractError> {
         use dolby_vision::rpu::{dovi_rpu::DoviRpu, extension_metadata::blocks::ExtMetadataBlock};
         let invalid = || {
@@ -120,8 +128,9 @@ impl DvDisplayTarget {
         self.mastering
     }
     pub fn needs_source_mastering(self) -> bool {
-        !self.sdr && (matches!(self.mastering_primaries, TitleConstant::Unknown)
-            || matches!(self.mastering_luminance, TitleConstant::Unknown))
+        !self.sdr
+            && (matches!(self.mastering_primaries, TitleConstant::Unknown)
+                || matches!(self.mastering_luminance, TitleConstant::Unknown))
     }
 
     /// Source fallback must come from the same held, attested video stream.
@@ -130,7 +139,11 @@ impl DvDisplayTarget {
         self,
         source: Option<DvSourceMastering>,
     ) -> Result<crate::fmp4::Hdr10OutputMetadata, DvContractError> {
-        if self.sdr { return Err(DvContractError::Invalid("SDR export cannot carry HDR10 mastering metadata")); }
+        if self.sdr {
+            return Err(DvContractError::Invalid(
+                "SDR export cannot carry HDR10 mastering metadata",
+            ));
+        }
         let primaries =
             match self.mastering_primaries {
                 TitleConstant::Consistent(value) => l9_primaries(value)?,
@@ -167,7 +180,11 @@ impl DvDisplayTarget {
             .map_err(|_| DvContractError::Invalid("targeted HDR10 metadata cannot be represented"))
     }
     pub fn output_policy(self) -> String {
-        if self.sdr { "bt709-gamma24-target-100".into() } else { format!("bt2020-pq-target-{}", self.nits) }
+        if self.sdr {
+            "bt709-gamma24-target-100".into()
+        } else {
+            format!("bt2020-pq-target-{}", self.nits)
+        }
     }
     pub fn endpoint_args(self) -> [String; 2] {
         [
@@ -233,6 +250,54 @@ mod tests {
             mastering_luminance: TitleConstant::Unknown,
             mastering_primaries: TitleConstant::Unknown,
         }
+    }
+    #[test]
+    fn sdr_target_never_elides_to_hdr_and_cannot_author_hdr_metadata() {
+        let low = DvTitleStats {
+            max_l1_pq: Some(0),
+            ..stats()
+        };
+        let DvDisplayTargetChoice::Target(sdr) =
+            DvDisplayTarget::for_sdr_title(Some(low)).expect("SDR policy")
+        else {
+            panic!("SDR conversion must not elide");
+        };
+        assert!(sdr.is_sdr());
+        assert_eq!(sdr.nits(), 100);
+        assert_eq!(sdr.output_policy(), "bt709-gamma24-target-100");
+        assert!(!sdr.needs_source_mastering());
+        assert!(sdr.output_metadata(None).is_err());
+        assert!(matches!(
+            DvDisplayTarget::for_sdr_title(None).expect("unknown"),
+            DvDisplayTargetChoice::Master {
+                reason: DvDisplayTargetDecline::TitleUnknown
+            }
+        ));
+        assert!(matches!(
+            DvDisplayTarget::for_sdr_title(Some(DvTitleStats {
+                complete: false,
+                ..low
+            }))
+            .expect("incomplete"),
+            DvDisplayTargetChoice::Master { .. }
+        ));
+        assert!(
+            DvDisplayTarget::for_title(100, Some(low)).is_err(),
+            "100 must never mean HDR PQ"
+        );
+        let DvDisplayTargetChoice::Target(hdr) =
+            DvDisplayTarget::for_title(400, Some(stats())).expect("HDR policy")
+        else {
+            panic!("HDR target");
+        };
+        let export = |target| {
+            super::super::DvExportPolicy::DisplayTargetYuv420p10V1 {
+                raster: (1280, 720),
+                target,
+            }
+            .target_parameters()
+        };
+        assert_ne!(export(sdr), export(hdr));
     }
     #[test]
     fn target_metadata_uses_exact_l9_units_and_source_fallback_without_masking_conflicts() {

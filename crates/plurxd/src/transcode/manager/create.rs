@@ -1263,6 +1263,12 @@ impl TranscodeManager {
         if !enabled {
             return Ok((None, None));
         }
+        if display.is_some_and(|display| !display.hdr && !display.dolby_vision) {
+            return match DvDisplayTarget::for_sdr_title(probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json)).map_err(|e| e.to_string())? {
+                DvDisplayTargetChoice::Target(target) => Ok((Some(target), Some("SDR: per-shot L1 mapped for 100-nit BT.709 gamma 2.4 limited output; rendered live (L1 only; creative trims are not applied)".into()))),
+                DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason().replace("master grade sent", "ordinary SDR tone mapping used")))),
+            };
+        }
         let Some(bucket) = display.and_then(|display| display.hdr10_target_bucket()) else {
             return Ok((None, Some("your display did not report a supported HDR peak (400–4999 nits), so the master grade is sent".into())));
         };
@@ -1345,6 +1351,7 @@ impl TranscodeManager {
             // processing, subject to the actual completed decoder contract.
             if request.dv_processing_destination.is_none()
                 && !profile81
+                && destination != DvDestination::Sdr
                 && !hdr10_intent
                 && original.selected_candidate.grade != OutputGrade::Hdr10
             {
@@ -1459,6 +1466,11 @@ impl TranscodeManager {
                 caps.display.as_ref(),
                 planning.probe_json.as_deref(),
             )?;
+            if destination == DvDestination::Sdr
+                && !display_target.is_some_and(|target| target.is_sdr())
+            {
+                return Err(display_target_note.unwrap_or_else(|| "SDR display targeting needs a complete eligible L1 scan and the display-target setting".into()));
+            }
             let (mut trial, projected) =
                 Self::processed_qualification_input(&planning, request, height)?;
             trial.request_id = Some(recovery.incarnation_id.clone());
@@ -1645,7 +1657,11 @@ impl TranscodeManager {
                     .map_err(|_| "processed rung overflow")?,
                 average_bps: Some(u64::from(encoding.options.video_bitrate_kbps) * 1000 + audio),
                 peak_bps: Some(u64::from(encoding.options.video_bitrate_kbps) * 1500 + audio),
-                grade: OutputGrade::Hdr10,
+                grade: if destination == DvDestination::Sdr {
+                    OutputGrade::Sdr
+                } else {
+                    OutputGrade::Hdr10
+                },
                 decoder_compatible: true,
                 complete_cache: false,
                 sustainable: true,
@@ -1665,6 +1681,7 @@ impl TranscodeManager {
             context.ordinary_request =
                 (!original.selected_candidate.processed_hdr10).then(|| Box::new(request.clone()));
             trial.candidate_context = Some(Box::new(context));
+            trial.hdr10 = destination != DvDestination::Sdr;
             let lease_binding = trial.processed_preparation_binding(recovery)?;
             trial
                 .candidate_context
@@ -2542,8 +2559,8 @@ impl TranscodeManager {
                     // this held source. A title scan replacement cannot reuse
                     // an older live policy or silently change a later window.
                     if let Some(target) = display_target {
-                        let selected = plurx_core::transcode::dv_processing::DvDisplayTarget::for_title(
-                            target.nits(), probe.as_deref().and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json))
+                        let stats = probe.as_deref().and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json);
+                        let selected = if target.is_sdr() { plurx_core::transcode::dv_processing::DvDisplayTarget::for_sdr_title(stats) } else { plurx_core::transcode::dv_processing::DvDisplayTarget::for_title(target.nits(), stats) }
                             .map_err(|error| error.to_string())?;
                         if selected != plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(target) {
                             return Err("complete-title display-target scan changed during preparation".into());
@@ -2852,7 +2869,7 @@ impl TranscodeManager {
                 use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
                 let actual_grade = encoding.as_ref().map_or_else(
                     || super::manager_candidates::copy_candidate_grade(file),
-                    |encoding| encoding.options.pipeline.output_grade(),
+                    |encoding| encoding.delivered_output_grade(),
                 );
                 let (actual, route) = if let Some(encoding) = encoding {
                     (
@@ -3185,7 +3202,8 @@ impl TranscodeManager {
             || context.owner_node_id.as_deref() != self.cache_location().map(|(_, node)| node)
             || req.continuous_media.is_some()
             || req.subtitle_burn.is_some()
-            || !req.hdr10
+            || req.hdr10
+                != (destination != plurx_core::transcode::dv_processing::DvDestination::Sdr)
             || context.normalized_geometry != prepared.encoding.options.normalized_geometry
             || context.profile != prepared.encoding.options.auto_quality_rate_profile
             || !context.selected_candidate.decoder_compatible
@@ -3193,7 +3211,7 @@ impl TranscodeManager {
             || context.selected_candidate.route
                 != plurx_core::playback::candidate::CandidateRoute::Encode
             || context.selected_candidate.planned_codec.as_deref() != Some("hevc")
-            || context.selected_candidate.grade != OutputGrade::Hdr10
+            || context.selected_candidate.grade != prepared.encoding.delivered_output_grade()
             || context.selected_candidate.width
                 != prepared
                     .encoding
@@ -3367,7 +3385,7 @@ impl TranscodeManager {
                 encoding.options.target_height
             });
         let grade = encoding.as_ref().map_or(OutputGrade::Sdr, |encoding| {
-            encoding.options.pipeline.output_grade()
+            encoding.delivered_output_grade()
         });
         let kind = encoding
             .as_ref()
@@ -5127,6 +5145,62 @@ mod display_target_policy_tests {
         scan::dv_title::*,
     };
     #[test]
+    fn explicit_sdr_capability_uses_100_without_converting_unknown_hdr_peak_to_sdr() {
+        use plurx_core::playback::caps::DisplayCaps;
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, SCHEMA};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(0),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        // Use the existing probe writer's actual key, not a synthetic shortcut.
+        let document = serde_json::json!({PROBE_FIELD:stats}).to_string();
+        let display = DisplayCaps {
+            hdr: false,
+            dolby_vision: false,
+            ..Default::default()
+        };
+        let (target, note) =
+            TranscodeManager::display_target_policy(true, Some(&display), Some(&document))
+                .expect("SDR");
+        assert!(target.expect("SDR target").is_sdr());
+        assert!(note.expect("note").contains("gamma 2.4"));
+        for display in [
+            None,
+            Some(DisplayCaps {
+                hdr: true,
+                ..Default::default()
+            }),
+        ] {
+            assert!(TranscodeManager::display_target_policy(
+                true,
+                display.as_ref(),
+                Some(&document)
+            )
+            .expect("unknown")
+            .0
+            .is_none());
+        }
+        assert!(
+            TranscodeManager::display_target_policy(true, Some(&display), None)
+                .expect("missing scan")
+                .0
+                .is_none()
+        );
+        assert!(
+            TranscodeManager::display_target_policy(false, Some(&display), Some(&document))
+                .expect("disabled")
+                .0
+                .is_none()
+        );
+    }
+    #[test]
     fn display_target_declines_are_named_and_elision_is_master() {
         let stats = DvTitleStats {
             schema: SCHEMA,
@@ -5142,6 +5216,7 @@ mod display_target_policy_tests {
         let probe = |stats| serde_json::json!({PROBE_FIELD:stats}).to_string();
         let high = probe(stats);
         let display = DisplayCaps {
+            hdr: true,
             max_nits: Some(1999),
             peak_source: Some(DisplayPeakSource::Platform),
             ..Default::default()

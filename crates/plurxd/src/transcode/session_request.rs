@@ -1099,7 +1099,7 @@ impl SessionRequest {
         if let Some(destination) = self.dv_processing_destination {
             if self.presentation != Presentation::Vod
                 || !matches!(self.kind, SessionKind::Transcode { height } if (32..=super::MAX_HEIGHT).contains(&height) && height % 2 == 0)
-                || !self.hdr10
+                || !self.hdr10 && destination != DvDestination::Sdr
                 || self.subtitle_burn.is_some()
                 || self.continuous_media.is_some()
             {
@@ -1209,6 +1209,7 @@ impl SessionRequest {
         let kind = if let Some(destination) = self.dv_processing_destination {
             let tag = match destination {
                 plurx_core::transcode::dv_processing::DvDestination::Hdr10 => "hdr10",
+                plurx_core::transcode::dv_processing::DvDestination::Sdr => "processed_sdr",
                 plurx_core::transcode::dv_processing::DvDestination::Profile81 => "profile81",
             };
             format!("{kind}+dv-processing-v1:{tag}")

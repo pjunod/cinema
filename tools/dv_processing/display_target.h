@@ -11,7 +11,7 @@
 static struct {
   unsigned nits, min_1e4, title_peak;
   unsigned max_pq, avg_pq;
-  bool frame_valid;
+  bool frame_valid, sdr;
 } dv_target;
 static struct {
   pl_dispatch dispatch;
@@ -31,16 +31,18 @@ static inline bool dv_target_uint(const char *text, unsigned *value) {
 }
 static inline bool dv_target_policy(const char *policy, const char *floor,
                                     const char *peak) {
-  static const unsigned buckets[] = {400, 600, 1000, 1600, 2000, 4000};
+  static const unsigned buckets[] = {100, 400, 600, 1000, 1600, 2000, 4000};
   for (unsigned i = 0; i < sizeof(buckets) / sizeof(*buckets); i++) {
     char expected[48];
-    snprintf(expected, sizeof(expected), "bt2020-pq-target-%u", buckets[i]);
+    if (buckets[i] == 100) snprintf(expected, sizeof(expected), "bt709-gamma24-target-100");
+    else snprintf(expected, sizeof(expected), "bt2020-pq-target-%u", buckets[i]);
     if (strcmp(policy, expected)) continue;
     unsigned min_value, peak_value;
     if (!dv_target_uint(floor, &min_value) || min_value > 10000 ||
         !dv_target_uint(peak, &peak_value) || !peak_value || peak_value > 10000 ||
         min_value >= peak_value * 10000) return false;
     dv_target.nits = buckets[i];
+    dv_target.sdr = buckets[i] == 100;
     dv_target.min_1e4 = min_value;
     dv_target.title_peak = peak_value;
     return true;
@@ -50,6 +52,7 @@ static inline bool dv_target_policy(const char *policy, const char *floor,
 static inline const char *dv_target_policy_name(void) {
   static char name[48];
   if (!dv_target.nits) return "bt2020-pq-master-clip";
+  if (dv_target.sdr) return "bt709-gamma24-target-100";
   snprintf(name, sizeof(name), "bt2020-pq-target-%u", dv_target.nits);
   return name;
 }

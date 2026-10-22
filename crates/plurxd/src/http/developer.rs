@@ -1697,7 +1697,7 @@ fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
 fn dolby_vision_hdr_processing(enabled: bool) -> DeveloperEnableItem {
     DeveloperEnableItem {
         id: "dolby_vision_hdr_processing",
-        title: "Process Dolby Vision for HDR output",
+        title: "Process Dolby Vision for HDR and targeted SDR",
         enabled: Some(enabled),
         setting: Some("dolby_vision_hdr_processing"),
         requirements: vec![
@@ -3219,8 +3219,9 @@ async fn display_target_hdr10(
     let helper: Result<bool, String> = Ok(false);
     let (reports, buckets) = state.transcode.display_target_usage().await;
     let scans = state.store.dv_title_readiness().await;
-    let cache = plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
+    let cache = [100]
         .iter()
+        .chain(plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS.iter())
         .map(|bucket| {
             let live = match buckets.get(bucket) {
                 Some(Some(bytes)) => format!("{bytes} live materialized media bytes"),
@@ -3232,7 +3233,7 @@ async fn display_target_hdr10(
         .collect::<Vec<_>>()
         .join("; ");
     DeveloperEnableItem {
-        id: "dolby_vision_display_target", title: "Display-targeted HDR10-E",
+        id: "dolby_vision_display_target", title: "Display-targeted HDR10-E / SDR",
         enabled: Some(enabled), setting: Some("dolby_vision_display_target"),
         requirements: vec![
             DeveloperRequirement {
@@ -3248,7 +3249,7 @@ async fn display_target_hdr10(
             DeveloperRequirement {
                 id: "dv_target_scan", title: "Complete-title L1 scan",
                 status: match &scans { Ok(count) if count.eligible > 0 => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
-                evidence: match scans { Ok(count) => format!("{} current-schema title scans; {} eligible for L1 targeting. Unknown/incomplete scans keep the master grade.", count.scanned,count.eligible), Err(error) => format!("Title scan reading unavailable: {error}") },
+                evidence: match scans { Ok(count) => format!("{} current-schema title scans; {} eligible for L1 targeting. Unknown/incomplete scans keep the HDR master or ordinary SDR route.", count.scanned,count.eligible), Err(error) => format!("Title scan reading unavailable: {error}") },
             },
             DeveloperRequirement {
                 id: "dv_target_cache", title: "Bucket storage on this node", status: RequirementStatus::Met,

@@ -316,9 +316,10 @@ static void open_nut(const char *path) {
   p->width = EXPORT_WIDTH;
   p->height = EXPORT_HEIGHT;
   p->bits_per_coded_sample = EXPORT_YUV10 ? 15 : 48;
-  p->color_primaries = AVCOL_PRI_BT2020;
-  p->color_trc = AVCOL_TRC_SMPTE2084;
-  p->color_space = EXPORT_YUV10 ? AVCOL_SPC_BT2020_NCL : AVCOL_SPC_RGB;
+  p->color_primaries = dv_target.sdr ? AVCOL_PRI_BT709 : AVCOL_PRI_BT2020;
+  // H.273 has no pure gamma-2.4 identifier; conventional SDR is BT.709.
+  p->color_trc = dv_target.sdr ? AVCOL_TRC_BT709 : AVCOL_TRC_SMPTE2084;
+  p->color_space = EXPORT_YUV10 ? (dv_target.sdr ? AVCOL_SPC_BT709 : AVCOL_SPC_BT2020_NCL) : AVCOL_SPC_RGB;
   p->color_range = EXPORT_YUV10 ? AVCOL_RANGE_MPEG : AVCOL_RANGE_JPEG;
   if (EXPORT_YUV10)
     p->chroma_location = AVCHROMA_LOC_LEFT;

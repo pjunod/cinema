@@ -756,8 +756,10 @@ data class EffectiveProcessingReport(
     val hdr10Enhanced: Boolean,
     val felContributed: Boolean,
     val appliedOperations: List<String>,
+    val sdrProcessed: Boolean = false,
 ) {
-    fun matches(active: String?, delivered: String?): Boolean = hdr10Enhanced && delivered == "hdr10" &&
+    val mark: String get() = if (sdrProcessed) "SDR-E" else "HDR10-E"
+    fun matches(active: String?, delivered: String?): Boolean = ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) &&
         active == generation && tv.plurx.app.player.PlaybackControl.isUuid(generation) &&
         appliedOperations.isNotEmpty() && appliedOperations.size <= 16 &&
         appliedOperations.all { it.isNotEmpty() && it.length <= 64 }
@@ -767,7 +769,7 @@ data class EffectiveProcessingReport(
             "RpuColorConversion" to "RPU color conversion", "TargetMapping" to "target mapping",
             "CreativeTrimApplication" to "creative trims")
         val metadata = appliedOperations.mapNotNull { names[it] }.joinToString(", ")
-        return "Dolby Vision–enhanced HDR10 · FEL used: ${if (felContributed) "yes" else "no"}" +
+        return "${if (sdrProcessed) "Dolby Vision–processed SDR (BT.709 gamma 2.4, L1 only)" else "Dolby Vision–enhanced HDR10"} · FEL used: ${if (felContributed) "yes" else "no"}" +
             if (metadata.isEmpty()) "" else " · Applied: $metadata"
     }
 
@@ -778,18 +780,19 @@ data class EffectiveProcessingReport(
                 ?.takeIf { it.isString }?.content
             fun boolean(key: String): Boolean? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
                 ?.takeIf { !it.isString }?.content?.let { when (it) { "true" -> true; "false" -> false; else -> null } }
+            val sdr = boolean("sdr_processed") ?: false
             val operations = objectValue["applied_operations"] as? kotlinx.serialization.json.JsonArray ?: return null
             val names = operations.map { item ->
                 (item as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: run {
                     val operation = item as? kotlinx.serialization.json.JsonObject ?: return null
                     val target = operation["DisplayTargetMapping"] as? kotlinx.serialization.json.JsonObject ?: return null
                     val nits = (target["nits"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { !it.isString }?.content?.toIntOrNull() ?: return null
-                    if (operation.size != 1 || target.size != 1 || nits !in listOf(400, 600, 1000, 1600, 2000, 4000)) return null
+                    if (operation.size != 1 || target.size != 1 || nits !in (if (sdr) listOf(100) else listOf(400, 600, 1000, 1600, 2000, 4000))) return null
                     "DisplayTargetMapping:$nits"
                 }
             }
             return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
-                boolean("fel_contributed") ?: return null, names)
+                boolean("fel_contributed") ?: return null, names, sdr)
         }
     }
 }

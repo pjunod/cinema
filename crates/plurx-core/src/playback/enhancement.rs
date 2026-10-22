@@ -56,6 +56,11 @@ pub enum EnhancementRoute {
         fel_contributed: bool,
         display_target: Option<u32>,
     },
+    /// Server reconstructed SDR, awarded only from its current processing report.
+    ProcessedSdr {
+        fel_contributed: bool,
+        display_target: Option<u32>,
+    },
     /// The HDR10 base layer with the Dolby Vision metadata removed.
     Hdr10Base,
     /// Tone-mapped to SDR for an SDR display: nothing of Dolby Vision reaches
@@ -202,6 +207,29 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 ),
             ));
         }
+        EnhancementRoute::ProcessedSdr {
+            fel_contributed,
+            display_target,
+        } => {
+            requires_effective_processing = true;
+            if has_el {
+                details.push(detail(
+                    Fel,
+                    *fel_contributed,
+                    if *fel_contributed {
+                        "FEL: full enhancement layer reconstructed into the SDR picture"
+                    } else {
+                        "FEL: no enhancement-layer detail in this window"
+                    },
+                ));
+            }
+            details.push(detail(
+                Rpu,
+                true,
+                "RPU: base reshaping applied by the server before SDR conversion",
+            ));
+            details.push(detail(Dyn, *display_target == Some(100), if *display_target == Some(100) { "DYN: per-shot L1 mapped for 100-nit BT.709 SDR by the server (L1 only; creative trims are not applied)" } else { "DYN: no current per-shot L1 mapping receipt" }));
+        }
         EnhancementRoute::Hdr10Base => {
             let why = not_used(facts.hdr_processing_enabled, "Dolby Vision processing");
             if has_el {
@@ -256,6 +284,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn processed_sdr_dyn_requires_the_actual_100_nit_mapping() {
+        for target in [None, Some(100)] {
+            let enhancement = playback_enhancement(&EnhancementFacts {
+                source_profile: Some(7),
+                source_el_present: Some(true),
+                route: EnhancementRoute::ProcessedSdr {
+                    fel_contributed: true,
+                    display_target: target,
+                },
+                hdr_processing_enabled: Some(true),
+                fel_reencode_enabled: None,
+                decline_reason: None,
+            })
+            .expect("DV source");
+            assert!(enhancement.requires_effective_processing);
+            assert_eq!(enhancement.active.contains(&Dyn), target == Some(100));
+            assert!(enhancement.active.contains(&Fel));
+            assert!(enhancement.active.contains(&Rpu));
+            assert!(!enhancement
+                .details
+                .iter()
+                .any(|detail| detail.text.contains("trims applied")));
+        }
+    }
     #[test]
     fn processed_hdr10_with_fel_shows_fel_and_rpu_only() {
         let shown = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {

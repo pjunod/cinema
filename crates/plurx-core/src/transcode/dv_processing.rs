@@ -88,6 +88,8 @@ pub fn dv_playback_generation_digest(generation: &str) -> Result<DvDigest, DvCon
 pub struct DvEffectiveProcessingReport {
     generation: String,
     hdr10_enhanced: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    sdr_processed: bool,
     fel_contributed: bool,
     applied_operations: Vec<DvOperation>,
     /// The source pictures were decoded on the GPU (VA-API). Omitted when
@@ -97,6 +99,9 @@ pub struct DvEffectiveProcessingReport {
 }
 impl DvEffectiveProcessingReport {
     /// Whether the full enhancement layer's residual is in the served picture.
+    pub fn sdr_processed(&self) -> bool {
+        self.sdr_processed
+    }
     pub fn fel_contributed(&self) -> bool {
         self.fel_contributed
     }
@@ -125,13 +130,15 @@ impl DvEffectiveProcessingReport {
         struct Wire {
             generation: String,
             hdr10_enhanced: bool,
+            #[serde(default)]
+            sdr_processed: bool,
             fel_contributed: bool,
             applied_operations: Vec<DvOperation>,
             #[serde(default)]
             gpu_decoded: bool,
         }
         if bytes.len() > 4096
-            || delivered != Some("hdr10")
+            || !matches!(delivered, Some("hdr10" | "sdr"))
             || dv_playback_generation_digest(generation).is_err()
         {
             return None;
@@ -139,20 +146,23 @@ impl DvEffectiveProcessingReport {
         let wire: Wire = serde_json::from_slice(bytes).ok()?;
         let operations: BTreeSet<_> = wire.applied_operations.iter().copied().collect();
         if wire.generation != generation
-            || !wire.hdr10_enhanced
+            || wire.hdr10_enhanced != (delivered == Some("hdr10"))
+            || wire.sdr_processed != (delivered == Some("sdr"))
+            || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
             || wire.applied_operations.len() > 16
             || operations.len() != wire.applied_operations.len()
             || !operations.contains(&DvOperation::RpuColorConversion)
             || !operations.contains(&DvOperation::TargetMapping)
             || operations.iter().filter(|op| matches!(op, DvOperation::DisplayTargetMapping { .. })).count() > 1
-            || operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { nits } if !DISPLAY_TARGET_BUCKETS.contains(nits)))
+            || operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { nits } if !(wire.sdr_processed && *nits == 100 || !wire.sdr_processed && DISPLAY_TARGET_BUCKETS.contains(nits))))
             || wire.fel_contributed && !operations.contains(&DvOperation::LinearNlqResidual)
         {
             return None;
         }
         Some(Self {
             generation: wire.generation,
-            hdr10_enhanced: true,
+            hdr10_enhanced: wire.hdr10_enhanced,
+            sdr_processed: wire.sdr_processed,
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
@@ -1290,6 +1300,44 @@ pub fn dv_author_hdr10_window(
     Ok(output)
 }
 
+pub fn dv_author_sdr_window(bytes: &[u8]) -> Result<Vec<u8>, DvContractError> {
+    use crate::fmp4::{FragmentReader, Unit};
+    let invalid = || DvContractError::Invalid("post-encode SDR HDR metadata removal");
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return Err(invalid());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(bytes);
+    let Some(Unit::Init(mut init)) = reader.next_unit().map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    crate::fmp4::strip_sdr_hdr_init(&mut init).map_err(|_| invalid())?;
+    let mut output = init.bytes.clone();
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|_| invalid())? {
+        let mut fragment = match unit {
+            Unit::Fragment(fragment) => fragment,
+            Unit::Trailer => continue,
+            Unit::Init(_) => return Err(invalid()),
+        };
+        crate::fmp4::strip_sdr_hdr_fragment(&mut fragment, &init).map_err(|_| invalid())?;
+        fragments += 1;
+        output.extend_from_slice(&fragment.bytes);
+        if output.len() > 64 * 1024 * 1024 {
+            return Err(DvContractError::Capacity);
+        }
+    }
+    if fragments == 0 || !reader.saw_trailer() || reader.buffered() != 0 {
+        return Err(invalid());
+    }
+    // Init/sample growth invalidates encoder-authored random-access offsets.
+    output.extend_from_slice(&completed_window_trailer(&init));
+    if output.len() > 64 * 1024 * 1024 {
+        return Err(DvContractError::Capacity);
+    }
+    Ok(output)
+}
+
 fn completed_window_trailer(init: &crate::fmp4::Init) -> Vec<u8> {
     let size = 24 + 24 * init.tracks.len() as u32;
     let mut trailer = Vec::with_capacity(size as usize);
@@ -1433,8 +1481,13 @@ pub fn dv_plan_completed_window(
         ));
     }
     let full_fel = input.mode == DvProcessingMode::Fel;
-    if input.export_policy.display_target().is_some_and(|target| target.is_sdr() != (input.destination == DvDestination::Sdr))
-        || input.destination == DvDestination::Profile81 && input.export_policy.display_target().is_some() {
+    if input
+        .export_policy
+        .display_target()
+        .is_some_and(|target| target.is_sdr() != (input.destination == DvDestination::Sdr))
+        || input.destination == DvDestination::Profile81
+            && input.export_policy.display_target().is_some()
+    {
         return Err(invalid(
             "display targeting cannot change native/P8.1 delivery",
         ));
@@ -1627,13 +1680,25 @@ pub fn dv_plan_completed_window(
         DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?
     };
     if input.destination == DvDestination::Sdr {
-        if !input.export_policy.display_target().is_some_and(DvDisplayTarget::is_sdr) {
-            return Err(invalid("SDR output requires an explicit title-qualified SDR export"));
+        if !input
+            .export_policy
+            .display_target()
+            .is_some_and(DvDisplayTarget::is_sdr)
+        {
+            return Err(invalid(
+                "SDR output requires an explicit title-qualified SDR export",
+            ));
         }
         for edge in &mut pixels {
-            if edge.operation == DvOperation::Bt2020NclConversion { edge.operation = DvOperation::Bt709Gamma24Conversion; }
-            if edge.input == DvIntermediateDomain::LimitedBt2020NclYuv420P10 { edge.input = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10; }
-            if edge.output == DvIntermediateDomain::LimitedBt2020NclYuv420P10 { edge.output = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10; }
+            if edge.operation == DvOperation::Bt2020NclConversion {
+                edge.operation = DvOperation::Bt709Gamma24Conversion;
+            }
+            if edge.input == DvIntermediateDomain::LimitedBt2020NclYuv420P10 {
+                edge.input = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10;
+            }
+            if edge.output == DvIntermediateDomain::LimitedBt2020NclYuv420P10 {
+                edge.output = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10;
+            }
         }
     }
     let graph = DvGraph {
@@ -1797,7 +1862,9 @@ fn resolve_inner(
             return unchanged(R::UnknownElKind)
         }
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
-        DvDestination::Hdr10 | DvDestination::Sdr if source.el_kind == DvElKind::Fel => DvStrategy::FelRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr if source.el_kind == DvElKind::Fel => {
+            DvStrategy::FelRpuToHdr10
+        }
         DvDestination::Hdr10 | DvDestination::Sdr => DvStrategy::BaseRpuToHdr10,
     };
     let graph = DvGraph::new(
@@ -2385,7 +2452,7 @@ impl DvProcessingReceipt {
     }
     /// Project actual served-frame evidence onto the existing playback identity.
     /// M1's empty registry keeps every shipping response unchanged and omitted.
-    pub fn hdr10_effective_report(
+    pub fn effective_report(
         &self,
         registry: &DvProductionRegistry,
         plan: &DvProcessingPlan,
@@ -2393,7 +2460,7 @@ impl DvProcessingReceipt {
         object_shape: &DvDigest,
     ) -> Result<Option<DvEffectiveProcessingReport>, DvContractError> {
         let generation = dv_playback_generation_digest(active_playback_generation)?;
-        if !self.reports_hdr10_enhanced(registry, plan, &generation, object_shape) {
+        if !self.reports_processed(registry, plan, &generation, object_shape) {
             return Ok(None);
         }
         let mut common: BTreeSet<_> = self.served_frames[0]
@@ -2412,15 +2479,38 @@ impl DvProcessingReceipt {
         });
         Ok(Some(DvEffectiveProcessingReport {
             generation: active_playback_generation.to_owned(),
-            hdr10_enhanced: true,
+            hdr10_enhanced: plan.destination == DvDestination::Hdr10,
+            sdr_processed: plan.destination == DvDestination::Sdr,
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
         }))
     }
 
+    pub fn hdr10_effective_report(
+        &self,
+        registry: &DvProductionRegistry,
+        plan: &DvProcessingPlan,
+        active_playback_generation: &str,
+        object_shape: &DvDigest,
+    ) -> Result<Option<DvEffectiveProcessingReport>, DvContractError> {
+        if plan.destination != DvDestination::Hdr10 {
+            return Ok(None);
+        }
+        self.effective_report(registry, plan, active_playback_generation, object_shape)
+    }
     /// Only completed daemon-checked runtime windows can award HDR10-E.
     pub fn reports_hdr10_enhanced(
+        &self,
+        registry: &DvProductionRegistry,
+        plan: &DvProcessingPlan,
+        active_generation: &DvDigest,
+        object_shape: &DvDigest,
+    ) -> bool {
+        plan.destination == DvDestination::Hdr10
+            && self.reports_processed(registry, plan, active_generation, object_shape)
+    }
+    fn reports_processed(
         &self,
         registry: &DvProductionRegistry,
         plan: &DvProcessingPlan,
@@ -2436,7 +2526,7 @@ impl DvProcessingReceipt {
             && self.observation_complete
             && self.terminal_failure.is_none()
             && !self.served_frames.is_empty()
-            && plan.destination == DvDestination::Hdr10
+            && matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr)
     }
 }
 
@@ -2494,7 +2584,12 @@ pub fn dv_receipt_completed_window(
             {
                 return Err(invalid());
             }
-            (parsed.applied_operations, parsed.metadata_levels)
+            let mut operations = parsed.applied_operations;
+            if plan.destination == DvDestination::Sdr {
+                operations.retain(|op| *op != DvOperation::Bt2020NclConversion);
+                operations.push(DvOperation::Bt709Gamma24Conversion);
+            }
+            (operations, parsed.metadata_levels)
         };
         if !requires_el {
             // Source metadata determines conditional reshaping, not the

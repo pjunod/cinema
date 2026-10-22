@@ -474,7 +474,7 @@ fn every_preference_combination_preserves_conversion_and_native_constraints() {
                         planning_input_generation: 0,
                     };
                     let expected = match destination {
-                        DvDestination::Hdr10 => hdr,
+                        DvDestination::Hdr10 | DvDestination::Sdr => hdr,
                         DvDestination::Profile81 => fel && conversion,
                     };
                     assert_eq!(
@@ -1536,4 +1536,32 @@ fn effective_target_report_rejects_ambiguous_or_unsupported_buckets() {
         Some("hdr10")
     )
     .is_none());
+}
+
+#[test]
+fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt() {
+    let generation = "00000000-0000-4000-8000-000000000001";
+    let mut value = serde_json::json!({"generation":generation,"hdr10_enhanced":false,"sdr_processed":true,"fel_contributed":false,"applied_operations":["RpuColorConversion","TargetMapping","Bt709Gamma24Conversion",{"DisplayTargetMapping":{"nits":100}}]});
+    let accept = |value: &serde_json::Value, delivered| {
+        DvEffectiveProcessingReport::from_owner_wire(
+            &serde_json::to_vec(value).expect("wire"),
+            generation,
+            delivered,
+        )
+    };
+    let report = accept(&value, Some("sdr")).expect("typed SDR report");
+    assert!(report.sdr_processed());
+    assert_eq!(report.display_target_nits(), Some(100));
+    assert!(accept(&value, Some("hdr10")).is_none());
+    value["hdr10_enhanced"] = true.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["hdr10_enhanced"] = false.into();
+    value["applied_operations"][3]["DisplayTargetMapping"]["nits"] = 400.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["applied_operations"][3]["DisplayTargetMapping"]["nits"] = 100.into();
+    value["applied_operations"]
+        .as_array_mut()
+        .expect("array")
+        .remove(2);
+    assert!(accept(&value, Some("sdr")).is_none());
 }

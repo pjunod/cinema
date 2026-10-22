@@ -131,8 +131,8 @@ function activityStreamDetails(session){
   }
   const target=session.vod_observation?.display_target;
   if(target){
-    rows.push(["HDR10-E display",`${target.reported_peak_nits==null?"peak unknown":`${target.reported_peak_nits} nits reported`} · ${target.peak_source||"source unknown"} · ${target.bucket_nits==null?"master grade":`${target.bucket_nits}-nit bucket`}`]);
-    rows.push(["HDR10-E rendering",`${target.live_rendering?"live rendering · no retained bucket cache":"retained output"} · ${target.note}`]);
+    rows.push(["Processed display target",`${target.reported_peak_nits==null?"peak unknown":`${target.reported_peak_nits} nits reported`} · ${target.peak_source||"source unknown"} · ${target.bucket_nits==null?"master grade":`${target.bucket_nits}-nit bucket`}`]);
+    rows.push(["Processed rendering",`${target.live_rendering?"live rendering · no retained bucket cache":"retained output"} · ${target.note}`]);
   }
   if(session.render_state) rows.push(["Render state",String(session.render_state).replace(/_/g," ")]);
   if(typeof session.recent_speed==="number") rows.push(["Encode speed",`${session.recent_speed.toFixed(2)}×`]);

@@ -56,6 +56,10 @@ static void require(bool condition, const char *message) {
 // texture. This separate pass cannot resize BL/EL before their DV operations.
 static void export_native_rgb(pl_renderer renderer, struct pl_frame native,
                               pl_tex output) {
+  if (dv_target.sdr) {
+    require(dv_yuv10_convert_sdr_rgb(renderer, native, output), "BT.709 gamma2.4 export");
+    return;
+  }
   struct pl_frame destination = native;
   destination.planes[0].texture = output;
   struct pl_render_params params = pl_render_fast_params;
@@ -531,7 +535,7 @@ static void gpu_render(uint16_t *decoded[2], const AVFrame *hardware[2],
           "renderer error-free export");
   if (EXPORT_YUV10) {
     require(!debug, "debug evidence is RGB48 only");
-    require(dv_yuv10_export(renderer, gpu, output_texture), "GPU yuv420p10 export");
+    require(dv_yuv10_export_color(renderer, gpu, output_texture, dv_target.sdr), "GPU yuv420p10 export");
     fel_unmap(gpu);
     write_rgb(dv_yuv10_context.frame, dv_yuv10_frame_bytes(), rgb_output);
     char yuv10_field[86] = "";

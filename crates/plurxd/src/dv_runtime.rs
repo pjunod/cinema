@@ -406,8 +406,12 @@ impl PrivateWindow {
         use plurx_core::transcode::dv_processing::{
             dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
         };
-        if self.display_target.is_some() && destination != DvDestination::Hdr10 {
-            return Err("display targeting is HDR10-only".into());
+        if self
+            .display_target
+            .is_some_and(|target| target.is_sdr() != (destination == DvDestination::Sdr))
+            || destination == DvDestination::Profile81 && self.display_target.is_some()
+        {
+            return Err("display target and output grade differ".into());
         }
         let rpus: Vec<_> = observed
             .pictures
@@ -418,6 +422,10 @@ impl PrivateWindow {
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
         let bytes = match destination {
+            DvDestination::Sdr => {
+                plurx_core::transcode::dv_processing::dv_author_sdr_window(&self.encoded)
+                    .map_err(|error| error.to_string())?
+            }
             DvDestination::Hdr10 => match self.display_target {
                 Some(target) => {
                     let metadata = target
@@ -494,6 +502,7 @@ impl PrivateWindow {
             return Err("completed output stream membership differs".into());
         }
         let video = videos[0];
+        let sdr = destination == DvDestination::Sdr;
         if video.get("width").and_then(serde_json::Value::as_u64) != Some(u64::from(raster.0))
             || video.get("height").and_then(serde_json::Value::as_u64) != Some(u64::from(raster.1))
             || [
@@ -501,9 +510,9 @@ impl PrivateWindow {
                 ("profile", "Main 10"),
                 ("pix_fmt", "yuv420p10le"),
                 ("color_range", "tv"),
-                ("color_space", "bt2020nc"),
-                ("color_transfer", "smpte2084"),
-                ("color_primaries", "bt2020"),
+                ("color_space", if sdr { "bt709" } else { "bt2020nc" }),
+                ("color_transfer", if sdr { "bt709" } else { "smpte2084" }),
+                ("color_primaries", if sdr { "bt709" } else { "bt2020" }),
             ]
             .iter()
             .any(|(field, value)| {
@@ -705,7 +714,7 @@ impl RuntimeRecipe {
         let mut receipt = receipt.clone();
         receipt.bind_publication(&generation, shape.clone()).ok()?;
         let report = receipt
-            .hdr10_effective_report(
+            .effective_report(
                 &plurx_core::transcode::dv_processing::DvProductionRegistry,
                 plan,
                 &generation,
@@ -909,10 +918,13 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        if display_target.is_some()
-            && self.destination != plurx_core::transcode::dv_processing::DvDestination::Hdr10
+        use plurx_core::transcode::dv_processing::DvDestination;
+        if display_target
+            .is_some_and(|target| target.is_sdr() != (self.destination == DvDestination::Sdr))
+            || self.destination == DvDestination::Profile81 && display_target.is_some()
+            || self.destination == DvDestination::Sdr && display_target.is_none()
         {
-            return Err("display targeting is HDR10-only".into());
+            return Err("display target and output grade differ".into());
         }
         if episode_failed(&self.failure_episode) {
             return Err(
@@ -927,7 +939,7 @@ impl RuntimeRecipe {
             };
         // Refuse missing/contradictory source facts before spending an encoder
         // window; the exact same policy is consumed again at final authoring.
-        if let Some(target) = display_target {
+        if let Some(target) = display_target.filter(|target| !target.is_sdr()) {
             target
                 .output_metadata(source_mastering)
                 .map_err(|error| error.to_string())?;
@@ -965,10 +977,13 @@ impl RuntimeRecipe {
             let execution =
                 TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
                     .map_err(|e| e.to_string())?;
-            let output = plan
+            let mut output = plan
                 .completed_reconstructed_output(self.encoder)
                 .ok_or("unsupported reconstructed output encoder")?
                 .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
+            if self.destination == DvDestination::Sdr {
+                output = output.with_sdr_output();
+            }
             let raster = plan
                 .output_contract()
                 .effective_width()

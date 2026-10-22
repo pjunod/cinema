@@ -216,3 +216,14 @@ test('current display-target mapping operation objects retain the accepted HDR10
     assert.equal(context.playerEffectiveProcessing(context.PLAYER),null);
   }
 });
+
+
+test('SDR-E uses only the current typed 100-nit conversion report and clears on seek',()=>{
+  const context=setup(); const p=context.PLAYER;
+  p.deliveredRange='sdr'; p.effectiveProcessing={...report(),hdr10_enhanced:false,sdr_processed:true,
+    applied_operations:['RpuColorConversion','TargetMapping','Bt709Gamma24Conversion',{DisplayTargetMapping:{nits:100}}]};
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, L1 only/);
+  p.effectiveProcessing.applied_operations.pop(); assert.equal(badge(context).arrow,'SDR');
+  p.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:100}});
+  context.clearEffectiveProcessing(p); assert.equal(badge(context).arrow,'SDR');
+});

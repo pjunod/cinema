@@ -1816,8 +1816,8 @@ pub use dvh1::validate_rolling_dvh1_fragment;
 #[path = "fmp4/hdr10_index.rs"]
 mod hdr10_index;
 pub use hdr10_index::{
-    normalize_indexed_hdr10_metadata, Hdr10IndexMetadata, Hdr10OutputMetadata,
-    HDR10_INDEX_METADATA_REVISION,
+    normalize_indexed_hdr10_metadata, strip_sdr_hdr_fragment, strip_sdr_hdr_init,
+    Hdr10IndexMetadata, Hdr10OutputMetadata, HDR10_INDEX_METADATA_REVISION,
 };
 
 /// Promote an init from captured inputs — the planned generation's path.
@@ -2609,7 +2609,10 @@ pub fn hevc_hdr10_sample_entry_facts(init: &Init) -> Result<HevcHdr10SampleEntry
 
 /// Processed SDR uses BT.709 signalling (1/1/1); the pixel EOTF is gamma 2.4.
 /// There is no distinct H.273 gamma-2.4 transfer code.
-pub fn hevc_processed_sample_entry_facts(init: &Init, sdr: bool) -> Result<HevcHdr10SampleEntryFacts, Fmp4Error> {
+pub fn hevc_processed_sample_entry_facts(
+    init: &Init,
+    sdr: bool,
+) -> Result<HevcHdr10SampleEntryFacts, Fmp4Error> {
     validate_hevc_decoder_configuration(init)?;
     let video = init
         .video()

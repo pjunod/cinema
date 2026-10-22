@@ -354,7 +354,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
-      <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E</h2><p>Per-shot L1 mapping for the viewer's reported peak. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
+      <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E / SDR</h2><p>Per-shot L1 mapping for the viewer's reported HDR peak or explicit SDR capability. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
@@ -583,8 +583,8 @@ async function saveJellyfinCompatibility(btn){
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 function dolbyVisionHdrProcessingCard(settings,readiness){
-  return setCard(`${cardHead("Dolby Vision for HDR output","Use supported Dolby Vision picture information when delivering HDR.","")}
-    ${togRow("dv-hdr-processing","Process Dolby Vision for HDR output","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
+  return setCard(`${cardHead("Dolby Vision processing","Use supported Dolby Vision picture information when delivering HDR or display-targeted SDR.","")}
+    ${togRow("dv-hdr-processing","Process Dolby Vision processing","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
     <p class="hint">New playback attempts supported Dolby Vision processing when the worker has the required tools and resources. Unsupported sources or processing failures use compatible playback. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_backend_reference","Qualified backend and reference","Validate HDR output against an independent reference.")}
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_encoder_matrix","Production encoder matrix","Test processing with the encoders used by playback workers.")}
@@ -698,13 +698,13 @@ function subtitleTranslationCard(){
 }
 
 function displayTargetHdr10Card(settings,readiness){
-  return setCard(`${cardHead("Display-targeted HDR10-E","Map per-shot L1 metadata to a supported display bucket. L1 only: creative trims are not applied; displays may still apply their own tone mapping.")}
-    ${togRow("dv-display-target","Display-targeted HDR10-E","Default off. Applies to new HDR10-E sessions; unknown display peaks and ineligible titles keep the master grade.",!!settings.dolby_vision_display_target)}
+  return setCard(`${cardHead("Display-targeted HDR10-E / SDR","Map per-shot L1 metadata to a supported display bucket. L1 only: creative trims are not applied; displays may still apply their own tone mapping.")}
+    ${togRow("dv-display-target","Display-targeted HDR10-E / SDR","Default off. New HDR10-E sessions use a supported peak; explicit SDR displays use 100-nit BT.709 gamma 2.4. Unknown HDR peaks keep the master grade; ineligible SDR titles keep ordinary tone mapping.",!!settings.dolby_vision_display_target)}
     ${devReq(readiness,"dolby_vision_display_target","dv_target_helper","Helper installed and HDR10-E enabled","Readings describe this node and never disable this switch or its Save.")}
     ${devReq(readiness,"dolby_vision_display_target","dv_target_peak","Client peak reports","Platform and viewer reports select the same bucket; the source is attribution only.")}
-    ${devReq(readiness,"dolby_vision_display_target","dv_target_scan","Complete-title L1 scan","A whole title must have valid L1; missing or unknown facts keep the master grade.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_scan","Complete-title L1 scan","A whole title must have valid L1; missing facts keep the existing HDR master or ordinary SDR route.")}
     ${devReq(readiness,"dolby_vision_display_target","dv_target_cache","Bucket storage on this node","Targeted playback renders live. Pre-encodes and retained VOD stay master-only. Private roots retain existing reader and reservation fences.")}
-    ${devGraduation("output metadata, live delivery and named physical HDR display qualification pass with truthful L1-only reporting.","the permanent targeting switch moves to Playback, preserving the saved choice.")}
+    ${devGraduation("output metadata, live delivery and named physical HDR and SDR display qualification pass with truthful L1-only reporting.","the permanent targeting switch moves to Playback, preserving the saved choice.")}
     <div class="err" id="dv-display-target-error" role="alert"></div>${setCardFoot("saveDisplayTargetHdr10")}`,{id:"dv-display-target-card"});
 }
 async function saveDisplayTargetHdr10(btn){
