@@ -7,6 +7,7 @@ a document to this folder.
 
 | File | Answers | |
 |---|---|---|
+| [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
 | [EFFORT-WEB-STATIC-CONTRACTS.md](EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |
