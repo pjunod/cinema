@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "archive": "glslang-5ed4003a18a10a9d1bd7e43aaf1664499abffa83.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "5ed4003a18a10a9d1bd7e43aaf1664499abffa83",
+      "role": "glslang",
+      "sha256": "66ada8e61f1bd59faaddeff2f047d139fb6cb60ac17d7fcecaebe27a169ecb2f",
+      "url": "https://codeload.github.com/KhronosGroup/glslang/tar.gz/5ed4003a18a10a9d1bd7e43aaf1664499abffa83"
+    },
+    {
+      "archive": "spirv-tools-c1cb30bb04e2bf911755a40df1242cc6e3d83e26.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "c1cb30bb04e2bf911755a40df1242cc6e3d83e26",
+      "role": "spirv-tools",
+      "sha256": "469f0e1221354803d7c81deb334c172a681826adb11471b36ada5a77cf53ad45",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/c1cb30bb04e2bf911755a40df1242cc6e3d83e26"
+    },
+    {
+      "archive": "spirv-headers-ad9184e76a66b1001c29db9b0a3e87f646c64de0.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "ad9184e76a66b1001c29db9b0a3e87f646c64de0",
+      "role": "spirv-headers",
+      "sha256": "b5b7eba62453eb8c6f6a5fbf7155b71cde693bafe9cd5f03b79ed8c714816afe",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/ad9184e76a66b1001c29db9b0a3e87f646c64de0"
+    },
+    {
+      "archive": "vulkan-headers-v1.4.355.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "v1.4.355",
+      "role": "vulkan-headers",
+      "sha256": "0820d86608b1f94bb84f8f7b39c6e190c4397d5cd967d60c10fb7df8351ba475",
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/v1.4.355"
+    },
+    {
+      "archive": "mvk-spirv-cross-0a88b2d5c08708d45692b7096a0a84e7bfae366c.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "0a88b2d5c08708d45692b7096a0a84e7bfae366c",
+      "role": "mvk-spirv-cross",
+      "sha256": "20df32bfe466a9919219762d76235ab64f53fb4344d07383886b05783680570c",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Cross/tar.gz/0a88b2d5c08708d45692b7096a0a84e7bfae366c"
+    },
+    {
+      "archive": "mvk-spirv-headers-bab63ff679c41eb75fc67dac76e1dc44426101e1.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "bab63ff679c41eb75fc67dac76e1dc44426101e1",
+      "role": "mvk-spirv-headers",
+      "sha256": "dc7294017073c50be0f880d637add583bfffe5b9f9ee1f5de6e04eae8509da1e",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/bab63ff679c41eb75fc67dac76e1dc44426101e1"
+    },
+    {
+      "archive": "mvk-spirv-tools-783d7033613cedaa7147d0700b517abc5c32312d.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "783d7033613cedaa7147d0700b517abc5c32312d",
+      "role": "mvk-spirv-tools",
+      "sha256": "e5d933754fdbf3b85e9022a9f3593ade1770fe7d273d0fe81157092c248aa095",
+      "url": "https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/783d7033613cedaa7147d0700b517abc5c32312d"
+    },
+    {
+      "archive": "mvk-volk-43c29e655cb8117fd9cfb65ad9cefe2d40965102.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "43c29e655cb8117fd9cfb65ad9cefe2d40965102",
+      "role": "mvk-volk",
+      "sha256": "ab1664d17dbad0d68c07cffe0dd973fd48cfbcfa63b5b004f7b70c335dad9051",
+      "url": "https://codeload.github.com/zeux/volk/tar.gz/43c29e655cb8117fd9cfb65ad9cefe2d40965102"
+    },
+    {
+      "archive": "mvk-vulkan-headers-088a00d81d1fc30ff77aacf31485871aebec7cb2.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "088a00d81d1fc30ff77aacf31485871aebec7cb2",
+      "role": "mvk-vulkan-headers",
+      "sha256": "ffb110888bb4f865550e7df686d36759424ebb27f3285a35f1d464f32ae60b46",
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/088a00d81d1fc30ff77aacf31485871aebec7cb2"
+    },
+    {
+      "archive": "mvk-vulkan-tools-682e42f7ae70a8fadf374199c02de737daa5c70d.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "682e42f7ae70a8fadf374199c02de737daa5c70d",
+      "role": "mvk-vulkan-tools",
+      "sha256": "9fbae6672c9a5c01ee0ea52b9b3102520e01777782da7797ba7d0c4ec6a32381",
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Tools/tar.gz/682e42f7ae70a8fadf374199c02de737daa5c70d"
+    },
+    {
+      "archive": "mvk-cereal-51cbda5f30e56c801c07fe3d3aba5d7fb9e6cca4.tar.gz",
+      "license_family": "BSD-3-Clause",
+      "revision": "51cbda5f30e56c801c07fe3d3aba5d7fb9e6cca4",
+      "role": "mvk-cereal",
+      "sha256": "26361b539fe50eee308b564faa2742166d2922a7ab0bd4870ac55708581228c8",
+      "url": "https://codeload.github.com/USCiLab/cereal/tar.gz/51cbda5f30e56c801c07fe3d3aba5d7fb9e6cca4"
+    },
+    {
+      "archive": "libplacebo-cee9b076.tar.gz",
+      "license_family": "LGPL-2.1-or-later",
+      "revision": "cee9b076f2c63104ccfd497fa79c39a867293ec4",
+      "role": "libplacebo",
+      "sha256": "6f8fa218cbafd8e5f50b8a82d918e1d8bbb92f9f980820bc0b34d92e9b79e484",
+      "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/cee9b076f2c63104ccfd497fa79c39a867293ec4"
+    },
+    {
+      "archive": "shaderc-d5f08ae5.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "d5f08ae5c5a9a45165578445cbd0f9adf0223448",
+      "role": "shaderc",
+      "sha256": "60256e43ae8ce73cd2b9d7d7ceaeabed4d79daf0d306fecf1f26bc7d61e68b16",
+      "url": "https://codeload.github.com/google/shaderc/tar.gz/d5f08ae5c5a9a45165578445cbd0f9adf0223448"
+    },
+    {
+      "archive": "MoltenVK-macos.tar",
+      "license_family": "Apache-2.0",
+      "revision": "v1.4.0",
+      "role": "moltenvk-binary",
+      "sha256": "f4feaf6a4988352de8e6d49874ccc1cd6a45021e3cb476e8531bef7ecc73e93a",
+      "url": "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.0/MoltenVK-macos.tar"
+    },
+    {
+      "archive": "MoltenVK-v1.4.0-source.tar.gz",
+      "license_family": "Apache-2.0",
+      "revision": "v1.4.0",
+      "role": "moltenvk-source",
+      "sha256": "fc74aef926ee3cd473fe260a93819c09fdc939bff669271a587e9ebaa43d4306",
+      "url": "https://codeload.github.com/KhronosGroup/MoltenVK/tar.gz/refs/tags/v1.4.0"
+    }
+  ]
+}

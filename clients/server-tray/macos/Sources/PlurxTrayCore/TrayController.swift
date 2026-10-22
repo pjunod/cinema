@@ -91,7 +91,7 @@ public final class TrayController {
         if let transaction = snapshot.activeTransaction {
             if case let .success(.update(update)) = await control.run(.updatesStatus(transaction: transaction)) {
                 snapshot.update = update
-                if update.state.isTerminal { environment?.showUpgrade(update) }
+                if update.state == .failed || update.state == .recoveryRequired { environment?.showUpgrade(update) }
             }
         }
         publish()
@@ -135,6 +135,10 @@ public final class TrayController {
             await upgrade(to: version)
         case .showUpgradeProgress:
             environment?.showUpgrade(snapshot.update)
+        case .showErrorDetails:
+            if let error = snapshot.lastError ?? snapshot.statusFailure?.message {
+                environment?.show(error: error)
+            }
         case .retryStatus:
             await refresh()
         case .quit:
@@ -299,7 +303,10 @@ public final class TrayController {
             report(failure)
         }
         publish()
-        environment?.showUpgrade(snapshot.update)
+        if let update = snapshot.update,
+           update.state.isInFlight || update.state == .failed || update.state == .recoveryRequired {
+            environment?.showUpgrade(update)
+        }
         await refresh()
     }
 
@@ -316,7 +323,10 @@ public final class TrayController {
             report(failure)
         }
         publish()
-        environment?.showUpgrade(snapshot.update)
+        if let update = snapshot.update,
+           update.state.isInFlight || update.state == .failed || update.state == .recoveryRequired {
+            environment?.showUpgrade(update)
+        }
     }
 }
 

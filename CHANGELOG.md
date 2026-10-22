@@ -19,6 +19,8 @@ bump may break compatibility and a **patch** bump never does.
   Title acquisition uses durable source/scanner generations, retains demand on
   scheduler preemption, suppresses manual cancellation, and yields its one-thread
   admitted child to runnable ordinary probes before releasing resources.
+- Web playback controls show the current presented resolution and quality mode,
+  with a brief quality-change notice that also works in fullscreen.
 
 - Native macOS menu-bar and optional Linux desktop controls show local server status, open the web interface and logs, start/stop/restart the server, and manage separate server and tray startup preferences. Named upgrades use authenticated GitHub release artifacts; production release trust and macOS signing must be provisioned before distribution.
 - Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
@@ -45,6 +47,68 @@ bump may break compatibility and a **patch** bump never does.
   content-encoding probe decorations, including repeated identical writes and
   manually cancelled generations. Only actual source changes or fresh ordinary
   probe publication invalidate it; identical ordinary reprobes still rotate.
+- All playback caches share one disk budget with reader-safe global eviction,
+  pre-write capacity reservations and a filesystem free-space reserve, preventing
+  completed renditions and concurrent producers from exhausting server disks.
+
+- Processed Dolby Vision Profile 8.1 playlists include the required HDR10
+  compatibility brand so Apple players can recognize the Dolby Vision enhancement.
+
+- macOS installation reports the blocking transaction and recovery command,
+  records source-upgrade failures, and can explicitly complete an interrupted
+  restoration after verifying the promoted runtime and candidate health.
+
+- Web playback automatically captures bounded frame-drop incidents with recent
+  frame, buffer, lifecycle and request evidence, respecting diagnostic-history
+  controls and retaining account-scoped local copies for investigation.
+
+- Processed Dolby Vision admission respects actual HLS support when clients
+  also advertise progressive DV; native web startup reads complete long-film
+  processing timelines without confusing them with small master playlists.
+
+- Dolby Vision FEL processing on Intel servers can use the independently
+  proved VAAPI output encoder when hardware selection prefers Quick Sync,
+  avoiding an unintended single-thread software encode and startup timeout.
+
+- Web playback counts delivered frame callbacks independently of suspicious
+  timestamps, preventing metadata diagnostics from retaining a buffering
+  overlay or triggering false stall recovery while the picture advances.
+
+- Apple TV movie and show rows keep complete posters, titles and metadata
+  visible while browsing. Library headings, search and the letter index scroll
+  with the results, leaving the compact tools available above them.
+
+- Web prepared quality switches reattach selected subtitles without cancelling
+  the pending quality request or sending a contradictory commit to the server.
+  Visible successors retain HLS failure recovery; established retries and
+  queued stall probes preserve their proper budgets and terminal diagnoses.
+
+- System settings separates Cinema and Jellyfin FFmpeg versions, shows concise
+  configured media capabilities and actual device bindings, and compares
+  representative decoding, processing and encoding work. Auto prefers working
+  hardware using real-media speed; collapsed diagnostics no longer poll.
+
+- Native Mac installs retain the complete patched Jellyfin media package,
+  including Metal reference-white support, static Vulkan/libplacebo, the
+  source parser and font authority. Known legacy media paths follow the
+  current runtime. Settings warns prominently about the wrong package,
+  missing hardware-specific features or failed execution probes, with a
+  separate build/execution matrix for Mac, Intel, AMD and NVIDIA hardware.
+
+- macOS source installation installs the pinned Rust toolchain when missing,
+  bootstrapping rustup through Homebrew and installing Homebrew if needed.
+  Existing toolchains are reused without a download.
+- Safari Play and Resume prepare the persistent media element during the user
+  gesture, before asynchronous stream readiness. Browser permission refusals
+  now stop recovery immediately and retain position and track choices for an
+  explicit retry instead of repeatedly reopening the same blocked stream.
+- macOS tray menus show a short error-details action and bound rendered row widths while retaining full text in dialogs, tooltips and accessibility. Successful GUI upgrades update status without opening a completion window.
+- Linux tray menus keep Docker startup details in the control window, bound long menu labels, and accept clicks after status refreshes when the panel fetches all D-Bus menu properties.
+
+
+- Linux tray installation accepts ordinary group-writable user desktop folders,
+  including existing hicolor icon directories, without changing permissions.
+  Desktop destinations are checked before staging or registering the tray.
 
 - Native desktop controllers embed the approved production update verification
   key instead of refusing all update checks with an empty trust-root list.
@@ -74,6 +138,7 @@ bump may break compatibility and a **patch** bump never does.
   Existing server running and startup choices are preserved.
 
 - Converted Profile 7 catalog starts can qualify reconstructed Profile 8.1 under FEL re-encode independently of the HDR-processing switch. The service carries an explicit processed destination on a finite PQ transcode, resolves its own encoded AAC audio, and checks the completed stream against one matching Main10/Profile 8 client capability entry. Native Dolby Vision copying is unchanged; refusals retain their reason and only the saved ordinary request can be a fallback. Remote descriptors retain the destination but do not acquire local execution authority.
+- Exact processed VOD predecessor reuse retains its existing reservation without requiring new throughput samples or missing qualification windows. A first pending same-node staged successor reconstructs current recipe/caps/audio inputs from its exact ledger predecessor's private provenance, under the admitted owner epoch; serialized descriptions alone still grant no execution authority. Replay, prepared-reader marking and cleanup retain the exact attached owner through asynchronous sealing, without mutating a same-id replacement. Unrelated graphs still require normal resource admission.
 - Browser startup keeps the requested transport intent when a decoder emits an unexplained pause before the current attachment presents. The original startup deadline remains active, and rejected Play calls retain their cause in diagnostics. Closing during a prepared quality switch drains both session handles through rollback and pending commit acceptance, including after the old decoder retires.
 - Closing an HDR10-E session preserves intentional cancellation through the processing helper and generation owner, so normal cleanup cannot blacklist the backend for the next play. Failed web session releases and failed quality recovery now retain diagnostics under the originating session without marking a replacement playback failed.
 - Web Auto keeps the current HDR10-E recipe through a matching quality-catalog refresh instead of requesting an ordinary HDR10 replacement. Leaving or reloading the page also releases its playback sessions immediately, so abandoned sessions do not hold processing capacity until the idle timeout.

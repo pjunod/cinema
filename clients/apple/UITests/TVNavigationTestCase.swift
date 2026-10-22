@@ -7,8 +7,8 @@ import UIKit
 class TVNavigationTestCase: XCTestCase {
     let remote = XCUIRemote.shared
 
-    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie", layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
-        let app = openSignIn(origin: origin, layout: layout)
+    func openLibrary(origin: String, presentation: String = "grid", collectionID: String = "movie", layout: ViewerLayoutChoice = .standard, posterSize: String? = nil) -> XCUIApplication {
+        let app = openSignIn(origin: origin, layout: layout, posterSize: posterSize)
         signInToFixture(in: app)
         let libraries = app.viewerTab("Libraries")
         XCTAssertTrue(libraries.waitForExistence(timeout: 15), app.debugDescription)
@@ -26,10 +26,11 @@ class TVNavigationTestCase: XCTestCase {
         return app
     }
 
-    func openSignIn(origin: String, layout: ViewerLayoutChoice = .standard) -> XCUIApplication {
+    func openSignIn(origin: String, layout: ViewerLayoutChoice = .standard, posterSize: String? = nil) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments += ["-plurx.layout", layout.rawValue]
+        if let posterSize { app.launchArguments += ["-plurx.posterSize", posterSize] }
         app.launch()
         let manual = app.buttons["Add server manually"]
         let change = app.buttons["Use a different server"]

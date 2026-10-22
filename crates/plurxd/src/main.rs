@@ -37,6 +37,7 @@ mod dv_disk;
 mod dv_segment;
 mod dvpipe;
 mod ffmpeg;
+mod ffmpeg_support;
 mod fontenv;
 mod fragindex;
 mod fragment_index_cluster;
@@ -57,6 +58,7 @@ mod online_subtitles;
 mod panics;
 mod pgs_overlay;
 mod pipeprobe;
+mod playback_cache;
 mod playback_control;
 mod playstart;
 mod process_control;
@@ -3006,23 +3008,14 @@ async fn probe_system(
         .await?;
     let hwaccel_pref = hwaccel_override.clone().unwrap_or(hwaccel_pref);
     seed_switch_settings(store).await?;
-    let optimization = match tokio::time::timeout(
-        std::time::Duration::from_secs(180),
-        transcoder_optimization::measure(&ffmpeg, &encoder_caps),
-    )
-    .await
+    // Representative comparisons run only on an explicit idle-node request.
+    // A saved receipt is reusable only for this executable/fixture/driver set.
+    let optimization = match transcoder_optimization::load(store, node_id, &ffmpeg, &encoder_caps)
+        .await
     {
-        Ok(Ok(report)) => {
-            if let Err(error) = transcoder_optimization::save(store, node_id, &report).await {
-                tracing::warn!(%error, "could not persist transcoder benchmark");
-            }
-            Some(report)
-        }
-        result => {
-            tracing::warn!(
-                ?result,
-                "transcoder benchmark unavailable; using validated encoder order"
-            );
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, "could not load representative transcode comparison; using validated hardware order");
             None
         }
     };
@@ -3092,6 +3085,17 @@ async fn probe_system(
     );
     system.hwaccel_override = hwaccel_override;
     system.transcoder_optimization = optimization;
+    let support = crate::ffmpeg_support::report(&system).await;
+    if !support.package_problems.is_empty()
+        || support.rows.iter().any(|row| row.required && !row.included)
+    {
+        tracing::error!(
+            executable = %support.executable,
+            package_problems = ?support.package_problems,
+            missing = ?support.rows.iter().filter(|row| row.required && !row.included).map(|row| (&row.label, &row.missing)).collect::<Vec<_>>(),
+            "FFmpeg does not satisfy this node's media support contract; see Settings > System"
+        );
+    }
     Ok((encoder_caps, system))
 }
 
@@ -3447,6 +3451,7 @@ fn spawn_background_loops(
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
+    tokio::spawn(std::sync::Arc::clone(&state.playback_cache).run(background_shutdown.clone()));
     // Fragment indexes are node-local for both storage backends. Validate one
     // bounded page here on every node; cluster leadership is neither required
     // nor sufficient to cover another node's sidecar.

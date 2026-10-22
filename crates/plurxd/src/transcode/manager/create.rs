@@ -1,3 +1,5 @@
+use crate::vodserve::StagedProcessedPredecessor;
+
 enum VodRecipeAttachment {
     Recovery {
         speculative: bool,
@@ -6,6 +8,8 @@ enum VodRecipeAttachment {
     FirstPreparation {
         owner: PreparedVodOwner,
         bootstrap: bool,
+        processed_predecessor: Option<StagedProcessedPredecessor>,
+        attachment_owner: Arc<std::sync::Mutex<Option<crate::vodserve::ResponseOwner>>>,
     },
 }
 
@@ -93,15 +97,21 @@ fn prepared_cached_recovery_recipe_matches(
 struct FirstPreparationCleanup {
     vod: Arc<crate::vodserve::VodServe>,
     session_id: String,
-    owner: Option<crate::vodserve::ResponseOwner>,
+    owner: Arc<std::sync::Mutex<Option<crate::vodserve::ResponseOwner>>>,
 }
 impl Drop for FirstPreparationCleanup {
     fn drop(&mut self) {
-        if let Some(owner) = self.owner.take() {
+        if let Some(owner) = self.owner.lock().expect("first preparation owner").take() {
             let vod = self.vod.clone();
             let session_id = self.session_id.clone();
             tokio::spawn(async move {
                 vod.end_for_owner(&session_id, &owner).await;
+                #[cfg(all(test, target_os = "linux"))]
+                TranscodeManager::processed_preparation_test_boundary(
+                    &session_id,
+                    "cleanup-complete",
+                )
+                .await;
             });
         }
     }
@@ -746,7 +756,10 @@ impl TranscodeManager {
                             .and_then(|context| context.retained_output.as_ref()),
                         info.retained_output.as_ref(),
                     ) {
-                        return Err(vod_refusal_error("retained_artifact_unavailable", "the recovered presentation does not own the exact issued retained artifact"));
+                        return Err(vod_refusal_error(
+                            "retained_artifact_unavailable",
+                            "the recovered presentation does not own the exact issued retained artifact",
+                        ));
                     }
                     if let Some(admission) = serving_admission {
                         self.require_cluster_serving_authority(admission)?;
@@ -1476,15 +1489,10 @@ impl TranscodeManager {
                     }
                 }
             };
-            if root.reused_parent.is_some() {
-                tokio::time::timeout_at(
-                    deadline,
-                    self.vod
-                        .refresh_processed_root(&mut root, request.start_seconds),
-                )
-                .await
-                .map_err(|_| "processed owner refresh exceeded its admitted deadline")??;
-            }
+            // Exact-root reuse retains already admitted capacity, not a claim
+            // that this producer can sustain a new graph. Idle/slow/complete
+            // roots need no extra private windows or throughput qualification.
+            // Attachment rechecks the exact live parent and reservation.
             let encoding = &mut root.encoding;
             let Some(runtime) = encoding.dv_runtime.as_ref().cloned() else {
                 return Err("the processed trial has no processing runtime".into());
@@ -2596,7 +2604,7 @@ impl TranscodeManager {
             active_production: std::sync::Mutex::new(
                 crate::vodencode::ActiveProductionWindow::default(),
             ),
-            processed_samplers: std::sync::Mutex::new(Vec::new()),
+
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
@@ -2893,7 +2901,6 @@ impl TranscodeManager {
         recovery: Option<&SessionRecoveryIdentity>,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
-        let (_, destination, _) = req.dv_processing_route()?;
         let recovery = recovery.ok_or("processed candidate requires typed recovery identity")?;
         let prepared = context
             .prepared_processing
@@ -2909,6 +2916,154 @@ impl TranscodeManager {
                     .map_err(|error| vod_refusal_error("candidate_recipe_changed", error))?,
             )
             .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+        self.validate_processed_root(req, context, file, &prepared)
+            .await?;
+        Ok(prepared)
+    }
+
+    /// Rebuild descriptive inputs only under a verified first-preparation
+    /// expectation, borrowing custody from its exact process-local predecessor.
+    /// This does not relax generic serialized catalog restoration.
+    async fn restore_staged_processed_root(
+        &self,
+        remote: &mut crate::media_sessions::RemoteStartRequest,
+        predecessor: &StagedProcessedPredecessor,
+        deadline: Instant,
+    ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (remote, predecessor, deadline);
+            Err("processed staged roots require the local processing owner".into())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let req = &remote.request;
+            let catalog = remote
+                .candidate_catalog
+                .as_ref()
+                .ok_or("processed catalog missing")?;
+            let selected = &catalog.candidate;
+            if remote.incarnation_id != predecessor.successor_incarnation_id
+                || req.request_id.as_deref() != Some(remote.incarnation_id.as_str())
+                || remote.principal.local_user_id().is_none()
+                || req.previous_session_id.is_some()
+                || req.presentation != Presentation::Vod
+                || req.continuous_media.is_some()
+                || req.subtitle_burn.is_some()
+                || req.dv_processing_destination.is_none()
+                || remote.candidate_id != Some(selected.id)
+                || !selected.identity_matches()
+            {
+                return Err("processed staged identity changed".into());
+            }
+            let current = self
+                .store
+                .media_session_route_by_incarnation(&predecessor.incarnation_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("processed predecessor missing")?;
+            if current.session_id != predecessor.session_id
+                || current.owner_node_id != predecessor.owner_node_id
+                || current.owner_epoch != predecessor.owner_epoch
+                || current.principal != remote.principal
+                || current.playback_id != req.playback_id
+                || current.state != "active"
+                || current.lease_expires_at_ms <= crate::media_sessions::unix_ms()
+                || self.cache_location().map(|(_, node)| node)
+                    != Some(predecessor.owner_node_id.as_str())
+            {
+                return Err("processed predecessor owner changed".into());
+            }
+            let (seed, root) = self
+                .vod
+                .capture_staged_processed_root(
+                    req,
+                    predecessor,
+                    &principal_supersession_scope(&remote.principal),
+                    deadline,
+                )
+                .await
+                .ok_or("exact processed predecessor unavailable")?;
+            let planning = self
+                .store
+                .playback_planning_snapshot(req.file_id, &QUALITY_PLANNING_KEYS)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("processed source missing")?;
+            let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+            if binding != seed.binding
+                || binding != catalog.binding
+                || planning.file.size != remote.source_size
+                || planning.file.mtime != remote.source_mtime
+                || selected.id != seed.selected.id
+                || selected.recipe_digest != seed.selected.recipe_digest
+            {
+                return Err("processed staged source or recipe changed".into());
+            }
+            let mut query = crate::media_pool::QualityCatalogRequest {
+                file_id: req.file_id,
+                source_size: remote.source_size,
+                source_mtime: remote.source_mtime,
+                caps: catalog.caps.clone(),
+                audio_index: req.audio_index,
+                audio_offset_ms: req.audio_offset_ms,
+                audio_claim: req.audio_claim.clone(),
+                audio_delivery: req.audio_delivery.clone(),
+                subtitle_burn: req.subtitle_burn,
+                presentation: req.presentation,
+                // Only original reviewed Copy provenance crosses from the seed.
+                copy_contract: seed.query.copy_contract,
+            };
+            query.validate().map_err(|error| format!("{error:?}"))?;
+            if let Some(decoder) = remote.decoder_caps.as_ref() {
+                query.caps.video = decoder.device_caps().video;
+                query.validate().map_err(|error| format!("{error:?}"))?;
+            }
+            if query.caps.legacy_blanket_dolby_vision != seed.caps.legacy_blanket_dolby_vision
+                || serde_json::to_value(&query.caps).map_err(|error| error.to_string())?
+                    != serde_json::to_value(&seed.caps).map_err(|error| error.to_string())?
+            {
+                return Err("processed staged decoder scope changed".into());
+            }
+            let projected = Self::processed_catalog_query(&planning, &query)
+                .ok_or("processed staged audio changed")?;
+            let scope = self
+                .processed_hint_key(&planning, &query)
+                .ok_or("processed staged scope unavailable")?;
+            if root.reuse_scope != Some(scope)
+                || self.processed_hint_key(&planning, &seed.query) != Some(scope)
+                || req.audio_claim != projected.audio_claim
+                || projected.audio_index != req.audio_index
+                || projected.audio_offset_ms != req.audio_offset_ms
+            {
+                return Err("processed staged immutable scope changed".into());
+            }
+            let mut file = planning.file.clone();
+            file.audio_offset_ms = projected.audio_offset_ms;
+            let mut context = Self::candidate_context(selected);
+            context.catalog_query = Some(query.clone());
+            context.canonical_caps = Some(query.caps);
+            context.planning_binding = Some(binding);
+            context.planning_snapshot = Some(Arc::new(planning));
+            context.owner_node_id = Some(predecessor.owner_node_id.clone());
+            self.validate_processed_root(req, &context, &file, &root)
+                .await?;
+            remote.request.candidate_context = Some(Box::new(context));
+            Ok(root)
+        }
+    }
+
+    /// Shared correctness validation for fresh one-shot qualification and an
+    /// exact staged predecessor. Catalog speed/ranking observations do not
+    /// decide whether already admitted physical capacity can be retained.
+    async fn validate_processed_root(
+        &self,
+        req: &SessionRequest,
+        context: &CandidateExecutionContext,
+        file: &plurx_core::domain::MediaFile,
+        prepared: &crate::vodserve::PreparedRootAdmission,
+    ) -> Result<(), String> {
+        let (_, destination, _) = req.dv_processing_route()?;
         let binding = context
             .planning_binding
             .as_ref()
@@ -2971,7 +3126,30 @@ impl TranscodeManager {
                 != context.candidate_id
             || context.owner_node_id.as_deref() != self.cache_location().map(|(_, node)| node)
             || req.continuous_media.is_some()
-            || !context.selected_candidate.playable()
+            || req.subtitle_burn.is_some()
+            || !req.hdr10
+            || context.normalized_geometry != prepared.encoding.options.normalized_geometry
+            || context.profile != prepared.encoding.options.auto_quality_rate_profile
+            || !context.selected_candidate.decoder_compatible
+            || !context.selected_candidate.processed_hdr10
+            || context.selected_candidate.route
+                != plurx_core::playback::candidate::CandidateRoute::Encode
+            || context.selected_candidate.planned_codec.as_deref() != Some("hevc")
+            || context.selected_candidate.grade != OutputGrade::Hdr10
+            || context.selected_candidate.width
+                != prepared
+                    .encoding
+                    .plan
+                    .output_contract()
+                    .effective_width()
+                    .unwrap_or(0)
+            || context.selected_candidate.height
+                != prepared
+                    .encoding
+                    .plan
+                    .output_contract()
+                    .effective_height()
+                    .unwrap_or(0)
             || context.selected_candidate.id != context.candidate_id
             || context.selected_candidate.recipe_digest != actual
             || i64::from(context.selected_candidate.target_height)
@@ -2999,7 +3177,7 @@ impl TranscodeManager {
                 "processed source changed",
             ));
         }
-        Ok(prepared)
+        Ok(())
     }
 
     /// The only public HLS presentation: immutable VOD or a typed refusal.
@@ -3872,6 +4050,7 @@ impl TranscodeManager {
                 if incoming != current {
                     return false;
                 }
+
                 // Derive purpose from the exact durable predecessor admitted by
                 // the preparation ledger, on both local and remote first primes.
                 // An Auto incumbent's voluntary proposals remain nonpreemptive.
@@ -3881,6 +4060,29 @@ impl TranscodeManager {
                 .is_ok_and(|previous| prepared_manual_auto_bootstrap(&previous, &current_recipe));
                 let pending = response["prepared_output_capture_pending"] == true;
                 let complete = response["prepared_output_capture_complete"] == true;
+                // Older callers without an admitted epoch keep ordinary
+                // recovery, but cannot acquire this new private authority.
+                let processed_predecessor = (pending
+                    && initial.incarnation_id == route.incarnation_id
+                    && initial.principal == route.principal
+                    && initial.request.playback_id == route.playback_id
+                    && initial.request.request_id.as_deref()
+                        == Some(route.incarnation_id.as_str())
+                    && expected_predecessor_owner_epoch == Some(predecessor.owner_epoch)
+                    && predecessor.owner_node_id == owner.node_id
+                    && self.cache_location().map(|(_, node)| node) == Some(owner.node_id.as_str())
+                    && predecessor.principal == route.principal
+                    && predecessor.playback_id == route.playback_id
+                    && predecessor.state == "active"
+                    && predecessor.lease_expires_at_ms > now)
+                    .then(|| StagedProcessedPredecessor {
+                        session_id: predecessor.session_id.clone(),
+                        incarnation_id: predecessor.incarnation_id.clone(),
+                        owner_node_id: predecessor.owner_node_id.clone(),
+                        owner_epoch: predecessor.owner_epoch,
+                        successor_session_id: session_id.to_owned(),
+                        successor_incarnation_id: route.incarnation_id.clone(),
+                    });
                 if !pending && !complete {
                     return self
                         .resurrect_vod_from_recipe_before(
@@ -3896,7 +4098,8 @@ impl TranscodeManager {
                         )
                         .await;
                 }
-                if let Some(facts) = self.vod.hls_facts(session_id).await {
+                let existing_facts = self.vod.hls_facts(session_id).await;
+                if let Some(facts) = existing_facts.as_ref() {
                     if !self
                         .vod
                         .prepared_owner_matches(
@@ -3909,9 +4112,21 @@ impl TranscodeManager {
                         return false;
                     }
                 }
+                let cleanup = FirstPreparationCleanup {
+                    vod: self.vod.clone(),
+                    session_id: session_id.to_owned(),
+                    owner: Arc::new(std::sync::Mutex::new(
+                        existing_facts
+                            .as_ref()
+                            .filter(|_| pending)
+                            .map(|facts| facts.response_owner.clone()),
+                    )),
+                };
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "replay-owner").await;
                 // A retry after an interrupted first attempt seals the existing actual
                 // attachment, including None; it never upgrades/replaces that choice.
-                if self.vod.hls_facts(session_id).await.is_none()
+                if existing_facts.is_none()
                     && !self
                         .resurrect_vod_from_recipe_before(
                             &route.recipe_json,
@@ -3923,6 +4138,8 @@ impl TranscodeManager {
                                 VodRecipeAttachment::FirstPreparation {
                                     owner: owner.clone(),
                                     bootstrap,
+                                    processed_predecessor,
+                                    attachment_owner: Arc::clone(&cleanup.owner),
                                 }
                             } else {
                                 VodRecipeAttachment::Recovery {
@@ -3935,35 +4152,47 @@ impl TranscodeManager {
                 {
                     return false;
                 }
-                let Some(facts) = self.vod.hls_facts(session_id).await else {
+                let Some(facts) = (match existing_facts {
+                    Some(facts) => Some(facts),
+                    None => self.vod.hls_facts(session_id).await,
+                }) else {
                     return false;
                 };
-                let mut cleanup = FirstPreparationCleanup {
-                    vod: self.vod.clone(),
-                    session_id: session_id.to_owned(),
-                    owner: pending.then(|| facts.response_owner.clone()),
-                };
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "facts").await;
+                // Replay retains the initially checked owner; a new attachment
+                // installs its exact owner synchronously at registry commit.
+                // Never acquire cleanup authority from a later by-id lookup.
+                let captured_owner = cleanup
+                    .owner
+                    .lock()
+                    .expect("first preparation owner")
+                    .clone();
+                let preparation_owner = captured_owner.as_ref().unwrap_or(&facts.response_owner);
                 let Some(_owner_guard) = self
                     .vod
-                    .lock_preparation_owner(
-                        session_id,
-                        &facts.response_owner,
-                        &route.incarnation_id,
-                    )
+                    .lock_preparation_owner(session_id, preparation_owner, &route.incarnation_id)
                     .await
                 else {
                     return false;
                 };
                 // Replayed first primes can already own an attachment. Refresh
                 // its exact consumer purpose after checking the same owner.
-                self.vod
-                    .mark_prepared_incarnation_with_bootstrap(
+                if !self
+                    .vod
+                    .mark_prepared_incarnation_for_owner(
                         session_id,
+                        preparation_owner,
                         &route.incarnation_id,
                         bootstrap,
                     )
-                    .await;
-                let output = facts.response_owner.retained_output_facts();
+                    .await
+                {
+                    return false;
+                }
+                let output = preparation_owner.retained_output_facts();
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "before-seal").await;
                 let seal = plurx_core::store::PreparedOutputSeal {
                     incarnation_id: route.incarnation_id,
                     session_id: session_id.to_owned(),
@@ -3994,7 +4223,13 @@ impl TranscodeManager {
                     return false;
                 }
                 trace_prepared_capture(&seal, Some(true), true);
-                cleanup.owner = None;
+                #[cfg(all(test, target_os = "linux"))]
+                Self::processed_preparation_test_boundary(session_id, "sealed").await;
+                cleanup
+                    .owner
+                    .lock()
+                    .expect("first preparation owner")
+                    .take();
                 true
             };
             tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
@@ -4050,16 +4285,30 @@ impl TranscodeManager {
         deadline: Instant,
         purpose: VodRecipeAttachment,
     ) -> bool {
-        let (speculative, first_owner, bootstrap) = match purpose {
-            VodRecipeAttachment::Recovery {
-                speculative,
-                bootstrap,
-            } => (speculative, None, bootstrap),
-            VodRecipeAttachment::FirstPreparation { owner, bootstrap } => {
-                (true, Some(owner), bootstrap)
-            }
-        };
+        let (speculative, first_owner, bootstrap, processed_predecessor, attachment_owner) =
+            match purpose {
+                VodRecipeAttachment::Recovery {
+                    speculative,
+                    bootstrap,
+                } => (speculative, None, bootstrap, None, None),
+                VodRecipeAttachment::FirstPreparation {
+                    owner,
+                    bootstrap,
+                    processed_predecessor,
+                    attachment_owner,
+                } => (
+                    true,
+                    Some(owner),
+                    bootstrap,
+                    processed_predecessor,
+                    Some(attachment_owner),
+                ),
+            };
         let first_capture = first_owner.is_some();
+        // Recovery also needs an exact commit receipt: a by-id read after
+        // create can observe an unrelated replacement before marking/enqueue.
+        let attachment_owner =
+            attachment_owner.unwrap_or_else(|| Arc::new(std::sync::Mutex::new(None)));
         if Instant::now() >= deadline {
             return false;
         }
@@ -4077,36 +4326,55 @@ impl TranscodeManager {
             else {
                 return false;
             };
-            if self
-                .restore_candidate_context_with_deadline(
-                    &mut remote,
-                    tokio::time::Instant::from_std(deadline),
-                )
-                .await
-                .is_err()
-            {
-                return false;
-            }
-            // Only the first unattached pending attempt evaluates current source
-            // authority. Replay/recovery never refresh an immutable choice.
-            let eligible = if let Some(owner) = first_owner.as_ref() {
-                if let Some(state) = owner
-                    .source_authority
-                    .as_ref()
-                    .filter(|state| state.node_id == owner.node_id)
+            let processed = remote
+                .candidate_catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.candidate.processed_hdr10);
+            let root_admission = if processed {
+                let Some(predecessor) = processed_predecessor.as_ref() else {
+                    return false;
+                };
+                match self
+                    .restore_staged_processed_root(&mut remote, predecessor, deadline)
+                    .await
                 {
-                    crate::media_pool::prepared_vod_owner(
-                        state,
-                        &remote,
+                    Ok(root) => Some(root),
+                    Err(_) => return false,
+                }
+            } else {
+                if self
+                    .restore_candidate_context_with_deadline(
+                        &mut remote,
                         tokio::time::Instant::from_std(deadline),
                     )
                     .await
-                } else {
-                    None
+                    .is_err()
+                {
+                    return false;
                 }
-            } else {
                 None
             };
+            // Only the first unattached pending attempt evaluates current source
+            // authority. Replay/recovery never refresh an immutable choice.
+            let eligible =
+                if let Some(owner) = first_owner.as_ref().filter(|_| root_admission.is_none()) {
+                    if let Some(state) = owner
+                        .source_authority
+                        .as_ref()
+                        .filter(|state| state.node_id == owner.node_id)
+                    {
+                        crate::media_pool::prepared_vod_owner(
+                            state,
+                            &remote,
+                            tokio::time::Instant::from_std(deadline),
+                        )
+                        .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
             let mut req = remote.request;
             let fresh_reuse = first_owner.as_ref().is_some_and(|owner| {
                 req.candidate_context.as_mut().is_some_and(|context| {
@@ -4119,16 +4387,32 @@ impl TranscodeManager {
             let Ok(Some(settings)) = self.vod_settings(&req).await else {
                 return false;
             };
-            let Ok(Some(mut file)) = self.store.get_file(req.file_id).await else {
-                return false;
+            let mut file = if root_admission.is_some() {
+                let Some(snapshot) = req
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.planning_snapshot.as_ref())
+                else {
+                    return false;
+                };
+                snapshot.file.clone()
+            } else {
+                let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
+                    return false;
+                };
+                file
             };
             file.audio_offset_ms = if file.audio_streams.is_empty() {
                 0
             } else {
                 req.audio_offset_ms.clamp(-15_000, 15_000)
             };
-            let Ok(encoding) = self.prepare_vod_encoding(&req, &file).await else {
-                return false;
+            let encoding = match root_admission.as_ref() {
+                Some(root) => Some(Arc::clone(&root.encoding)),
+                None => match self.prepare_vod_encoding(&req, &file).await {
+                    Ok(encoding) => encoding,
+                    Err(_) => return false,
+                },
             };
             let Ok(soundtrack) = self
                 .prepare_vod_soundtrack(&req, &file, encoding.as_ref())
@@ -4139,7 +4423,7 @@ impl TranscodeManager {
             let Ok(companion) = self.prepare_vod_companion(&req, &file).await else {
                 return false;
             };
-            let measured_candidate = if first_capture {
+            let measured_candidate = if first_capture && root_admission.is_none() {
                 match self
                     .resolved_retained_candidate_binding(&req, &file, &encoding)
                     .await
@@ -4157,8 +4441,10 @@ impl TranscodeManager {
                 if let Some(soundtrack) = soundtrack.as_ref() {
                     soundtrack.mark_speculative();
                 }
-                if let Some(encoding) = encoding.as_ref() {
-                    encoding.mark_speculative();
+                if root_admission.is_none() {
+                    if let Some(encoding) = encoding.as_ref() {
+                        encoding.mark_speculative();
+                    }
                 }
             }
             let user_name = self
@@ -4181,24 +4467,27 @@ impl TranscodeManager {
             // First local preparations create the same complete output as a
             // normal start. Give the existing owned publication worker the
             // identical work after actual attachment; recovery never queues.
-            let output_enqueue = first_owner.as_ref().map(|owner| {
-                (
-                    OutputEnqueue {
-                        request: req.clone(),
-                        file: file.clone(),
-                        settings: settings.clone(),
-                        encoding: encoding.clone(),
-                        session_id: session_id.to_owned(),
-                        queued_at: Instant::now(),
-                    },
-                    owner.clone(),
-                )
-            });
+            let output_enqueue = first_owner
+                .as_ref()
+                .filter(|_| root_admission.is_none())
+                .map(|owner| {
+                    (
+                        OutputEnqueue {
+                            request: req.clone(),
+                            file: file.clone(),
+                            settings: settings.clone(),
+                            encoding: encoding.clone(),
+                            session_id: session_id.to_owned(),
+                            queued_at: Instant::now(),
+                        },
+                        owner.clone(),
+                    )
+                });
             match self
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
-                        root_admission: None,
+                        root_admission,
                         companion,
                         measured_candidate,
                         retained_capture: if fresh_reuse {
@@ -4223,30 +4512,45 @@ impl TranscodeManager {
                     crate::vodserve::VodReleaseFence::new(
                         Arc::clone(&release_gate.transition),
                         &release_gate.released,
-                    ),
+                    )
+                    .with_attachment_owner(Some(attachment_owner.as_ref())),
                 )
                 .await
             {
                 Ok(_) => {
-                    if let Some((work, owner)) = output_enqueue {
-                        if !release_gate.released.load(Acquire) {
-                            if let Some(facts) = self.vod.hls_facts(session_id).await {
-                                self.hand_off_prepared_output_enqueue(
-                                    work,
-                                    &owner,
-                                    &facts.response_owner,
-                                );
-                            }
-                        }
-                    }
+                    #[cfg(all(test, target_os = "linux"))]
+                    Self::processed_preparation_test_boundary(session_id, "attached").await;
+                    let Some(captured_owner) = attachment_owner
+                        .lock()
+                        .expect("first preparation owner")
+                        .clone()
+                    else {
+                        return false;
+                    };
                     if speculative {
-                        self.vod
-                            .mark_prepared_incarnation_with_bootstrap(
+                        if !self
+                            .vod
+                            .mark_prepared_incarnation_for_owner(
                                 session_id,
+                                &captured_owner,
                                 &remote.incarnation_id,
                                 bootstrap,
                             )
-                            .await;
+                            .await
+                        {
+                            return false;
+                        }
+                    } else if !self
+                        .vod
+                        .response_owner_is_live(session_id, &captured_owner)
+                        .await
+                    {
+                        return false;
+                    }
+                    if let Some((work, owner)) = output_enqueue {
+                        if !release_gate.released.load(Acquire) {
+                            self.hand_off_prepared_output_enqueue(work, &owner, &captured_owner);
+                        }
                     }
                     tracing::info!(
                         target: "plurxd::transcode",
@@ -4753,3 +5057,6 @@ pub(super) fn constrain_finite_vod_rate(
 
 #[cfg(test)]
 mod retained_recovery_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod processed_reuse_tests;

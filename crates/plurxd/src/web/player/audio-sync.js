@@ -100,8 +100,8 @@ async function setSub(index){
       {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
     return false;   // nothing changed, so nothing to remember
   }
-  const captionSerial=typeof translationSelectSource==="function"?translationSelectSource(me,index):(me.captionIntentSerial=(me.captionIntentSerial||0)+1);
-  const attachment=me.mediaAttachment,auth=typeof AUTH_GENERATION==="undefined"?null:AUTH_GENERATION;
+  if(typeof translationSelectSource==="function") translationSelectSource(me,index);
+  else me.captionIntentSerial=(me.captionIntentSerial||0)+1;
   const video=/** @type {HTMLVideoElement|null} */(document.getElementById("video"));
   const position=positionForPlaybackIntent(video,me);
   me.curSub=index;
@@ -122,11 +122,19 @@ async function setSub(index){
     // "off" also has to be a restart.
     return burnSub(index>=0?index:null);
   }
-  const v=video; if(!v) return;
+  notifyPlaybackControl();
+  return attachPlaybackSubtitle(video,me,index);
+}
+// Apply an existing subtitle choice to its current media element. A stream
+// handoff or offset change needs fresh rendition/track state without issuing
+// a viewer command that would supersede the handoff's reserved recipe.
+async function attachPlaybackSubtitle(v,me,index){
+  if(!v||!me||PLAYER!==me||me.curSub!==index||document.getElementById("video")!==v) return;
+  const captionSerial=me.captionIntentSerial;
+  const attachment=me.mediaAttachment,auth=typeof AUTH_GENERATION==="undefined"?null:AUTH_GENERATION;
   pbSyncSubIcon();
   clearSubs(v);
-  notifyPlaybackControl();
-  if(index<0){ me._subOff=null; return; }
+  if(!Number.isInteger(index)||index<0||me.burnedSub!=null){ me._subOff=null; return; }
   const off=me.offset||0;
   me._subOff=off;                       // set before awaiting: stops pbTick re-firing
   const s=(me.subs||[]).find(x=>x.index===index);

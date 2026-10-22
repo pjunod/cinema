@@ -303,7 +303,7 @@ const AUTHORITY_QUORUM_RETRY_MAX_DELAY: Duration = Duration::from_millis(899);
 const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
-const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+pub(super) const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
     "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
 const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
@@ -481,6 +481,10 @@ pub struct HiqliteAuthStore {
     cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
     watch_fences: Arc<super::watch_fence::WatchWriteFences>,
     pub(super) media_session_projection: Arc<std::sync::atomic::AtomicU8>,
+    /// Conformance observation slot for the chosen fenced insertion; shared
+    /// by clones of this handle, private to it. Contract-test builds only.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    pub(super) insertion_seam: super::hiqlite_publication::conformance::InsertionSeamSlot,
 }
 
 /// Cache activity is advisory recency, not ownership or completion. One
@@ -5206,6 +5210,8 @@ impl HiqliteAuthStore {
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
             watch_fences: Arc::new(super::watch_fence::WatchWriteFences::default()),
             media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            #[cfg(feature = "hiqlite-contract-tests")]
+            insertion_seam: Default::default(),
         }
     }
 

@@ -10,6 +10,11 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [FRAME-DROP-RECORDER.md](FRAME-DROP-RECORDER.md) | Automatic web incident capture, bounds, privacy, retrieval and attribution limits; production acceptance pending. | built |
+| [AVATAR-WEB-PLAYBACK-STATUS.md](AVATAR-WEB-PLAYBACK-STATUS.md) | Avatar Safari presentation faults, FEL encoder-selection root cause, physical evidence and review state. | open |
+| [Apple TV library row clipping](../apple-builds/1245-tvos-library-row-clipping.md) | Complete movie/show posters and metadata fit while browsing; the preamble scrolls and compact tools retain Back/Down focus. Physical Apple TV acceptance pending. | built |
+| [SYSTEM-SETTINGS-STATUS.md](SYSTEM-SETTINGS-STATUS.md) | Approved System layout, backend capability/package facts, representative comparison and source-bound rendering; Linux hardware acceptance remains open. | built |
+| [SAFARI-PLAYBACK-ACTIVATION.md](SAFARI-PLAYBACK-ACTIVATION.md) | Safari gesture-bound media preparation, immediate permission-refusal ownership, independent review and focused regression evidence, and pending physical acceptance. | open |
 | [Meridian source identity](../apple-builds/1195-meridian-source-identity.md) | Choosing another source from the Meridian panel opens it and focuses its tools; Apple native TV job limit 120 minutes. Physical Apple TV acceptance pending. | built |
 | [Retained Apple resume position](../apple-builds/1181-retain-resume-position.md) | Interrupted native resume seeks retry once; failed preparation, Retry and Close retain the saved destination. Physical iPad acceptance pending. | built |
 | [Restore Standard Apple layouts](../apple-builds/1178-restore-standard-apple.md) | Restores native iPad/Apple TV tabs and original TV Theater styling after Meridian changed Standard; existing themes stay unchanged. | built |

@@ -1,6 +1,18 @@
 use super::*;
 
 impl TranscodeManager {
+    /// The representative comparison uses the same resolved movie plan as
+    /// production, including the currently qualified native processing context.
+    pub(crate) fn representative_comparison_plan(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        probe: &str,
+    ) -> Result<ResolvedTranscode, String> {
+        self.resolve_movie_plan_from_probe(file, options, encoder, Some(probe))
+    }
+
     /// This node's output identity, for naming a transcode.
     pub(super) fn digest(&self) -> Option<PipelineDigest> {
         let cache = self.cache.as_ref()?;

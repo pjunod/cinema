@@ -33,7 +33,7 @@ and the passing reconciled-head lane are the qualification evidence.
    - `Regression-Test: crates/plurxd/src/http/hls/tests/chunk_06.rs::continuous_catalog_offers_only_rows_inside_the_avc_level_envelope`
 2. Paul deploys; after deployment, check Avatar on the Pixel shows the HDR10-E badge and FEL/RPU and Animals' fallback starts. No deployment or device result is claimed here.
 
-## B. FEL→Profile 8.1 for DV displays — draft PR #1211 (source owner: Sol; publication: coordinator)
+## B. FEL→Profile 8.1 for DV displays — merged PR #1211 (source owner: Sol; publication: coordinator)
 
 Original authored head `1eeb0542d` is preserved on preparation branch
 `codex/cinema-fel-p81-catalog`. Actual Pixel/main landing `e940b75b455e` is
@@ -50,8 +50,12 @@ reviewed DV provenance, then constructs the query after canonical track selectio
 using the same Progressive track/offset resolver as actual Copy reconciliation.
 P81 scope survives geometry/Encode normalization; original intent fingerprinting,
 strict admission equality and ordinary fallback remain unchanged. Corrected F2
-compilation/publication and the same independent reviewer's closure remain
-required; no approval yet.
+compilation/publication and the same independent reviewer's closure completed.
+The Linux-only F3 fixture correction also passed; no production contract was
+relaxed. PR #1211 merged as `9753284ef7ddf1ef4deb7c35a1116f56ace62068`,
+with fourteen source-bound positives, two old-behavior sensitivity controls
+and the complete required fast lane 5600 green. Deployment and Safari/Studio
+Display physical acceptance remain Paul's work, not a software-pass claim.
 
 **Retained evidence:** exact pre-integration `f931f603` formatting and all-target
 Clippy passed after repairing the baseline helper visibility and one range-style
@@ -88,12 +92,12 @@ to physical playback evidence. Final review can invalidate changed closures only
 - `chunk_06.rs::reviewed_catalog_ingress_keeps_p81_scope_through_encode_and_reselection`
   drives the shared production ingress/normalization helpers into qualification
   inputs and remembered-description lookup, including FEL-only, HDR, native,
-  numeric and disabled-policy cases. Written for F1; execution awaits review.
+  numeric and disabled-policy cases. F1 qualification passed.
 - `chunk_06.rs::ordinary_copy_catalog_audio_matches_reconciled_execution`
   compares production query and normalized/reconciled ordinary Copy tuples and
   recipe digests: both stale AAC directions, nondefault track, offset, native,
   DV-declined, failed optional preparation and legacy no-claim behavior. Written
-  for F2; execution and compile-compatible old-418 sensitivity await review.
+  for F2; positive execution and compile-compatible old-418 sensitivity passed.
 
 **Resolved design risk; still a review focus:** the original Encode-route/Copy-kind
 trial violated retained-kind/audio invariants. The accepted explicit optional
@@ -103,7 +107,7 @@ restore/successor/recovery/link paths, canonical encoded AAC and same-entry Safa
 Main10/Profile 8 raster/cadence/bitrate support; do not relax equality to make reuse
 work. Ordinary producers refuse serialized explicit processed destinations.
 
-**Preparation, not final review:** canonical Astra decision accepted the explicit
+**Reviewed implementation:** canonical Astra decision accepted the explicit
 destination and truthful encoded carrier. Source repairs the retained-kind/audio
 mismatch, FEL-only reuse scope and swallowed processing errors, and checks plan
 destination/height again at prepared admission and retained binding. Source tests
@@ -112,24 +116,18 @@ audio scope, same-entry completed client contract and original daemon indicators
 The complete independent review found F1 in production ingress, not in the
 retained wire/lease safety contract. The repair retains original intent ordering,
 ordinary fallback, query/destination equality and strict kind/audio binding.
-Corrected compilation, same-reviewer closure and remaining post-review execution
-determine readiness. The separate reservation-slot
+Corrected compilation, same-reviewer closure and post-review execution are
+complete for PR #1211. The separate reservation-slot
 incident and general remote processed requalification remain out of B scope.
 
 **Finish:**
-1. Compile and publish the corrected actual-main-reconciled source with pinned
-   formatting/all-target Clippy and a linked production daemon. The three
-   section-B regressions and old-main sensitivity already have independently
-   adopted receipts. Retain them where test/defect closures are unchanged;
-   no repeat merely for history or docs. The quick draft-paperwork
-   operations-test exception remains in effect.
-2. Close F2 in the existing independent frontier review (F1 conversion provenance
-   is accepted in source),
-   then run new/invalidated affected tests and the remaining fast lane once.
-   Retry only failed or genuinely invalidated checks, including sensitivity
-   only if its test/defect closure changed.
-3. Merge with the two daemon `Regression-Test:` lines.
-4. Device check after deploy: Safari plus Studio Display, Avatar from 10 minutes in, expecting FEL+RPU+DYN and "FEL: full enhancement layer reconstructed". Also check there is no stutter.
+1. Source, independent review, pinned compilation, affected qualification,
+   required fast lane and API merge are complete. Retain passing evidence;
+   history rebinding alone does not invalidate it. Ten regression anchors are
+   retained in the PR and landing message.
+2. Paul deploys. Device check after deploy: Safari plus Studio Display, Avatar
+   from 10 minutes in, expecting FEL+RPU+DYN and "FEL: full enhancement layer
+   reconstructed". Also check there is no stutter. This remains unverified here.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
@@ -227,6 +225,80 @@ PRs B–F (MDCV/CLL writer reusing `crates/plurx-core/src/fmp4/hdr10_index.rs`; 
 
 ## D. Small open items
 
-- **Pixel 11 direct play of Animals fails** with ExoPlayer 4003 `ERROR_CODE_DECODING_FAILED`. The file is HEVC Main10 L5.0 HDR10, 3840×2160, 15 Mb/s, 24/1 nominal. Get a device logcat (MediaCodec/c2 errors) and compare with a title that plays.
-- **Apple TV UI test overruns:** `testLiveFullscreenRevealMoreReportAndBackRetainSession` goes past its 3 minutes. It predates #1197; rerun it on the Mac simulator.
-- **A second processed session is refused** while the first holds the processing slot ("DV processing needs a GPU slot and 15 CPU threads that other work holds"). After an Auto replacement the successor may lose HDR10-E. Check whether successors should reuse the prepared processed root (`capture_processed_root`).
+- **Pixel diagnostic bounded closure:** on app 0.7.0/code 175 and Media3 1.10.1,
+  the coordinator observed Air (2023) render and advance 0:34–0:51 without a
+  PlaybackException, on actual HEVC+AAC processed HDR10-E/RPU delivery. Earlier
+  Animals/Uprising failures identify a Dolby E-AC3 audio `queueInputBuffer`
+  error (index 1), not a demonstrated HEVC decoder failure. Air's source is
+  E-AC3/Profile 5, but its delivered AAC makes it neither a passing direct-E-AC3
+  control nor proof of corrupt packets. No decoder source change is justified
+  by this comparison; broader direct-audio diagnosis remains separate.
+- **Apple TV simulator closure:** PR #1215 merged as `7a7d04c6` after full lane 5601 passed. The focused Live journey passed in 152.421 seconds under its original 180-second limit; four affected native cases passed. No physical Apple TV acceptance is claimed.
+- **Processed successor reservation:** the exact-root repair in PR #1225 has independent review and local contract qualification below. It reuses an eligible prepared graph without borrowing another reservation; a different recipe or independent job still requires normal admission. Paul owns deployment and live verification.
+
+### Processed-root repair
+
+Owner: Sol (source), coordinator (native compilation, publication and merge).
+
+`codex/cinema-processed-successor-reuse` removes the leftover throughput-only
+refresh/readers from exact-root reuse, retaining source/executable, full recipe,
+principal/playback, actual rendition/reservation and final attachment fences.
+The first pending staged successor can capture only its ledger-named local
+predecessor under the caller's admitted epoch. A narrow, nonserialized session
+seed preserves original Copy provenance; current planning/caps/decoder/audio
+and scope are reconstructed and checked against the actual encoding. Ordinary
+serialized restore still refuses processed descriptions. Changed recipes,
+destinations, heights or independent plays do not borrow capacity.
+
+Actual-owner cleanup is armed synchronously with registry attachment, before
+marking/facts/seal awaits. The predecessor is never retired early; normal durable
+seal/commit CAS still decides activation. Shared encoding priority is not changed
+by a speculative successor. No new render, speed receipt or sustainable bit is
+invented to admit an already-owned graph.
+
+Current source includes lifecycle regression controls for both processed
+destinations with a checked HEVC/PQ window, private-context loss on serialization,
+the manager's mixed GPU/CPU saturation, missing admitted epoch, input/owner drift,
+replay, two successive durable commit CAS/parent retirements and exclusive-worker
+reap. Deterministic test-only pauses cover cancellation after attachment, facts,
+before seal and after seal, plus predecessor epoch motion before the frozen seal.
+Controlled completed-window publication binds reporting to the actual successor
+owner: no HDR10-E is reported from descriptor selection alone; reconstructed P81
+retains its distinct carrier/FEL semantics. These controls do not run the renderer
+or establish Dolby pixel accuracy. Ordinary serialized recovery stays refused.
+
+**Local qualification complete:** exact current-base source `a857f488b` passed
+pinned Rust 1.97.1 formatting, daemon all-target Clippy with `-D warnings`, and
+fresh Cargo JSON-selected test linkage. All fifteen focused contracts have a
+valid source-bound pass: eight staged cases on `a857f488b`, the no-speed reuse
+case on `748761ed`, and six unchanged positives on `03cbfe62c`. Each executed
+case matched exactly once, returned actual exit 0 and counted 1 passed / 0 failed /
+0 ignored; raw logs and stable executable hashes are retained. Independent Astra
+complete review and bounded owner/audio/cleanup/fixture closures are approved.
+
+The controls use real source packet timing and checked HDR10/P81 output. A small
+native public-core diagnostic separately passed source mapping, RPU parsing,
+HDR10 validation and P81 authoring/validation for silent and AAC windows. It is
+fixture evidence, not a replacement for the fifteen unit contracts. Earlier
+setup failures remain recorded; only failed or genuinely invalidated cases were
+retried. No separate old-code execution was required by the accepted plan.
+
+These custody controls deliberately hold the exclusive worker and coordinate
+only their registered test driver. They prove actual admission, graph ownership,
+cleanup settlement and seal/CAS contracts, not ordinary driver execution/reap,
+renderer throughput, audible offset or Dolby pixel accuracy. Production validators
+are unchanged; serialized descriptions still grant no local processing authority.
+See [PR #1225](http://forge.lan:3000/noirr/plurx/pulls/1225) for the required main
+fast-lane and API landing records. Paul owns the server-image deployment and live
+incident verification; no service deployment or physical acceptance is claimed here.
+
+Regression anchors retained in the PR and landing message:
+- `Regression-Test: crates/plurxd/src/vodencode_tests.rs::processed_root_reuse_needs_no_speed_or_missing_qualification_window`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_roots_reconstruct_both_destinations_without_serialized_authority_or_speed`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_root_refuses_current_input_and_owner_drift_without_spending_capacity`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::first_processed_attachment_arms_exact_owner_cleanup_before_returning`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_second_successor_survives_normal_commit_and_parent_retirement`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_cancellation_at_attachment_facts_and_seal_releases_only_successor`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_epoch_motion_after_attachment_refuses_frozen_seal`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_replacement_never_inherits_preparation_or_cleanup_authority`
+- `Regression-Test: crates/plurxd/src/transcode/manager/processed_reuse_tests.rs::staged_processed_audio_canonicalization_reuses_default_and_alternate_aac_exactly`

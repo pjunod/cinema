@@ -1354,6 +1354,7 @@ validate-help: ## Explain the validation workflow and UI golden commands
 .PHONY: validation-lint
 validation-lint: ## Verify every governed file maps to a valid functionality point
 	@scripts/validate lint
+	@scripts/knowledge lint --scope pilot --body-env
 
 .PHONY: validate-plan
 validate-plan: ## Explain which points and checks the staged diff selects
@@ -1548,6 +1549,7 @@ web-check: web-unit-check ## Test playback policy, embedded JS, and every shippe
 # runs exactly this, so a web pull request executes the same tests web-check
 # does apart from the two real-browser scripts.
 web-unit-check: ## Run every Node web and playback test (no browser)
+	@node --test tests/playback/frame-drop-recorder.test.js
 	@node --test tests/web/diagnostics-wire.test.js tests/web/diagnostics-recorder.test.js
 	@node --test tests/web/cinema-remote-client.test.js
 	@node --test tests/web/cinema-remote-controller.test.js
@@ -1596,7 +1598,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	# An idle-expired sign-in lands on the login page saying why.
 	@node tests/web/session-expiry.test.js
 	# The Transcoding backend buttons send objects, not pre-serialized strings.
-	@node --test tests/web/transcoder-backend-requests.test.js
+	@node --test tests/web/transcoder-backend-requests.test.js tests/web/system-settings.test.js
 	@node tests/web/read-after.test.js
 	# The validation runner already has this as `web-membership`, but this is
 	# the target a web change reaches for, and the Cluster panel is a web

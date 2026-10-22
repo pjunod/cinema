@@ -420,6 +420,7 @@ function retirePlaybackPredecessor(p,release=releaseSession){
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(p,"replaced");
   if(typeof translationRetire==="function")translationRetire("attachment changed");
   clearEffectiveProcessing(p);
   // A Shared direct session is read by exactly one attachment; any new one on
@@ -432,6 +433,7 @@ function beginPlaybackMediaAttachment(p){
   // A deliberate reopen mints a new attachment. Clear the retired attempt
   // only after the old attachment can no longer pass its identity closure.
   p.terminalStop=null;
+  p.playPermissionDenied=null;
   p.sessionTerminal=null;
   p.recoveryHealth=null;
   // Where this attempt's generation takes the picture: every attach on every
@@ -513,7 +515,7 @@ function rememberPlaybackTransportIntent(v,p){
   if(p&&typeof p.wantsPlayback!=="boolean") p.wantsPlayback=!!v&&!v.paused&&!v.ended;
 }
 function applyPlaybackTransportIntent(v,p){
-  if(!v||!p||PLAYER!==p) return;
+  if(!v||!p||PLAYER!==p||p.playPermissionDenied) return;
   rememberPlaybackTransportIntent(v,p);
   const proof=p.preparedCommitting;
   if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
@@ -604,6 +606,7 @@ function stopPlayerTimers(){
   if(!PLAYER) return;
   if(PLAYER.preparedRetiring)
     retirePreparedPredecessor(PLAYER,PLAYER.preparedRetiring);
+  if(typeof stopFrameDropRecorder==="function")stopFrameDropRecorder(PLAYER);
   stopPlaybackControl(PLAYER);
   clearPendingSeekTimer();
   clearInterval(PLAYER.timer); PLAYER.timer=null;
@@ -625,7 +628,8 @@ function stopPlayerTimers(){
 // a presenter with no evidence, and neither would come back until the next
 // full open.
 function armPlaybackSampling(v,p){
-  if(!v||!p) return;
+  if(!v||!p||p.playPermissionDenied) return;
+  if(typeof startFrameDropRecorder==="function")startFrameDropRecorder(v,p);
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackSamplingTick(v,p),500);
   clearInterval(p.autoTimer);

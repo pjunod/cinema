@@ -199,6 +199,11 @@ mod hiqlite_media;
 mod hiqlite_pretranscode;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_publication;
+/// Formal-verification conformance seam for the chosen replicated insertion;
+/// compiled only for the three-voter Store contract suite.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub use hiqlite_publication::conformance as publication_conformance;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_reading;
 #[cfg(feature = "hiqlite-store")]
