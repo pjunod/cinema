@@ -22,7 +22,10 @@ def digest(raw):
 
 class PairedRuntimeContracts(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        base = (Path(__file__).resolve().parents[2] /
+                'target/agent-fixtures/.hermes/hdr-collaboration/workspaces/paired-runtime-tests')
+        base.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=base, prefix='owned-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.lock = b'# synthetic dependency lock\n'
