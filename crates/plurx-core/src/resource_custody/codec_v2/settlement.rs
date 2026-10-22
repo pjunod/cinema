@@ -1,6 +1,45 @@
 //! Versioned close/transfer AUDIT records, never physical capabilities.
 use super::*;
 
+/// Disjoint cancellation audit: never label an uninvoked source/task as an
+/// actually joined/closed owner. No physical capability is serialized here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NeverArmed {
+    pub version: u32,
+    pub kind: NeverArmedKind,
+    pub owner_id: Id,
+    pub graph_id: Id,
+    pub operation_id: Id,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NeverArmedKind {
+    PreparedNeverArmed,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SettlementDocument {
+    Physical(Settlement),
+    NeverArmed(NeverArmed),
+}
+pub(crate) fn decode_settlement(json: &str) -> Result<SettlementDocument, CustodyError> {
+    #[derive(Deserialize)]
+    struct Discriminator {
+        kind: Option<String>,
+    }
+    match codec::decode::<Discriminator>(json)?.kind.as_deref() {
+        None => Ok(SettlementDocument::Physical(codec::decode(json)?)),
+        Some("prepared_never_armed") => {
+            let value: NeverArmed = codec::decode(json)?;
+            if value.version != 2 {
+                return Err(codec::invalid());
+            }
+            Ok(SettlementDocument::NeverArmed(value))
+        }
+        _ => Err(codec::invalid()),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub(crate) enum CopyClosed {

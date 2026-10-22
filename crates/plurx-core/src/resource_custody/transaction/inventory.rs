@@ -83,8 +83,7 @@ pub(super) fn load(
             if manifest.owner_id.uuid() != owner || manifest.graph_id.uuid() != graph {
                 return Err(codec::invalid());
             }
-            let settlement: Option<v2::Settlement> =
-                settlement_json.map(codec::decode).transpose()?;
+            let settlement = settlement_json.map(v2::decode_settlement).transpose()?;
             let mut stmt = connection.prepare("SELECT member_id,kind,adapter,adapter_version,phase,identity_json,proof_json FROM members WHERE obligation_id=?1 ORDER BY member_id")?;
             let mut rows = stmt.query([id.as_bytes()])?;
             let mut members = Vec::new();
@@ -111,7 +110,7 @@ pub(super) fn load(
                     proof.is_some(),
                 )?;
                 if let Some(proof) = proof {
-                    if settlement.as_ref() != Some(&codec::decode::<v2::Settlement>(&proof)?) {
+                    if settlement.as_ref() != Some(&v2::decode_settlement(&proof)?) {
                         return Err(codec::invalid());
                     }
                 }
@@ -130,6 +129,28 @@ pub(super) fn load(
                 return Err(codec::invalid());
             }
             if let Some(record) = &settlement {
+                let operation = match record {
+                    v2::SettlementDocument::NeverArmed(record) => record.operation_id,
+                    v2::SettlementDocument::Physical(record) => record.operation_id,
+                };
+                let recorded: Vec<u8> = connection.query_row(
+                    "SELECT last_operation_id FROM obligations WHERE obligation_id=?1",
+                    [id.as_bytes()],
+                    |r| r.get(0),
+                )?;
+                if operation.uuid() != codec::uuid_from_bytes(&recorded)? {
+                    return Err(codec::invalid());
+                }
+            }
+            if let Some(v2::SettlementDocument::NeverArmed(record)) = &settlement {
+                if record.owner_id != manifest.owner_id
+                    || record.graph_id != manifest.graph_id
+                    || members.iter().any(|m| m.envelope.observed.is_some())
+                {
+                    return Err(codec::invalid());
+                }
+            }
+            if let Some(v2::SettlementDocument::Physical(record)) = &settlement {
                 v2::validate_settlement(
                     &manifest,
                     &members

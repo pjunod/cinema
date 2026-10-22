@@ -10,7 +10,7 @@ fn inventory() -> IoInventory {
         readers: vec![],
     }
 }
-fn fixture() -> Manifest {
+pub(in crate::resource_custody) fn fixture() -> Manifest {
     let owner_id = id();
     let graph_id = id();
     let root = id();

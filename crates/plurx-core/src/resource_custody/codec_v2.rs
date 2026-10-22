@@ -3,7 +3,7 @@
 mod cost;
 mod settlement;
 #[cfg(test)]
-mod tests;
+pub(in crate::resource_custody) mod tests;
 use super::{codec, CustodyError, Role};
 use codec::{BootIdentity, MemberEnvelope, MemberKind, PlannedMember};
 pub(crate) use cost::{retained_minimum_resources, validate_retained_resources};

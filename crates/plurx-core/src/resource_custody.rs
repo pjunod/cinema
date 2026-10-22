@@ -282,6 +282,21 @@ pub(crate) struct PrepareBatch {
     pub families: Vec<FamilyRequest>,
     pub trial: bool,
 }
+/// New typed records use the existing journal/queue and family accounting. They
+/// never reinterpret historical v1 documents or acquire resources themselves.
+#[derive(Clone, Debug)]
+pub(crate) struct TypedNewObligation {
+    pub runtime_binding: ReservationBinding,
+    pub allocation_epoch: u64,
+    pub resources: ResourceVector,
+    pub manifest: codec_v2::Manifest,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct TypedPrepareBatch {
+    pub obligations: Vec<TypedNewObligation>,
+    pub families: Vec<FamilyRequest>,
+    pub trial: bool,
+}
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedBatch {
     pub obligations: Vec<ObligationHandle>,
@@ -305,6 +320,7 @@ pub(crate) struct PhysicalSettlement {
 pub(crate) enum Mutation {
     Arm { members: Vec<Uuid> },
     RecordAcquired { identity: ObservedIdentity },
+    RecordTypedAcquired { envelope: codec_v2::Envelope },
     Seal,
     Hold { reason: String },
     CancelPrepared,
@@ -335,6 +351,11 @@ struct QueuedOperation {
 enum Command {
     Prepare {
         batch: PrepareBatch,
+        handles: Vec<ObligationHandle>,
+        trial: Option<Uuid>,
+    },
+    PrepareTyped {
+        batch: TypedPrepareBatch,
         handles: Vec<ObligationHandle>,
         trial: Option<Uuid>,
     },

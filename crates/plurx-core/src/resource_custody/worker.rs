@@ -59,7 +59,9 @@ impl PendingOperation {
 }
 fn obligations(command: &Command) -> Vec<Uuid> {
     match command {
-        Command::Prepare { handles, .. } => handles.iter().map(|h| h.obligation_id).collect(),
+        Command::Prepare { handles, .. } | Command::PrepareTyped { handles, .. } => {
+            handles.iter().map(|h| h.obligation_id).collect()
+        }
         Command::Change { key, .. } => vec![key.handle.obligation_id],
     }
 }
@@ -152,6 +154,38 @@ impl CustodyJournal {
         })
         .map_err(|(error, _unaccepted_prepare)| error)
     }
+    /// The runtime must own its actual typed plan and reservation BEFORE enqueue.
+    /// Cancellation retains this exact prepare and UUID in the same owner book.
+    pub(crate) fn prepare_typed(
+        &self,
+        operation_id: Uuid,
+        batch: TypedPrepareBatch,
+        deadline: Instant,
+    ) -> Result<PendingOperation, CustodyError> {
+        codec::nonnil(operation_id)?;
+        let handles = batch
+            .obligations
+            .iter()
+            .map(|n| ObligationHandle {
+                journal_id: self.journal_id,
+                owner_id: self.owner_id,
+                obligation_id: Uuid::new_v4(),
+                graph_id: n.manifest.graph_id.uuid(),
+                runtime_binding: n.runtime_binding,
+            })
+            .collect();
+        let trial = batch.trial.then(Uuid::new_v4);
+        self.enqueue(QueuedOperation {
+            id: operation_id,
+            deadline,
+            command: Command::PrepareTyped {
+                batch,
+                handles,
+                trial,
+            },
+        })
+        .map_err(|(error, _unaccepted_prepare)| error)
+    }
     pub(crate) fn change(
         &self,
         key: TransitionKey,
@@ -184,7 +218,9 @@ impl CustodyJournal {
                     key,
                     mutation,
                 }),
-                Command::Prepare { .. } => unreachable!("change constructs only a transition"),
+                Command::Prepare { .. } | Command::PrepareTyped { .. } => {
+                    unreachable!("change constructs only a transition")
+                }
             },
         }
     }
@@ -469,6 +505,7 @@ fn run(
             && (matches!(
                 operation.operation.command,
                 Command::Prepare { .. }
+                    | Command::PrepareTyped { .. }
                     | Command::Change {
                         mutation: Mutation::Arm { .. },
                         ..

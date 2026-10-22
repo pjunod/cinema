@@ -1,6 +1,7 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
 mod inventory;
+mod typed;
 use super::*;
 use codec::{MemberEnvelope, SettlementRecord};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -458,6 +459,32 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
     // Explicit canonical payload excludes ephemeral deadline and receipt object.
     // Receipt identity is checked independently against its core runtime binding.
     let value = match command {
+        Command::PrepareTyped {
+            batch,
+            handles,
+            trial,
+        } => {
+            let obligations: Vec<_> = batch.obligations.iter().zip(handles).map(|(n,h)| serde_json::json!({"id":h.obligation_id,"graph":h.graph_id,"owner":h.owner_id,"epoch":n.allocation_epoch,"resources":codec::vector_bytes(n.resources),"manifest":n.manifest})).collect();
+            let families: Vec<_> = batch
+                .families
+                .iter()
+                .map(|f| {
+                    let roles: Vec<_> = f
+                        .roles
+                        .iter()
+                        .map(|(r, t)| {
+                            let id = match t {
+                                RoleTarget::New(i) => handles.get(*i).map(|h| h.obligation_id),
+                                RoleTarget::Retained(h) => Some(h.obligation_id),
+                            };
+                            serde_json::json!([r, id])
+                        })
+                        .collect();
+                    serde_json::json!([f.family.family_id, roles])
+                })
+                .collect();
+            serde_json::json!({"typed_prepare_v2":obligations,"families":families,"trial":trial})
+        }
         Command::Prepare {
             batch,
             handles,
@@ -488,6 +515,9 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
             let action = match mutation {
                 Mutation::Arm { members } => serde_json::json!({"arm":members}),
                 Mutation::RecordAcquired { identity } => serde_json::json!({"acquired":identity}),
+                Mutation::RecordTypedAcquired { envelope } => {
+                    serde_json::json!({"typed_acquired_v2":envelope})
+                }
                 Mutation::Seal => serde_json::json!("seal"),
                 Mutation::Hold { reason } => serde_json::json!({"hold":reason}),
                 Mutation::CancelPrepared => serde_json::json!("cancel_prepared"),
@@ -567,6 +597,19 @@ pub(super) fn execute(
             ));
         }
         let result = match &operation.command {
+            Command::PrepareTyped {
+                batch,
+                handles,
+                trial,
+            } => typed::prepare(
+                &tx,
+                storage.witness.journal_id,
+                owner,
+                operation.id,
+                batch,
+                handles,
+                *trial,
+            )?,
             Command::Prepare {
                 batch,
                 handles,
@@ -617,7 +660,7 @@ pub(super) fn execute(
     })?;
     match (&operation.command, disk_result) {
         (
-            Command::Prepare { handles, trial, .. },
+            Command::Prepare { handles, trial, .. } | Command::PrepareTyped { handles, trial, .. },
             DiskResult::Prepared {
                 sequence,
                 obligations,
@@ -738,10 +781,26 @@ fn prepare(
             )?;
         }
     }
+    insert_families(tx, journal, owner, &batch.families, handles, &new_ids)?;
+    Ok(DiskResult::Prepared {
+        sequence,
+        obligations: handles.iter().map(|h| h.obligation_id).collect(),
+        trial,
+    })
+}
+
+fn insert_families(
+    tx: &Transaction<'_>,
+    journal: Uuid,
+    owner: Uuid,
+    requests: &[FamilyRequest],
+    handles: &[ObligationHandle],
+    new_ids: &BTreeSet<Uuid>,
+) -> Result<(), CustodyError> {
     let mut families = BTreeSet::new();
     let mut referenced = BTreeSet::new();
     let mut physical_roles = BTreeMap::new();
-    for family in &batch.families {
+    for family in requests {
         if family.family.journal_id != journal
             || !families.insert(family.family.family_id)
             || family.roles.is_empty()
@@ -816,14 +875,10 @@ fn prepare(
             return Err(codec::invalid());
         }
     }
-    if referenced != new_ids {
+    if &referenced != new_ids {
         return Err(codec::invalid());
     }
-    Ok(DiskResult::Prepared {
-        sequence,
-        obligations: handles.iter().map(|h| h.obligation_id).collect(),
-        trial,
-    })
+    Ok(())
 }
 
 fn change(
@@ -854,6 +909,9 @@ fn change(
             "custody obligation already settled",
         ));
     }
+    if let codec_v2::ManifestDocument::V2(manifest) = codec_v2::decode_manifest(&manifest)? {
+        return typed::change(tx, owner, key, mutation, prior, &manifest);
+    }
     let manifest: Manifest = codec::decode(&manifest)?;
     let mut phase = prior;
     let mut reason: Option<String> = tx.query_row(
@@ -863,6 +921,7 @@ fn change(
     )?;
     let mut settlement = None;
     match mutation {
+        Mutation::RecordTypedAcquired { .. } => return Err(codec::invalid()),
         Mutation::Arm { members } => {
             if !matches!(prior, Phase::Prepared | Phase::AcquisitionPossible)
                 || members.is_empty()
