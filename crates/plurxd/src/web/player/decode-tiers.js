@@ -892,7 +892,10 @@ function capturePlayInputs(fileId,meta,retryIntent){
         priorKbps:PLAYER.priorKbps})
     : null;
   const continuingPlayback=!!(samePlaybackFile(PLAYER,fileId,meta));
+  // File identity survives Close, but its admitted display peak belongs only
+  // to the open presentation. An explicit retry carries its own snapshot.
   const peakIncumbent=retryIntent?.peakIncumbent||(continuingPlayback
+    &&document.getElementById("modal")?.classList.contains("open")
     ?{capsSnapshot:{display:{...(PLAYER.capsSnapshot?.display||{})}}}:null);
   const carriedSeek=retryIntent?.controlSeek||(continuingPlayback&&PLAYER.controlSeek);
   const replacementControlSeek=carriedSeek
