@@ -25,7 +25,10 @@ explicit frozen overrides and await fresh qualification. The two affected
 OCI controls then refused because the pinned images were absent, before any
 container execution. A newly identified environment has been recreated from
 recorded public inputs and the unchanged verified crate cache; its admission
-pin and environment need a narrow independent recheck and fresh controls.
+pin and environment now have actual Astra R6 approval and two passing actual
+OCI controls. Current CI retained all 2,111 Python passes, then refused before
+compilation at a runner disk guard. A bounded online disk increase preserved
+all cache/work state and restored headroom; a fresh required run is next.
 The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md#pre-answer-environment-recreation--explicit-new-identity)
 records exact replacement identities and the limit of historical provenance.
 Fresh CI preserves valid authenticated per-test successes; job reruns are

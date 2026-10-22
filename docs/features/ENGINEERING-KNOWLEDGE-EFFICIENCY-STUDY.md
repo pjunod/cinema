@@ -328,6 +328,52 @@ limit, schedule or token ceiling changes. This environment revision precedes
 all calibration, count, inference, answer and scoring calls; it provides no
 comparison result or resource-fit conclusion on its own.
 
+## R6 closure and runner prerequisite recovery
+
+Actual Astra R6 (`t_f2bbdbbf`) approved source/environment admission at
+`b5c9d6eef16212f1e9248e1abb28d088b2554a46`, with no blocking findings.
+Verdict SHA-256:
+`d95bcb47b2e4b722b4371267c45b77f9ac378ff493e00c5738e57d866eccb59c`.
+The exact 46-input runtime map SHA-256 is
+`4de7945d87780ea2f64d90b52bb016c7a930de1cece2f7aa6a50a0ebbc77d37c`.
+This covers the strict new base-image pin and copied public environment
+evidence; it does not claim runtime qualification or inspection of private
+study inputs.
+
+Both invalidated actual OCI controls then passed: **two tests, zero skips,
+9.471 seconds** on the exact replacement image. Fresh protected/worker
+containment and cleanup were observed, with no owned containers remaining.
+The proof SHA-256 is
+`814769dcda77f774c8ef9e37bf9e0a5b93e071b696b848e01988049899549037`.
+These small controls use 1 GiB/one CPU fixtures; they do not establish resource
+fit for the full feature-enabled study. The earlier focused profile pass is
+retained without repeating it.
+
+Required CI run 5795/internal 5824 passed paperwork, scope and preflight,
+retaining all 2,111 authenticated Python passes with zero fixture errors.
+Its Rust job refused **before compilation** at the existing disk guard:
+23 GiB free against a 25 GiB requirement. Promotion failed downstream.
+This failure adds no candidate compile or study outcome.
+
+Read-only diagnosis located a separate remote CI VM. Its managed BuildKit
+cache volume persisted without registered builder metadata; cache retention
+is intentional in the CI action, so this is not proof of abandonment or an
+account migration. Reclaimability could not be established through the
+normal prune path, and the volume was preserved. A bounded online increase
+of this idle runner's root disk from **140 to 150 GiB** raised available
+space from 26,899,520 to 37,064,952 KiB (35.35 GiB). The existing 25 GiB guard
+remains. The runner service returned to its original active state, the VM
+boot identity and partition identities were unchanged, and no cache,
+worktree, image, volume or evidence was deleted. The capacity receipt SHA-256
+is `0a92bbd3aafb60277603624af0106c95fca5650f9a765baac052730ae5715758`.
+
+A fresh PR synchronization run must now establish current required CI;
+repository policy forbids job reruns. This factual evidence update changes
+no execution input from R6. Valid prior passes remain eligible for normal
+CI adoption. Fresh full study qualification and calibration remain pending;
+no study count, inference, answer or scorer call has run. Legacy cache
+maintenance remains explicit follow-up, rather than a claimed repair.
+
 ## Results and interpretation
 
 **Pending.** No numerical savings, comparative reliability or dollar-cost
