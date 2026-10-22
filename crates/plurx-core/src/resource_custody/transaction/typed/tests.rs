@@ -307,3 +307,66 @@ fn typed_source_acquisition_rejects_changed_association_without_advancing_sequen
         vector(10)
     );
 }
+
+#[test]
+fn typed_late_source_copy_enrichment_is_monotonic_and_cannot_forget_a_held_copy() {
+    let mut f = fixture(false);
+    let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
+        unreachable!()
+    };
+    let v2::MemberPlan::SourceV1 { source, .. } = &mut batch.obligations[0].manifest.members[1]
+    else {
+        unreachable!()
+    };
+    let mut copy = source.planned_copies[0].clone();
+    copy.copy_id = v2::Id::new(Uuid::new_v4()).unwrap();
+    copy.acquisition_operation_id = v2::Id::new(Uuid::new_v4()).unwrap();
+    source.planned_copies.push(copy);
+    let prepared = prepare(&mut f);
+    let full = observed_source(&f);
+    let mut first = full.clone();
+    let Some(v2::Observed::SourceV1 { source }) = &mut first.observed else {
+        unreachable!()
+    };
+    source.copies.truncate(1);
+    let armed = change_command(
+        &prepared.obligations[0],
+        sequence(&f),
+        Mutation::Arm {
+            members: vec![full.planned.member_id()],
+        },
+    );
+    execute(&mut f.storage, &armed, f.owner).unwrap();
+    let acquired = change_command(
+        &prepared.obligations[0],
+        sequence(&f),
+        Mutation::RecordTypedAcquired {
+            envelope: first.clone(),
+        },
+    );
+    execute(&mut f.storage, &acquired, f.owner).unwrap();
+    let sealed = change_command(&prepared.obligations[0], sequence(&f), Mutation::Seal);
+    execute(&mut f.storage, &sealed, f.owner).unwrap();
+    let enriched = change_command(
+        &prepared.obligations[0],
+        sequence(&f),
+        Mutation::RecordTypedAcquired {
+            envelope: full.clone(),
+        },
+    );
+    execute(&mut f.storage, &enriched, f.owner).unwrap();
+    let before = sequence(&f);
+    let forgotten = change_command(
+        &prepared.obligations[0],
+        before,
+        Mutation::RecordTypedAcquired { envelope: first },
+    );
+    assert!(execute(&mut f.storage, &forgotten, f.owner).is_err());
+    assert_eq!(sequence(&f), before);
+    let snapshot = snapshot(&f.storage.connection, &f.storage.witness).unwrap();
+    assert_eq!(snapshot.total, vector(10));
+    let ObligationInventory::TypedV2 { members, .. } = &snapshot.obligations[0].inventory else {
+        unreachable!()
+    };
+    assert!(members.iter().any(|m| m.envelope == full));
+}

@@ -168,7 +168,39 @@ pub(super) fn change(
                 return Err(codec::invalid());
             }
             v2::validate_envelope(manifest, envelope)?;
-            if tx.execute("UPDATE members SET phase='acquired',identity_json=?3 WHERE obligation_id=?1 AND member_id=?2 AND phase='acquisition_possible'",params![key.handle.obligation_id.as_bytes(),envelope.planned.member_id().as_bytes(),codec::encode(envelope)?])? != 1 {
+            let (member_phase, json): (String, String) = tx.query_row(
+                "SELECT phase,identity_json FROM members WHERE obligation_id=?1 AND member_id=?2",
+                params![
+                    key.handle.obligation_id.as_bytes(),
+                    envelope.planned.member_id().as_bytes()
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if member_phase == "acquired" {
+                // Each copy was already declared/armed before acquisition. A
+                // later actual copy result can only ADD exact slots to the SAME
+                // held file; it cannot replace identity or forget an old copy.
+                let old: v2::Envelope = codec::decode(&json)?;
+                let (
+                    Some(v2::Observed::SourceV1 { source: before }),
+                    Some(v2::Observed::SourceV1 { source: after }),
+                ) = (&old.observed, &envelope.observed)
+                else {
+                    return Err(codec::invalid());
+                };
+                let mut same = after.clone();
+                same.copies = before.copies.clone();
+                if old.planned != envelope.planned
+                    || same != *before
+                    || after.copies.len() <= before.copies.len()
+                    || before.copies.iter().any(|c| !after.copies.contains(c))
+                {
+                    return Err(codec::invalid());
+                }
+            } else if member_phase != "acquisition_possible" {
+                return Err(codec::invalid());
+            }
+            if tx.execute("UPDATE members SET phase='acquired',identity_json=?3 WHERE obligation_id=?1 AND member_id=?2 AND phase IN ('acquisition_possible','acquired')",params![key.handle.obligation_id.as_bytes(),envelope.planned.member_id().as_bytes(),codec::encode(envelope)?])? != 1 {
                 return Err(codec::invalid());
             }
         }
