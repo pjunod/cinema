@@ -17,8 +17,8 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
-| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Live original Job process-only evidence, integrated Store/durable custody; compiled NOT RUN, full recovery/runtime/M0–M7 open. | open |
-| [ADAPTIVE-RESOURCE-CUSTODY.md](ADAPTIVE-RESOURCE-CUSTODY.md) | Local custody storage, startup refusal, backup/move limits and missing physical closure/recovery. | open |
+| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Restricted live graph proof, Store/durable custody; host-compiled NOT RUN, full recovery/runtime/M0–M7 open. | open |
+| [ADAPTIVE-RESOURCE-CUSTODY.md](ADAPTIVE-RESOURCE-CUSTODY.md) | Local custody storage, live-close restrictions, startup refusal and backup/recovery limits. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) | Required workload, lifecycle, cluster, platform and latency evidence for adaptive resource management. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) | Fable 5.1 findings, dispositions, reviewed hashes and remaining acceptance. | done |
 | [ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md) | How every playback pipeline learns per-node capacity, preserves owned resources, and uses eligible cluster workers before quality fallback. | open |

@@ -482,6 +482,8 @@ paths = [
   "crates/plurx-core/src/adaptive_resources.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/budgets.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/live_close.rs",
+  "crates/plurx-core/src/adaptive_resources/physical_graph/live_close/**",
   "crates/plurx-core/src/adaptive_resources/physical_graph/live_jobs.rs",
   "crates/plurx-core/src/adaptive_resources/physical_graph/live_jobs/**",
   "crates/plurx-core/src/adaptive_resources/physical_graph/tests.rs",

@@ -6,7 +6,7 @@ PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 
-## What exists through f2ca25697
+## What exists through 6dc165309
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -63,11 +63,21 @@ Only the suspended-before-assignment launcher establishes descendant coverage;
 ordinary attach-after-execution Jobs cannot certify it. A sealed complete root
 inventory plus actual waits and native active-zero queries supplies private
 graph-bound PROCESS-ONLY evidence. Ambiguous launches, failed/active queries or
-unsupported platforms cannot become zero. No task/source/external settlement,
-whole-graph receipt/refund, same-boot restart or Windows durable admission follows.
-Exact native FFI source cross-compiles; bare-target full check lacked C headers.
-Controller found the genuine SDK and owns the isolated SDK-bound full check;
-native execution/restart acceptance remains owed. Fixtures NOT RUN; see the ledger.
+unsupported platforms cannot become zero. The private restricted live-close path
+now combines that process proof with actual audited task joins, source-operation/
+handle close joins and disposal of unclaimed root pipes. It issues at most one
+nonclone graph-bound receipt AFTER dropping real native Child/Job owners, without
+refunding by itself. Generic writer factory
+handoff (including panic before task registration) and returned copied source
+buffers permanently disqualify the graph: their downstream ownership is unaudited.
+Hardware/tuner/scratch costs also refuse because no external adapter closes them.
+Public close remains UnknownHeld. No restart proof or Windows durable admission.
+
+The controller's genuine SDK-bound core+daemon all-target Windows compile passes
+on fixture repair2726df816 (96.023s); prior failures remain evidence. New live-close
+source host-compiles (combined125.139s, only changed core rechecked47.42s) and its
+Windows compile is in progress. Native execution/
+restart acceptance remains owed; every behavioral fixture remains NOT RUN.
 
 Private cleanup consumes the original nonclone proof, retains it on queue refusal
 or uncertain commit, and refunds only after exact durable settlement. A public
@@ -84,7 +94,7 @@ physical proof. Its normal API cannot mark Closed or refund a local reservation;
 fixture history erasure exists only under the contract-test compilation feature.
 Worker RPC/admission/publication composition remains open, not advertised ready.
 
-No positive old-owner/whole-graph recovery backend is implemented yet. The interim
+No positive old-owner/restart recovery backend is implemented yet. The interim
 startup path therefore refuses pending custody BEFORE cleanup or legacy competing
 work. This preserves protected paths but is not the final availability/recovery
 implementation: selective reconciliation and unaffected serving still remain.
@@ -128,16 +138,14 @@ cannot prove that a copied source host's processes or external resources ended.
 
 ## Evidence and remaining work
 
-The released journal was serially adopted with original authorship. Its 28
-regression bodies, 10 startup/runtime/lock/namespace bodies and 12 new owned-
-operation/worker contracts are compile-checked, NOT executed. Nine new mixed-
-adapter bodies also compile, NOT RUN. Pinned Rust1.97.1 core+daemon all-target
-Hiqlite-contract check passes at83ec55303 (45.319s), with nine source hashes.
-The initial test-only arm privacy error is retained, then corrected without
-exporting any production authority. Unit-only fixtures are not durable proof.
+The released journal retains original authorship and earlier scoped compiler
+receipts; its synthetic fixtures are protocol checks, not native physical proof.
+Twelve new live-close bodies are authored: nine host-compiled and three Windows-
+only bodies awaiting full Windows compilation. All behavior remains NOT RUN.
+The canonical ledger binds current source/compiler evidence and preserved failures.
 Private APIs still produce warnings because production composition is missing;
-there is no current Clippy -Dwarnings, independent full-candidate review,
-behavioral qualification or platform physical-close pass.
+there is no strict Clippy, independent full-candidate review, behavioral
+qualification or native platform physical-close pass.
 
 Synthetic private test receipts prove only protocol shape, not kernel or physical
 closure. Remaining work includes existing-supervisor/production composition of

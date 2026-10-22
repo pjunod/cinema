@@ -24,22 +24,21 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`f2ca25697` implements LIVE original Windows Job termination/population query.
-Suspended-entry provenance stays with the unnamed no-breakaway native object;
-sealed cleanup visits Jobs even after leaders exit. Actual zero after real root
-waits yields private graph-bound PROCESS-ONLY evidence. Failed/active/unsupported
-queries or ambiguous launch inventory cannot become zero. No physical receipt,
-refund, restart proof, Windows durable readiness or finite production switch.
+`35f0d8715`/`6dc165309` compose a private single-use LIVE local-graph receipt:
+original Windows Job extinction, root waits, audited joins, source closes and
+full native-owner disposal. Ambiguous launches, generic factory handoffs (even
+factory panic), escaped source buffers and hardware/tuner/scratch costs refuse.
+Public close remains UnknownHeld; no restart proof, Windows durable readiness,
+production switch or runtime exact-manifest settlement is claimed.
 
-Pinned Rust1.97.1 core+daemon all-target Hiqlite-contract check PASS0 47.429s,
-`evidence/compile-run72-host-200122.json`, seven source hashes. Current core42
-library+5 libtest warnings remain; NOT strict Clippy. Initial stale fixture-field
-compile failure is retained; actual owner extraction invalidated the earlier host
-pass. Exact production native Job source plus two native tests cross-compiled
-for x86_64 Windows PASS0 .61s, NO stubs. Bare-target full check FAILED in ring C
-(`assert.h` absent). SDK found; controller SDK-bound check pending. Four graph
-bodies host-compiled, two native bodies cross-compiled, two Windows graph fixtures
-AUTHORED but not compiled. ALL behavior remains NOT RUN.
+Pinned1.97.1 combined all-target host check PASS125.139s; two changed core files
+then rechecked PASS47.42s (`compile-run73-host-202323.json`). Seven source hashes;
+core46 library+3 libtest warnings; NOT strict Clippy. Twelve new bodies:
+nine host-compiled, three Windows-only authored; ALL behavior NOT RUN.
+Controller SDK-bound full Windows check on fixture repair `2726df816` PASS0
+96.023s: real launcher/graph/daemon and earlier Windows bodies compiled, NOT RUN.
+Its original211.686s failure remains preserved. New live-close source needs its
+own SDK-bound compile; actual native/restart acceptance remains separately owed.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
@@ -55,7 +54,7 @@ Source guards and claim/Prepared/winner/adoption/fence authority, not worker RPC
 advertisement or a normal Closed writer. Preserve ALL earlier anchors/receipts
 and the strict-default child failure. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
 
-Whole-graph/positive restart/old-owner fencing/typed closure, production/supervisor/
+Full typed closure/positive restart/old-owner fencing, production/supervisor/
 shared transfer, learning/pacing/M4 runtime/M5 and remaining M0–M7 stay open.
 Ordinary production remains legacy; no unsupported trial/finite admission.
 Draft PR1248 needs complete implementation, actual independent Fable review/fixes,
