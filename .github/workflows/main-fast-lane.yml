@@ -148,6 +148,9 @@ jobs:
       # the same diff, and tests/validation/test_regression_field.py refuses
       # one without the other.
       - name: Check validation catalog and static contracts
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          KNOWLEDGE_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           make validation-lint
       - name: Check formal protocol source mapping

@@ -10,6 +10,7 @@ a document to this folder.
 | [FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md) · [data](FULL-SUITE-BASELINE-2026-10-20.json) | Frozen M0 runtime observations, queue/build/test timing and explicit qualification gaps. | open |
 | [FULL-SUITE-EVERY-PR-PLAN.md](FULL-SUITE-EVERY-PR-PLAN.md) | October 20 source/run audit, ranked slowdown findings, and the implementation contract for fresh complete tests on every ready PR; runtime qualification remains pending. | open |
 | [RUST-SUITE-REPAIR-2026-10-20.md](RUST-SUITE-REPAIR-2026-10-20.md) | The original 25 Rust failures, assertion-preserving corrections, repeated execution and exact native qualification. | open |
+| [ENGINEERING-KNOWLEDGE.md](ENGINEERING-KNOWLEDGE.md) | Code/diff queries, source-backed record maintenance, advisory PR capture and evidence limits for the bounded knowledge pilot. | open |
 | [DOCKER-HARDWARE-STATUS.md](DOCKER-HARDWARE-STATUS.md) | Automatic Docker GPU passthrough, device groups, NVIDIA libraries, review and validation progress. | open |
 | [PYTHON-UNIT-PR-RECEIPTS.md](PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes: authenticated journals are adopted, anything else simply runs again — history never blocks a PR. | open |
 | [EFFORT-WEB-STATIC-CONTRACTS.md](EFFORT-WEB-STATIC-CONTRACTS.md) | Current-source effort web lint, preserved shape obligations, and explicitly deferred behavioral qualification. | open |

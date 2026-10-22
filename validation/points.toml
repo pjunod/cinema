@@ -44,6 +44,15 @@ missing = "fail"
 timeout_seconds = 60
 
 [[checks]]
+id = "knowledge-contract"
+title = "Engineering knowledge schema and references"
+command = "scripts/knowledge lint --scope pilot"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["python3", "git"]
+missing = "fail"
+timeout_seconds = 30
+
+[[checks]]
 id = "history-regressions"
 title = "Historical corrective commits have current validation evidence"
 command = "scripts/history-audit --report target/validation/history.json"
@@ -1714,3 +1723,19 @@ contract = "An eligible local graphical session exposes native server status, li
 paths = ["crates/plurx-tray/**", "vendor/ksni/**"]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
 depends_on = ["desktop.control"]
+
+[[points]]
+id = "knowledge.engineering"
+title = "Scoped engineering intent and evidence graph"
+contract = "Code and proposed changes trace to source-backed intent, scoped obligations and independently labeled execution evidence; unknown coverage and origin never become qualification."
+paths = [
+  "validation/knowledge/**",
+  "scripts/knowledge",
+  ".agents/skills/engineering-knowledge/**",
+  "tests/validation/test_knowledge_*.py",
+  "tests/operations/test_knowledge_pilot.py",
+  "docs/features/ENGINEERING-KNOWLEDGE-GRAPH-*.md",
+  "docs/ci/ENGINEERING-KNOWLEDGE.md",
+]
+checks = ["knowledge-contract", "catalog-contract", "operations-contract"]
+depends_on = ["validation.framework"]

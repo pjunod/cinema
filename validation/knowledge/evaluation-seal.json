@@ -1,0 +1,567 @@
+{
+  "activity_flags": {
+    "acceptance_executed": false,
+    "benchmarks_run": false,
+    "builds_run": false,
+    "gold_disclosed_to_parent_or_record_author": false,
+    "network_accessed": false,
+    "owner_checkout_accessed": false,
+    "source_mutated": false,
+    "tests_run": false,
+    "tmp_artifacts_created": false
+  },
+  "aggregate_counts": {
+    "blocking_issues": 0,
+    "cases": 12,
+    "cohorts": {
+      "evidence": 6,
+      "routing": 6
+    },
+    "empty_control_authorities": 4,
+    "empty_controls": 2,
+    "explicit_stale_disputed_cases": 5,
+    "gold_authority_excerpts": 83,
+    "gold_obligation_count": 56,
+    "non_author_reviews_per_case": 2,
+    "source_or_overlay_digests": 71,
+    "task_types": {
+      "investigation": 4,
+      "planning_review": 4,
+      "small_patch": 4
+    }
+  },
+  "aggregate_flags": {
+    "acceptance_execution_not_performed": true,
+    "all_four_patch_acceptance_definitions_static_feasibility_reviewed": true,
+    "all_obligations_binary_all_or_nothing": true,
+    "all_twelve_gold_lists_frozen": true,
+    "authority_branch_environment_and_dependency_dimensions_reviewed": true,
+    "benchmark_runtime_ceiling_still_required": true,
+    "blind_patch_diff_review_still_required": true,
+    "empty_controls_excluded_from_missed_obligation_denominators": true,
+    "exact_final_case_and_acceptance_revisions_verified": true,
+    "exclusive_person_time_available": false,
+    "four_investigation_four_planning_review_four_small_patch": true,
+    "genuine_multihop_review_obligation_met": true,
+    "initial_approvals_and_original_revisions_preserved": true,
+    "m1_work_performed_by_adjudicator": false,
+    "minimum_three_stale_superseded_or_disputed_cases_met": true,
+    "overall_m0_completion_asserted_by_this_seal": false,
+    "sandbox_enforcement_not_yet_demonstrated": true,
+    "six_cases_per_cohort": true,
+    "source_compatible_but_unauthenticated_receipt_met": true,
+    "tests_builds_benchmarks_not_run": true,
+    "two_correct_bounded_empty_controls_met": true,
+    "two_independent_nonauthor_source_backed_reviews_per_case": true,
+    "unsupported_authority_and_false_obligations_scored_separately": true
+  },
+  "canonical_commitment_format": "Structured components: UTF-8 JSON, sorted keys, compact separators, ensure_ascii=false. Prompt and visible fixture: raw UTF-8. Complete artifacts: exact bytes. All digests SHA-256.",
+  "cases": [
+    {
+      "acceptance_artifacts": [],
+      "author": "A",
+      "case_id": "P01",
+      "cohort": "routing",
+      "commitments": {
+        "acceptance_specification_sha256": "fd9e43e35f3066079c7e6b460531437d39e794f4c755fbaa845a8c73236d6007",
+        "allowlist_sha256": "2eaa2534b0db8c217910ee48c7759b2227f6d5857e52c838865df890823db76f",
+        "complete_case_sha256": "baa928fb94366df52671b966fd48069d741228718165a0b31cfb918aced16090",
+        "forbidden_conclusions_sha256": "7065bf11f0f494fcaf1d756a782eae1cd63ced94a5a2c713947cd5d7d53c6056",
+        "gold_and_authorities_sha256": "91f0fd983182394f16524187860fdea9094c0479096feac0bb4b217a802a8fd1",
+        "prompt_utf8_sha256": "a18c0ae6d2062e74d7f28deb92319b5fdee65bdb4a15b5c909b5033c74f28625",
+        "rubric_sha256": "14ee1370496bf48b07b6ece4616c1410946f81fb3b12e5deb12d9bb04cb4bcca",
+        "source_identities_sha256": "477925cc7761a18ada8adb2056db21c6a0896c6edd992d44e3510d79efcbd5c0",
+        "visible_corpus_sha256": "cefdc5d563650ca443e116a37f4bc1785db4e6b72ea8e53078b6d5922f4b17fb"
+      },
+      "public_subject": "explicit capability precedence",
+      "reviewers": [
+        {
+          "report_sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c",
+          "reviewed_case_sha256": "baa928fb94366df52671b966fd48069d741228718165a0b31cfb918aced16090",
+          "reviewer": "B",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "baa928fb94366df52671b966fd48069d741228718165a0b31cfb918aced16090",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "investigation"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "A",
+      "case_id": "P02",
+      "cohort": "routing",
+      "commitments": {
+        "acceptance_specification_sha256": "1133663aa8f4602025e6bb4307409e379ef7b26f4b4ce02948926af8b031d4c1",
+        "allowlist_sha256": "a0fbbbf10ccd4828055702612f242a73fba89988b242eed761a10ce47fed97df",
+        "complete_case_sha256": "3aa035e1e4a48476ff3141a926d35f6f3084a11b33d86dfcfe970e86fa57f5b7",
+        "forbidden_conclusions_sha256": "4a041533b1a817056522e4ddd9d1c154ed19ea5e7bdf6aafdfc7d091c50a257f",
+        "gold_and_authorities_sha256": "cf96bad9d64793c4b7a037746e1f37e3632c413763031c63747b81c6694fa88e",
+        "prompt_utf8_sha256": "dea44f01bb4631e37a7839d4eeea6b9fe0aadab2a8a7b65a80b7ec75a4668498",
+        "rubric_sha256": "db05da51be2aa13d546aed6206396af91b3e2bb9a68c4320c42742e88bd31b11",
+        "source_identities_sha256": "004cca4405c3ee9938494384c275ed0ff9f65d144dec66f1c1c73ee550732f54",
+        "visible_corpus_sha256": "3a0d74868da7d1e9b995f6a7dc9a4270a2effd433d7c85cdd301427cfcd89db4",
+        "visible_fixture_utf8_sha256": "b982528cf658d2ece0882930ba28066d244a589a264d1e6f41be41dc751112fe"
+      },
+      "public_subject": "learned-limit expiry",
+      "reviewers": [
+        {
+          "report_sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c",
+          "reviewed_case_sha256": "3aa035e1e4a48476ff3141a926d35f6f3084a11b33d86dfcfe970e86fa57f5b7",
+          "reviewer": "B",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "3aa035e1e4a48476ff3141a926d35f6f3084a11b33d86dfcfe970e86fa57f5b7",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "investigation"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "A",
+      "case_id": "P03",
+      "cohort": "routing",
+      "commitments": {
+        "acceptance_specification_sha256": "ad4d19dc2c06749ffa4e248f693887967c2cd04658b44cb13e27ff5b79cbce3c",
+        "allowlist_sha256": "effac54516644484ff10265e04f1e2a61af7ec0ee7fd3360186c2bb423b28edd",
+        "complete_case_sha256": "e38b9ed00d55337244d2069f8e8351a36275c1a1e60dd8cacf020c2336ad8588",
+        "forbidden_conclusions_sha256": "c77b9c78ad90503e3e38e326d874c565c8ef08b10000dd2a2d26d8e66365aa57",
+        "gold_and_authorities_sha256": "9e34b09554ede1a4b4f40ca87a7dd71c801aa1fd8a027e0b208cfe3c0053f61b",
+        "prompt_utf8_sha256": "60daa6fd2e0cd1dcb8bc0bd4815e88db031a5b0dc93d781fba464e1b3ab1156b",
+        "rubric_sha256": "14ee1370496bf48b07b6ece4616c1410946f81fb3b12e5deb12d9bb04cb4bcca",
+        "source_identities_sha256": "f700f62b55dea71df3312cad2fb38d681c98d4257ac6a86e2da04a3207d9967f",
+        "visible_corpus_sha256": "bd95739aa98a3fdca4246e076f85aba716210075b209224c5926fbfb300c0687"
+      },
+      "public_subject": "learned-limit scope",
+      "reviewers": [
+        {
+          "report_sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c",
+          "reviewed_case_sha256": "e38b9ed00d55337244d2069f8e8351a36275c1a1e60dd8cacf020c2336ad8588",
+          "reviewer": "B",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "e38b9ed00d55337244d2069f8e8351a36275c1a1e60dd8cacf020c2336ad8588",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "planning_review"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "A",
+      "case_id": "P04",
+      "cohort": "routing",
+      "commitments": {
+        "acceptance_specification_sha256": "3710fefa15d7c9d4f821023cc537f8535777ce28018cf5a277c39f84f9b8937c",
+        "allowlist_sha256": "15d412ac1bf93eeef8d84188932c0fecb249f78d994bdaee5809b8d7a679e68a",
+        "complete_case_sha256": "17b3a89154467ecf935f16e69c9f040844d079193f97c92caa459d8d6055c994",
+        "forbidden_conclusions_sha256": "e763d6086bf042842dbac526eea2195038999b200a9292d8b8b5f83cc024b172",
+        "gold_and_authorities_sha256": "c8b1c4469b2ccb9263d964f647e7e8c75b925ef8ac2a5d3b4af1790c83ab3446",
+        "prompt_utf8_sha256": "3aeea087e985fdee92ec3721fc28137c341da9634d213ba000aa1d0cec2a78f5",
+        "rubric_sha256": "9f491a790965da15daba4b53addca280496540195067f8f3b0ee9e88113a22a8",
+        "source_identities_sha256": "0bed1bd87735c418259fca3be6bfc30d3f547bcff79c96bbc128faa8bc171f56",
+        "visible_corpus_sha256": "e01e3a8cee797c0e3e45761bed1a4c3000a659ea69955511f35fd6ddf2e9ceb2"
+      },
+      "public_subject": "verdict ownership",
+      "reviewers": [
+        {
+          "report_sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c",
+          "reviewed_case_sha256": "17b3a89154467ecf935f16e69c9f040844d079193f97c92caa459d8d6055c994",
+          "reviewer": "B",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "17b3a89154467ecf935f16e69c9f040844d079193f97c92caa459d8d6055c994",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "planning_review"
+    },
+    {
+      "acceptance_artifacts": [
+        {
+          "component_id": "1",
+          "sha256": "b73ae616db615736be5f073c298957f64e167848f4a09ac50b05b82a3e33fb2c"
+        },
+        {
+          "component_id": "2",
+          "sha256": "512b817fe6f5d4e5519aaef4bba1d4bea608d8a757a64539dcba3518d0a4152c"
+        }
+      ],
+      "author": "A",
+      "case_id": "P05",
+      "cohort": "routing",
+      "commitments": {
+        "acceptance_specification_sha256": "801505bb5b0faec35935aa0603ebe01c0afec138d132a429ba84c4d0ad947b3d",
+        "allowlist_sha256": "9fc3dbc4f4d7d7f2116a8214e1c3f6e874be65c1f6980f942207d3939a7dbaf9",
+        "complete_case_sha256": "f1ac10aad161cb27f1c4a740ac0cc66bee3f49d2c6ca79101c9bf792cf508d0d",
+        "forbidden_conclusions_sha256": "6a17de4315939a8d9058adfd6aa0976aada3f9ac727b8b033e62f9274a391b4a",
+        "gold_and_authorities_sha256": "55f2cf5de9a072c0e100fee3bd808b758956f3d2cc17f0b39dc06ef05adedbd9",
+        "prompt_utf8_sha256": "7fc7b4bceb403f27344490686c31a79dc1a1ba3a3a9b199951e07866023dbaf6",
+        "rubric_sha256": "b3f96c5367e94896dac51705a1721659260b91f3cee657664bd0e0d56bea91e8",
+        "source_identities_sha256": "849502599a87839920380dd3f55f6236480833bf699b5f748b97f9559b8d5c74",
+        "visible_corpus_sha256": "db898902454115d97dc95ee3bae848f684870bded664221b21d56e08b793b817"
+      },
+      "public_subject": "manual-quality policy",
+      "reviewers": [
+        {
+          "report_sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c",
+          "reviewed_case_sha256": "f1ac10aad161cb27f1c4a740ac0cc66bee3f49d2c6ca79101c9bf792cf508d0d",
+          "reviewer": "B",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "f1ac10aad161cb27f1c4a740ac0cc66bee3f49d2c6ca79101c9bf792cf508d0d",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "small_patch"
+    },
+    {
+      "acceptance_artifacts": [
+        {
+          "component_id": "1",
+          "sha256": "6bf18f84770be5a20e9a041194786589a66d2c9e2c397344326a8ccc009d76e5"
+        }
+      ],
+      "author": "A",
+      "case_id": "P06",
+      "cohort": "routing",
+      "commitments": {
+        "acceptance_specification_sha256": "113f64e9e70f0791b4aa3f434d708bec9c9a481971ae8db58caf04fadea9b71d",
+        "allowlist_sha256": "d800caf85bd374ce95912c58ec06d45fcd97d9e638a4e669e1e69739aab244aa",
+        "complete_case_sha256": "0b3cba700e6b5840a76e5955b1807f013e98dae8d8c01173f88c7464c4ec4c3c",
+        "forbidden_conclusions_sha256": "e7b0bf0a2384912c0bb6c718a18b44095419be703b8143201dfbdbfbcfadb4ae",
+        "gold_and_authorities_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "prompt_utf8_sha256": "68924df5fa0cbbebef766d7358c0f3e7e174b7c0d7f91fd7e1432aeed7c98a0c",
+        "rubric_sha256": "6b89f18b61e43419480462a561700b1ea3b2f5fe613c6df65e349e7566dd9aaa",
+        "source_identities_sha256": "1297cafb528b231fcd63e61ed671e38287fd8eb0b6e6ce690024c6f9dd36e154",
+        "visible_corpus_sha256": "484182a8d141ac44bc614c3ab732fa3002b8ad93e0d36d799af39e7c851c17fc"
+      },
+      "public_subject": "execution-plan derivation",
+      "reviewers": [
+        {
+          "report_sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c",
+          "reviewed_case_sha256": "0b3cba700e6b5840a76e5955b1807f013e98dae8d8c01173f88c7464c4ec4c3c",
+          "reviewer": "B",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "0b3cba700e6b5840a76e5955b1807f013e98dae8d8c01173f88c7464c4ec4c3c",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "small_patch"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "B",
+      "case_id": "E01",
+      "cohort": "evidence",
+      "commitments": {
+        "acceptance_specification_sha256": "965fc19af73d92723115745caeddc378077ac7e5b257befad7dca3ca27d9d8d7",
+        "allowlist_sha256": "023abe1a63c735cd1da9554d102944b062ccab775455b31e60c4a3059757adde",
+        "complete_case_sha256": "c5502088d8a8f7858db67db4c55c52bd1863561794e4ea323e7bd1bd9e2284c7",
+        "forbidden_conclusions_sha256": "eb2f04fea869ee3081ed3ec42f3c5141befe4a89b88f5f0317c67eb92e98c252",
+        "gold_and_authorities_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "prompt_utf8_sha256": "0cedecdc44175d1ce08010912998e878f098baa6508d10dbd52ac508877d677c",
+        "rubric_sha256": "e35b2523280a6f27f49152998645b398dd00970c05d1fd5ed6b177dce9b90378",
+        "source_identities_sha256": "77b2de39c0af4ec3ae60cf411c003fec8d7dd69bcab2ab2108411a593f1b4c6f",
+        "visible_corpus_sha256": "18eea2b0c86c50262c2e0acc38812610d12a33a9d7ec819cf73ab7420ae1138d",
+        "visible_fixture_utf8_sha256": "622fd1fb25d51dfd988b8e75a45ac7ba62a21244f032e92484ab65e3042eb03d"
+      },
+      "public_subject": "check definition/execution",
+      "reviewers": [
+        {
+          "report_sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055",
+          "reviewed_case_sha256": "c5502088d8a8f7858db67db4c55c52bd1863561794e4ea323e7bd1bd9e2284c7",
+          "reviewer": "A",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "c5502088d8a8f7858db67db4c55c52bd1863561794e4ea323e7bd1bd9e2284c7",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "investigation"
+    },
+    {
+      "acceptance_artifacts": [
+        {
+          "component_id": "1",
+          "sha256": "4aec511f00896c1516d6111ebb70f4ddfb374ca28f8f38f8a2315066f9928323"
+        }
+      ],
+      "author": "B",
+      "case_id": "E02",
+      "cohort": "evidence",
+      "commitments": {
+        "acceptance_specification_sha256": "99b11a76715488c883eaee873aa5742cd8a4af9cd38ebfdede480769edfd9d6a",
+        "allowlist_sha256": "68a7c7b89a3cf84918995c17c92f1294eda7885ce6dac7130a1451bfd5c8be4e",
+        "complete_case_sha256": "2457bcf1a6ba72b2ed3ce18acda86db44e89d019df7636c4031fff269de4f4b1",
+        "forbidden_conclusions_sha256": "81492803eb1e8f8147ba966e2460cc91055434793fd5634a6a315f20fbb1b574",
+        "gold_and_authorities_sha256": "705ee9452430eff22af0be88f02ad38273faf603da0077d2516598da6cf226d9",
+        "prompt_utf8_sha256": "26642fe000a4bf5ff92eaf8c48b7b85cf2f04c6c4f777307cfe01479898b415b",
+        "rubric_sha256": "cb95c33a521b968cc82f5c4af9185da78a4ef597e0a79a028cca7523912c0f84",
+        "source_identities_sha256": "88b10a23aec744311e47968b1f91cb7ac35de7e8c7b9a41d36481ddb8e111e58",
+        "visible_corpus_sha256": "b9648f9d41f6bf8007cb4f8c5ded446aa0457ed7e77aa6a7e6e118ca553478c5"
+      },
+      "public_subject": "input-path membership",
+      "reviewers": [
+        {
+          "report_sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055",
+          "reviewed_case_sha256": "2457bcf1a6ba72b2ed3ce18acda86db44e89d019df7636c4031fff269de4f4b1",
+          "reviewer": "A",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "2457bcf1a6ba72b2ed3ce18acda86db44e89d019df7636c4031fff269de4f4b1",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "small_patch"
+    },
+    {
+      "acceptance_artifacts": [
+        {
+          "component_id": "1",
+          "sha256": "4ecbff0f8cdcd86984777f3d0a325e768e69dbe7f06943237b5cae31bf7abeda"
+        }
+      ],
+      "author": "B",
+      "case_id": "E03",
+      "cohort": "evidence",
+      "commitments": {
+        "acceptance_specification_sha256": "68522aa77661d8b0ea179f13028c2b9710284097bdd7e29866af072a05847627",
+        "allowlist_sha256": "0c529aa906a6f20d34cb348eba15cfe47c3edb656a1b6bf0b9b6340cecd053b0",
+        "complete_case_sha256": "ffe4598e41d8e577569a972aa548cd52c55538eeff975d689345fcd81e5ca035",
+        "forbidden_conclusions_sha256": "31e3c66ee485f33e647370c51335902cc1637b5aa71c5f04583ed6921113a5cf",
+        "gold_and_authorities_sha256": "dc20117411160a7f71841ec8271d12e0db5bd9a5bd7bc3e540a39b17a5eb2896",
+        "prompt_utf8_sha256": "44fd170be246402c52c48839c794bac523a8b73f088c1d03caf08d3a0b4ca926",
+        "rubric_sha256": "3fbe2a89c34b3e97e1095b96bb8871f57fb40df5e07c7f36998b39f6c903094d",
+        "source_identities_sha256": "63381de23566875c186cd4be7045c540cd8314b5f64a6ee8e2cb1e7409fed26e",
+        "visible_corpus_sha256": "a042dc73391b5c669fe9c61c5115034c5ef0d16de9364dbbc2456ed11dc88f15"
+      },
+      "public_subject": "environment mismatch",
+      "reviewers": [
+        {
+          "report_sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055",
+          "reviewed_case_sha256": "ffe4598e41d8e577569a972aa548cd52c55538eeff975d689345fcd81e5ca035",
+          "reviewer": "A",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "ffe4598e41d8e577569a972aa548cd52c55538eeff975d689345fcd81e5ca035",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "small_patch"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "B",
+      "case_id": "E04",
+      "cohort": "evidence",
+      "commitments": {
+        "acceptance_specification_sha256": "e5600db0f2e562070cfd4ba46b39c2a9d536d3413fb546d6198e98ba04e8b40d",
+        "allowlist_sha256": "72d10ebb7d007f28126c12964b9a6156b7bd12f25d49127219e10a236d6572ba",
+        "complete_case_sha256": "45aa7a787aa6937576fa57eda9f6fca3a38bd3ebe3a355662c7f35d02e1878cd",
+        "forbidden_conclusions_sha256": "8bf56b8ba6230ed94691c70226c7a0810b08d8da8244c008ec6514697b0df7eb",
+        "gold_and_authorities_sha256": "394567d014e9992c8ffe32a8eea6db48123c61c5fd5430d6211539da52475f92",
+        "prompt_utf8_sha256": "c213d966f77239fa77e62253b4be055ae26c73ae639a56ee3b485eaeb131975e",
+        "rubric_sha256": "b67a6d83651119427046468f236ec765f16278b9ef4a1fae5bf364f9d812400f",
+        "source_identities_sha256": "85f3e7bb781b8b8f503447c7ba0e4ec95fb9e227a8dd8e41670c2ce5ea334ea4",
+        "visible_corpus_sha256": "65449475370277a2c9c4a93cdbbdf6f982c5b0f83b1d1b4e8854c9d2f5405044"
+      },
+      "public_subject": "unauthenticated reported pass",
+      "reviewers": [
+        {
+          "report_sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055",
+          "reviewed_case_sha256": "45aa7a787aa6937576fa57eda9f6fca3a38bd3ebe3a355662c7f35d02e1878cd",
+          "reviewer": "A",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "45aa7a787aa6937576fa57eda9f6fca3a38bd3ebe3a355662c7f35d02e1878cd",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "planning_review"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "B",
+      "case_id": "E05",
+      "cohort": "evidence",
+      "commitments": {
+        "acceptance_specification_sha256": "09d89cba993833dfee6d4fe527eb0ab6ac52f1a1d77740249819e2a5ec46a307",
+        "allowlist_sha256": "82931306b1edf37e526a4e058ea905dc6ac5c4b5319ba71208b79f5363bb018e",
+        "complete_case_sha256": "6a5dcefdd077989f40b8fcce5ddce502b28591038eeba2fec39d48732260928f",
+        "forbidden_conclusions_sha256": "e217f9e425b428e729cea0e26a5ef6f8592d0650db2d486256fa6480099b986d",
+        "gold_and_authorities_sha256": "9992660e31efb3f52ff7484a854bf67b2dea71e925e09e0a53d5857cdb09cd26",
+        "prompt_utf8_sha256": "a99df3fec625478377e551588fe14573afdcc2e7af2dbcb8000ad9bb86d7f315",
+        "rubric_sha256": "b67a6d83651119427046468f236ec765f16278b9ef4a1fae5bf364f9d812400f",
+        "source_identities_sha256": "63381de23566875c186cd4be7045c540cd8314b5f64a6ee8e2cb1e7409fed26e",
+        "visible_corpus_sha256": "6bd67a6dc018e66dad192d23f962ac9658c80d0906a173a38509e7662400c0d9"
+      },
+      "public_subject": "unusable history/current integrity",
+      "reviewers": [
+        {
+          "report_sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055",
+          "reviewed_case_sha256": "6a5dcefdd077989f40b8fcce5ddce502b28591038eeba2fec39d48732260928f",
+          "reviewer": "A",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "6a5dcefdd077989f40b8fcce5ddce502b28591038eeba2fec39d48732260928f",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "investigation"
+    },
+    {
+      "acceptance_artifacts": [],
+      "author": "B",
+      "case_id": "E06",
+      "cohort": "evidence",
+      "commitments": {
+        "acceptance_specification_sha256": "9bef59fc4b6dc6149b766da74fa0b4ce6996632b5c420078067b24bea560c84b",
+        "allowlist_sha256": "96ccf2b19dd27a536bae1ef10844b15291338e2e602987961ca7bf2e7bed968f",
+        "complete_case_sha256": "0842c3aedd24ab09197aa80ea250ae846feb0e7eda5da9e638edb6d9d1a048ad",
+        "forbidden_conclusions_sha256": "4db506944e0768a1368d79b4364f487258bc80bb281619a6cf1c9c592497bb7d",
+        "gold_and_authorities_sha256": "562dcb7e568a871b1ff542370ba2b83575a5ca1af21c090ba3d4269c860e9697",
+        "prompt_utf8_sha256": "e1a0310a9c7375fd544ef00583d6af84d73ab5da65b6d3cdc85d687f3203b8fd",
+        "rubric_sha256": "1ea911e2a841acfda3abd4f7e41aeeec0144b2f93e0ea2d8d65efea0e0acbb69",
+        "source_identities_sha256": "48ef2935427a6fc71ec1ad4d9213152dd3315855efa0301f82092138a01dcb3e",
+        "visible_corpus_sha256": "c5c9e69a7ca9a4a2cb31d9fcea834513fce09073771828e82af2f08470c6bb19"
+      },
+      "public_subject": "compile versus behavioral qualification",
+      "reviewers": [
+        {
+          "report_sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055",
+          "reviewed_case_sha256": "0842c3aedd24ab09197aa80ea250ae846feb0e7eda5da9e638edb6d9d1a048ad",
+          "reviewer": "A",
+          "verdict": "approve"
+        },
+        {
+          "report_sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650",
+          "reviewed_case_sha256": "0842c3aedd24ab09197aa80ea250ae846feb0e7eda5da9e638edb6d9d1a048ad",
+          "reviewer": "C",
+          "verdict": "approve"
+        }
+      ],
+      "task_type": "planning_review"
+    }
+  ],
+  "corpus_export_policy": {
+    "B_C_curated_record_excerpts_must_be_subset_of_committed_visible_corpus": true,
+    "actual_export_and_isolation_enforcement_remains_future_harness_requirement": true,
+    "allowlist_and_semantic_source_identity_commitments_exported": true,
+    "fixed_source_baseline_required": true,
+    "identical_per_case_visible_source_doc_corpus_across_A_B_C_required": true,
+    "network_CI_credentials_hardware_excluded": true,
+    "no_future_fix_gold_or_later_commit_source_in_solver_roots_or_tools": true,
+    "outside_corpus_excerpts_must_be_excluded_or_marked_inaccessible": true,
+    "shared_tmp_artifacts_prohibited": true,
+    "silent_B_C_corpus_widening_prohibited": true,
+    "task_owned_TMPDIR_TMP_TEMP_and_disabled_bytecode_required": true
+  },
+  "curator_metadata_commitments": [
+    {
+      "curator": "A",
+      "sha256": "4be7498e3daa7a406b71df8089a12b9e4b4f7abba72b9133db505f7c6bb7fe19"
+    },
+    {
+      "curator": "B",
+      "sha256": "ea73d2836fed62c250e79081416cc14763eab7057c3d83bde15d1afff01fcd98"
+    }
+  ],
+  "review_report_commitments": [
+    {
+      "reviewer": "A",
+      "sha256": "5b86f6dfda4e67a0d2611ea6236da2b309a1959899ee1140e17d4ed0a9fbf055"
+    },
+    {
+      "reviewer": "B",
+      "sha256": "a0633541e5fc9f31ed865251d9c0063dfc1fae64556936b34ec5a47ae1f5f49c"
+    },
+    {
+      "reviewer": "C",
+      "sha256": "bd24865ac3cccfcd8ab7159202806ba191f526bf690c5a15688524ff44ab5650"
+    }
+  ],
+  "schema_version": 1,
+  "scope_id": "M0-private-gold-final-seal",
+  "source_commit": "168fe74fb2a47f3ccd56b795741dfe3422307b0d",
+  "source_tree": "ea8c9c283a71b67bf773511144eb3ee7ab09ee9c",
+  "timing": {
+    "A_expansion_shared_wall": {
+      "elapsed_wall_seconds": 752.184,
+      "end_utc": "2026-10-21T18:50:09.184327+00:00",
+      "start_utc": "2026-10-21T18:37:37+00:00"
+    },
+    "B_authoring_shared_wall": {
+      "elapsed_wall_minutes": 5.933,
+      "end_utc": "2026-10-21T18:43:39.977846+00:00",
+      "start_utc": "2026-10-21T18:37:44+00:00"
+    },
+    "B_crossreview_shared_wall": {
+      "elapsed_wall_minutes": 3.3842,
+      "end_utc": "2026-10-21T18:47:35.050762+00:00",
+      "start_utc": "2026-10-21T18:44:12+00:00"
+    },
+    "C_expansion_and_seal_shared_wall": {
+      "elapsed_wall_seconds": 870.695934,
+      "end_utc": "2026-10-21T18:52:25.695934+00:00",
+      "start_utc": "2026-10-21T18:37:55+00:00"
+    },
+    "C_final_review_shared_wall": {
+      "exclusive_person_minutes": null,
+      "expansion_elapsed_wall_seconds": 698.128473,
+      "expansion_start_utc": "2026-10-21T18:37:55+00:00",
+      "final_seal_utc": "2026-10-21T18:49:33.128473+00:00",
+      "initial_elapsed_wall_seconds": 168.430754,
+      "initial_end_utc": "2026-10-21T18:34:13.430754+00:00",
+      "initial_start_utc": "2026-10-21T18:31:25+00:00",
+      "kind": "Direct UTC shared session wall time including waiting/coordination; phase intervals are not summed per case."
+    },
+    "initial_C_shared_wall_seconds": 168.430754,
+    "initial_authoring_conservative_shared_wall_upper_bound_minutes": 10,
+    "initial_authoring_measured_person_minutes": null,
+    "initial_crossreview_shared_wall_minutes": {
+      "A": 1.982,
+      "B": 1.1762
+    },
+    "measurement_kind": "Agent-session/shared elapsed wall time including coordination and waits; not human or exclusive person-time. Do not sum overlapping phase or per-case intervals.",
+    "metadata_sealed_utc": "2026-10-21T18:52:25.695934+00:00",
+    "total_exclusive_person_minutes": null
+  },
+  "verdict": "approved_static_gold_freeze"
+}
