@@ -3598,7 +3598,7 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext, linkReceipt = currentLinkReceipt()).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext, linkReceipt = currentLinkReceipt(), retainedPeak = decisionCaps.display).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
             if (fresh.display_aware_auto_protocol == "route-v1") {

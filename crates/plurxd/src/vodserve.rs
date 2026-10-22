@@ -646,7 +646,7 @@ pub struct VodActivityObservation {
     pub display_target: Option<DisplayTargetActivity>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct DisplayTargetActivity {
     pub reported_peak_nits: Option<i64>,
     pub peak_source: Option<plurx_core::playback::caps::DisplayPeakSource>,
