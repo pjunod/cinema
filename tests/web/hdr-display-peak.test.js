@@ -63,3 +63,40 @@ test("full-play quality reload passes its captured peak to the decision",async()
     preparation:{run:fn=>fn(null)},openIsCurrent:()=>true,failPreparation:error=>{throw error;}});
   assert.equal(result.decision._capsSnapshot.display.max_nits,600);
 });
+
+
+test("same-title display peak freezes while open and refreshes after Close",async()=>{
+  for(const value of [null,600]){
+    const h=harness(value),first=await h.decision(1,"auto",null);
+    h.ctx.incumbent={fileId:1,capsSnapshot:first._capsSnapshot};
+    vm.runInContext(`let PLAYER=incumbent,PENDING_DEFAULT_SUB_OFF=false;
+      const modal={open:true,classList:{contains:()=>modal.open,remove:()=>{modal.open=false;}}};
+      document.getElementById=id=>id==="modal"?modal:{};
+      const performance={now:()=>0},PlaybackPolicy={bandwidthSeedBps:()=>null};
+      function takePlaybackAttemptReason(){return null;}
+      function playbackFileContextForPlayer(player){return player.fileId;}
+      function playbackFileKey(file){return file;}
+      function playbackSelection(){return {};}
+      function wirePlayer(){}function watchPrepare(){return null;}
+      `+declaration("core/file-context.js","samePlaybackFile")+"\n"+
+      declaration("player/decode-tiers.js","capturePlayInputs")+`
+      this.capture=()=>capturePlayInputs(1,{},null);
+      this.closePresentation=()=>modal.classList.remove("open");
+      this.captureRetry=peakIncumbent=>capturePlayInputs(1,{}, {peakIncumbent});`,h.ctx);
+    h.save({value:"1600"});
+    const decide=inputs=>h.fullDecision({...inputs,fileId:1,
+      preparation:{run:fn=>fn(null)},openIsCurrent:()=>true,failPreparation:error=>{throw error;}});
+    const activeInputs=h.ctx.capture();
+    const active=await decide(activeInputs);
+    assert.equal(active.decision._capsSnapshot.display.max_nits,value??undefined);
+    assert.equal(active.decision._capsSnapshot.display.peak_source,value==null?undefined:"viewer");
+    // Close removes the modal's open state while deliberately retaining PLAYER
+    // and its file identity/caps. Reopening this title is a new presentation.
+    h.ctx.closePresentation();
+    const reopened=await decide(h.ctx.capture());
+    assert.equal(reopened.decision._capsSnapshot.display.max_nits,1600);
+    assert.equal(reopened.decision._capsSnapshot.display.peak_source,"viewer");
+    const retry=await decide(h.ctx.captureRetry(activeInputs.peakIncumbent));
+    assert.equal(retry.decision._capsSnapshot.display.max_nits,value??undefined);
+  }
+});
