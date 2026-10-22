@@ -1531,7 +1531,12 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
             display_ordinal: ordinal as u64,
         })
         .collect();
-    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), grid, 0, 48)
+    let origin = DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1).expect("valid zero origin timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(0),
+    )
+    .expect("valid observed zero source origin");
+    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), origin, grid, 0, 48)
         .expect("valid bounded clock fixture");
     assert_eq!(mapped.len(), 48);
     assert_eq!(
@@ -1542,12 +1547,153 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
         mapped[1].output_pts,
         DvTimestamp::new(1_001, 24_000).expect("valid bounded clock fixture")
     );
-    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), origin, grid, 0, 48).is_err());
     let mut dropped = source.clone();
     dropped[24].pts = dropped[25].pts;
-    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), origin, grid, 0, 48).is_err());
     let mut wrong = source.clone();
     wrong[47].pts = DvTimestamp::new(1_970, 1_000).expect("valid bounded clock fixture");
-    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), grid, 0, 48).is_err());
-    assert!(dv_map_source_to_output_grid(&source, (1, 24), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), origin, grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source, (1, 24), origin, grid, 0, 48).is_err());
+}
+
+#[test]
+fn common_source_origin_preserves_absolute_keys_across_film_windows() {
+    let grid = super::super::VodFrameGrid::new(24_000, 1_001).expect("valid NTSC cadence");
+    for millis in [0, 125] {
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(millis, 1000).expect("valid origin timestamp"),
+            super::super::VodSourceClock::ReportedOrigin(millis * 1000),
+        )
+        .expect("valid observed source origin");
+        for entry in [0, 1, 2, 360] {
+            let first = entry * 48_u64;
+            let keys: Vec<_> = (first..first + 48)
+                .map(|frame| DvFrameKey {
+                    absolute_video_index: 0,
+                    continuity_epoch: 11,
+                    pts: DvTimestamp::new(
+                        millis + i64::try_from(frame * 1001 / 24).expect("frame PTS fits i64"),
+                        1000,
+                    )
+                    .expect("valid source PTS"),
+                    display_ordinal: frame,
+                })
+                .collect();
+            let mapped = dv_map_source_to_output_grid(
+                &keys,
+                (1, 1000),
+                origin,
+                grid,
+                first,
+                48,
+            )
+            .expect("complete bounded source window");
+            assert_eq!(
+                mapped.iter().map(|m| m.source.clone()).collect::<Vec<_>>(),
+                keys
+            );
+            assert_eq!(
+                mapped[0].output_pts,
+                DvTimestamp::new(
+                    i64::try_from(first * 1001).expect("output frame index fits i64"),
+                    24000,
+                )
+                .expect("valid output timestamp")
+            );
+            assert!(
+                dv_map_source_to_output_grid(&keys[..47], (1, 1000), origin, grid, first, 48)
+                    .is_err()
+            );
+            let mut duplicate = keys.clone();
+            duplicate[24] = duplicate[23].clone();
+            assert!(
+                dv_map_source_to_output_grid(&duplicate, (1, 1000), origin, grid, first, 48)
+                    .is_err()
+            );
+            let mut drift = keys.clone();
+            drift[47].pts = DvTimestamp::new(
+                millis
+                    + i64::try_from((first + 47) * 1001 / 24)
+                        .expect("drift frame PTS fits i64")
+                    + 2,
+                1000,
+            )
+            .expect("valid drift PTS");
+            assert!(
+                dv_map_source_to_output_grid(&drift, (1, 1000), origin, grid, first, 48).is_err()
+            );
+            let wrong = DvSourceOrigin::observed_common(
+                DvTimestamp::new(millis + 2, 1000).expect("valid shifted origin timestamp"),
+                super::super::VodSourceClock::ReportedOrigin((millis + 2) * 1000),
+            )
+            .expect("valid shifted source origin");
+            assert!(
+                dv_map_source_to_output_grid(&keys, (1, 1000), wrong, grid, first, 48).is_err()
+            );
+            assert!(
+                dv_map_source_to_output_grid(&keys, (1, 1000), origin, grid, u64::MAX, 48).is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn common_source_origin_bounds_are_absolute_exact_and_seek_stable() {
+    for millis in [0, 125] {
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(millis, 1000).expect("valid boundary origin timestamp"),
+            super::super::VodSourceClock::ReportedOrigin(millis * 1000),
+        )
+        .expect("valid observed source origin");
+        for entry in [0, 1, 2, 360] {
+            let first = entry * 48 * 1001_u64;
+            let start = origin
+                .source_boundary(first, 24000, (1, 1000))
+                .expect("bounded source start boundary");
+            let end = origin
+                .source_boundary(first + 48 * 1001, 24000, (1, 1000))
+                .expect("bounded source end boundary");
+            let expected = if entry == 0 {
+                DvTimestamp::new(millis, 1000).expect("valid expected start timestamp")
+            } else {
+                DvTimestamp::new(
+                    i64::try_from(first * 1000 / 24000)
+                        .expect("expected boundary offset fits i64")
+                        + millis
+                        - 1,
+                    1000,
+                )
+                .expect("valid expected boundary timestamp")
+            };
+            assert_eq!(
+                DvTimestamp::new(start.0, start.1)
+                    .expect("valid actual boundary timestamp"),
+                expected
+            );
+            assert_eq!(
+                end,
+                origin
+                    .source_boundary((entry + 1) * 48 * 1001, 24000, (1, 1000))
+                    .expect("bounded expected next boundary")
+            );
+        }
+        assert!(origin.source_boundary(u64::MAX, 24000, (1, 1000)).is_err());
+        assert!(origin.source_boundary(1, 0, (1, 1000)).is_err());
+    }
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1).expect("valid default clock timestamp"),
+        super::super::VodSourceClock::ProducerDefaultZero
+    )
+    .is_err());
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(1, 8).expect("valid mismatched clock timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(0)
+    )
+    .is_err());
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(-1, 8).expect("valid negative origin timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(-125000)
+    )
+    .is_err());
 }

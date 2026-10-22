@@ -651,6 +651,7 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) source: Arc<crate::fragment_index_cluster::SourceFence>,
     pub(crate) source_offsets: Arc<tokio::sync::Semaphore>,
     pub(crate) source_tick: (u32, u32),
+    pub(crate) source_origin: plurx_core::transcode::dv_processing::DvSourceOrigin,
     pub(crate) native_bl: (u32, u32),
     /// The held demux origin the Encoding froze for its soundtrack.
     pub(crate) source_clock: plurx_core::transcode::VodSourceClock,
@@ -792,31 +793,19 @@ impl RuntimeRecipe {
         entry: &plurx_core::segplan::PlanEntry,
         grid: plurx_core::transcode::VodFrameGrid,
     ) -> Result<crate::dv_segment::SegmentWindow, String> {
-        fn subtract_tick(value: u64, grid: u32, tick: (u32, u32)) -> Result<(i64, u32), String> {
-            let numerator = (i128::from(value) * i128::from(tick.1)
-                - i128::from(tick.0) * i128::from(grid))
-            .max(0);
-            let denominator = u64::from(grid) * u64::from(tick.1);
-            let mut a = numerator as u128;
-            let mut b = u128::from(denominator);
-            while b != 0 {
-                (a, b) = (b, a % b);
-            }
-            let divisor = a.max(1);
-            Ok((
-                i64::try_from(numerator / divisor as i128)
-                    .map_err(|_| "source window numerator overflow")?,
-                u32::try_from(u128::from(denominator) / divisor)
-                    .map_err(|_| "source window clock overflow")?,
-            ))
-        }
         let end = entry
             .start_ticks
             .checked_add(entry.duration_ticks)
             .ok_or("window endpoint overflow")?;
         Ok(crate::dv_segment::SegmentWindow {
-            start: subtract_tick(entry.start_ticks, grid.numerator, self.source_tick)?,
-            end: subtract_tick(end, grid.numerator, self.source_tick)?,
+            start: self
+                .source_origin
+                .source_boundary(entry.start_ticks, grid.numerator, self.source_tick)
+                .map_err(|e| e.to_string())?,
+            end: self
+                .source_origin
+                .source_boundary(end, grid.numerator, self.source_tick)
+                .map_err(|e| e.to_string())?,
             max_preroll: 512,
         })
     }
@@ -1049,6 +1038,7 @@ impl RuntimeRecipe {
             let first_frame = entry.start_ticks / u64::from(grid.denominator);
             let observed = private.observe(
                 &window,
+                self.source_origin,
                 plan.decode().input_video_stream(),
                 0,
                 grid,
@@ -1174,6 +1164,7 @@ impl RuntimeRecipe {
                 source_keys: &source_keys,
                 source_rpus: &source_rpus,
                 source_tick: self.source_tick,
+                source_origin: self.source_origin,
                 grid,
                 first_global_frame: first_frame,
                 encoded: &verified.bytes,
@@ -1589,6 +1580,17 @@ fn timestamp(value: &str) -> Result<plurx_core::transcode::dv_processing::DvTime
         .map_err(|e| e.to_string())
 }
 #[cfg(target_os = "linux")]
+fn validate_window_origin(
+    origin: &str,
+    provenance: &str,
+    expected: plurx_core::transcode::dv_processing::DvSourceOrigin,
+) -> Result<(), String> {
+    if provenance != "observed_stream_start_time" || timestamp(origin)? != expected.timestamp() {
+        return Err("source window origin differs from observed held common origin".into());
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
 fn tick_timestamp(
     ticks: i64,
     clock: (u32, u32),
@@ -1613,6 +1615,7 @@ impl PrivateWindow {
     pub(crate) fn observe(
         &self,
         window: &crate::dv_segment::SegmentWindow,
+        source_origin: plurx_core::transcode::dv_processing::DvSourceOrigin,
         stream: u32,
         epoch: u64,
         grid: plurx_core::transcode::VodFrameGrid,
@@ -1749,6 +1752,11 @@ impl PrivateWindow {
             || "bt2020-pq-master-clip".to_owned(),
             DvDisplayTarget::output_policy,
         );
+        validate_window_origin(
+            &complete.source_origin,
+            &complete.origin_provenance,
+            source_origin,
+        )?;
         if tick.0 == 0
             || complete.frames != frames
             || pairs.len() != frames
@@ -1765,8 +1773,6 @@ impl PrivateWindow {
             || complete.preroll_pairs > usize::from(window.max_preroll)
             || complete.paired_pictures > usize::from(window.max_preroll) + frames + 1
             || complete.source_bytes_read > 128 * 1024 * 1024
-            || complete.source_origin != "0/1"
-            || complete.origin_provenance != "observed_stream_start_time"
             || complete.membership != "frame_pts_in_half_open_window_durations_unclipped"
             || timestamp(&complete.requested_start)?
                 != DvTimestamp::new(window.start.0, window.start.1).map_err(|e| e.to_string())?
@@ -1794,7 +1800,16 @@ impl PrivateWindow {
             .values()
             .map(|row| serde_json::to_value(row).expect("integer target trace serializes"))
             .collect();
-        let mut trace = Vec::new();
+        let mut trace = serde_json::to_vec(&(
+            "observed_common_stream_format_origin-v1",
+            source_origin,
+            complete.origin_provenance.as_str(),
+            stream,
+            epoch,
+            window.start,
+            window.end,
+        ))
+        .map_err(|e| e.to_string())?;
         let timing = self.evidence.timing()?;
         let expected_timing = String::from_utf8(timing).map_err(|e| e.to_string())?;
         let mut observed_timing = String::new();
@@ -1934,7 +1949,7 @@ impl PrivateWindow {
             return Err("private timing differs from the source trace".into());
         }
         let source_keys: Vec<_> = pictures.iter().map(|frame| frame.key.clone()).collect();
-        dv_map_source_to_output_grid(&source_keys, tick, grid, first_frame, frames)
+        dv_map_source_to_output_grid(&source_keys, tick, source_origin, grid, first_frame, frames)
             .map_err(|e| e.to_string())?;
         Ok(ObservedWindow {
             pictures,
@@ -1945,6 +1960,43 @@ impl PrivateWindow {
             runtime_device,
             decoder,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod source_origin_tests {
+    use super::validate_window_origin;
+    use plurx_core::transcode::{
+        dv_processing::{DvSourceOrigin, DvTimestamp},
+        VodSourceClock,
+    };
+
+    #[test]
+    fn renderer_receipt_requires_exact_observed_held_common_origin() {
+        for (origin, micros, equivalent) in [("0/1", 0, "0/1000"), ("1/8", 125000, "125/1000")] {
+            let expected = DvSourceOrigin::observed_common(
+                DvTimestamp::new(micros, 1000000).expect("valid expected held-format timestamp"),
+                VodSourceClock::ReportedOrigin(micros),
+            )
+            .expect("valid observed common origin");
+            for actual in [origin, equivalent] {
+                validate_window_origin(actual, "observed_stream_start_time", expected)
+                    .expect("matching held-origin receipt");
+            }
+            for wrong in ["1/7", "124/1000", "N/A", "1/0", "9223372036854775808/1"] {
+                assert!(
+                    validate_window_origin(wrong, "observed_stream_start_time", expected).is_err()
+                );
+            }
+            for provenance in [
+                "",
+                "unknown",
+                "producer_default_zero",
+                "first_window_picture",
+            ] {
+                assert!(validate_window_origin(origin, provenance, expected).is_err());
+            }
+        }
     }
 }
 

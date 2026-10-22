@@ -2475,6 +2475,8 @@ impl TranscodeManager {
                         .and_then(|clock| clock.split_once('/')).ok_or("held source has no rational time base")?;
                     let source_tick = (clock.0.parse::<u32>().map_err(|e| e.to_string())?,
                         clock.1.parse::<u32>().map_err(|e| e.to_string())?);
+                    let source_origin = crate::transcode::source_preparation::held_dv_source_origin(
+                        stream, source_tick, source_clock)?;
                     let dimension = |name| stream.get(name).and_then(serde_json::Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok()).ok_or("held native raster unavailable");
                     let native_bl = (dimension("width")?, dimension("height")?);
@@ -2495,7 +2497,7 @@ impl TranscodeManager {
                     let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
-                        source_tick, native_bl, source_clock, preferences,
+                        source_tick, source_origin, native_bl, source_clock, preferences,
                         source_mastering: crate::vodencode::dv_runtime::source_mastering_metadata(stream),
                         destination, mode, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
