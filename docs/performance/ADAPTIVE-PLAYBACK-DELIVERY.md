@@ -7,6 +7,40 @@ draft PR1248. This is a delivery breakdown of the existing
 not new design, feature scope, a framework or another review gate.
 The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
+## Authoritative first ordinary VOD source checklist
+
+All five items are **OPEN** at `772370540`. The immediate target is one ordinary
+local-file software VOD request on supported Linux, using a fresh rendition in
+the existing configured root. Source-complete is not behavior-verified.
+
+| Item | Actual missing production connection / binary closure |
+|---|---|
+| V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
+| V2 — held output/durability — OPEN | `operations/bootstrap/native.rs` must complete retained component/parent/child acquisition; `renditiondir` publication consumes that held child and durable I/O identity. Every selected mutation is armed and its actual outcome known before manifest/readers; no reopen or local UUID substitutes for ownership. |
+| V3 — producer/stop — OPEN | Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
+| V4 — retained output — OPEN | Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
+| V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
+
+Work order: minimal V2 held-parent/child bridge → V1/V3 ordinary composition →
+V4 serving/transfer → V5 settlement/reuse. The full execution artifact is the
+controller-owned `operator/FIRST-VOD-DELIVERY-CHECKLIST.md` under
+`~/.hermes/hdr-collaboration/workspaces/adaptive-playback-parallel-20261021/`,
+SHA256 `9908a6a60e0b2bce4dfa509d181d96a3459cb065aa45309bb83daf8b58e9c92d`.
+It specifies the concrete failure, existing gap, smallest change, prerequisites
+and binary closure for each item; this section is the sole product-doc summary.
+No new approval/pause gate, backend/framework/security prerequisite or scope
+cancellation follows from the list. Any new dependency must identify the blocked
+V item, concrete ordinary-request failure and smallest necessary addition.
+
+R1 (separate recovery integration): conservative restored holds/protected cleanup
+are mandatory now; selective startup/reconciliation and positive exact old-domain
+completion remain required before final acceptance. A universal restart transport
+is not a prerequisite for connecting the ordinary live path. Later generality
+remains all other agreed M0–M7 recipes/pipelines, policy, worker/placement,
+platforms and operations below. Acceptance-only remains complete integration →
+independent actual Fable review/fixes → once-only affected qualification/fast lane
+→ authorized merge. No pre-review behavioral tests or deployment.
+
 ## Actual distance to usable playback
 
 Ordinary production playback still uses legacy admission. The new policy,
@@ -38,7 +72,7 @@ No source-ownership transfer or additional permission gate is introduced.
 
 The next user-visible vertical target is deliberately narrow and already in M3:
 **one ordinary software finite VOD producer using durable finite admission through
-normal stop and same-host restart reconciliation, with its capacity reusable.**
+normal completion/cancel and retained accounting, with its capacity reusable.**
 It is not all pipelines, a remote worker, a new platform promise or speculative
 growth. It cannot be declared done by adding another private proof helper.
 
@@ -47,7 +81,7 @@ growth. It cannot be declared done by adding another private proof helper.
 | C1 — supported owned-workload cleanup and recovery | Final C1 amendment accepts trusted fixed-software/known-helper normal ownership, without hostile arbitrary-descendant claims or a custom broker. Implement that concrete graph; preserve uncertainty, write-ahead and all real owners. | Normal actual waits/joins/FD/sink closure or transfer; restart needs positive exact old-domain completion, not a restart request/new namespace. Current managed-runtime evidence transport remains missing; normal source work does not wait for it. No host setup implied. |
 | C2 — real graph/member settlement | `f51a5475f` connects typed preparation and exact scratch member/ArmIo commands to the same retained runtime book, applies local folds only after known commits and refuses early legacy proof consumption. Bounded event/reader audit remains. Missing: actual native bootstrap/outcomes, bounded native/index-memory owners, overage correction, snapshot/RetainedAssetsV2, private proof/adoption and atomic R→S transaction/swap. | Host-COMPILED NOT RUN, not C2 accepted. Data folds cannot mint native authority. Every actual owner is closed or transferred before the same-ledger R→S swap; no omitted holder. |
 | C3 — connect the existing VOD owner | Concrete actor/terminal/parent-source ownership and original moved-payload/registration latch remain. `1584a357c` adds actual Unix held-directory/no-follow/exclusive-temp/no-clobber publication and retained partial-object facts; `a4465e4b0` preserves drain errors, `521a6d5fb` authors actual-native cancellation. Next: already-charged prearmed storage-root/init bootstrap, scratch-v2 write-ahead/native outcomes, source/copy/HTTP leases, bounded native/index memory and current-cap/settings/shared-role demand. | The actual application request, not a fixture-only branch, reserves once, produces output, stops and returns its finite capacity. Admission STILL LEGACY; local native facts are not finite authority. C1/C2 and conserving R→S remain. |
-| C4 — restart availability and acceptance | Replace the all-startup pending refusal in `resource_runtime.rs` with protected selective reconciliation and applicable admission refusal; keep unrelated serving safe. Author exact normal/cancel/crash/restart/capacity-reuse cases now; execute the required behavioral cases only after complete candidate review/fixes. | First finite path can be marked source-complete only when its normal/recovery lifecycle is wired. It is accepted only with actual applicable post-review evidence. Other M3 adapters and M4–M6 remain separate table rows. |
+| R1 / C4 — restart availability and acceptance (separate from first live-path connection) | Replace the all-startup pending refusal in `resource_runtime.rs` with protected selective reconciliation and applicable admission refusal; keep unrelated serving safe. Author exact normal/cancel/crash/restart/capacity-reuse cases now; execute required behavioral cases only after complete candidate review/fixes. | Conservative restored holds are mandatory. Positive old-domain completion and selective recovery remain required before final acceptance, not a universal restart-backend gate on V1–V5. Acceptance needs actual applicable post-review evidence. Other M3 adapters and M4–M6 remain separate rows. |
 
 The final C1/SourceFile-v2/retained-output and first-root bootstrap contracts are
 delivered, not blanket design gates. `bb4979850` binds source-copy/task plans to the
