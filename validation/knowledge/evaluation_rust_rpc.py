@@ -16,6 +16,8 @@ from typing import Any
 
 FROZEN_REVISION = "168fe74fb2a47f3ccd56b795741dfe3422307b0d"
 FROZEN_TREE = "ea8c9c283a71b67bf773511144eb3ee7ab09ee9c"
+FROZEN_BODY_SHA256 = "bbd2d8c1f83286133f1eeea09d3dd3e22b30559836569845c7536a30a06544e2"
+GENERATOR_ASSETS = frozenset(("rust_facade.rs", "rust_worker.rs", "frozen_decide_forced.rs"))
 FROZEN_DECISION_SHA256 = "f6b6de592a3185092c0c181011e8eaccd39183b472f4e34913495a1a027998f4"
 DECISION_PATH = "crates/plurx-core/src/playback/mod.rs"
 RPC_MODULE = "plurx_core.playback"
@@ -274,7 +276,36 @@ class InstrumentedSource:
     schema_sha256: str
 
 
-def instrument_decision_source(clean_source: bytes) -> InstrumentedSource:
+def _generation_inputs(
+    assets: dict[str, bytes] | None, generator_source_bytes: bytes | None,
+) -> tuple[dict[str, bytes], bytes]:
+    """Use one approved buffer closure, or the explicit fixture path fallback.
+
+    The controller authenticates supplied module/asset buffers against its source
+    closure. Supplying either input requires both, and never falls back to paths.
+    """
+    if assets is None and generator_source_bytes is None:
+        directory = Path(__file__).parent / "study_workers"
+        assets = {name: (directory / name).read_bytes() for name in GENERATOR_ASSETS}
+        generator_source_bytes = Path(__file__).read_bytes()
+    if (type(assets) is not dict or set(assets) != GENERATOR_ASSETS
+            or any(type(key) is not str or type(value) is not bytes for key, value in assets.items())
+            or type(generator_source_bytes) is not bytes or not generator_source_bytes):
+        raise RustRpcError("generation requires the closed byte assets and module buffer together")
+    if hashlib.sha256(assets["frozen_decide_forced.rs"]).hexdigest() != FROZEN_BODY_SHA256:
+        raise RustRpcError("generation requires the exact frozen public decision body")
+    try:
+        for value in assets.values():
+            value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RustRpcError("generation assets must be UTF-8 source bytes") from error
+    return dict(assets), generator_source_bytes
+
+
+def instrument_decision_source(
+    clean_source: bytes, *, assets: dict[str, bytes] | None = None,
+    generator_source_bytes: bytes | None = None,
+) -> InstrumentedSource:
     """Replace the exact frozen body, preserving every byte outside it.
 
     The controller must additionally bind clean_source to its trusted git archive;
@@ -282,7 +313,8 @@ def instrument_decision_source(clean_source: bytes) -> InstrumentedSource:
     """
     if hashlib.sha256(clean_source).hexdigest() != FROZEN_DECISION_SHA256:
         raise RustRpcError("protected instrumentation requires the exact clean frozen public module")
-    frozen_body = (Path(__file__).parent / "study_workers" / "frozen_decide_forced.rs").read_bytes()
+    assets, generator_source_bytes = _generation_inputs(assets, generator_source_bytes)
+    frozen_body = assets["frozen_decide_forced.rs"]
     needle = b"pub fn decide_forced("
     if clean_source.count(needle) != 1 or clean_source.count(frozen_body) != 1:
         raise RustRpcError("clean frozen decision body not uniquely identified")
@@ -291,17 +323,20 @@ def instrument_decision_source(clean_source: bytes) -> InstrumentedSource:
     if body_start < 0 or not clean_source.startswith(frozen_body, body_start):
         raise RustRpcError("frozen decision signature/body mismatch")
     body_end = body_start + len(frozen_body)
-    facade = (Path(__file__).parent / "study_workers" / "rust_facade.rs").read_text()
+    facade = assets["rust_facade.rs"].decode("utf-8")
     replacement = ("{\n" + codec_source() + facade + "\n}\n").encode()
     prefix, suffix = clean_source[:body_start], clean_source[body_end:]
     generated = prefix + replacement + suffix
     digest = lambda value: hashlib.sha256(value).hexdigest()
-    generator = Path(__file__).read_bytes() + facade.encode() + frozen_body + (Path(__file__).parent / "study_workers" / "rust_worker.rs").read_bytes()
+    generator = generator_source_bytes + assets["rust_facade.rs"] + frozen_body + assets["rust_worker.rs"]
     return InstrumentedSource(generated, digest(clean_source), digest(generated), digest(prefix), digest(suffix), digest(generator), schema_sha256())
 
 
-def worker_binary_source() -> bytes:
-    template = (Path(__file__).parent / "study_workers" / "rust_worker.rs").read_text()
+def worker_binary_source(
+    *, assets: dict[str, bytes] | None = None, generator_source_bytes: bytes | None = None,
+) -> bytes:
+    assets, _ = _generation_inputs(assets, generator_source_bytes)
+    template = assets["rust_worker.rs"].decode("utf-8")
     # Public crate path for the separate binary; never edit the candidate body.
     return (codec_source().replace("crate::", "plurx_core::") + template).encode()
 

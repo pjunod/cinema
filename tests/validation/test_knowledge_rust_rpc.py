@@ -83,6 +83,41 @@ class RustRpcContracts(unittest.TestCase):
         self.assertEqual(generated.unchanged_suffix_sha256, hashlib.sha256(suffix).hexdigest())
         self.assertEqual(generated.instrumented_sha256, hashlib.sha256(generated.source).hexdigest())
 
+    def test_approved_generation_buffers_never_reopen_paths(self):
+        assets = {name: (Path(rpc.__file__).parent / "study_workers" / name).read_bytes()
+                  for name in rpc.GENERATOR_ASSETS}
+        module = Path(rpc.__file__).read_bytes()
+        expected_worker = rpc.worker_binary_source()
+        source = b"pub fn decide_forced() -> Decision " + assets["frozen_decide_forced.rs"]
+        with patch.object(rpc, "FROZEN_DECISION_SHA256", hashlib.sha256(source).hexdigest()):
+            expected = rpc.instrument_decision_source(source)
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("path reopened")), \
+                    patch.object(Path, "read_text", side_effect=AssertionError("path reopened")):
+                generated = rpc.instrument_decision_source(
+                    source, assets=assets, generator_source_bytes=module)
+                self.assertEqual(generated, expected)
+                self.assertEqual(rpc.worker_binary_source(
+                    assets=assets, generator_source_bytes=module), expected_worker)
+                changed = rpc.instrument_decision_source(
+                    source, assets=assets, generator_source_bytes=module + b"\n")
+                self.assertEqual(changed.source, generated.source)
+                self.assertNotEqual(changed.generator_sha256, generated.generator_sha256)
+
+    def test_generation_buffer_closure_is_closed_and_frozen(self):
+        assets = {name: (Path(rpc.__file__).parent / "study_workers" / name).read_bytes()
+                  for name in rpc.GENERATOR_ASSETS}
+        module = Path(rpc.__file__).read_bytes()
+        invalid = [({}, module), (assets, None), (None, module), (assets, b""),
+                   ({**assets, "unexpected.rs": b""}, module),
+                   ({**assets, "rust_worker.rs": "text"}, module),
+                   ({**assets, "frozen_decide_forced.rs": b"{}"}, module),
+                   ({**assets, "rust_facade.rs": b"\xff"}, module)]
+        for supplied, source in invalid:
+            with self.subTest(asset_keys=list(supplied or {}), source_type=type(source).__name__):
+                with patch.object(Path, "read_bytes", side_effect=AssertionError("path fallback")):
+                    with self.assertRaises(rpc.RustRpcError):
+                        rpc.worker_binary_source(assets=supplied, generator_source_bytes=source)
+
     def test_generation_carries_fields_skipped_by_product_serde(self):
         source = rpc.codec_source()
         for field in ("transcode_grade", "downloaded_subtitles", "profile_max_heights"):
