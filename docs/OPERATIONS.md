@@ -1852,6 +1852,16 @@ install_snapshot_timeout_secs = 120
 When omitted, both new paths preserve the exact legacy layout. With
 `cache_dir` set, persistent children are `artwork/`, `transcode/`, `subs/`, and
 `renditions/`; regenerable ffmpeg state lives under `runtime/`.
+All playback children and live-session scratch share the node-local
+`cache.max_gb` ceiling (50 GiB when unset), including completed renditions,
+retained outputs, subtitle sources/sidecars and generation stages. Writers
+reserve capacity before output lands. Global oldest-unused eviction protects
+active readers and durable preparation dependencies, while retaining at least
+1 GiB or 2% free on each cache filesystem. The sweep runs every 15 seconds even
+when background production is off. If protected output leaves no room, new
+production is refused rather than spending the filesystem reserve. Settings →
+Maintenance → Playback cache reports the aggregate footprint and disk budget.
+See [the playback cache contract](streaming/PLAYBACK-CACHE-BUDGET.md).
 `transcode_dir` names the disposable live-session directory itself and must sit
 outside `data_dir`. Naming the legacy path explicitly — `transcode_dir =
 "<data_dir>/transcode"`, or any other scratch below `data_dir` — is refused at
@@ -4799,12 +4809,13 @@ row, so saving the card for any reason turned them on.
 
 | Setting | Values | What it does |
 |---|---|---|
-| `vod.output_preparation` | `off` · `copy` · `copy_and_encoded` | Which complete-output preparation a VOD start may queue (`copy_output_prepare`, `encoded_output_prepare`). It runs on the pre-transcode worker whether or not `cache_produce_mins` is on; the speculative rows and the cachekeep sweep still need that schedule. Rows carry a seven-day deadline |
+| `vod.output_preparation` | `off` · `copy` · `copy_and_encoded` | Which complete-output preparation a VOD start may queue (`copy_output_prepare`, `encoded_output_prepare`). It runs on the pre-transcode worker whether or not `cache_produce_mins` is on; speculative rows still need that schedule; aggregate playback eviction runs independently. Rows carry a seven-day deadline |
 | `vod.rolling_retention` | off · on | Hard-link a rolling session's segments into `<cache>/renditions/.retained/<nonce>/` so a verified complete output outlives the session |
 
-Both are bounded by `cache.max_gb`, where no stored row means the 50 GB the
-settings page shows and `0` means off. VOD rendition admission is different:
-no stored row keeps it closed, as it always has.
+Both draw from the same aggregate `cache.max_gb` authority as ordinary
+renditions, subtitle caches and live playback scratch: an absent row means
+50 GiB and zero refuses new cache writes. Per-title VOD admission still has
+its own eligibility threshold; it never grants additional physical capacity.
 
 **Turning a kind off.** Every node, on every pre-transcode loop tick, cancels
 up to 32 queued rows of each disabled kind without claiming them. Each one is

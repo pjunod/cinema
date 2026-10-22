@@ -58,6 +58,7 @@ mod online_subtitles;
 mod panics;
 mod pgs_overlay;
 mod pipeprobe;
+mod playback_cache;
 mod playback_control;
 mod playstart;
 mod process_control;
@@ -3450,6 +3451,7 @@ fn spawn_background_loops(
             .root_readability_loop(std::sync::Arc::clone(&state.store)),
     );
     tokio::spawn(std::sync::Arc::clone(&state.shared_cache).run(background_shutdown.clone()));
+    tokio::spawn(std::sync::Arc::clone(&state.playback_cache).run(background_shutdown.clone()));
     // Fragment indexes are node-local for both storage backends. Validate one
     // bounded page here on every node; cluster leadership is neither required
     // nor sufficient to cover another node's sidecar.

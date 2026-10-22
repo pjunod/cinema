@@ -980,6 +980,14 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         .map_err(|_| input.source_failure())?;
     let audio_map = format!("0:a:{audio_index}");
     let scratch_root = runtime_cache_dir.join("subtitle-transcription");
+    // Reserve the bounded WAV plus engine output before the private attempt
+    // can write. The reservation outlives TempDir cleanup on every exit.
+    let _scratch_reservation = crate::playback_cache::reserve(
+        &scratch_root,
+        MAX_WAV_BYTES.saturating_add(80 * 1024 * 1024),
+    )
+    .await
+    .map_err(|_| input.failure("output_invalid", "transcription disk budget exhausted"))?;
     tokio::fs::create_dir_all(&scratch_root)
         .await
         .map_err(|_| {
@@ -1044,6 +1052,13 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
             &(MAX_WAV_BYTES + 1).to_string(),
         ])
         .arg(&wav);
+    crate::subtitle_ride_along::configure_stage_file_limit(&mut decode, MAX_WAV_BYTES + 1)
+        .map_err(|error| {
+            input.failure(
+                "output_invalid",
+                &format!("bounded transcription output unavailable: {error}"),
+            )
+        })?;
     let output = pipeline_output(
         &input,
         &mut decode,
@@ -1144,6 +1159,16 @@ async fn pipeline(input: Pipeline<'_>) -> Result<String, StoreError> {
         .arg(&wav)
         .arg("--output-file")
         .arg(&output_base);
+    crate::subtitle_ride_along::configure_stage_file_limit(
+        &mut whisper,
+        (MAX_DOWNLOADED_SUBTITLE_BYTES + 1) as u64,
+    )
+    .map_err(|error| {
+        input.failure(
+            "output_invalid",
+            &format!("bounded transcription output unavailable: {error}"),
+        )
+    })?;
     let output = pipeline_output(
         &input,
         &mut whisper,
@@ -2292,6 +2317,51 @@ mod tests {
             }
         }
         (file, model, decoder, whisper)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transcription_runaway_caption_is_stopped_at_the_child_file_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_tempdir().expect("caption fixture");
+        let (file, model, decoder, whisper) = process_fixture(root.path()).await;
+        let size_probe = root.path().join("caption-size");
+        std::fs::write(&whisper, format!(
+            "#!/bin/sh\nfor last do :; done\nhead -c 8388608 /dev/zero > \"$last.vtt\"\nwc -c < \"$last.vtt\" > '{}'\nexit 0\n", size_probe.display()
+        )).expect("runaway adapter");
+        std::fs::set_permissions(&whisper, std::fs::Permissions::from_mode(0o700))
+            .expect("adapter executable");
+        let cancel = CancellationToken::new();
+        let error = plurx_core::process::bounded::cancellable(
+            cancel.clone(),
+            transcribe(
+                root.path(),
+                &file,
+                &Settings::default(),
+                &whisper,
+                &model,
+                &cancel,
+                decoder.to_str().expect("decoder"),
+            ),
+        )
+        .await
+        .expect_err("runaway captions cannot publish");
+        let written: u64 = std::fs::read_to_string(size_probe)
+            .expect("child reported size")
+            .trim()
+            .parse()
+            .expect("byte count");
+        assert!(
+            written <= (MAX_DOWNLOADED_SUBTITLE_BYTES + 1) as u64,
+            "the OS stops growth before the child exits"
+        );
+        assert!(error.to_string().contains("exceeds bound"));
+        assert_eq!(
+            std::fs::read_dir(root.path().join("subtitle-transcription"))
+                .expect("scratch")
+                .count(),
+            0
+        );
     }
 
     #[cfg(unix)]

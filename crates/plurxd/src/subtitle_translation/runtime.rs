@@ -40,6 +40,101 @@ const MAX_PCM_BYTES: u64 = 4 * 1024 * 1024;
 #[cfg(unix)]
 const MAX_CHILD_LOG: usize = 1024 * 1024;
 
+/// The whole private attempt stays reserved until TempDir has removed it.
+/// Catalog coverage is durable; only these disposable execution files evict.
+pub(crate) fn register_playback_cache(
+    budget: &std::sync::Arc<crate::playback_cache::PlaybackCacheBudget>,
+    runtime_root: &std::path::Path,
+) {
+    budget.register(std::sync::Arc::new(TranslationAttempts {
+        root: runtime_root.join("subtitle-translation"),
+    }));
+}
+
+struct TranslationAttempts {
+    root: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for TranslationAttempts {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        let mut entries = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut candidates = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+            if metadata.is_dir() && entry.file_name().to_string_lossy().starts_with("attempt-") {
+                candidates.push(crate::playback_cache::CacheCandidate {
+                    path: entry.path(),
+                    last_used: metadata
+                        .modified()
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if candidate.path.parent() != Some(self.root.as_path()) {
+            return Ok(false);
+        }
+        let Some(name) = candidate
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| name.starts_with("attempt-"))
+        else {
+            return Ok(false);
+        };
+        match plurx_core::fs_secure::remove_bounded_directory_tree_child(&self.root, name, 64, 2)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn constrain_child_file(command: &mut tokio::process::Command, bytes: u64) {
+    // SAFETY: the child hook performs only async-signal-safe libc operations.
+    unsafe {
+        command.pre_exec(move || {
+            let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            if libc::getrlimit(libc::RLIMIT_FSIZE, limit.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut limit = limit.assume_init();
+            limit.rlim_cur = limit.rlim_cur.min(bytes as libc::rlim_t);
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(unix)]
+fn scratch_allowance(engine: &Engine, fixture_bytes: u64) -> u64 {
+    let engine_bytes = if cfg!(target_os = "macos") {
+        engine.identity.size
+    } else {
+        0
+    };
+    MAX_PCM_BYTES
+        .saturating_add(256 * 1024)
+        .saturating_add(engine_bytes)
+        .saturating_add(fixture_bytes)
+}
+
 #[cfg(unix)]
 #[derive(Debug)]
 struct ClockObservation {
@@ -757,8 +852,8 @@ async fn decode_window(
     rewind(source)?;
     let mut decode = tokio::process::Command::new(decoder);
     let filter = format!(
-            "asettb=1/16000,ashowinfo,aresample=16000:async=1:first_pts={begin_sample}:min_comp=0:min_hard_comp=0:max_soft_comp=0,atrim=start_pts={begin_sample}:end_pts={end_sample},ashowinfo,asetpts=PTS-STARTPTS"
-        );
+        "asettb=1/16000,ashowinfo,aresample=16000:async=1:first_pts={begin_sample}:min_comp=0:min_hard_comp=0:max_soft_comp=0,atrim=start_pts={begin_sample}:end_pts={end_sample},ashowinfo,asetpts=PTS-STARTPTS"
+    );
     decode
         .args([
             "-nostdin",
@@ -805,6 +900,7 @@ async fn decode_window(
             &format!("{}.{:03}", (end - begin) / 1_000, (end - begin) % 1_000),
         ])
         .arg(&wav);
+    constrain_child_file(&mut decode, MAX_PCM_BYTES);
     crate::ffmpeg::inherit_file_descriptors(&mut decode, &[(source, 3)]);
     let wall = match window.purpose {
         Purpose::Range => Duration::from_secs(120),
@@ -890,6 +986,7 @@ async fn infer_window(
                 "--output-file",
             ])
             .arg(&output_base);
+        constrain_child_file(&mut whisper, 256 * 1024);
         crate::ffmpeg::inherit_file_descriptors(
             &mut whisper,
             &[(&decoded.file, 3), (&model.handle, 5), (&engine.handle, 7)],
@@ -960,6 +1057,10 @@ pub(crate) async fn translate_range(
         let begin = (core_begin - i64::from(recipe.profile.left_context_ms)).max(0);
         let end = (core_end + i64::from(recipe.profile.right_context_ms)).min(recipe.duration_ms);
         let root = state.runtime_cache_dir.join("subtitle-translation");
+        let _scratch_reservation =
+            crate::playback_cache::reserve(&root, scratch_allowance(engine, 0))
+                .await
+                .map_err(|_| failure("output_invalid"))?;
         tokio::fs::create_dir_all(&root)
             .await
             .map_err(|_| failure("output_invalid"))?;
@@ -1099,6 +1200,12 @@ pub(crate) async fn self_test_translation(
             return Err(failure("model_self_test_failed"));
         }
         let root = state.runtime_cache_dir.join("subtitle-translation");
+        let _scratch_reservation = crate::playback_cache::reserve(
+            &root,
+            scratch_allowance(engine, selected::SELF_TEST_FIXTURE.len() as u64),
+        )
+        .await
+        .map_err(|_| failure("output_invalid"))?;
         tokio::fs::create_dir_all(&root)
             .await
             .map_err(|_| failure("output_invalid"))?;
@@ -1205,7 +1312,9 @@ mod tests {
     use std::io::Write;
 
     fn frame(filter: u8, pts: i64, samples: i64) -> String {
-        format!("[Parsed_ashowinfo_{filter} @0] n:0 pts:{pts} pts_time:0 fmt:s16 channels:1 rate:16000 nb_samples:{samples}\n")
+        format!(
+            "[Parsed_ashowinfo_{filter} @0] n:0 pts:{pts} pts_time:0 fmt:s16 channels:1 rate:16000 nb_samples:{samples}\n"
+        )
     }
 
     #[test]
@@ -1416,7 +1525,10 @@ mod tests {
                 core_end_ms,
                 audio_index: 0,
             };
-            let pcm = decode_window(&source, window, scratch.path(), &decoder, &cancel)
+            // The held-capability opener rejects symlinked ancestors such as
+            // macOS /var. Match the canonical runtime root used in production.
+            let scratch_root = scratch.path().canonicalize().expect("canonical scratch");
+            let pcm = decode_window(&source, window, &scratch_root, &decoder, &cancel)
                 .await
                 .expect("test setup");
             assert_eq!(pcm.clock.anchor_sample, begin_ms * 16);
@@ -1432,8 +1544,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    const OWNED_GROUP_TEST: &str =
-        "subtitle_translation::runtime::tests::actual_timeout_and_cancellation_reap_owned_child_group_before_return";
+    const OWNED_GROUP_TEST: &str = "subtitle_translation::runtime::tests::actual_timeout_and_cancellation_reap_owned_child_group_before_return";
 
     fn announced_children(path: &Path) -> Option<(i32, i32)> {
         let text = std::fs::read_to_string(path).ok()?;
@@ -1647,8 +1758,12 @@ mod tests {
                             }
                             let reap_until = std::time::Instant::now() + Duration::from_secs(2);
                             while child.try_wait().expect("reap refused child").is_none() {
-                                assert!(std::time::Instant::now() < reap_until,
-                                    "refused isolated child PID={} did not reap after SIGKILL; identity={:?}", child.id(), linux_process_identity(child.id() as i32));
+                                assert!(
+                                    std::time::Instant::now() < reap_until,
+                                    "refused isolated child PID={} did not reap after SIGKILL; identity={:?}",
+                                    child.id(),
+                                    linux_process_identity(child.id() as i32)
+                                );
                                 std::thread::sleep(Duration::from_millis(10));
                             }
                         }
@@ -1847,8 +1962,10 @@ mod tests {
                             .unwrap_or_default()
                     );
                     if waited == descendant {
-                        assert!(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL,
-                            "mode={mode} PID={descendant}: descendant was not killed by the owned group operation, status={status}");
+                        assert!(
+                            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL,
+                            "mode={mode} PID={descendant}: descendant was not killed by the owned group operation, status={status}"
+                        );
                         descendant_reaped = true;
                     }
                 }
@@ -1877,8 +1994,10 @@ mod tests {
                     );
                     break;
                 }
-                assert!(tokio::time::Instant::now() < until,
-                    "mode={mode} mapped errorKind={expected} leader={leader} descendant={descendant}; owned group outlived return; PID PPID PGID STAT={members:?}");
+                assert!(
+                    tokio::time::Instant::now() < until,
+                    "mode={mode} mapped errorKind={expected} leader={leader} descendant={descendant}; owned group outlived return; PID PPID PGID STAT={members:?}"
+                );
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }

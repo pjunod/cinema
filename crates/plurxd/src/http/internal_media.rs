@@ -245,7 +245,7 @@ async fn serve_subtitle_source(
             .ok_or(StatusCode::NOT_FOUND)?;
     let stream = FragmentIndexStream {
         inner: tokio_util::io::ReaderStream::with_capacity(
-            tokio::fs::File::from_std(file).take(bytes),
+            file.take(bytes),
             MEDIA_BODY_READ_BUFFER,
         ),
         _global_permit: read_permit,
@@ -676,6 +676,49 @@ mod tests {
                 .await
                 .expect_err("off switch refuses the response"),
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn subtitle_peer_body_keeps_its_disk_pin_until_the_response_is_dropped() {
+        use futures_util::StreamExt;
+        let (base, root, _) = peer_fixture(b"subtitle bytes remain allocated");
+        let catalog =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let budget =
+            crate::playback_cache::PlaybackCacheBudget::new(catalog, vec![base.path().to_owned()]);
+        budget.configure_for_test(u64::MAX);
+        let (reader, bytes) =
+            source::open_verified_for_peer(&root, 7, 2, RepresentationFormat::Sup)
+                .await
+                .expect("verified peer reader");
+        let directory = source::file_dir(&root, 7);
+        assert!(
+            crate::playback_cache::begin_eviction(&directory).is_err(),
+            "the API returns an owned reader lease"
+        );
+        let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            reader.take(bytes),
+            1,
+        ));
+        let mut stream = body.into_data_stream();
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .expect("first chunk")
+                .expect("read")
+                .len(),
+            1
+        );
+        assert!(
+            crate::playback_cache::begin_eviction(&directory).is_err(),
+            "partial response retains its artifact"
+        );
+        drop(stream);
+        assert!(
+            crate::playback_cache::begin_eviction(&directory).is_ok(),
+            "body cancellation closes the reader and releases its pin"
         );
     }
 
