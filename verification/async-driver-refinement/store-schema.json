@@ -1,0 +1,206 @@
+{
+  "status": "schema registry only; not an executed graph or qualification receipt",
+  "schema_version": 1,
+  "export_env": "PLURX_ASYNC_STORE_GRAPH",
+  "positive_test": "store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed",
+  "control_tests": {
+    "C4": {
+      "test": "store::async_driver_refinement::closure_completion_trigger_mutation_fails_last_request_atomic_retirement",
+      "named_failure": "LastRequestAtomicRetirement"
+    },
+    "C9": {
+      "test": "store::async_driver_refinement::closure_reservation_release_mutation_fails_reservation_conservation",
+      "named_failure": "ReservationConservation"
+    }
+  },
+  "root_fields": [
+    "schema_version",
+    "scope",
+    "initial",
+    "source_bindings",
+    "schema_bindings",
+    "domain",
+    "coverage",
+    "states",
+    "edges"
+  ],
+  "state_fields": [
+    "id",
+    "now",
+    "jobs",
+    "domain",
+    "captured_tokens",
+    "captured_leases",
+    "budgets",
+    "cutoffs",
+    "canonical_sha256"
+  ],
+  "job_fields": [
+    "state",
+    "owner",
+    "fence",
+    "revision",
+    "expiry",
+    "failed_attempts",
+    "active",
+    "request_done",
+    "request_state",
+    "reservation_count"
+  ],
+  "token_fields": [
+    "job_id",
+    "node_id",
+    "boot_id",
+    "claim_id",
+    "fence",
+    "revision",
+    "lease_expires_ms"
+  ],
+  "lease_fields": [
+    "resource",
+    "owner_node_id",
+    "fence",
+    "revision",
+    "expires_at_unix_ms"
+  ],
+  "domain_fields": [
+    "resource",
+    "owner",
+    "fence",
+    "revision",
+    "expiry"
+  ],
+  "budgets_fields": [
+    "claims",
+    "renewed_claims",
+    "domain_acquired",
+    "removed"
+  ],
+  "edge_fields": [
+    "from",
+    "to",
+    "action",
+    "result"
+  ],
+  "action_registry": {
+    "claim": [
+      "job",
+      "node"
+    ],
+    "renew": [
+      "job",
+      "token"
+    ],
+    "settle": [
+      "job",
+      "token",
+      "disposition"
+    ],
+    "bind": [
+      "job",
+      "token",
+      "lease"
+    ],
+    "complete": [
+      "job",
+      "token",
+      "lease"
+    ],
+    "acquire_domain": [
+      "node"
+    ],
+    "release_domain": [
+      "lease"
+    ],
+    "remove_owner": [
+      "node"
+    ],
+    "clock_advance": [
+      "now"
+    ]
+  },
+  "settlement_dispositions": {
+    "0": "yield",
+    "1": "retry",
+    "2": "cancel"
+  },
+  "result_registry": [
+    "claimed",
+    "refused",
+    "cancelled",
+    "expired_or_pruned",
+    "renewed",
+    "accepted",
+    "acquired",
+    "held",
+    "removed",
+    "advanced"
+  ],
+  "cutoff_registry": [
+    "attempt_budget_j0",
+    "attempt_budget_j1",
+    "renewal_budget_<claim_id>",
+    "domain_acquire_budget",
+    "no_future_boundary"
+  ],
+  "cutoff_semantics": "input-domain exclusions, not whole-state terminal flags; no cutoff edge is silently discarded",
+  "coverage_fields": [
+    "closed",
+    "no_skipped_edges",
+    "state_count",
+    "edge_count",
+    "by_op",
+    "by_result",
+    "cutoff_counts"
+  ],
+  "closure": "only emitted if BFS empties without cap, SQL, materialization, rollback, coverage or independent invariant failures",
+  "canonical": "SHA256 of serde_json UTF8 serialization of {rows:one authoritative full-column snapshot,episode:exact captured identities/numeric values/budgets}; replace opaque generated job UUID strings with J0/J1 only",
+  "numeric_quotient": "none",
+  "state_cap": 20000,
+  "restrictions": {
+    "jobs": 2,
+    "nodes": 2,
+    "physical_capacity_per_node": 1,
+    "attempts_per_job": 2,
+    "renewals_per_attempt": 1,
+    "domain_acquisitions_per_owner": 1,
+    "domain_owners": [
+      "node-a",
+      "node-b",
+      "foreign-holder"
+    ],
+    "selected_attempt_ids": 4,
+    "reserved_boundary_ids": 2,
+    "rearrival": false,
+    "ordinary_token_inputs": "latest captured revision perclaim; old revisions retained in state and tested as conformance",
+    "binding_completion_inputs": "captured lease owner matches captured queue-token node",
+    "node_domain_acquisition_inputs": "node owns selected durable runningclaim; expiry races retained; foreignholder independent",
+    "library_settlement_inputs": [
+      "yield",
+      "retry",
+      "cancel"
+    ]
+  },
+  "premises": [
+    "completion opportunity before explicit attempt/domain/fault budgets exhaust",
+    "no unbounded fair-source transfer",
+    "no infinite fresh-progress conclusion from two fixed selected requests"
+  ],
+  "schema_bindings_fields": [
+    "compiled_sqlite_migrations",
+    "installed_sqlite_schema_sha256",
+    "schema_inventory"
+  ],
+  "schema_bindings_hashes": "SHA256 of compiled migration SQL UTF8 per1based version; SHA256 of ordered sqlite_schema JSON UTF8",
+  "savepoints": "same production writer connection; all errors abort closure; actual commit-observation/durability and engine internals are boundary assumptions, separately conformance sampled",
+  "cost_bounds_by_definition": {
+    "max_action_submissions_per_state": 30,
+    "max_captured_queue_tokens": 8,
+    "max_captured_domain_leases": 3,
+    "max_clock_advances_per_trace": 36,
+    "max_state_changing_trace_length_conservative": 61,
+    "max_edges_at_cap": 600000,
+    "roundtrip_upper_bound_conservative_approx": 8500000,
+    "measured": false
+  }
+}

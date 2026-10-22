@@ -32,6 +32,7 @@ class AsyncDriverRefinementCiTests(unittest.TestCase):
         provision = step_block(block, "Provision the pinned TLC toolchain for async driver refinement")
         build = step_block(block, "Build async driver refinement graph and control inputs")
         qualify = step_block(block, "Qualify async driver refinement with pinned TLC")
+        snapshot = step_block(block, "Snapshot compact async driver refinement evidence")
         artifact = step_block(block, "Preserve async driver refinement evidence")
 
         self.assertIn("scripts/check-async-driver-refinement affected", selection)
@@ -52,10 +53,25 @@ class AsyncDriverRefinementCiTests(unittest.TestCase):
         self.assertLess(block.index("Compile every Rust target without executing tests"), block.index(build))
         self.assertLess(block.index(provision), block.index(build))
         self.assertLess(block.index(build), block.index(qualify))
+        self.assertIn("validation.async_refinement_resume snapshot", snapshot)
+        self.assertIn("--working-dir", snapshot)
+        self.assertIn("--output-dir", snapshot)
+        self.assertLess(block.index(qualify), block.index(snapshot))
+        self.assertLess(block.index(snapshot), block.index(artifact))
         if effort:
-            for step in (provision, build, qualify, artifact):
+            for step in (provision, build, qualify, snapshot, artifact):
                 self.assertIn("!inputs.compile_only", step)
+            self.assertNotIn("--origin", snapshot)
         else:
+            prepare = step_block(block, "Prepare authenticated same-PR async driver proof resumption")
+            self.assertIn("validation.async_refinement_resume prepare", prepare)
+            self.assertIn("GITHUB_TOKEN: ${{ github.token }}", prepare)
+            self.assertIn("steps.async-driver-resume.outputs.working_dir", build)
+            self.assertIn("steps.async-driver-resume.outputs.working_dir", qualify)
+            self.assertIn("steps.async-driver-resume.outputs.origin_path", snapshot)
+            self.assertIn("--origin", snapshot)
+            self.assertLess(block.index(selection), block.index(prepare))
+            self.assertLess(block.index(prepare), block.index(provision))
             gate = job_block((ROOT / ".github/workflows/main-fast-lane.yml").read_text(), "promotion_gate")
             self.assertIn("\n      - rust_compile\n", gate)
 

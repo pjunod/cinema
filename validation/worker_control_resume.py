@@ -1,6 +1,7 @@
 """Hydrate bounded, same-PR worker proof evidence for strict runner resumption."""
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -40,7 +41,42 @@ COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def invocation_digests(commit: str, workspace: Path) -> dict:
+@dataclass(frozen=True)
+class TransportSpec:
+    """Explicit authenticated transport identity; defaults retain legacy policy."""
+    workflow: str = WORKFLOW
+    proof_job: str = PROOF_JOB
+    artifact_prefix: str = "worker-control-proof"
+    trust: object = None
+    max_archive_bytes: int = MAX_ARCHIVE_BYTES
+    label: str = "worker proof"
+
+
+@dataclass(frozen=True)
+class ExtractionSpec:
+    """Bounded selection only; the common ZIP integrity checks always apply."""
+    select: object = None
+    max_archive_bytes: int = MAX_ARCHIVE_BYTES
+    max_files: int = MAX_ARCHIVE_FILES
+    max_member_bytes: int = MAX_MEMBER_BYTES
+    max_total_bytes: int = MAX_TOTAL_BYTES
+    max_hydrated_bytes: int = MAX_HYDRATED_BYTES
+    max_hydrated_files: int = MAX_HYDRATED_FILES
+
+
+def legacy_transport_spec():
+    # Resolve module constants at call time, retaining legacy fixture seams.
+    return TransportSpec(workflow=WORKFLOW,proof_job=PROOF_JOB,
+      artifact_prefix='worker-control-proof',max_archive_bytes=MAX_ARCHIVE_BYTES)
+
+
+def legacy_extraction_spec():
+    return ExtractionSpec(max_archive_bytes=MAX_ARCHIVE_BYTES,max_files=MAX_ARCHIVE_FILES,
+      max_member_bytes=MAX_MEMBER_BYTES,max_total_bytes=MAX_TOTAL_BYTES,
+      max_hydrated_bytes=MAX_HYDRATED_BYTES,max_hydrated_files=MAX_HYDRATED_FILES)
+
+
+def invocation_digests(commit: str, workspace: Path, *, paths=None) -> dict:
     """Hash actual bounded Git blobs, preserving every byte including newlines."""
     receipts.require(isinstance(commit, str) and COMMIT.fullmatch(commit) is not None,
                      "Invocation commit must be a full lowercase Git commit")
@@ -53,7 +89,7 @@ def invocation_digests(commit: str, workspace: Path) -> dict:
     receipts.require(raw("cat-file", "-t", commit).strip() == b"commit",
                      "Invocation revision is not a commit")
     result = {}
-    for path in INVOCATION_PATHS:
+    for path in (INVOCATION_PATHS if paths is None else paths):
         ref = commit + ":" + path
         size_bytes = raw("cat-file", "-s", ref).strip()
         receipts.require(re.fullmatch(rb"[0-9]{1,9}", size_bytes) is not None,
@@ -155,14 +191,15 @@ def selected_path(parts: tuple[str, ...], is_dir: bool) -> bool:
     return False
 
 
-def extract_evidence(data: bytes, destination: Path) -> tuple[int, int]:
-    if len(data) > MAX_ARCHIVE_BYTES:
+def extract_evidence(data: bytes, destination: Path, *, spec=None) -> tuple[int, int]:
+    spec = legacy_extraction_spec() if spec is None else spec
+    if len(data) > spec.max_archive_bytes:
         raise receipts.ReceiptError("Proof archive exceeds download limit")
     total = hydrated = count = 0
     seen: set[str] = set()
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         members = archive.infolist()
-        if not members or len(members) > MAX_ARCHIVE_FILES:
+        if not members or len(members) > spec.max_files:
             raise receipts.ReceiptError("Proof archive member count is invalid")
         for member in members:
             parts = safe_member(member.filename.rstrip("/") if member.is_dir() else member.filename)
@@ -173,18 +210,18 @@ def extract_evidence(data: bytes, destination: Path) -> tuple[int, int]:
             mode = member.external_attr >> 16
             if stat.S_ISLNK(mode) or member.flag_bits & 1:
                 raise receipts.ReceiptError("Proof archive contains a link or encrypted entry")
-            if member.file_size > MAX_MEMBER_BYTES:
+            if member.file_size > spec.max_member_bytes:
                 raise receipts.ReceiptError("Proof archive member exceeds size limit")
             total += member.file_size
-            if total > MAX_TOTAL_BYTES:
+            if total > spec.max_total_bytes:
                 raise receipts.ReceiptError("Proof archive expanded size exceeds limit")
             if member.file_size and member.compress_size == 0:
                 raise receipts.ReceiptError("Proof archive has invalid compression metadata")
             if member.compress_size and member.file_size / member.compress_size > 250:
                 raise receipts.ReceiptError("Proof archive compression ratio exceeds limit")
-            if not selected_path(parts, member.is_dir()):
+            if not (selected_path if spec.select is None else spec.select)(parts, member.is_dir()):
                 continue
-            if member.file_size > MAX_HYDRATED_BYTES - hydrated or count >= MAX_HYDRATED_FILES:
+            if member.file_size > spec.max_hydrated_bytes - hydrated or count >= spec.max_hydrated_files:
                 raise receipts.ReceiptError("Selected proof evidence exceeds hydration limit")
             target = destination.joinpath(*parts)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +234,7 @@ def extract_evidence(data: bytes, destination: Path) -> tuple[int, int]:
                     if not chunk:
                         break
                     copied += len(chunk)
-                    if copied > member.file_size or copied > MAX_MEMBER_BYTES:
+                    if copied > member.file_size or copied > spec.max_member_bytes:
                         raise receipts.ReceiptError("Proof archive member expanded beyond its header")
                     output.write(chunk)
             if copied != member.file_size:
@@ -207,7 +244,8 @@ def extract_evidence(data: bytes, destination: Path) -> tuple[int, int]:
     return count, hydrated
 
 
-def archive_bytes(api: receipts.API, artifact_id: int) -> bytes:
+def archive_bytes(api: receipts.API, artifact_id: int, *, spec=None) -> bytes:
+    spec = legacy_transport_spec() if spec is None else spec
     api.requests += 1
     receipts.require(api.requests <= 200, "Receipt request budget exhausted")
     path = f"/actions/artifacts/{artifact_id}/zip"
@@ -217,29 +255,30 @@ def archive_bytes(api: receipts.API, artifact_id: int) -> bytes:
     })
     try:
         with api.opener.open(request, timeout=60) as response:
-            data = response.read(MAX_ARCHIVE_BYTES + 1)
+            data = response.read(spec.max_archive_bytes + 1)
     except urllib.error.HTTPError as error:
         raise receipts.ReceiptHTTPError(error.code, "/repos/" + api.repository + path) from None
     except (OSError, TimeoutError) as error:
         raise receipts.ReceiptError(f"{type(error).__name__} downloading prior proof; evidence unavailable") from None
-    receipts.require(len(data) <= MAX_ARCHIVE_BYTES, "Proof archive exceeds download limit")
+    receipts.require(len(data) <= spec.max_archive_bytes, "Proof archive exceeds download limit")
     return data
 
 
 def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int,
-                     current_commit: str, workspace: Path):
+                     current_commit: str, workspace: Path, *, spec=None):
+    spec = legacy_transport_spec() if spec is None else spec
     run_id = receipts.positive(run.get("id"))
     if run_id == current_run:
         return None
     prior = api.get(f"/actions/runs/{run_id}")
-    if prior.get("id") != run_id or prior.get("workflow_id") != WORKFLOW:
+    if prior.get("id") != run_id or prior.get("workflow_id") != spec.workflow:
         return None
     if prior.get("repository", {}).get("id") != scope["repository"]:
         return None
     main_unit_receipts.authenticate_run(scope, prior)
-    trust = invocation_trust(prior["commit_sha"], current_commit, workspace)
+    trust = (invocation_trust if spec.trust is None else spec.trust)(prior["commit_sha"], current_commit, workspace)
     jobs = api.pages(f"/actions/runs/{run_id}/jobs")
-    valid_jobs = [job for job in jobs if job.get("name") == PROOF_JOB
+    valid_jobs = [job for job in jobs if job.get("name") == spec.proof_job
                   and job.get("repo_id") == scope["repository"] and job.get("run_id") == run_id
                   and type(job.get("attempt")) is int and job["attempt"] > 0
                   and type(job.get("task_id")) is int and job["task_id"] > 0]
@@ -252,7 +291,7 @@ def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int
         # parsing still rejects missing, truncated or unsuccessful evidence.
         if job.get("status") not in {"success", "failure", "cancelled"}:
             continue
-        name = f"worker-control-proof-{run_id}-{attempt}"
+        name = f"{spec.artifact_prefix}-{run_id}-{attempt}"
         artifacts = [item for item in api.pages("/actions/artifacts", {"name": name})
                      if item.get("name") == name and item.get("run_id") == run_id
                      and not item.get("expired")]
@@ -260,7 +299,7 @@ def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int
             continue
         artifact = artifacts[0]
         size = artifact.get("size_in_bytes")
-        if type(size) is not int or size <= 0 or size > MAX_ARCHIVE_BYTES:
+        if type(size) is not int or size <= 0 or size > spec.max_archive_bytes:
             continue
         log_lines = main_unit_receipts.log_lines(
             api.bytes(f"/actions/jobs/{receipts.positive(job.get('id'))}/logs"))
@@ -281,20 +320,23 @@ def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int
     return None
 
 
-def find_prior(api: receipts.API, scope: dict, current_run: int, current_commit: str, workspace: Path):
+def find_prior(api: receipts.API, scope: dict, current_run: int, current_commit: str, workspace: Path, *, spec=None):
+    policy = legacy_transport_spec() if spec is None else spec
     runs = api.pages("/actions/runs", {
-        "workflow_id": WORKFLOW,
+        "workflow_id": policy.workflow,
         "ref": f"refs/pull/{scope['pr']}/head",
     }, "workflow_runs")
     for run in sorted(runs, key=lambda item: item.get("id", 0), reverse=True):
         if run.get("prettyref") != f"#{scope['pr']}" or run.get("event") != "pull_request":
             continue
         try:
-            candidate = artifact_for_run(api, scope, run, current_run, current_commit, workspace)
+            candidate = (artifact_for_run(api, scope, run, current_run, current_commit, workspace) if spec is None
+                         else artifact_for_run(api, scope, run, current_run, current_commit, workspace, spec=spec))
             if candidate is None:
                 continue
             artifact, job, prior, attempt, uploaded_sha256, trust = candidate
-            data = archive_bytes(api, receipts.positive(artifact.get("id")))
+            data = (archive_bytes(api, receipts.positive(artifact.get("id"))) if spec is None
+                    else archive_bytes(api, receipts.positive(artifact.get("id")), spec=spec))
             archive_sha256 = hashlib.sha256(data).hexdigest()
             receipts.require(archive_sha256 == uploaded_sha256,
                             "downloaded proof archive SHA differs from its upload receipt")
@@ -310,7 +352,7 @@ def find_prior(api: receipts.API, scope: dict, current_run: int, current_commit:
                 "invocation_trust": trust,
             }
         except (receipts.ReceiptError, KeyError, TypeError, ValueError, zipfile.BadZipFile) as error:
-            print(f"Prior worker proof candidate not adopted ({type(error).__name__}); checking older evidence")
+            print(f"Prior {policy.label} candidate not adopted ({type(error).__name__}); checking older evidence")
     return None
 
 

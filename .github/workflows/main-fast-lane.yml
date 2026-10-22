@@ -401,31 +401,50 @@ jobs:
           mkdir -p target
           python3 scripts/check-async-driver-refinement affected --base "$PR_BASE_SHA" > target/async-driver-affected.json
           python3 -c 'import json, os; from pathlib import Path; value=json.loads(Path("target/async-driver-affected.json").read_text()); assert type(value.get("affected")) is bool; print("affected=" + str(value["affected"]).lower(), file=open(os.environ["GITHUB_OUTPUT"], "a"))'
+      - name: Prepare authenticated same-PR async driver proof resumption
+        id: async-driver-resume
+        if: steps.async-driver-inputs.outputs.affected == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.async_refinement_resume prepare
       - name: Provision the pinned TLC toolchain for async driver refinement
         if: steps.async-driver-inputs.outputs.affected == 'true'
         run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
       - name: Build async driver refinement graph and control inputs
         if: steps.async-driver-inputs.outputs.affected == 'true'
         env:
-          ASYNC_DRIVER_OUTPUT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/target/verification"
-          test ! -e "$ASYNC_DRIVER_OUTPUT"
-          python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_OUTPUT"
+          test -n "$ASYNC_DRIVER_WORKING"
+          python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_WORKING"
       - name: Qualify async driver refinement with pinned TLC
         if: steps.async-driver-inputs.outputs.affected == 'true'
         env:
-          ASYNC_DRIVER_OUTPUT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
         run: >-
           python3 scripts/check-async-driver-refinement qualify
-          --driver-graph "$ASYNC_DRIVER_OUTPUT/driver-graph.json"
-          --store-graph "$ASYNC_DRIVER_OUTPUT/store-graph.json"
-          --provenance "$ASYNC_DRIVER_OUTPUT/provenance.json"
-          --output-dir "$ASYNC_DRIVER_OUTPUT/tlc"
+          --driver-graph "$ASYNC_DRIVER_WORKING/driver-graph.json"
+          --store-graph "$ASYNC_DRIVER_WORKING/store-graph.json"
+          --provenance "$ASYNC_DRIVER_WORKING/provenance.json"
+          --output-dir "$ASYNC_DRIVER_WORKING/tlc"
           --cache-dir target/formal-toolchain
+      - name: Snapshot compact async driver refinement evidence
+        if: always() && steps.async-driver-inputs.outputs.affected == 'true' && steps.async-driver-resume.outputs.working_dir != ''
+        env:
+          ASYNC_DRIVER_WORKING: ${{ steps.async-driver-resume.outputs.working_dir }}
+          ASYNC_DRIVER_ORIGIN: ${{ steps.async-driver-resume.outputs.origin_path }}
+          ASYNC_DRIVER_SNAPSHOT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/target/verification"
+          test ! -e "$ASYNC_DRIVER_SNAPSHOT"
+          python3 -m validation.async_refinement_resume snapshot \
+            --working-dir "$ASYNC_DRIVER_WORKING" \
+            --output-dir "$ASYNC_DRIVER_SNAPSHOT" \
+            --origin "$ASYNC_DRIVER_ORIGIN"
       - name: Preserve async driver refinement evidence
-        if: always() && steps.async-driver-inputs.outputs.affected == 'true'
+        if: always() && steps.async-driver-inputs.outputs.affected == 'true' && steps.async-driver-resume.outputs.working_dir != ''
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}

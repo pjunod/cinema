@@ -1,0 +1,61 @@
+{
+  "status": "final exact source compile-checked and Clippy -Dwarnings passed; all execution intentionally deferred until final review",
+  "core_lib_feature": "hiqlite-contract-tests",
+  "core_tests": [
+    "store::async_driver_refinement::two_node_same_root_claim_refusal_and_atomic_last_request_retirement",
+    "store::async_driver_refinement::reply_loss_keeps_application_and_exact_claim_reconciliation_distinct",
+    "store::async_driver_refinement::renewal_and_completion_application_before_reply_reconcile_authoritatively",
+    "store::async_driver_refinement::completion_trigger_mutation_is_detected_by_last_request_atomic_retirement",
+    "store::async_driver_refinement::reclaim_equality_and_removed_owner_preserve_failed_cas_atomicity",
+    "store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed",
+    "store::async_driver_refinement::closure_completion_trigger_mutation_fails_last_request_atomic_retirement",
+    "store::async_driver_refinement::closure_reservation_release_mutation_fails_reservation_conservation",
+    "store::async_driver_refinement::queue_identity_and_expiry_predicate_partitions_are_atomic",
+    "store::async_driver_refinement::domain_expiry_missing_resources_and_overflow_are_separate_partitions",
+    "store::async_driver_refinement::claim_guard_predicate_partitions_refuse_without_mutation",
+    "store::async_driver_refinement::protocol_excluded_domain_owner_and_terminal_settlements_are_conformance_only"
+  ],
+  "graph_export_test": "store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed",
+  "graph_export_env": "PLURX_ASYNC_STORE_GRAPH",
+  "sampled_backend_test": "background_jobs::async_library_two_node_source_admission_and_applied_reply_reconciliation",
+  "sampled_backend_target": "store_contract",
+  "sampled_backend_feature": "hiqlite-contract-tests",
+  "conformance_case_definition": {
+    "queue_identity_expiry": 96,
+    "domain_expiry": 6,
+    "missing_resource": 4,
+    "max_revision": 4,
+    "max_claim_counter": 2,
+    "claim_guards": 8,
+    "total_individual_partition_rows": 124,
+    "protocol_excluded_domain_owner_and_terminal_settlements": 4
+  },
+  "closure_state_count": null,
+  "closure_edge_count": null,
+  "observed_execution": false,
+  "tests_executed": [],
+  "solvers_executed": [],
+  "sampled_backend_marker": {
+    "prefix": "async_store_backend_sample=",
+    "format": "one JSON object per completed backend, after every history assertion",
+    "required_backends_with_feature": [
+      "memory",
+      "file",
+      "hiqlite-3-voter"
+    ],
+    "fields": {
+      "backend": "exact existing fixture label",
+      "completed": true,
+      "reply_fault": "applied acknowledgement deliberately discarded"
+    },
+    "not_evidence_until_executed": true
+  },
+  "partition_marker": {
+    "prefix": "async_store_predicate_partitions=",
+    "fields": {
+      "queue_identity_expiry_cases": 96,
+      "relation_coverage": false
+    },
+    "scope": "only the96queueidentity/expiry rows; all124rows require passed exact test cases and source-bound registry, not this marker alone"
+  }
+}

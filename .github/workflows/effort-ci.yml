@@ -247,23 +247,34 @@ jobs:
       - name: Build async driver refinement graph and control inputs
         if: ${{ steps.async-driver-inputs.outputs.affected == 'true' && !inputs.compile_only }}
         env:
-          ASYNC_DRIVER_OUTPUT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+          ASYNC_DRIVER_WORKING: ${{ github.workspace }}/target/verification/async-driver-work-effort-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/target/verification"
-          test ! -e "$ASYNC_DRIVER_OUTPUT"
-          python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_OUTPUT"
+          test ! -e "$ASYNC_DRIVER_WORKING"
+          python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_WORKING"
       - name: Qualify async driver refinement with pinned TLC
         if: ${{ steps.async-driver-inputs.outputs.affected == 'true' && !inputs.compile_only }}
         env:
-          ASYNC_DRIVER_OUTPUT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+          ASYNC_DRIVER_WORKING: ${{ github.workspace }}/target/verification/async-driver-work-effort-${{ github.run_id }}-${{ github.run_attempt }}
         run: >-
           python3 scripts/check-async-driver-refinement qualify
-          --driver-graph "$ASYNC_DRIVER_OUTPUT/driver-graph.json"
-          --store-graph "$ASYNC_DRIVER_OUTPUT/store-graph.json"
-          --provenance "$ASYNC_DRIVER_OUTPUT/provenance.json"
-          --output-dir "$ASYNC_DRIVER_OUTPUT/tlc"
+          --driver-graph "$ASYNC_DRIVER_WORKING/driver-graph.json"
+          --store-graph "$ASYNC_DRIVER_WORKING/store-graph.json"
+          --provenance "$ASYNC_DRIVER_WORKING/provenance.json"
+          --output-dir "$ASYNC_DRIVER_WORKING/tlc"
           --cache-dir target/formal-toolchain
+      - name: Snapshot compact async driver refinement evidence
+        if: always() && steps.async-driver-inputs.outputs.affected == 'true' && !inputs.compile_only
+        env:
+          ASYNC_DRIVER_WORKING: ${{ github.workspace }}/target/verification/async-driver-work-effort-${{ github.run_id }}-${{ github.run_attempt }}
+          ASYNC_DRIVER_SNAPSHOT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$ASYNC_DRIVER_WORKING" "$GITHUB_WORKSPACE/target/verification"
+          test ! -e "$ASYNC_DRIVER_SNAPSHOT"
+          python3 -m validation.async_refinement_resume snapshot \
+            --working-dir "$ASYNC_DRIVER_WORKING" \
+            --output-dir "$ASYNC_DRIVER_SNAPSHOT"
       - name: Preserve async driver refinement evidence
         if: always() && steps.async-driver-inputs.outputs.affected == 'true' && !inputs.compile_only
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4

@@ -6104,6 +6104,14 @@ async fn async_library_two_node_source_admission_and_applied_reply_reconciliatio
             ),
             "{backend}"
         );
+        eprintln!(
+            "async_store_backend_sample={}",
+            serde_json::json!({
+                "backend": backend,
+                "completed": true,
+                "reply_fault": "applied acknowledgement deliberately discarded"
+            })
+        );
     })
     .await;
 }
