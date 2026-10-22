@@ -1259,6 +1259,7 @@ async fn fixture_with_audio(
         source_tick,
         native_bl: (64, 64),
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        source_mastering: Ok(None),
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
