@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "generation/owner.rs"]
+mod owner;
+use owner::{GenerationOutput, GenerationResources, VodGenerationOwner};
+
 /// Spawn a real generation positioned at plan entry `at` and hand its stdout
 /// to [`run_generation`].
 pub(super) async fn spawn_generation(
@@ -454,6 +458,7 @@ pub(super) async fn spawn_generation(
     // process writes — so the producer is the producer it always was.
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let output = GenerationOutput::new();
     let (registration, pid) = {
         if !generation_current() {
             return;
@@ -510,8 +515,17 @@ pub(super) async fn spawn_generation(
                 return;
             }
         };
-        let writer_shared = Arc::clone(shared);
-        let writer_rendition = Arc::clone(rendition);
+        output.retain_source(audio_source);
+        let writer = VodGenerationOwner {
+            shared: Arc::clone(shared),
+            rendition: Arc::clone(rendition),
+            at,
+            epoch: generation_epoch,
+            ready: ready_rx,
+            completed: completed_tx,
+            landing_probe,
+            output: Arc::clone(&output),
+        };
         match empty.spawn_registered_owned(
             &program,
             &args,
@@ -523,62 +537,11 @@ pub(super) async fn spawn_generation(
                 work: crate::process_control::ChildWork::realtime("VOD transcode"),
             },
             at,
-            permit.map(|permit| Box::new(permit) as Box<dyn Send>),
-            move |registration, stdout, stderr| async move {
-                // Source association and private registration precede any
-                // publication. The actual JoinHandle already belongs to slot.
-                if ready_rx.await.is_err() {
-                    let _ = completed_tx.send(None);
-                    return;
-                }
-                let shared = writer_shared;
-                let rendition = writer_rendition;
-                if rendition.closed.load(Relaxed)
-                    || rendition.failure().is_some()
-                    || rendition.gen_epoch.load(Relaxed) != generation_epoch
-                    || rendition.cancelled_preparation_epoch.load(Acquire)
-                        == generation_epoch.saturating_add(1)
-                {
-                    let _ = completed_tx.send(None);
-                    return;
-                }
-                let (retiring, retired) = tokio::sync::oneshot::channel();
-                let result = tokio::join!(
-                    async {
-                        let outcome = run_generation(
-                            Arc::clone(&shared),
-                            Arc::clone(&rendition),
-                            Box::new(stdout),
-                            at,
-                            generation_epoch,
-                            registration.retirement(),
-                            landing_probe,
-                        )
-                        .await;
-                        // Request, NEVER await this task's own reap receipt.
-                        let _ = super::driver::request_registered_driver_retirement(
-                            &shared,
-                            &rendition,
-                            &registration,
-                        )
-                        .await;
-                        let _ = retiring.send(());
-                        outcome
-                    },
-                    async {
-                        let diagnostic = crate::ffmpeg::drain_diagnostics(stderr);
-                        tokio::pin!(diagnostic);
-                        tokio::select! {
-                            text = &mut diagnostic => text,
-                            _ = retired => match tokio::time::timeout(Duration::from_secs(5), &mut diagnostic).await {
-                                Ok(text) => text,
-                                Err(_) => "producer diagnostic drain exceeded its retirement deadline".to_owned(),
-                            },
-                        }
-                    }
-                );
-                let _ = completed_tx.send(Some(result));
-            },
+            Some(Box::new(GenerationResources {
+                _admission: permit.map(|permit| Box::new(permit) as Box<dyn Send>),
+                _output: Arc::clone(&output),
+            })),
+            move |registration, stdout, stderr| writer.run(registration, stdout, stderr),
         ) {
             Ok(spawned) => spawned,
             Err(error) => {
@@ -631,7 +594,6 @@ pub(super) async fn spawn_generation(
         let rendition = Arc::clone(rendition);
         let registration = registration.clone();
         async move {
-            let key = rendition.key.clone();
             let result = on_writer_panic(completed_rx, || {
                 if !rendition.closed.load(Relaxed)
                     && rendition.failure().is_none()
@@ -662,29 +624,20 @@ pub(super) async fn spawn_generation(
                     debug_assert!(receipt.matches(&registration));
                 }
                 Err(error) => {
-                    tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded")
+                    tracing::warn!(target: "plurxd::vodserve",%error,"generation retirement was superseded");
+                    // A successor in the slot is not old-owner closure. Wait
+                    // the exact registration rather than discarding its sink
+                    // or treating the slot mismatch as successful retirement.
+                    let receipt = registration.wait_confirmed_reap().await;
+                    debug_assert!(receipt.matches(&registration));
                 }
             }
-            let Some(Some((outcome, diagnostic))) = result else {
+            let Some(()) = result else {
                 return;
             };
-            // Completion is metadata about already-settled writes. It may wait
-            // for the manifest only after the reaper has released the writer's
-            // resources and any cleanup owner can release its publication gate.
-            let (outcome, completed) = outcome;
-            if let Some((sink, _)) = completed {
-                vodgen::Sink::completed_output(&sink).await;
-            }
-            let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
-            if !diagnostic.informational.is_empty() {
-                tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = generation_epoch, informational = %diagnostic.informational, "VOD producer informational output");
-            }
-            if !diagnostic.actionable.is_empty() {
-                tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = generation_epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
-            }
-            if let Some(outcome) = outcome {
-                on_generation_end(&shared, &rendition, outcome, generation_epoch, at).await;
-            }
+            output
+                .finish(&shared, &rendition, generation_epoch, at)
+                .await;
         }
     });
     if registration_rx.await.is_err() {
