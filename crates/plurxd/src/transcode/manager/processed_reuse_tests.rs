@@ -805,6 +805,41 @@ async fn fixture(destination: DvDestination) -> Fixture {
     fixture_with_audio(destination, None).await
 }
 
+#[tokio::test]
+async fn processed_profile81_master_declares_hdr10_compatibility() {
+    for destination in [DvDestination::Hdr10, DvDestination::Profile81] {
+        let f = fixture(destination).await;
+        let HlsPresentationResolution::Ready(context, file, _) = f
+            .manager
+            .hls_presentation_before(&f.session_id, Instant::now() + Duration::from_secs(10))
+            .await
+        else {
+            panic!("admitted processed session must have an HLS presentation");
+        };
+        // Exercise the real admitted Encoding and publication path, then the
+        // shared master writer; a hardcoded supplemental string misses the bug.
+        let master = String::from_utf8(crate::http::hls::source_native_master(
+            &file,
+            None,
+            &context,
+            &Default::default(),
+        ))
+        .expect("HLS text");
+        assert!(master.contains("VIDEO-RANGE=PQ"), "{master}");
+        if destination == DvDestination::Profile81 {
+            assert!(context.codecs.starts_with("hev1"), "{master}");
+            assert!(master.contains("#EXT-X-VERSION:10\n"), "{master}");
+            assert!(
+                master.contains("SUPPLEMENTAL-CODECS=\"dvhe.08.06/db1p\""),
+                "{master}"
+            );
+        } else {
+            assert!(context.supplemental_codecs.is_none(), "{master}");
+            assert!(!master.contains("SUPPLEMENTAL-CODECS="), "{master}");
+        }
+    }
+}
+
 async fn fixture_with_audio(
     destination: DvDestination,
     audio: Option<(Option<i64>, i64)>,
