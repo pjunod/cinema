@@ -3,6 +3,37 @@
 **Status:** PR A P8 cells passed; scanner controls partially passed, fixture repair pending review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (source), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
+## PR B implementation checkpoint
+
+**Authored, not qualified (2026-10-22).** Explicit targeted HDR10 windows now
+resolve output mastering metadata before encoding and author it after successful
+private helper/encoder completion, before encoded-window validation and
+publication. The writer is independent of the encoder family. The same payloads
+replace stale encoder declarations in hvcC, init `mdcv`/`clli` and prefix SEI on
+every IRAP; unrelated SEI, coded picture NALs, audio and sample timing survive.
+The completed trailer is rebuilt because init/sample growth moves offsets.
+
+Consistent title L9 supplies mastering primaries. Its preset coordinates come
+from the pinned Dolby Vision dependency; custom coordinates convert from
+1/32767 into ST 2086's 1/50000 units. Missing L9 may use MDCV from the exact
+selected held source stream's already-attested probe side data. Contradictory
+L9, reserved or unrepresentable primaries, malformed/conflicting source MDCV,
+and missing source primaries refuse the explicit target with a named reason.
+No BT.2020 container colour tag or assumed P3 gamut supplies missing mastering
+facts. Title L6 supplies the minimum; missing L6 may use the source MDCV minimum,
+and contradictory/missing minima refuse. Maximum luminance is the bucket,
+MaxCLL is min(bucket, scanned title L1 peak), and MaxFALL is zero (unknown).
+Default/master and elided policies retain their original encoded bytes.
+
+Authored regressions cover preset/custom units and unknown/conflict handling,
+selected-stream rational MDCV parsing, stale prefix/suffix SEI replacement for
+IRAP types and NAL length sizes, identical init/in-band payloads, unchanged
+coded pictures/audio/timing, and an independent decoded-frame ffprobe check.
+No regression has run: completed-code independent review precedes functional
+validation. Pinned compilation, independent review, once-only regressions,
+actual encoder-family/device acceptance and publication remain open. No targeting
+control or later C–F feature is introduced by B.
+
 ## PR A implementation checkpoint
 
 - **Current qualification (2026-10-22; supersedes historical states below):**

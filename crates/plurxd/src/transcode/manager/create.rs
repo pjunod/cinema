@@ -2488,6 +2488,7 @@ impl TranscodeManager {
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
                         source_tick, native_bl, source_clock, preferences,
+                        source_mastering: crate::vodencode::dv_runtime::source_mastering_metadata(stream),
                         destination, mode, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
