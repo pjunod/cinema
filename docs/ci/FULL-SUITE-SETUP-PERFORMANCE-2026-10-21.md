@@ -13,11 +13,12 @@ checkout is not used for edits or tests. Preserve all assertions, identities,
 capacity boundaries, production deadlines and scenario concurrency.
 
 M1 exact-source qualification is recorded in
-[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). At 2026-10-21
-23:26 UTC, the user-authorized M1 merge into `effort/full-pr-suite` remains
-pending: development gate 5740 is green and refreshed full qualification
-5743 is in progress. The M1 source is
-`761b371c3ddd136ba7a724fd244dd91746acac73`. Earlier failed gates 5728 and
+[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244). The user-authorized
+M1 merge into `effort/full-pr-suite` completed at 2026-10-22 00:40 UTC:
+development gate 5740 and complete Rust qualification 5743 passed.
+The qualified source is `761b371c3ddd136ba7a724fd244dd91746acac73`, landed as
+`0aa94aefcc9bfa35fde312fcc372ca5438753c30` with the exact qualified tree and
+all 63 regression fields. Earlier failed gates 5728 and
 5733 retain their original ancestry and writer-pin verdicts; gate 5736
 retains its unsupported-landing-title refusal.
 
@@ -31,27 +32,40 @@ other platform lanes or automatic every-PR execution. M2 retains the older
 current-base pair is used to attribute the measured improvements. No history
 guard is weakened.
 
-## 1. The earlier green M1 run supplies whole-suite context
+## 1. The merged M1 run supplies whole-suite context
 
-| Measure | Frozen observation |
+M1 landing `0aa94aefc` has exactly the tree qualified by run 5743 on source
+`761b371c3`: `a5736c391563b9e96dd3d857ad7e009f2803a6fc`.
+
+| Measure | Qualified observation |
 |---|---|
-| Source | `0f7b6325cce563fec1d8001dc141a46d432db573` |
-| Run | Forgejo display run 5713; exact receipt linked from PR #1244 |
-| Ordinary native inventory | 6,977 cases: 6,928 passed, zero failed, 49 ignored |
-| Doctest selection | Seven selected targets, accounted separately from native cases |
-| Full ordinary command | 2,636.152 seconds (43m56.152s) |
-| Core native bodies | 958.99 seconds |
-| Ordinary Store native bodies | 413.95 seconds |
-| Daemon native bodies | 1,233.33 seconds |
-| Complete job | 5,463 seconds (91m03s), including setup and other phases |
+| Source | `761b371c3ddd136ba7a724fd244dd91746acac73` |
+| Run | Forgejo display run 5743; exact receipt linked from PR #1244 |
+| Ordinary native inventory | 7,011 cases: 6,961 passed, zero failed, 50 ignored |
+| Doctest selection | Seven selected targets; one actual case passed |
+| Full ordinary command | 2,687.031 seconds (44m47.031s) |
+| Core native bodies | 971.32 seconds |
+| Ordinary Store native bodies | 413.60 seconds |
+| Daemon native bodies | 1,269.53 seconds |
+| Separate serial VFR / bitmap commands | 5.771 / 5.149 seconds |
+| Complete job | 5,250 seconds (87m30s), including setup and other phases |
 | Declared repetition controls | 400 affected-cohort bodies and 20 writer bodies passed |
 
 **How to read it:** command wall time, native binary body time and complete
 job time have different boundaries. Their difference does not measure
 migrations, SQL preparation or teardown. Section 2 measures three focused
-cases separately; other isolated costs remain unknown. The 49 ignored
-statuses remain ignored; serial passes are separate observations. M2 must
+cases separately; other isolated costs remain unknown. All 49 older ignored
+identities remain, and main adds one ignored GPU comparison; serial passes
+are separate observations. M2 must
 retain every baseline identity and seven doctest targets.
+
+The strict qualified-summary SHA-256 is
+`16d1cb18ab74e42d33ed06382c9db86ae0221c933d07c120dca5661d83f53f4b`.
+The later main update `7f5af4524` → `92b259b25` adds Python tooling and
+documentation without changing Rust, Cargo, toolchain, image or test-observer
+inputs. It does not invalidate the frozen focused comparisons in §2;
+Python/static scheduling and total job cost may change. The final integrated
+M2 candidate still requires fresh complete qualification.
 
 ## 2. Focused measurements separate bottleneck discovery from comparison
 

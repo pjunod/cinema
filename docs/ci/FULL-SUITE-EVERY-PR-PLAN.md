@@ -1,6 +1,6 @@
 # Full suite on every PR — audit, execution contract, and implementation plan
 
-**Status:** open — M0 measured; refreshed M1 Rust qualification running; M2 focused improvements measured, full qualification pending ·
+**Status:** open — M0 measured; M1 Rust repairs qualified and merged; M2 focused improvements measured, full qualification pending ·
 **Requested:** 2026-10-20 · **Audit source:** `c1c344132` ·
 **Evidence captured:** 2026-10-20 14:21:12 UTC
 
@@ -23,10 +23,13 @@ Current measurements are tracked in
 M1 exact-source Rust qualification is recorded through the receipt in
 [PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244) and the
 [repair ledger](RUST-SUITE-REPAIR-2026-10-20.md). The user authorized the
-complete PR merge into the effort on 2026-10-21. Refreshed source `761b371c`
-has passed development gate 5740; complete Rust qualification 5743 is in
-progress, so the merge is still pending. Older run 5713 qualifies its own
-source only. M2 is tracked in
+complete PR merge into the effort on 2026-10-21. Source `761b371c` passed
+development gate 5740 and complete Rust qualification 5743. PR #1244 merged
+as `0aa94aefc` with the exact qualified tree and all 63 regression fields.
+The ordinary Rust command took 44m47s: 6,961 passed, zero failed and 50
+preserved/current-main ignores; doctests, repeated controls and serial cases
+also passed with complete accounting and qualified cleanup. Older run 5713
+qualifies its own source only. M2 is tracked in
 [the setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md):
 its implemented changes pass focused controls and two alternating local
 measurement pairs, preserving the recorded work and assertions. Fresh

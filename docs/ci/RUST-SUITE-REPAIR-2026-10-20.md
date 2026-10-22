@@ -1,7 +1,7 @@
 # Rust suite repair — preserve the 25 failures and qualify their corrections
 
-**Status:** integration refresh in progress after merge authorization on
-2026-10-21. Frozen `0f7b6325` passed run 5713: 6,928 native passes, zero
+**Status:** done — qualified Rust repairs merged into `effort/full-pr-suite`
+on 2026-10-22 at 00:40 UTC. Frozen `0f7b6325` passed run 5713: 6,928 native passes, zero
 failures and 49 unchanged ignores; seven doctest targets, 400 cohort bodies,
 20 writer bodies and both serial media cases also passed with qualified
 cleanup. Those receipts remain evidence for that exact older source.
@@ -18,7 +18,17 @@ parents and all 15 own-tree regression fields are valid. One existing
 `[[landings]]` recognition record now binds that exact immutable merge;
 no parser, waiver or audit boundary is changed. The failed gate remains red,
 and replacement gate 5740 passed on `761b371c3`. Full Rust qualification
-5743 is in progress on that frozen source; M1 is not yet merged.
+5743 passed on that frozen source. PR #1244 landed as
+`0aa94aefcc9bfa35fde312fcc372ca5438753c30`, with the exact qualified tree
+`a5736c391563b9e96dd3d857ad7e009f2803a6fc` and all 63 regression fields.
+The ordinary command took 2,687.031 seconds (44m47s): 6,961 native passes,
+zero failures and 50 ignores across 36 executables. All 49 older ignored
+identities remain; main adds one ignored GPU comparison. All seven doctest
+targets were observed and the one actual doctest passed. The 400 repeated
+cohort bodies, 20 writer bodies and both explicit serial media cases passed;
+strict native accounting has no gaps and every process cleanup qualified.
+The complete qualification job, including setup and diagnostic repetition,
+took 5,250 seconds (87m30s).
 All three package mapping checks report no source
 drift, and all 43 focused formal package/runner/CI controls pass, including
 the existing stale-writer-hash and missing/ambiguous-anchor negatives. The
@@ -31,8 +41,8 @@ The writer correction does not change that protocol, transaction ordering or
 those limits. No model, configuration, checker or premise is changed by this
 integration review, and TLC has not been rerun for it. Failed gates and
 old formal receipts retain their original verdicts and source bindings.
-Fresh exact-source compiler, focused, full native and development-gate
-acceptance remain required before merge; any fresh TLC qualification claim
+Exact-source compiler, focused, full native and development-gate
+acceptance passed for this landing; any fresh TLC qualification claim
 needs a new input-bound formal receipt.
 Current receipts are recorded in
 [task PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244).
