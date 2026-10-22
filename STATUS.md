@@ -16,27 +16,7 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-22 · display-targeted HDR10-E PR #1216:** original `a49`/`c036`
-  review is retained; 20 scanner controls and standalone P7 (17,983 valid frames,
-  max 3,441 nits, passing policies) passed with its actual `c036` listing.
-  Owner-interrupted attempt 258 stopped at 137/1,000 for 1,000 nits: it is not a
-  product defect or pass; 1,600 was unrun. Additive continuation 259 is running
-  1,000, then 1,600 only if it passes. No new mapped-P7 pass exists at this
-  snapshot. Current-main source is `a316` plus test-only fixture repair
-  `fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8`; pinned fmt passed. The original
-  compile E0063 was in a scanner `/bin/false` fixture; failed-only compile 261
-  passed on Rust 1.97.1 with true outer exit 0, all-target `plurxd`/`plurx-core`
-  and `hiqlite-contract-tests` check, no units. B integration `2038269` is queued
-  for pinned compile 262. Preserve earlier 99 Rust, receipt regression, 141
-  shader / 866,304 samples, 70 helper, and P8 results with original attribution.
-  Separate FEL comparison/interpreter work is excluded (no reviewed production
-  fix to integrate); full-app C1's final source-EOF failure remains open, with no
-  full-clip/general FEL claim. Direct GPT/root owns PR #1216. Narrow integration
-  review, completed P7 evidence, current fast lane and API merge with 22 anchors
-  remain open. B metadata `2038269` is complete but unqualified; C server and D
-  clients are in isolated Sol implementation clones, E/F remain planned. No
-  setting before B, Apple peak/device/deployment acceptance, or deployment is
-  claimed. See the [canonical build ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md).
+- **2026-10-22 · Display-targeted HDR10-E:** [PR A qualification and A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Direct GPT owns PR #1216; pinned compilation passed, missing-only P7 qualification is running. B metadata is implemented; C/D candidates await integration and qualification. Separate FEL full-application acceptance remains open.
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,
