@@ -8,7 +8,30 @@ execution page: source ownership, milestone acceptance and publication.
 The plan specifies behavior; this page records actual work and changes in
 execution instructions. No benchmark savings are established.
 
-## Current work — source approved; local qualification recorded
+## Current work — frozen comparative study continuation
+
+Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`.
+Its final fast lane passed and the merge tree matched the qualified candidate;
+the earlier pre-publication evidence below is retained as historical scope.
+The current agent-owned branch is `codex/knowledge-efficiency-study`.
+The study itself retains source `168fe74fb` and all twelve sealed cases.
+
+The owner requests completing the missing prerequisites and running the actual
+token/documentation comparison. Ordered acceptance, separate protected
+assertions/candidate RPC workers, and common actual Ripwire are being finished.
+One static isolated toolchain discovery confirmed Rust 1.97.1/Python 3.12.3;
+no study model or token-count calls have run. Sol owns executor and Rust worker
+implementation, custodian C owns private staging/scoring, and Luna completed
+the small navigation API task. The integrator owns common navigation and
+integration. Gold stays outside builder, reviewer and record-author contexts.
+
+The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md) records the
+pre-answer descriptive documentation metric. Independent audit/sealing,
+completed-source adversarial review, one affected check batch and runtime
+qualification precede calibration and 108 solver/216 blind scorer contexts.
+No savings claim follows from prerequisite implementation alone.
+
+## Previous pilot qualification snapshot — retained historical evidence
 
 Agent-owned clone, branch `effort/engineering-knowledge-pilot`, based on
 `168fe74fb2a47f3ccd56b795741dfe3422307b0d` (current Forgejo main at setup).
