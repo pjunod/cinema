@@ -149,11 +149,18 @@ def run_exact_assertion_command(argv: tuple[str, ...], rpc: Callable, *, cwd: st
     endpoint = Path(SOCKET_PATH)
     endpoint.parent.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.chmod(endpoint.parent, 0o700)
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(endpoint))
-    os.chmod(endpoint, 0o600)
-    server.listen(1)
-    server.settimeout(0.1)
+    server = None
+    try:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(endpoint))
+        os.chmod(endpoint, 0o600)
+        server.listen(1)
+        server.settimeout(0.1)
+    except BaseException:
+        if server is not None: server.close()
+        endpoint.unlink(missing_ok=True)
+        endpoint.parent.rmdir()
+        raise
     stop = threading.Event()
     errors = []
     state = {"calls": 0, "bytes": 0}
@@ -206,14 +213,20 @@ def run_exact_assertion_command(argv: tuple[str, ...], rpc: Callable, *, cwd: st
         if errors: raise RustRpcError("protected Rust RPC bridge failed") from errors[0]
         return AssertionProcessResult(process.returncode, bytes(captures[0]), bytes(captures[1]), state["calls"])
     finally:
+        cleanup_errors = []
         if process is not None:
             try: _reap_group(process)
+            except BaseException as exc: cleanup_errors.append(exc)
             finally:
                 process.stdout.close()
                 process.stderr.close()
         stop.set()
         thread.join(timeout=max(0.1, deadline-time.monotonic())+0.2)
         server.close()
-        endpoint.unlink(missing_ok=True)
-        endpoint.parent.rmdir()
-        if thread.is_alive(): raise RustRpcError("protected RPC thread survived cleanup")
+        try:
+            endpoint.unlink(missing_ok=True)
+            endpoint.parent.rmdir()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        if thread.is_alive(): cleanup_errors.append(RustRpcError("protected RPC thread survived cleanup"))
+        if cleanup_errors: raise RustRpcError("protected RPC cleanup failed") from cleanup_errors[0]

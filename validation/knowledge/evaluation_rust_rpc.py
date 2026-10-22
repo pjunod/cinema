@@ -22,6 +22,7 @@ RPC_MODULE = "plurx_core.playback"
 RPC_FUNCTION = "decide_forced"
 MAX_FRAME_BYTES = 65_536
 MAX_DEPTH = 16
+TOOLCHAIN_ROOT = "/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin"
 SOCKET_PATH = "/work/.runtime/protected-rpc/endpoint.sock"
 
 # A closed value algebra. Product types never cross an ABI or pickle boundary.
@@ -313,5 +314,5 @@ def compile_recipe() -> tuple[tuple[str, ...], ...]:
     Missing cache, resource failure and compiler error are distinct controller
     outcomes. This function never executes a compiler or tests.
     """
-    return (("/usr/local/cargo/bin/rustc", "--version"),
-            ("/usr/local/cargo/bin/cargo", "build", "--offline", "--locked", "-p", "plurx-core", "--bin", "study_rpc"))
+    return ((TOOLCHAIN_ROOT + "/rustc", "--version"),
+            (TOOLCHAIN_ROOT + "/cargo", "build", "--offline", "--locked", "-p", "plurx-core", "--bin", "study_rpc"))
