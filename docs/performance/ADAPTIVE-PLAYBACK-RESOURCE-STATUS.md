@@ -24,23 +24,24 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`b63cb217c` connects exact same-file v1→v2 upgrade to `Storage::open`, after
-witness/location/file guards and before owner registration. Frozen v1 DDL/codecs,
-all historical rows/JSON/operations/u64 values survive; one transaction rebuilds
-only meta/members, adds typed asset ownership and checks both inventories/totals.
-Strict SourceFile/copy/task/scratch/Closed-or-Transferred documents now feed startup
-reconstruction and family-OR-asset accounting, never receipt deserialization.
-Retained vectors cover actual declared handles/buffers/readers/files, not CPU slots.
+`c0f8e1fb0` connects private `VodGenerationOwner` to ordinary production: actual
+readiness, output and diagnostics stay in the slot-owned task. Completion signals
+carry no sink; slot/observer share the retained terminal and parent audio source.
+Superseded slots join the exact old registration before terminal consumption.
+`80eb89262` writes typed v2 prepare/arm/acquired/seal/hold/unarmed-cancel through
+the existing retained journal queue. `511989003` permits only monotonic observed
+source-copy enrichment. Frozen v1 history/DDL/codecs and full startup accounting
+from `b63cb217c` remain; no serialized fact remints physical/transfer authority.
 
-Pinned1.97.1 combined core+daemon all-target Hiqlite-contract PASS225.756s;
-subsequent copy/cost guards invalidated only core, PASS56.750s on17bindings.
-Fourteen new bodies COMPILED NOT RUN;51lib/4libtest warnings, NOT strict Clippy.
-Real VOD source/task owners and atomic R→S writer still missing: startup decoding
-is connected, actual request/admission/output/retirement remains LEGACY.
-Controller's current prior C2 Windows check PASS12.246s; v2 Windows unclaimed.
-Final C1 amendment accepts trusted fixed-software/known-helper normal ownership,
-NOT a custom broker; exact positive old-domain restart evidence remains missing.
-No receipt was weakened by this data/migration slice; all behavior NOT RUN.
+Pinned1.97.1 combined core+daemon all-target Hiqlite-contract PASS110.129s;
+only later private core/copy changes recompiled47.617s. Ten new bodies COMPILED
+NOT RUN; warnings remain, NOT strict Clippy. Earlier unchanged passes retained.
+Windows v2 prior8f8 check PASS58.617s; current80eb core+daemon check is separate.
+Admission remains LEGACY. Actual sink IO/reader/native-source custody, core typed
+adoption and atomic producer→assets R→S swap remain. Scratch plan==observed cannot
+yet model output growth; exact write-ahead/reserved-budget shape is requested from
+the existing coordinator. Trusted fixed-software normal graph, not a broker;
+positive exact old-domain restart evidence remains missing. Behavior NOT RUN.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
