@@ -1009,7 +1009,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
         generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
         hdr10Enhanced = ((try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == true)
             && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
-        sdrProcessed = ((try? values?.decode(Bool.self, forKey: .sdrProcessed)) == true) && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
+        sdrProcessed = ((try? values?.decode(Bool.self, forKey: .sdrProcessed)) == true) && (try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == false && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
         appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
         if appliedOperations.contains(where: { $0.hasPrefix("DisplayTargetMapping:") && ($0 == "DisplayTargetMapping:100") != sdrProcessed }) { appliedOperations = [] }

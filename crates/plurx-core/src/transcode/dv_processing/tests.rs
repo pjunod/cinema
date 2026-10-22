@@ -1550,6 +1550,13 @@ fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt() {
         )
     };
     let report = accept(&value, Some("sdr")).expect("typed SDR report");
+    assert_eq!(
+        serde_json::to_value(&report).expect("wire")["creative_trims_applied"],
+        false
+    );
+    value["creative_trims_applied"] = true.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["creative_trims_applied"] = false.into();
     assert!(report.sdr_processed());
     assert_eq!(report.display_target_nits(), Some(100));
     assert!(accept(&value, Some("hdr10")).is_none());

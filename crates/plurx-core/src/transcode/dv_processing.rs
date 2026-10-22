@@ -90,6 +90,7 @@ pub struct DvEffectiveProcessingReport {
     hdr10_enhanced: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sdr_processed: bool,
+    creative_trims_applied: bool,
     fel_contributed: bool,
     applied_operations: Vec<DvOperation>,
     /// The source pictures were decoded on the GPU (VA-API). Omitted when
@@ -132,6 +133,8 @@ impl DvEffectiveProcessingReport {
             hdr10_enhanced: bool,
             #[serde(default)]
             sdr_processed: bool,
+            #[serde(default)]
+            creative_trims_applied: bool,
             fel_contributed: bool,
             applied_operations: Vec<DvOperation>,
             #[serde(default)]
@@ -146,6 +149,8 @@ impl DvEffectiveProcessingReport {
         let wire: Wire = serde_json::from_slice(bytes).ok()?;
         let operations: BTreeSet<_> = wire.applied_operations.iter().copied().collect();
         if wire.generation != generation
+            || wire.creative_trims_applied
+            || operations.contains(&DvOperation::CreativeTrimApplication)
             || wire.hdr10_enhanced != (delivered == Some("hdr10"))
             || wire.sdr_processed != (delivered == Some("sdr"))
             || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
@@ -163,6 +168,7 @@ impl DvEffectiveProcessingReport {
             generation: wire.generation,
             hdr10_enhanced: wire.hdr10_enhanced,
             sdr_processed: wire.sdr_processed,
+            creative_trims_applied: false,
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
@@ -2481,6 +2487,8 @@ impl DvProcessingReceipt {
             generation: active_playback_generation.to_owned(),
             hdr10_enhanced: plan.destination == DvDestination::Hdr10,
             sdr_processed: plan.destination == DvDestination::Sdr,
+            // No accepted creative-trim renderer is in the production graph.
+            creative_trims_applied: false,
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
