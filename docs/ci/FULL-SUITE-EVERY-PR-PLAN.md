@@ -1,6 +1,6 @@
 # Full suite on every PR — audit, execution contract, and implementation plan
 
-**Status:** open — M0 diagnostic baseline measured; M1 Rust repair and qualification in progress ·
+**Status:** open — M0 measured; M1 Rust repairs qualified and merged; M2 focused improvements measured, full qualification pending ·
 **Requested:** 2026-10-20 · **Audit source:** `c1c344132` ·
 **Evidence captured:** 2026-10-20 14:21:12 UTC
 
@@ -20,10 +20,21 @@ Existing source fixes are identified separately from unimplemented work.
 No passing complete run is claimed until its outcomes are recorded.
 Current measurements are tracked in
 [FULL-SUITE-BASELINE-2026-10-20.md](FULL-SUITE-BASELINE-2026-10-20.md).
-The authorized next milestone is tracked in
-[RUST-SUITE-REPAIR-2026-10-20.md](RUST-SUITE-REPAIR-2026-10-20.md): preserve
-the 25 failed identities, correct their causes and qualify repeated/full
-Rust execution before enabling any new automatic PR policy.
+M1 exact-source Rust qualification is recorded through the receipt in
+[PR #1244](http://forge.lan:3000/noirr/plurx/pulls/1244) and the
+[repair ledger](RUST-SUITE-REPAIR-2026-10-20.md). The user authorized the
+complete PR merge into the effort on 2026-10-21. Source `761b371c` passed
+development gate 5740 and complete Rust qualification 5743. PR #1244 merged
+as `0aa94aefc` with the exact qualified tree and all 63 regression fields.
+The ordinary Rust command took 44m47s: 6,961 passed, zero failed and 50
+preserved/current-main ignores; doctests, repeated controls and serial cases
+also passed with complete accounting and qualified cleanup. Older run 5713
+qualifies its own source only. M2 is tracked in
+[the setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md):
+its implemented changes pass focused controls and two alternating local
+measurement pairs, preserving the recorded work and assertions. Fresh
+complete M2 native/doctest qualification remains pending. Other lanes and
+the automatic every-PR policy cutover remain unqualified.
 
 ## 1. Outcome — every landing has complete, fresh test evidence
 

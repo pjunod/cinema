@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import copy
+import hashlib
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -368,6 +370,88 @@ VIEW ModelView
 
 
 class MappingFailClosedTests(unittest.TestCase):
+    sqlite_sources = (
+        "crates/plurx-core/src/store/sqlite/background_jobs.rs",
+        "crates/plurx-core/src/store/sqlite/mod.rs",
+    )
+
+    def sqlite_mapping_fixture(self) -> tuple[Path, dict]:
+        mapping = copy.deepcopy(formal.read_json(formal.MAPPING_PATH, "reviewed mapping"))
+        selected = [row for row in mapping["source_mapping"]["tables"]
+                    if row["source"] in self.sqlite_sources]
+        self.assertEqual([sum(row["source"] == source for row in selected)
+                          for source in self.sqlite_sources], [1, 6])
+        mapping["source_mapping"]["tables"] = selected
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        paths = {mapping["model_file"], *self.sqlite_sources}
+        paths.update(f"verification/durable-jobs/{name}" for name in mapping["configs"])
+        for relative in paths:
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
+        return root, mapping
+
+    def copied_mapping_inputs(self, root: Path, mapping: dict) -> tuple[list[str], dict[str, str]]:
+        # Use the real path, SHA and exactly-once checks against copied source;
+        # no source-path, hashing or checker guard is mocked away.
+        with mock.patch.object(formal, "ROOT", root):
+            return formal.mapping_inputs(mapping)
+
+    def test_reviewed_current_sqlite_sources_and_all_seven_bindings_are_accepted(self) -> None:
+        root, mapping = self.sqlite_mapping_fixture()
+        drift, hashes = self.copied_mapping_inputs(root, mapping)
+        self.assertEqual(drift, [])
+        for source in self.sqlite_sources:
+            self.assertEqual(hashes[source], hashlib.sha256((ROOT / source).read_bytes()).hexdigest())
+
+    def test_sqlite_source_byte_drift_refuses_unchanged_anchors(self) -> None:
+        root, mapping = self.sqlite_mapping_fixture()
+        for source in self.sqlite_sources:
+            with self.subTest(source=source):
+                path = root / source
+                original = path.read_bytes()
+                path.write_bytes(original + b"\n// copied-source drift control\n")
+                drift, _ = self.copied_mapping_inputs(root, mapping)
+                self.assertIn(f"authority source drift requires review: {source}", drift)
+                self.assertFalse(any("anchor" in issue for issue in drift), drift)
+                path.write_bytes(original)
+
+    def test_sqlite_missing_anchor_refuses_even_with_fresh_source_hash(self) -> None:
+        self.assert_sqlite_anchor_mutation_refused(duplicate=False)
+
+    def test_sqlite_duplicate_anchor_refuses_even_with_fresh_source_hash(self) -> None:
+        self.assert_sqlite_anchor_mutation_refused(duplicate=True)
+
+    def assert_sqlite_anchor_mutation_refused(self, *, duplicate: bool) -> None:
+        root, original_mapping = self.sqlite_mapping_fixture()
+        for source in self.sqlite_sources:
+            with self.subTest(source=source):
+                mapping = copy.deepcopy(original_mapping)
+                selected = [row for row in mapping["source_mapping"]["tables"] if row["source"] == source]
+                anchor = selected[0]["anchor"]
+                path = root / source
+                original = path.read_text()
+                mutated = original + "\n" + anchor + "\n" if duplicate else original.replace(anchor, "removed reviewed anchor", 1)
+                path.write_text(mutated)
+                actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                for row in selected:
+                    row["sha256"] = actual
+                drift, _ = self.copied_mapping_inputs(root, mapping)
+                self.assertIn(f"authority anchor must occur exactly once: {selected[0]['table']}", drift)
+                self.assertFalse(any("source drift" in issue for issue in drift), drift)
+                path.write_text(original)
+
+    def test_one_stale_sqlite_module_binding_still_refuses_five_fresh_bindings(self) -> None:
+        root, mapping = self.sqlite_mapping_fixture()
+        source = self.sqlite_sources[1]
+        selected = [row for row in mapping["source_mapping"]["tables"] if row["source"] == source]
+        self.assertEqual(len(selected), 6)
+        selected[-1]["sha256"] = "0" * 64
+        drift, _ = self.copied_mapping_inputs(root, mapping)
+        self.assertEqual(drift, [f"authority source drift requires review: {source}"])
+
     def test_unreviewed_fable_mapping_cannot_be_accepted(self) -> None:
         mapping = copy.deepcopy(formal.read_json(formal.MAPPING_PATH, "test mapping"))
         mapping["model_file"] = "verification/durable-jobs/__runner_test_missing__.tla"

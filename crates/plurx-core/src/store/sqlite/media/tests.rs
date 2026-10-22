@@ -218,6 +218,11 @@ async fn recently_added_widens_window() {
 /// library filter and several limits.
 #[tokio::test]
 async fn recently_added_matches_the_whole_catalogue_ranking() {
+    let timing = std::env::var("PLURX_TEST_SETUP_TIMING").as_deref() == Ok("1");
+    let total_started = timing.then(std::time::Instant::now);
+    let mut elapsed = [std::time::Duration::ZERO; 4];
+    let mut operations = [0_u64; 4];
+    let mut seeded_rows = 0;
     for seed in 0..200_u64 {
         let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
         let mut next = move |bound: u64| {
@@ -226,7 +231,12 @@ async fn recently_added_matches_the_whole_catalogue_ranking() {
             state ^= state << 17;
             i64::try_from(state % bound).expect("small")
         };
-        let store = SqliteStore::open_in_memory().expect("open");
+        let started = timing.then(std::time::Instant::now);
+        let store = SqliteStore::fixture_in_memory().expect("open fixture");
+        if let Some(started) = started {
+            elapsed[0] += started.elapsed();
+            operations[0] += 1;
+        }
         let mut rows = Vec::new();
         let mut id = 1;
         let stamp = |next: &mut dyn FnMut(u64) -> i64| 1_000 + next(12);
@@ -277,20 +287,65 @@ async fn recently_added_matches_the_whole_catalogue_ranking() {
             rows.push((id, 4, "video", None, stamp(&mut next), None, None));
             id += 1;
         }
+        if timing {
+            seeded_rows += rows.len();
+        }
+        let started = timing.then(std::time::Instant::now);
         seed_recent(&store, rows).await;
+        if let Some(started) = started {
+            elapsed[1] += started.elapsed();
+            operations[1] += 1;
+        }
         for library_id in [None, Some(1), Some(2), Some(3), Some(4)] {
             for limit in [1, 2, 3, 7, 50] {
+                let started = timing.then(std::time::Instant::now);
                 let cards = windowed_recently_added(&store, library_id, limit).await;
+                if let Some(started) = started {
+                    elapsed[2] += started.elapsed();
+                    operations[2] += 1;
+                }
+                let started = timing.then(std::time::Instant::now);
                 let legacy = store
                     .with_conn(move |conn| Ok(legacy_recently_added(conn, library_id, limit)))
                     .await
                     .expect("legacy");
+                if let Some(started) = started {
+                    elapsed[3] += started.elapsed();
+                    operations[3] += 1;
+                }
                 assert_eq!(
                     cards, legacy,
                     "seed {seed}, library {library_id:?}, limit {limit}"
                 );
             }
         }
+    }
+    if let Some(started) = total_started {
+        let phases: Vec<_> = [
+            "open",
+            "seed_recent",
+            "production_queries",
+            "oracle_queries",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            serde_json::json!({
+                "phase": phase,
+                "elapsed_seconds": elapsed[index].as_secs_f64(),
+                "operations": operations[index],
+            })
+        })
+        .collect();
+        eprintln!(
+            "PLURX_TEST_SETUP_TIMING {}",
+            serde_json::json!({
+                "test": "store::sqlite::media::tests::recently_added_matches_the_whole_catalogue_ranking",
+                "elapsed_seconds": started.elapsed().as_secs_f64(),
+                "seeded_rows": seeded_rows,
+                "phases": phases,
+            })
+        );
     }
 }
 

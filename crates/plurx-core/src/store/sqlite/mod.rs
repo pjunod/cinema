@@ -17,6 +17,8 @@ mod coordination;
 mod dv_conversion;
 mod dvr;
 mod file_grants;
+#[cfg(any(test, feature = "fixtures"))]
+mod fixture;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;

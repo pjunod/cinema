@@ -385,7 +385,7 @@
       },
       {
         "anchor": "impl QueueSql for SqliteStore {",
-        "sha256": "16a81e9ce15b78313deee940ea726bf802016ddae9884c7bb78641844e925c8c",
+        "sha256": "b39446c6194d2bee07fc728393dfcd551c5a3605b59e48ab2b5f8becccefd5f9",
         "source": "crates/plurx-core/src/store/sqlite/background_jobs.rs",
         "table": "proposal \u00a74.1 SQLite queue adapter"
       },
@@ -409,37 +409,37 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "a0d126543d89c9dc7792a3025c308d601dbd8323b6cc4f9f50039d1f60e16960",
+        "sha256": "1ad678102f6c00fb6a3b427793b13d20ef9db066b2545d9c1b28825a5111978a",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "a0d126543d89c9dc7792a3025c308d601dbd8323b6cc4f9f50039d1f60e16960",
+        "sha256": "1ad678102f6c00fb6a3b427793b13d20ef9db066b2545d9c1b28825a5111978a",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "a0d126543d89c9dc7792a3025c308d601dbd8323b6cc4f9f50039d1f60e16960",
+        "sha256": "1ad678102f6c00fb6a3b427793b13d20ef9db066b2545d9c1b28825a5111978a",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "a0d126543d89c9dc7792a3025c308d601dbd8323b6cc4f9f50039d1f60e16960",
+        "sha256": "1ad678102f6c00fb6a3b427793b13d20ef9db066b2545d9c1b28825a5111978a",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "a0d126543d89c9dc7792a3025c308d601dbd8323b6cc4f9f50039d1f60e16960",
+        "sha256": "1ad678102f6c00fb6a3b427793b13d20ef9db066b2545d9c1b28825a5111978a",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "a0d126543d89c9dc7792a3025c308d601dbd8323b6cc4f9f50039d1f60e16960",
+        "sha256": "1ad678102f6c00fb6a3b427793b13d20ef9db066b2545d9c1b28825a5111978a",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },

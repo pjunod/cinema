@@ -11,6 +11,21 @@ source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
 
+**M2 source review, 2026-10-21:** the changes from repair refresh `6a6d55099`
+through `b7644c04b`, plus the adapter timing-helper relocation, preserve this
+mapping. Shared enqueue, claim, renewal, settlement, resource and retention
+SQL are unchanged. SQLite still binds the caller's request, drains every
+statement in order and commits or rolls back one transaction. The adapter
+reuses bounded prepared statements; its test-only timers now follow the
+production implementation so the existing transaction census can see it.
+The SQLite module adds only the explicit test/fixture helper declaration;
+cold production constructors and fenced publication checks are unchanged.
+All seven affected file-hash bindings were refreshed after this review,
+without changing anchors, model, configurations, bounds or fairness. Copied
+source controls require hashes and unique anchors independently. The old
+bounded qualification remains retained; complete M2 qualification is pending
+in the [setup ledger](../../docs/ci/FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md).
+
 ## Publication checks two independent owners in one transaction
 
 The queue tuple is job/node/boot/claim/fence/revision/expiry. The domain tuple
@@ -79,7 +94,7 @@ publication files would miss guards they depend on.
 | Dispatch/resolution window | `now < dispatched` or `now-dispatched >= 120000` | Expired/pruned at upper boundary | [resolve:3465](../../crates/plurx-core/src/store/background_jobs.rs#L3465) |
 | Domain release | `min(stored expiry, caller now_ms)` | Does not extend lease | [SQLite:125](../../crates/plurx-core/src/store/sqlite/coordination.rs#L125); [Hiqlite:162](../../crates/plurx-core/src/store/hiqlite_coordination.rs#L162) |
 | Successor | same resource/owner/fence, revision+1, successor expiry `> predecessor expiry` | Equal successor expiry invalid | [successor construction:52](../../crates/plurx-core/src/cluster/coordination.rs#L52); [Hiqlite validation:34](../../crates/plurx-core/src/store/hiqlite_publication.rs#L34) |
-| SQLite replacement | additionally successor expiry `> backend sample` | Equal successor expiry invalid | [inside-transaction validation:1985](../../crates/plurx-core/src/store/sqlite/mod.rs#L1985) |
+| SQLite replacement | additionally successor expiry `> backend sample` | Equal successor expiry invalid | [inside-transaction validation:1987](../../crates/plurx-core/src/store/sqlite/mod.rs#L1987) |
 | Hiqlite acceptance | predecessor expiry `> backend sample` and successor expiry `> predecessor expiry` | Implies successor expiry `> sample`; no accepted-publication strength difference | [replacement validation:38](../../crates/plurx-core/src/store/hiqlite_publication.rs#L38); [predecessor UPDATE:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
 
 Facade precheck, successor-computation and each backend submission retain
