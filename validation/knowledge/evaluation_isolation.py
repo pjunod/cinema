@@ -302,13 +302,45 @@ except OSError as error:
     network_errno=error.errno
 finally:
     sock.close()
+interfaces=sorted(name for _,name in socket.if_nameindex())
+if len(interfaces)>256:raise RuntimeError("network link bound")
+links={}
+for name in interfaces:
+    if not name or "/" in name or name in {".",".."}:raise RuntimeError("network link identity")
+    with open("/sys/class/net/"+name+"/flags") as stream:flags=stream.read(33)
+    with open("/sys/class/net/"+name+"/operstate") as stream:operstate=stream.read(33)
+    if len(flags)>32 or len(operstate)>32:raise RuntimeError("network link state bound")
+    links[name]={"flags":int(flags,16),"operstate":operstate.strip().lower()}
+def route_lines(path):
+    with open(path) as stream:raw=stream.read(512*1024+1)
+    if len(raw)>512*1024:raise RuntimeError("network route byte bound")
+    rows=raw.splitlines()
+    if len(rows)>4096:raise RuntimeError("network route count bound")
+    return rows
+ipv4_lines=route_lines("/proc/net/route")
+if not ipv4_lines or ipv4_lines[0].split()!=["Iface","Destination","Gateway","Flags","RefCnt","Use","Metric","Mask","MTU","Window","IRTT"]:
+    raise RuntimeError("IPv4 route header schema")
+ipv4_routes=[]
+for line in ipv4_lines[1:]:
+    row=line.split()
+    if len(row)!=11:raise RuntimeError("IPv4 route schema")
+    ipv4_routes.append({"interface":row[0],"destination":row[1].lower(),"gateway":row[2].lower(),
+                        "flags":int(row[3],16),"mask":row[7].lower()})
+ipv6_routes=[]
+for line in route_lines("/proc/net/ipv6_route"):
+    row=line.split()
+    if len(row)!=10:raise RuntimeError("IPv6 route schema")
+    ipv6_routes.append({"interface":row[9],"destination":row[0].lower(),"destination_prefix":int(row[1],16),
+                        "source":row[2].lower(),"source_prefix":int(row[3],16),"gateway":row[4].lower(),"flags":int(row[8],16)})
+ipv4_routes.sort(key=lambda row:json.dumps(row,sort_keys=True))
+ipv6_routes.sort(key=lambda row:json.dumps(row,sort_keys=True))
 versions={"python":platform.python_version(),"python_executable":sys.executable,"platform":platform.platform(),"machine":platform.machine()}
 if rust_required == "yes":
     for name,path in (("rustc",rustc),("cargo",cargo)):
         outcome=subprocess.run([path,"--version"],cwd="/",stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         versions[name]={"returncode":outcome.returncode,"output":outcome.stdout.decode("utf-8","replace").strip()}
 build_environment={"CARGO_BUILD_JOBS":os.environ.get("CARGO_BUILD_JOBS")} if rust_required=="yes" else {}
-print(json.dumps({"outside":outside,"network":{"interfaces":sorted(name for _,name in socket.if_nameindex()),"errno":network_errno},"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
+print(json.dumps({"outside":outside,"network":{"interfaces":interfaces,"links":links,"ipv4_routes":ipv4_routes,"ipv6_routes":ipv6_routes,"errno":network_errno},"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
 '''
 
 
@@ -624,7 +656,7 @@ def _prepare(config: IsolationConfig):
         targets.add(cache.target)
     environment = dict(config.environment)
     _require(len(environment) == len(config.environment) and len(environment) <= 32, "unique bounded callback environment required")
-    reserved = {"HOME", "TMPDIR", "TMP", "TEMP", "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "CARGO_NET_OFFLINE", "PYTHONDONTWRITEBYTECODE", "XDG_CACHE_HOME", "PATH", "RUSTC", "CARGO", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTUP_TOOLCHAIN"}
+    reserved = {"HOME", "TMPDIR", "TMP", "TEMP", "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "CARGO_NET_OFFLINE", "PYTHONDONTWRITEBYTECODE", "XDG_CACHE_HOME", "PATH", "RUSTC", "CARGO", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTUP_TOOLCHAIN", "DEBIAN_FRONTEND"}
     for key, value in config.environment:
         _require(isinstance(key, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key)
                  and key not in reserved and key not in {"LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV"}
@@ -702,7 +734,7 @@ def _environment(config):
     return {"HOME": "/work/.runtime/home", "TMPDIR": "/work/.runtime/tmp", "TMP": "/work/.runtime/tmp",
             "TEMP": "/work/.runtime/tmp", "CARGO_HOME": "/work/.runtime/cargo", "RUSTUP_HOME": "/work/.runtime/rustup",
             "CARGO_TARGET_DIR": "/work/.runtime/target", "XDG_CACHE_HOME": "/work/.runtime/cache",
-            "CARGO_NET_OFFLINE": "true", "PYTHONDONTWRITEBYTECODE": "1",
+            "CARGO_NET_OFFLINE": "true", "PYTHONDONTWRITEBYTECODE": "1", "DEBIAN_FRONTEND": "noninteractive",
             "PATH": ":".join(dict.fromkeys((str(Path(config.python_executable).parent), str(Path(config.rustc_executable).parent), str(Path(config.cargo_executable).parent), "/usr/bin", "/bin"))),
             "RUSTC": config.rustc_executable, "CARGO": config.cargo_executable, "RUSTC_WRAPPER": "",
             "RUSTC_WORKSPACE_WRAPPER": "", "RUSTUP_TOOLCHAIN": "1.97.1",
@@ -864,6 +896,49 @@ def _cleanup(config, name):
     return _Cleanup(proved, observed)
 
 
+def _network_denied(network):
+    """Prove inactive external topology, rather than assuming device names."""
+    if not isinstance(network, dict) or set(network) != {"interfaces", "links", "ipv4_routes", "ipv6_routes", "errno"}:
+        return False
+    links = network.get("links")
+    if (not isinstance(links, dict) or not 0 < len(links) <= 256 or "lo" not in links
+            or any(not isinstance(name, str) for name in links)
+            or network.get("interfaces") != sorted(links)):
+        return False
+    for name, state in links.items():
+        if (not isinstance(state, dict) or set(state) != {"flags", "operstate"}
+                or type(state["flags"]) is not int or not 0 <= state["flags"] < 2**32
+                or not isinstance(state["operstate"], str)):
+            return False
+        flags, operstate = state["flags"], state["operstate"]
+        if name == "lo":
+            # Linux reports operstate=unknown for the ordinary UP loopback.
+            if not flags & 0x8 or operstate not in {"unknown", "up", "down"}:
+                return False
+            if (operstate == "up" and not flags & 0x1) or (operstate == "down" and flags & 0x1):
+                return False
+        elif operstate != "down" or flags & (0x1 | 0x40):
+            # IFF_UP and IFF_RUNNING must both be clear on dormant kernel links.
+            return False
+    for family in ("ipv4_routes", "ipv6_routes"):
+        rows = network.get(family)
+        if not isinstance(rows, list) or len(rows) > 4096:
+            return False
+        fields = ({"interface", "destination", "gateway", "flags", "mask"} if family == "ipv4_routes" else
+                  {"interface", "destination", "destination_prefix", "source", "source_prefix", "gateway", "flags"})
+        for row in rows:
+            if (not isinstance(row, dict) or set(row) != fields or row["interface"] != "lo"
+                    or type(row["flags"]) is not int or not 0 <= row["flags"] < 2**32):
+                return False
+            addresses = ("destination", "gateway", "mask") if family == "ipv4_routes" else ("destination", "source", "gateway")
+            width = 8 if family == "ipv4_routes" else 32
+            if any(not isinstance(row[key], str) or not re.fullmatch(r"[a-f0-9]{" + str(width) + r"}", row[key]) for key in addresses):
+                return False
+            if family == "ipv6_routes" and any(type(row[key]) is not int or not 0 <= row[key] <= 128 for key in ("destination_prefix", "source_prefix")):
+                return False
+    return type(network.get("errno")) is int and network["errno"] in {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EACCES, errno.EPERM}
+
+
 def _configuration_probe(config, private):
     name = "plurx-knowledge-" + uuid.uuid4().hex
     sentinel = private / ("outside-" + uuid.uuid4().hex)
@@ -893,7 +968,7 @@ def _configuration_probe(config, private):
         _require(checked.returncode == 0 and not checked.timed_out and not checked.output_limited, "isolation probes unavailable")
         observed = json.loads(checked.stdout)
         _require(observed["outside"]["readable"] is False and observed["outside"]["errno"] in {errno.ENOENT, errno.EACCES}, "outside sentinel readable")
-        _require(observed["network"]["interfaces"] == ["lo"] and observed["network"]["errno"] in {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EACCES, errno.EPERM}, "network denial unproved")
+        _require(_network_denied(observed["network"]), "network denial unproved")
         _require(observed["filesystem"]["candidate"]["writable"] is (not config.candidate_readonly)
                  and (not config.candidate_readonly or observed["filesystem"]["candidate"]["errno"] in {errno.EROFS, errno.EACCES})
                  and observed["filesystem"]["runtime"]["writable"] is True

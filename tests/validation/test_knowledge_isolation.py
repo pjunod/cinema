@@ -5,6 +5,7 @@ real controller tests require explicit reviewed image/engine configuration.
 All sources are synthetic and never qualify actual study acceptance.
 """
 from dataclasses import replace
+import base64
 import errno
 import hashlib
 import hmac
@@ -12,10 +13,16 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
 from validation.knowledge import evaluation_isolation as isolation
+
+
+def synthetic_closed_network():
+    return {"interfaces": ["lo"], "links": {"lo": {"flags": 0x9, "operstate": "unknown"}},
+            "ipv4_routes": [], "ipv6_routes": [], "errno": errno.ENETUNREACH}
 
 
 class SyntheticEngine:
@@ -24,6 +31,7 @@ class SyntheticEngine:
         self.calls = []
         self.alive = set()
         self.network = "none"
+        self.network_observation = None
         self.cleanup_fails = False
         self.image_available = True
         self.image_id = "sha256:" + "b" * 64
@@ -79,7 +87,7 @@ class SyntheticEngine:
             return result(json.dumps({"memory.events": {"oom": 0, "oom_kill": 0, "max": 0}, "pids.events": {"max": 0}}).encode())
         if arguments[0] == "exec" and isolation._PROBE_CODE in arguments:
             data = {"outside": {"readable": self.sentinel_readable, "errno": errno.ENOENT},
-                    "network": {"interfaces": ["lo"], "errno": errno.ENETUNREACH},
+                    "network": synthetic_closed_network() if self.network_observation is None else self.network_observation,
                     "filesystem": {"candidate": {"writable": not config.candidate_readonly, "errno": errno.EROFS if config.candidate_readonly else 0},
                                    "runtime": {"writable": True, "errno": 0},
                                    "grader": {"writable": False, "errno": errno.EROFS},
@@ -280,6 +288,56 @@ class KnowledgeIsolationTests(unittest.TestCase):
         (config.runtime_root / "quiet-logs").rmdir()
         (config.runtime_root / "quiet-logs").symlink_to(config.runtime_root / "tmp", target_is_directory=True)
         with self.assertRaises(isolation.IsolationError): isolation.probe(config)
+
+    def test_controller_declares_packaging_environment_without_allowing_ambient_extras(self):
+        self.assertEqual(isolation._environment(self.config)["DEBIAN_FRONTEND"], "noninteractive")
+        with self.assertRaises(isolation.IsolationError):
+            isolation.probe(replace(self.config, environment=(("DEBIAN_FRONTEND", "interactive"),)))
+        observed = self.engine.inspect(self.config, "synthetic")
+        observed[0]["Config"]["Env"].append("UNDECLARED_IMAGE_VALUE=1")
+        with self.assertRaises(isolation.IsolationError): isolation._observed_security(self.config, observed)
+
+    def dormant_network(self):
+        value = synthetic_closed_network()
+        value["links"]["tunnel0"] = {"flags": 0x80, "operstate": "down"}
+        value["interfaces"] = sorted(value["links"])
+        return value
+
+    def test_dormant_kernel_links_prove_denial_by_state_without_name_exceptions(self):
+        value = self.dormant_network()
+        self.assertTrue(isolation._network_denied(value))
+        value["ipv6_routes"] = [{"interface": "lo", "destination": "0" * 31 + "1", "destination_prefix": 128,
+                                 "source": "0" * 32, "source_prefix": 0, "gateway": "0" * 32, "flags": 0x80200001}]
+        self.assertTrue(isolation._network_denied(value))
+        self.engine.network_observation = value
+        receipt = isolation.probe(self.config)
+        self.assertEqual(receipt.status, "verified")
+        recorded = json.loads(receipt.private_path.read_bytes())["observations"]["observed_probes"]["network"]
+        self.assertEqual(recorded, value)
+
+    def test_network_proof_refuses_active_unknown_inconsistent_or_routed_links(self):
+        for flags, operstate in ((0x81, "up"), (0x81, "down"), (0x80, "unknown"),
+                                 (0x80, "dormant"), (0x80, "up"), (0xc0, "down"), (True, "down"), (0x80, None)):
+            value = self.dormant_network()
+            value["links"]["tunnel0"] = {"flags": flags, "operstate": operstate}
+            with self.subTest(flags=flags, operstate=operstate):
+                self.assertFalse(isolation._network_denied(value))
+        value = self.dormant_network(); del value["links"]["tunnel0"]["operstate"]
+        self.assertFalse(isolation._network_denied(value))
+        for family, row in (("ipv4_routes", {"interface": "tunnel0", "destination": "00000000",
+                "gateway": "00000000", "mask": "00000000", "flags": 1}),
+                ("ipv6_routes", {"interface": "tunnel0", "destination": "0" * 32, "destination_prefix": 0,
+                "source": "0" * 32, "source_prefix": 0, "gateway": "0" * 32, "flags": 1})):
+            value = self.dormant_network(); value[family] = [row]
+            with self.subTest(family=family): self.assertFalse(isolation._network_denied(value))
+        for field in ("links", "ipv4_routes", "ipv6_routes"):
+            value = self.dormant_network(); del value[field]
+            with self.subTest(missing=field): self.assertFalse(isolation._network_denied(value))
+        value = self.dormant_network(); value["errno"] = 0
+        self.assertFalse(isolation._network_denied(value))
+        self.engine.network_observation = value
+        self.assertEqual(isolation.probe(self.config).status, "unavailable")
+        self.assertEqual(self.engine.alive, set())
 
     def test_rust_jobs_default_preserves_and_probes_explicit_frozen_extra(self):
         config = replace(self.config, require_rust=True)
@@ -834,9 +892,10 @@ class ReviewedControllerOciTests(unittest.TestCase):
     def setUp(self):
         base = Path.cwd() / "target/agent-fixtures/.hermes/hdr-collaboration/workspaces/controller-oci"
         base.mkdir(parents=True, exist_ok=True)
-        self.directory = tempfile.TemporaryDirectory(prefix="roles-", dir=base)
-        self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name).resolve()
+        self.root = Path(tempfile.mkdtemp(prefix="roles-", dir=base)).resolve()
+        self.fixture_succeeded = False
+        self.observation_sequence = 0
+        self.addCleanup(self.finish_fixture)
         for name in ("protected-source", "protected-export", "protected-runtime",
                      "worker-source", "worker-export", "worker-runtime"):
             (self.root / name).mkdir(mode=0o755)
@@ -908,6 +967,22 @@ def run(mode,argv,context):
         self.addCleanup(isolation._ACTIVE_ROOTS.clear)
         self.addCleanup(isolation._RESERVED_STEPS.clear)
 
+    def record_observation(self, event):
+        path = self.root / ("observation-" + str(self.observation_sequence).zfill(6) + ".json")
+        isolation._write_private(path, event)
+        self.observation_sequence += 1
+
+    def finish_fixture(self):
+        self.record_observation({"kind": "fixture-finished", "passed": self.fixture_succeeded,
+            "owned_containers": sorted(isolation._OWNED_CONTAINERS), "retained_stage": str(self.root)})
+        print("retained synthetic OCI evidence: " + str(self.root), file=sys.stderr)
+
+    def assert_receipt(self, receipt, expected):
+        self.record_observation({"kind": "receipt", "status": receipt.status, "expected": expected,
+                                 "digest": receipt.digest, "private_path": str(receipt.private_path)})
+        self.assertEqual(receipt.status, expected,
+            "isolation refused; retained receipt " + str(receipt.private_path) + "; command/refusal evidence " + str(self.root))
+
     def run_roles(self, *, quiet=False):
         config = self.config
         if quiet:
@@ -934,16 +1009,36 @@ def run(mode,argv,context):
             isolation.TrustedSourceFile("protected.py", worker.proxy_sha256), worker=worker)
         calls = []
         actual_popen = isolation.subprocess.Popen
+        actual_command = isolation._command
+        actual_probe = isolation._configuration_probe
         def observed_popen(arguments, **kwargs):
             calls.append(arguments)
             return actual_popen(arguments, **kwargs)
-        with patch.object(isolation.subprocess, "Popen", side_effect=observed_popen):
+        def observed_command(current, arguments, **kwargs):
+            result = actual_command(current, arguments, **kwargs)
+            self.record_observation({"kind": "command", "argv": arguments,
+                "returncode": result.returncode, "timed_out": result.timed_out, "output_limited": result.output_limited,
+                "stdout_base64": base64.b64encode(result.stdout).decode(),
+                "stderr_base64": base64.b64encode(result.stderr).decode()})
+            return result
+        def observed_probe(*args):
+            try:
+                return actual_probe(*args)
+            except BaseException as error:
+                self.record_observation({"kind": "probe-refusal", "type": type(error).__name__, "reason": str(error)})
+                raise
+        with patch.object(isolation.subprocess, "Popen", side_effect=observed_popen), \
+                patch.object(isolation, "_command", side_effect=observed_command), \
+                patch.object(isolation, "_configuration_probe", side_effect=observed_probe):
             proof = isolation.probe(config)
-            self.assertEqual(proof.status, "verified")
+            self.assert_receipt(proof, "verified")
             qualification = isolation.qualify_family(config, plan, proof)
-            self.assertEqual(qualification.status, "qualified")
-            execution = isolation.execute_plan(config, isolation.probe(config), family=plan, prerequisite=qualification)
-            self.assertEqual((execution.status, execution.classification), ("passed", "passed"))
+            self.assert_receipt(qualification, "qualified")
+            acceptance_proof = isolation.probe(config)
+            self.assert_receipt(acceptance_proof, "verified")
+            execution = isolation.execute_plan(config, acceptance_proof, family=plan, prerequisite=qualification)
+            self.assert_receipt(execution, "passed")
+            self.assertEqual(execution.classification, "passed")
         for code in (isolation._PROTECTED_CONTROLLER, isolation._WORKER_CONTROLLER):
             launches = [args for args in calls if code in args]
             self.assertTrue(launches, "must traverse actual isolated controller launch")
@@ -957,6 +1052,7 @@ def run(mode,argv,context):
             self.assertFalse((worker_config.runtime_root / "quiet-logs").exists())
         self.assertFalse((config.candidate_root / "forbidden-source-write").exists())
         self.assertEqual(isolation._OWNED_CONTAINERS, set())
+        self.fixture_succeeded = True
 
     def test_actual_isolated_controller_argv_imports_only_its_verified_role_source(self):
         self.run_roles()
