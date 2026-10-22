@@ -151,7 +151,11 @@ class SyntheticEngine:
                 self.alive.discard(arguments[-1])
             return result(code=1 if self.cleanup_fails else 0)
         if arguments[:2] == ["container", "ls"]:
-            return result(("\n".join(sorted(self.alive))).encode())
+            selector = arguments[arguments.index("--filter") + 1]
+            if not selector.startswith("name=^/") or not selector.endswith("$"):
+                raise AssertionError("expected exact owned-container name filter")
+            selected = selector[len("name=^/"):-1]
+            return result(selected.encode() if selected in self.alive else b"")
         raise AssertionError("unexpected engine command")
 
 
