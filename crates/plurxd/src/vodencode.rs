@@ -1427,7 +1427,9 @@ impl Encoding {
             return None;
         };
         plan.profile81_level()
-            .map(|level| format!("dvhe.08.{level:02}"))
+            // Profile 8.1 is HDR10-compatible. Apple requires the compatibility
+            // brand alongside VIDEO-RANGE=PQ to recognize the DV enhancement.
+            .map(|level| format!("dvhe.08.{level:02}/db1p"))
     }
 
     pub(crate) fn processed_candidate_digest(
