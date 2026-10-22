@@ -108,7 +108,80 @@ fn source_cell(path: &Path, domain: v2::FilesystemDomain) -> SourceCell {
         failed_join: false,
         observed_committed: false,
         lease_issued: false,
+        root_observation_id: Uuid::new_v4(),
+        root_observed_committed: false,
+        selected_root_member: None,
+        pending_root: None,
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn inherited_source_stages_only_the_planned_child_copy_on_the_same_file() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("source.mkv");
+    std::fs::write(&path, b"inherited source fixture").expect("fixture source");
+    let mut cell = source_cell(&path, filesystem_domain(namespace()));
+    let root_member = id().uuid();
+    let (graph_id, source_copy) = {
+        let v2::MemberPlan::SourceV1 { source, .. } = &mut cell.plan else {
+            panic!("fixture source plan")
+        };
+        let graph_id = match &source.recovery {
+            v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
+        };
+        let source_copy = source.planned_copies[0].clone();
+        source.planned_copies.push(v2::SourceCopy {
+            copy_id: id(),
+            owner: v2::CopyOwner::OwnedRoot {
+                graph_id,
+                root_member_id: v2::Id::new(root_member).expect("root member"),
+            },
+            acquisition_operation_id: id(),
+            parent_copy_id: Some(source_copy.copy_id),
+        });
+        (graph_id, source_copy)
+    };
+    let enter = cell.launch().expect("register source job");
+    enter.send(()).expect("enter source open");
+    cell.join().await.expect("join source acquisition");
+    cell.observed_committed = true;
+    let original_fd = cell
+        .result
+        .as_ref()
+        .and_then(|result| result.file.as_ref())
+        .expect("retained source")
+        .as_raw_fd();
+
+    let first = cell
+        .inherited_source(root_member)
+        .expect("planned root inherits retained source");
+    assert_eq!(first.raw_fd, original_fd);
+    assert_eq!(first.observation_id, cell.root_observation_id);
+    assert!(!first.acknowledged);
+    let observed = match first.envelope.observed.as_ref().expect("observed source") {
+        v2::Observed::SourceV1 { source } => source,
+        _ => panic!("source observation"),
+    };
+    assert_eq!(observed.copies.len(), 2);
+    assert!(observed.copies.contains(&source_copy));
+    assert!(observed.copies.iter().any(|copy| matches!(
+        copy.owner,
+        v2::CopyOwner::OwnedRoot { graph_id: actual, root_member_id }
+            if actual == graph_id && root_member_id.uuid() == root_member
+    )));
+
+    let repeated = cell
+        .inherited_source(root_member)
+        .expect("same root reuses staged observation");
+    assert_eq!(repeated.raw_fd, original_fd);
+    assert_eq!(repeated.observation_id, first.observation_id);
+    assert_eq!(repeated.envelope, first.envelope);
+    assert!(cell.inherited_source(id().uuid()).is_err());
+    assert!(
+        !cell.lease_issued,
+        "inheritance does not export an Arc lease"
+    );
 }
 
 #[tokio::test]

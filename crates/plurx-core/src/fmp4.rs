@@ -4762,21 +4762,48 @@ pub fn merge(fragments: &[Fragment], init: &Init, sequence: u32) -> Result<Segme
     merge_retaining(fragments, init, sequence, false)
 }
 
-/// [`merge`], told whether the video samples' in-band HEVC parameter sets must
-/// survive it.
-///
-/// `true` for a source whose in-band sets redefine the sample entry's record
-/// (`CopyVideoOptions::retains_hevc_parameter_sets`): those definitions are
-/// the only correct ones for the pictures that follow them, so the
-/// out-of-band-only normalization above would reintroduce exactly the
-/// corruption the copy's bitstream filter was told to avoid. Every sample is
-/// then copied byte for byte, as it already is for `hev1`/`dvhe`.
+mod merge_budget;
+pub use merge_budget::MergeMemoryLimits;
+
+/// Merge an ordinary AVC run with separately reserved metadata and output
+/// partitions. Original fragment storage remains the caller's responsibility.
+pub fn merge_retaining_bounded(
+    fragments: &[Fragment],
+    init: &Init,
+    sequence: u32,
+    retain_parameter_sets: bool,
+    limits: MergeMemoryLimits,
+) -> Result<Segment, Fmp4Error> {
+    merge_retaining_inner(
+        fragments,
+        init,
+        sequence,
+        retain_parameter_sets,
+        Some(limits),
+    )
+}
+
+/// [`merge`], told whether in-band HEVC parameter sets must survive it.
+/// Legacy callers retain the original allocation and byte behavior.
 pub fn merge_retaining(
     fragments: &[Fragment],
     init: &Init,
     sequence: u32,
     retain_parameter_sets: bool,
 ) -> Result<Segment, Fmp4Error> {
+    merge_retaining_inner(fragments, init, sequence, retain_parameter_sets, None)
+}
+
+fn merge_retaining_inner(
+    fragments: &[Fragment],
+    init: &Init,
+    sequence: u32,
+    retain_parameter_sets: bool,
+    limits: Option<MergeMemoryLimits>,
+) -> Result<Segment, Fmp4Error> {
+    let bounded = limits
+        .map(|limits| merge_budget::preflight(fragments, init, retain_parameter_sets, limits))
+        .transpose()?;
     if fragments.is_empty() {
         return malformed("nothing to merge");
     }
@@ -4807,19 +4834,34 @@ pub fn merge_retaining(
     // carry audio again — and taking the track list from the first of those
     // published a SILENT segment whose audio bytes were still copied into the
     // mdat, with no error and no counter anywhere. Found by review.
-    let mut track_ids: Vec<u32> = Vec::new();
+    let mut track_ids: Vec<u32> = if let Some(preflight) = &bounded {
+        merge_budget::reserve(preflight.track_slots)?
+    } else {
+        Vec::new()
+    };
     for frag in fragments {
         for t in &frag.tracks {
             if !track_ids.contains(&t.track_id) {
+                if bounded.is_some() && track_ids.len() >= track_ids.capacity() {
+                    return malformed("bounded AVC track inventory exceeds reservation");
+                }
                 track_ids.push(t.track_id);
             }
         }
     }
-    let mut plans: Vec<Plan> = Vec::with_capacity(track_ids.len());
+    let mut plans: Vec<Plan> = if bounded.is_some() {
+        merge_budget::reserve(track_ids.len())?
+    } else {
+        Vec::with_capacity(track_ids.len())
+    };
 
     for &id in &track_ids {
-        let mut samples: Vec<Sample> = Vec::new();
-        let mut slices: Vec<Slice> = Vec::new();
+        let (mut samples, mut slices): (Vec<Sample>, Vec<Slice>) = if bounded.is_some() {
+            let count = merge_budget::samples_for_track(fragments, id)?;
+            (merge_budget::reserve(count)?, merge_budget::reserve(count)?)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut base: Option<u64> = None;
         let mut expected_next: Option<u64> = None;
         for (fi, frag) in fragments.iter().enumerate() {
@@ -4880,6 +4922,12 @@ pub fn merge_retaining(
                             "a normalized HEVC sample exceeds the 32-bit MP4 size".into(),
                         )
                     })?;
+                    if bounded.is_some()
+                        && (samples.len() >= samples.capacity()
+                            || slices.len() >= slices.capacity())
+                    {
+                        return malformed("bounded AVC sample inventory exceeds reservation");
+                    }
                     samples.push(sample);
                     slices.push(Slice {
                         fragment: fi,
@@ -4894,6 +4942,9 @@ pub fn merge_retaining(
             expected_next = Some(tf.base_decode_time + dur);
         }
         if let (Some(base), false) = (base, samples.is_empty()) {
+            if bounded.is_some() && plans.len() >= plans.capacity() {
+                return malformed("bounded AVC plan inventory exceeds reservation");
+            }
             plans.push(Plan {
                 track_id: id,
                 base_decode_time: base,
@@ -4909,8 +4960,16 @@ pub fn merge_retaining(
     // Build the moof with zeroed data offsets to learn its size. Every field
     // that could change the size is fixed-width, so the patch below only
     // changes values — the layout is already final.
-    let mut offset_slots: Vec<usize> = Vec::new();
-    let mut moof = build_moof(&plans, sequence, &mut offset_slots);
+    let mut offset_slots: Vec<usize> = if let Some(preflight) = &bounded {
+        merge_budget::reserve(preflight.plan_count)?
+    } else {
+        Vec::new()
+    };
+    let mut moof = if let Some(preflight) = &bounded {
+        merge_budget::build_moof_bounded(&plans, sequence, preflight, &mut offset_slots)?
+    } else {
+        build_moof(&plans, sequence, &mut offset_slots)
+    };
     let moof_size = moof.len();
 
     let payload_total: usize = plans.iter().map(|p| p.byte_len()).sum();
@@ -4940,7 +4999,14 @@ pub fn merge_retaining(
 
     let sidx_total = plans.len() * SIDX_BYTES;
     let referenced_size = moof_size + mdat_size;
-    let mut out = Vec::with_capacity(STYP.len() + sidx_total + referenced_size);
+    let mut out = if let Some(preflight) = &bounded {
+        merge_budget::reserve(preflight.output_bytes)?
+    } else {
+        Vec::with_capacity(STYP.len() + sidx_total + referenced_size)
+    };
+    if bounded.is_some() && STYP.len() > out.capacity() {
+        return malformed("bounded AVC output capacity changed after preflight");
+    }
     out.extend_from_slice(&STYP);
     for (i, plan) in plans.iter().enumerate() {
         let timescale = init
@@ -4952,6 +5018,14 @@ pub fn merge_retaining(
         // Every sidx after this one sits between it and the material it
         // describes, which is what `first_offset` measures.
         let first_offset = ((plans.len() - 1 - i) * SIDX_BYTES) as u64;
+        if bounded.is_some()
+            && out
+                .len()
+                .checked_add(SIDX_BYTES)
+                .is_none_or(|end| end > out.capacity())
+        {
+            return malformed("bounded AVC sidx exceeds reserved output");
+        }
         write_sidx(
             &mut out,
             plan.track_id,
@@ -4961,6 +5035,14 @@ pub fn merge_retaining(
             referenced_size as u32,
             duration.min(u32::MAX as u64) as u32,
         );
+    }
+    if bounded.is_some()
+        && out
+            .len()
+            .checked_add(moof.len() + 8)
+            .is_none_or(|end| end > out.capacity())
+    {
+        return malformed("bounded AVC moof exceeds reserved output");
     }
     out.extend_from_slice(&moof);
     out.extend_from_slice(&(mdat_size as u32).to_be_bytes());
@@ -4980,8 +5062,21 @@ pub fn merge_retaining(
                     return malformed("HEVC sample normalization changed size between passes");
                 }
             } else {
+                if bounded.is_some()
+                    && out
+                        .len()
+                        .checked_add(source.len())
+                        .is_none_or(|end| end > out.capacity())
+                {
+                    return malformed("bounded AVC sample exceeds reserved output");
+                }
                 out.extend_from_slice(source);
             }
+        }
+    }
+    if let Some(preflight) = &bounded {
+        if out.len() != preflight.output_bytes {
+            return malformed("bounded AVC output differs from preflight size");
         }
     }
 

@@ -18,6 +18,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 mod bootstrap;
+#[cfg(unix)]
+mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
 pub(super) mod plans;
@@ -77,6 +79,8 @@ struct OwnedRole {
     bootstrap: BTreeMap<Uuid, bootstrap::BootstrapMember>,
     #[cfg(unix)]
     sources: BTreeMap<Uuid, source_files::SourceCell>,
+    #[cfg(unix)]
+    finite_vod: Option<finite_vod::FiniteLaunch>,
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
@@ -105,6 +109,10 @@ enum Effect {
     Bootstrap(Uuid),
     #[cfg(unix)]
     Source(Uuid),
+    #[cfg(unix)]
+    SourceRoot(Uuid),
+    #[cfg(unix)]
+    FiniteTask(Uuid),
     Enrich,
     Seal,
     Hold,
@@ -476,6 +484,8 @@ impl NodeResourceRuntime {
                 bootstrap: BTreeMap::new(),
                 #[cfg(unix)]
                 sources: BTreeMap::new(),
+                #[cfg(unix)]
+                finite_vod: None,
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),
@@ -721,6 +731,23 @@ impl NodeResourceRuntime {
         self.eligible(&bundle)?;
         let id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        self.launch_root_role(id, role, member, command, work, deadline, None)
+            .await
+    }
+
+    // Callers are private concrete adapters or the existing legacy entry above.
+    // The role lock retains actual source descriptors throughout native spawn.
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_root_role(
+        &self,
+        id: Uuid,
+        role: &mut OwnedRole,
+        member: Uuid,
+        command: &mut tokio::process::Command,
+        work: crate::process::ChildWork,
+        deadline: Instant,
+        named_arm: Option<Uuid>,
+    ) -> Result<GraphRoot, OperationError> {
         let plan = role
             .members
             .iter()
@@ -730,7 +757,7 @@ impl NodeResourceRuntime {
         if role.refunded
             || role.graph.is_none()
             || role.invoked.contains(&member)
-            || role.armed.contains(&member)
+            || (role.armed.contains(&member) && named_arm.is_none())
             || role
                 .transition
                 .as_ref()
@@ -740,20 +767,19 @@ impl NodeResourceRuntime {
         }
         if !role.armed.contains(&member) {
             if role.transition.is_none() {
-                start_transition(
+                start_named_transition(
                     &self.journal,
                     role,
+                    named_arm.unwrap_or_else(Uuid::new_v4),
                     Mutation::Arm {
                         members: vec![member],
                     },
                     Effect::Arm(member),
                     deadline,
                 )?;
-            } else if role
-                .transition
-                .as_ref()
-                .is_none_or(|t| t.effect != Effect::Arm(member))
-            {
+            } else if role.transition.as_ref().is_none_or(|t| {
+                t.effect != Effect::Arm(member) || named_arm.is_some_and(|id| t.operation.id != id)
+            }) {
                 return Err(OperationError::State);
             }
             self.finish_transition(id, role).await?;
@@ -773,16 +799,36 @@ impl NodeResourceRuntime {
             )?;
             return Err(OperationError::Deadline);
         }
-        // There is no await after this once-only marker and before transferring
-        // launch to the graph's retained owner. Graph rechecks current epoch and
-        // drain under its accounting lock immediately before the native call.
-        role.invoked.insert(member);
+        // The fixed adapter records entry under the SAME graph lock as the
+        // actual spawn. Its original source cells remain borrowed in this role.
+        if named_arm.is_none() {
+            role.invoked.insert(member);
+        }
         let graph = role.graph.as_mut().ok_or(OperationError::State)?;
         let arm = DurableArm {
             binding: role.binding,
             generation: graph.identity().generation,
         };
-        let root = match graph.spawn_durable_root(command, work, arm).await {
+        let launched = if named_arm.is_some() {
+            #[cfg(unix)]
+            {
+                let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+                if finite.root_member != member || Some(finite.acquisition_id) != named_arm {
+                    return Err(OperationError::State);
+                }
+                graph
+                    .spawn_selected_durable_root(command, work, arm, &mut finite.entered)
+                    .await
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(OperationError::State);
+            }
+        } else {
+            graph.spawn_durable_root(command, work, arm).await
+        };
+        role.invoked.insert(member);
+        let root = match launched {
             Ok(root) => root,
             Err(error) => {
                 if let Some(graph) = role.graph.take() {
@@ -1077,6 +1123,14 @@ impl NodeResourceRuntime {
             Effect::Bootstrap(member) => bootstrap::acknowledge(role, member)?,
             #[cfg(unix)]
             Effect::Source(member) => source_files::acknowledge(role, member, ack.operation_id)?,
+            #[cfg(unix)]
+            Effect::SourceRoot(member) => {
+                source_files::acknowledge_root(role, member, ack.operation_id)?
+            }
+            #[cfg(unix)]
+            Effect::FiniteTask(member) => {
+                finite_vod::acknowledge_task(role, member, ack.operation_id)?
+            }
             _ => {}
         }
         role.sequence = ack.sequence;

@@ -28,6 +28,11 @@ impl From<OperationError> for FiniteVodError {
         Self(error)
     }
 }
+impl From<std::io::Error> for FiniteVodError {
+    fn from(error: std::io::Error) -> Self {
+        Self(OperationError::Physical(error))
+    }
+}
 impl From<CustodyError> for FiniteVodError {
     fn from(error: CustodyError) -> Self {
         Self(OperationError::Custody(error))
@@ -65,7 +70,8 @@ pub struct SoftwareVodRequest {
     pub rendition_id: String,
     pub generation_epoch: u64,
     pub recipe_source_binding: String,
-    pub executable: PathBuf,
+    pub command: SoftwareAvcCommand,
+    pub producer: SoftwareAvcPumpPlan,
     pub sources: Vec<FiniteSourceRequest>,
     pub segment_count: u32,
     pub encoded_process_marker: bool,
@@ -81,9 +87,9 @@ pub struct SoftwareVodOwner {
     source_members: Vec<Uuid>,
     source_specs: Vec<Option<SourceOpenSpec>>,
     scratch_member: Uuid,
-    root_member: Uuid,
     directory_path: PathBuf,
     encoded_process_marker: bool,
+    events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
 }
 
 /// A bounded selection of the same custodian, not an exported File/Arc<File>.
@@ -256,6 +262,27 @@ impl SoftwareVodOwner {
             encoded_process_marker: self.encoded_process_marker,
         })
     }
+    /// Metadata notifications do not confer root/task completion or refunds.
+    pub fn take_events(&mut self) -> Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>> {
+        self.events.take()
+    }
+
+    /// Core opens its own prearmed source/output cells and launches only the
+    /// immutable compiled software recipe. No child, raw pipe or callback leaves.
+    pub async fn start(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
+        self.prepare(deadline).await?;
+        for member in &self.source_members {
+            self.runtime
+                .acquire_prepared_source(&self.preparation, 0, *member, deadline)
+                .await?;
+        }
+        self.open_output(deadline).await?;
+        self.runtime
+            .start_finite_vod(&self.preparation, 0, deadline)
+            .await?;
+        Ok(())
+    }
+
     pub async fn cancel(&self, deadline: Instant) -> Result<(), FiniteVodError> {
         self.runtime
             .cancel_preparation(&self.preparation, deadline)
@@ -290,7 +317,13 @@ impl NodeResourceRuntime {
             || matches!(request.rendition_id.as_str(), "." | "..")
             || request.recipe_source_binding.is_empty()
             || request.recipe_source_binding.len() > 4096
-            || request.executable.as_os_str().len() > 4096
+            || !request.encoded_process_marker
+            || request.sources.len() != request.command.source_count()
+            || request.producer.segment_count() != request.segment_count as usize
+            || request
+                .sources
+                .iter()
+                .any(|source| !request.command.matches_source(source))
             || request.sources.iter().any(|s| {
                 !s.path.is_absolute()
                     || s.path.as_os_str().len() > 4096
@@ -369,7 +402,32 @@ impl NodeResourceRuntime {
             depends_on: vec![],
             protected_paths,
         };
-        let mut plans = Vec::with_capacity(request.sources.len() + 2);
+        let task_member = id();
+        let stdout_owner = id();
+        let diagnostic_owner = id();
+        let sink_owner = id();
+        let task_buffer = id();
+        let task_memory = request
+            .producer
+            .minimum_memory_bytes()?
+            .checked_add(
+                u64::try_from(request.command.resident_memory_bytes()?).map_err(|_| invalid())?,
+            )
+            .ok_or_else(invalid)?;
+        if resources
+            .peak_memory_bytes
+            .checked_sub(request.output.resident_memory_bytes)
+            .is_none_or(|remaining| remaining < task_memory)
+        {
+            return Err(invalid());
+        }
+        let task_source = &request.sources[0];
+        let task_association = v2::SourceAssociation {
+            media_file_id: task_source.media_file_id.clone(),
+            object_version: task_source.object_version.clone(),
+            recipe_source_binding: request.recipe_source_binding.clone(),
+        };
+        let mut plans = Vec::with_capacity(request.sources.len() + 3);
         let mut source_members = Vec::with_capacity(request.sources.len());
         let mut source_specs = Vec::with_capacity(request.sources.len());
         for source in request.sources {
@@ -484,7 +542,12 @@ impl NodeResourceRuntime {
             adapter: Adapter::ProcessRoot,
             adapter_version: 1,
             domain: self.owner.daemon_process.domain.clone(),
-            locator: request.executable.to_str().ok_or_else(invalid)?.to_owned(),
+            locator: request
+                .command
+                .program()
+                .to_str()
+                .ok_or_else(invalid)?
+                .to_owned(),
             recovery: RecoveryMethod::LiveOnly {
                 reason: "fixed software VOD graph; no old-domain release proof".into(),
             },
@@ -493,6 +556,43 @@ impl NodeResourceRuntime {
             maximum_cardinality: 1,
             protected_paths: vec![],
         }));
+        plans.push(TypedMemberPlan::VodOutputTask {
+            slot: v2::MemberSlot {
+                member_id: task_member,
+                owned_by: Some(root_member),
+                depends_on: vec![root_member, scratch_member],
+                protected_paths: vec![],
+            },
+            task: super::operations::plans::VodTaskPlan {
+                root_member_id: root_member,
+                generation_epoch: request.generation_epoch,
+                source_association: task_association,
+                stdout_owner_id: stdout_owner,
+                diagnostic_owner_id: diagnostic_owner,
+                asset_id: asset,
+                sink_owner_id: sink_owner,
+                inventory: v2::IoInventory {
+                    pending_io: vec![],
+                    buffers: vec![v2::OwnerAllocation {
+                        owner_id: task_buffer,
+                        memory_bytes: task_memory,
+                        handles: 0,
+                    }],
+                    readers: vec![
+                        v2::OwnerAllocation {
+                            owner_id: stdout_owner,
+                            memory_bytes: 0,
+                            handles: 1,
+                        },
+                        v2::OwnerAllocation {
+                            owner_id: diagnostic_owner,
+                            memory_bytes: 0,
+                            handles: 1,
+                        },
+                    ],
+                },
+            },
+        });
         let roles = [FamilyRoleDemand {
             role: FamilyRole::Video,
             demand: request.demand,
@@ -518,15 +618,34 @@ impl NodeResourceRuntime {
                 return Err(error.into());
             }
         };
+        let output = FiniteOutput {
+            runtime: Arc::clone(self),
+            preparation: preparation.clone(),
+            member: scratch_member.uuid(),
+            directory_path: directory_path.clone(),
+            encoded_process_marker: true,
+        };
+        let (pump, events) = pump::SoftwarePump::new(output, request.producer)
+            .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;
+        self.queue_finite_vod(
+            &preparation,
+            0,
+            root_member.uuid(),
+            task_member.uuid(),
+            root_acquisition_id.uuid(),
+            source_members.clone(),
+            request.command,
+            pump,
+        )?;
         Ok(SoftwareVodOwner {
             runtime: Arc::clone(self),
             preparation,
             source_members,
             source_specs,
             scratch_member: scratch_member.uuid(),
-            root_member: root_member.uuid(),
             directory_path,
             encoded_process_marker: request.encoded_process_marker,
+            events: Some(events),
         })
     }
 }

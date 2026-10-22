@@ -4,6 +4,8 @@
 pub mod bounded;
 #[cfg(test)]
 mod census;
+#[cfg(unix)]
+pub mod inherited_descriptors;
 mod job_control;
 pub mod observation;
 pub mod priority;

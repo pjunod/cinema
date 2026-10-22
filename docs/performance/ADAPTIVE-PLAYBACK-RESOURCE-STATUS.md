@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete; current source checks pending, tests not run.
-**Updated:** 2026-10-22 at committed checkpoint `84c562e28b494f32d9f364cc8cc9ab4b4d86ed70`; finite pump changes are uncommitted.
+**Updated:** 2026-10-22 at committed checkpoint `6e57aeb774b408e4b5b4c9fa1e559c64391fc0c8`; finite-request runtime changes are uncommitted.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -62,37 +62,51 @@ daemon re-exports them while retaining its existing test bodies. The new
 graph's concrete `SoftwarePump` task and guarded actual pipes. The pump reads the
 exact init boundary, then queues the encoded-process marker, identity, init and
 segments through selected publication tickets and syncs them with bounded
-progress and diagnostics. Native payload allocation is released only after
-durable observation and return of the same held directory; durable charge stays
-conservative. Parser preflight and measured `Init`, `Fragment` and `Segmenter`
+progress and diagnostics. Known durable Observe ends pending-I/O payload
+accounting. The actual payload is cleared and the same directory returned under
+the original bundle lock, before another queue operation can enter; the whole
+role reservation remains held until retirement. Parser preflight and measured
+`Init`, `Fragment` and `Segmenter`
 capacities remain bounded, but this task record is not a complete memory
 profile: engine merge/transform/runtime/journal partitions remain unresolved.
 Exact registered-child control uses the original registration and pidfd.
 
-This is still a core producer component, not ordinary source closure. Ordinary
-`build_rendition_with_storage` still starts with legacy admission; root launch,
-ordinary request/task journal composition and the first real metadata caller
-are not wired. Full parser/engine memory partition, durable overage/index
-accounting, serving leases, retained transfer and retirement/settlement/reuse
-remain incomplete.
+The core finite-request path now requires an immutable `SoftwareAvcCommand` and
+`SoftwareAvcPumpPlan` in the same reserved bundle before I/O, and verifies the
+actual source identity, path and scanner sizes against command inputs. It
+prearms source cells without exporting a lease; `start_finite_vod` uses the
+predeclared root acquisition ID and carries the same actual `File` through
+spawn. It enriches the source-copy observation only after the actual root launch
+is known, then arms and registers the retained pump task and durably acknowledges
+the typed task observation once. A cancelled wait for graph ownership does not
+consume the root-entry latch, and the pump task remains in the bundle until the
+graph locks and registers it. Shared-fd helper extraction preserves daemon
+behavior. The bounded AVC merge preflights workspace/output before allocation,
+but is not yet wired into Segmenter or `GenerationMemoryLimits`.
+
+This is still runtime composition, not ordinary request closure. Ordinary
+`build_rendition_with_storage` still uses legacy admission; the production
+capacity model and request connection, full memory profile, serving leases,
+retained transfer, R→S, cleanup and settlement/reuse remain open.
 
 All V1–V5 remain **OPEN**. Still missing: ordinary entry and root producer
 ownership/task composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `84c562e28b494f32d9f364cc8cc9ab4b4d86ed70`.
-The frozen finite-pump source after that base passed pinned Rust 1.97.1 host
-core+daemon all-target compilation in 139.653s (EXIT 0, stable source hashes).
-Receipt `direct-check-20261022-184547.json`, log SHA-256
-`71e8a906a6b8cfd56767e8a7c6f417647c6cac1b3617f8a71816a66e1b728ac2`.
-The first attempt found an identity-error conversion mismatch; it was fixed
-before this pass. This is warning-level compilation, not strict Clippy, and no
-behavioral tests ran. Earlier receipts retain their original source scope.
-The candidate PR-body draft has 349 unique regression anchors; the durable new
-regression list has 42. Current-source Linux/Windows compilation, final independent
-review, qualification, fast lane and merge remain open, as do restart and behavior
-evidence. Catalog/status/size bookkeeping is checked separately before publication.
+The latest published base is `6e57aeb774b408e4b5b4c9fa1e559c64391fc0c8`.
+The frozen retained-source/root/task and bounded-merge source passed pinned
+Rust 1.97.1 host core+daemon all-target compilation in 128.579s (EXIT 0,
+stable source hashes). Receipt `direct-check-20261022-185956.json`, log SHA-256
+`dfa06c1bd4c7c13d4cc0217a54b40b548dc9c73c724c53e505a02bd5c84768d7`.
+The first attempt found plan-binding order and moof-borrow errors; both were
+fixed before this pass. This is warning-level compilation, not strict Clippy.
+No behavioral tests ran. The candidate PR-body draft has 352 unique regression
+anchors; the durable new regression list has 45. The inherited-source regression
+is Linux-only and was not compiled by this host check. Current Linux/Windows
+compilation, final independent review, qualification, fast lane, merge and
+restart/behavior evidence remain open. The writer's actual terminal join and
+source closure still need their production retirement composition.
 
 ## Current source and compiler receipt
 

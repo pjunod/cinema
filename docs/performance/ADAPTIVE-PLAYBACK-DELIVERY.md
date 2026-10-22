@@ -1,6 +1,6 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `84c562e28b494f32d9f364cc8cc9ab4b4d86ed70`.
+**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `6e57aeb774b408e4b5b4c9fa1e559c64391fc0c8`.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -12,21 +12,21 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at `84c562e28b`. The immediate target is one ordinary
+All five items are **OPEN** at `6e57aeb774`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
 | V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
-| V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The core now has a concrete bounded `SoftwarePump` task over guarded actual pipes. It reads the exact init boundary, queues marker/identity/init/segments through selected tickets, syncs, and reports bounded progress/diagnostics. Payload capacity releases only after durable observation and return of the held directory; charge remains conservative. The actual root launch, ordinary entry and task/journal composition are still unconnected. Full engine merge/transform/runtime/journal memory partition and durable overage/index accounting remain incomplete; no ordinary request connection is closed. |
+| V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The concrete finite request carries an immutable `SoftwareAvcCommand` and pump plan in the same reserved bundle before I/O, checks source identity/path/scanner values, prearms source cells without a lease, and uses the predeclared root acquisition ID. The same retained `File` crosses spawn; after known launch, source-copy observation is enriched, then the retained pump task is armed/joined and its typed observation acknowledged. Cancellation while waiting for graph locks does not spend the root-entry latch. Known durable Observe ends pending-I/O payload accounting. The payload is cleared and the same directory returned under the original bundle lock before another queue operation can enter; the whole role reservation remains held until retirement. Ordinary `build_rendition_with_storage` still uses legacy admission. The bounded AVC merge preflight is not wired into Segmenter or `GenerationMemoryLimits`; full engine/runtime/journal memory partition and durable overage/index accounting remain incomplete. |
 | V3 — producer/stop — OPEN | Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
 | V4 — retained output — OPEN | Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
-Current sequence: compose the concrete core pump with ordinary admission, root
-launch and task/journal ownership; then V4 serving/transfer → V5
-settlement/reuse. All V1–V5 remain OPEN; no source item
+Current sequence: wire this finite runtime composition into ordinary
+`build_rendition_with_storage`, then close V1/V3; proceed to V4
+serving/transfer → V5 settlement/reuse. All V1–V5 remain OPEN; no source item
 has newly closed. The
 detailed execution artifact remains the existing
 `operator/FIRST-VOD-DELIVERY-CHECKLIST.md` under
@@ -62,32 +62,36 @@ Arm/Observe and limits batches to 16. Parser input is preflighted against
 track/run/sample limits; `Init`, `Fragment` and `Segmenter` capacities and
 bounded-generation accumulation/transfer are accounted. Exact registered-child
 signals use the original registration and pidfd, not a numeric PID lookup, and
-introduce no root-wait-lock dependency. The graph retains the original concrete software pump task and guarded
-pipe records; this adapter does not grant a physical-close receipt. Existing
-[`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) can hold the
-core source lease without reopening the legacy pathname. The daemon
+introduce no root-wait-lock dependency. The graph retains the original concrete software pump task, actual pipes and
+diagnostics; the adapter does not grant a physical-close receipt. The finite
+request requires `SoftwareAvcCommand` and `SoftwareAvcPumpPlan` before I/O and
+checks source identity/path/scanner sizes against command inputs. It resolves
+and prearms source cells without a lease, then uses the predeclared root copy ID
+and same retained `File` through spawn. Only after actual root launch does it
+stage source-copy enrichment; it arms/joins the retained pump and acknowledges
+its typed task observation once. A cancelled graph-lock wait leaves the root
+entry latch untouched, and the pump remains in the bundle until registration.
+Shared-fd helpers are extracted with daemon re-exports preserving behavior. The
+bounded AVC merge artifact preflights workspace/output before allocation but is
+not connected to Segmenter or `GenerationMemoryLimits`. Existing
+[`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) and daemon
 [`PendingWrites` adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
-contains finite metadata/`make_durable` wiring, and startup passes the same open
-runtime Arc to `VodServe::Shared`. The first metadata-marker creation caller is
-not fully wired, and the first statement in ordinary
-`build_rendition_with_storage` still selects legacy admission. Full task/parser
-merge/transform/plan/process memory partitioning remains incomplete. This is a
-core/runtime bridge, not ordinary source closure.
+remain available. Ordinary `build_rendition_with_storage` still selects legacy
+admission; full memory partitioning remains incomplete. This is runtime
+composition, not ordinary source closure.
 
-All V1–V5 remain OPEN. Ordinary request preparation and root producer
-ownership/task composition, the first metadata-marker caller, complete memory,
-index and durable-debt accounting, actual reader leases, retained-output
-transfer, conserving retirement and exact settlement/capacity reuse still lack
-their production connections. The
+All V1–V5 remain OPEN. Ordinary request entry and the production capacity
+connection, full memory profile, serving leases, retained-output transfer,
+conserving retirement and exact settlement/capacity reuse still lack their
+production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
-records the exact limits. Ten prior sync/metadata regression bodies were
-compiled on an earlier source snapshot, not run. Nine new bounded-reader, registered-child-control and finite-pipe bodies are
-authored. The latest committed base is `84c562e28b494f32d9f364cc8cc9ab4b4d86ed70`.
-The frozen finite-pump source passed pinned 1.97.1 host core+daemon all-target
-compilation in 139.653s with stable hashes; the source ledger records the exact
-receipt. Warning-level compilation does not establish strict Clippy, Linux-only
-code or Windows. No behavioral tests or review ran for this slice. Review and qualification wait for the complete
-integrated candidate.
+records the limits. The latest committed base is
+`6e57aeb774b408e4b5b4c9fa1e559c64391fc0c8`; current finite-request source is
+compiled with pinned Rust 1.97.1 host core+daemon all-target checks in 128.579s
+with stable source hashes. The source ledger records the receipt and the two
+compiler errors fixed before this pass. Linux-only bodies and Windows remain
+outside this host evidence. No behavioral tests or review ran for this slice. Review and qualification wait for the complete integrated
+candidate.
 
 ## Actual distance to usable playback
 

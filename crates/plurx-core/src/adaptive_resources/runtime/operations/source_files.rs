@@ -4,6 +4,7 @@
 use super::*;
 use crate::source_identity::SourceIdentity;
 use std::fs::File;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use tokio::task::JoinHandle;
 
@@ -34,6 +35,20 @@ pub(super) struct SourceCell {
     failed_join: bool,
     observed_committed: bool,
     lease_issued: bool,
+    root_observation_id: Uuid,
+    root_observed_committed: bool,
+    selected_root_member: Option<Uuid>,
+    pending_root: Option<(Uuid, v2::SourceCopy, v2::SourceObserved)>,
+}
+
+pub(super) struct InheritedSource {
+    /// Borrowed from the retained File; the caller must hold the original
+    /// bundle lock through the spawn that inherits this descriptor.
+    pub raw_fd: RawFd,
+    pub acquisition_id: v2::Id,
+    pub observation_id: Uuid,
+    pub envelope: v2::Envelope,
+    pub acknowledged: bool,
 }
 struct SourceResult {
     file: Option<Arc<File>>,
@@ -210,6 +225,10 @@ impl NodeResourceRuntime {
                 failed_join: false,
                 observed_committed: false,
                 lease_issued: false,
+                root_observation_id: Uuid::new_v4(),
+                root_observed_committed: false,
+                selected_root_member: None,
+                pending_root: None,
             },
         );
         Ok(())
@@ -224,6 +243,42 @@ impl NodeResourceRuntime {
         member: Uuid,
         deadline: Instant,
     ) -> Result<RetainedSourceLease, OperationError> {
+        self.acquire_prepared_source(owner, index, member, deadline)
+            .await?;
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle.installed {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
+        if role.refunded
+            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || !source.observed_committed
+            || source.lease_issued
+        {
+            return Err(OperationError::State);
+        }
+        let file = source
+            .result
+            .as_ref()
+            .and_then(|r| r.file.as_ref())
+            .ok_or(OperationError::State)?;
+        source.lease_issued = true;
+        Ok(RetainedSourceLease {
+            file: Arc::clone(file),
+        })
+    }
+
+    /// Runs source prepare/arm/open/observe and durable observation, without
+    /// exporting the retained File through a lease.
+    pub(in crate::adaptive_resources::runtime) async fn acquire_prepared_source(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.lock().await;
         if !bundle.installed {
@@ -299,21 +354,117 @@ impl NodeResourceRuntime {
             )?;
             self.finish_transition(bundle_id, role).await?;
         }
-        if !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed) {
+        if !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || !role
+                .sources
+                .get(&member)
+                .is_some_and(|source| source.observed_committed)
+        {
             return Err(OperationError::State);
         }
-        let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
-        if !source.observed_committed || source.lease_issued {
+        Ok(())
+    }
+}
+
+impl SourceCell {
+    pub(super) fn inherited_source(
+        &mut self,
+        root_member: Uuid,
+    ) -> Result<InheritedSource, OperationError> {
+        if !self.observed_committed || self.lease_issued {
             return Err(OperationError::State);
         }
-        let file = source
-            .result
-            .as_ref()
-            .and_then(|r| r.file.as_ref())
-            .ok_or(OperationError::State)?;
-        source.lease_issued = true;
-        Ok(RetainedSourceLease {
-            file: Arc::clone(file),
+        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        let file = result.file.as_ref().ok_or(OperationError::State)?;
+        let source_observed = result.observed.as_ref().ok_or(OperationError::State)?;
+        let metadata = file.metadata()?;
+        let native = &source_observed.native_object;
+        if !metadata.is_file()
+            || source_observed.holder_id != plan.holder_id
+            || source_observed.member_id != plan.member_id
+            || source_observed.source_association != plan.source_association
+            || source_observed.access != v2::SourceAccess::ReadOnlyRegular
+            || native.file_type != v2::FileType::Regular
+            || native.filesystem_domain != plan.filesystem_domain
+            || native.device
+                != (v2::NativeValue::Known {
+                    value: metadata.dev(),
+                })
+            || native.inode
+                != (v2::NativeValue::Known {
+                    value: metadata.ino(),
+                })
+            || native.mount_id != bootstrap::native::steps::mount_id(file)
+            || SourceIdentity::from_metadata(&metadata).render_s1()
+                != source_observed.source_association.object_version
+        {
+            return Err(OperationError::State);
+        }
+        let planned_graph_id = match &plan.recovery {
+            v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
+        };
+        let mut source_copies = source_observed.copies.iter().filter(|copy| {
+            matches!(copy.owner,
+                v2::CopyOwner::DaemonSourceCell { owner_id, graph_id, member_id }
+                    if owner_id == plan.filesystem_domain.daemon_owner_id
+                        && graph_id == planned_graph_id
+                        && member_id == plan.member_id)
+        });
+        let source_copy = source_copies.next().ok_or(OperationError::State)?;
+        if source_copies.next().is_some() || !plan.planned_copies.contains(source_copy) {
+            return Err(OperationError::State);
+        }
+        let mut root_copies = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner,
+                v2::CopyOwner::OwnedRoot { graph_id, root_member_id: planned_root }
+                    if graph_id == planned_graph_id && planned_root.uuid() == root_member)
+                && copy.parent_copy_id == Some(source_copy.copy_id)
+        });
+        let root_copy = root_copies.next().ok_or(OperationError::State)?;
+        if root_copies.next().is_some() {
+            return Err(OperationError::State);
+        }
+        let observed = if let Some((selected, staged_copy, staged_observed)) = &self.pending_root {
+            if *selected != root_member || staged_copy != root_copy {
+                return Err(OperationError::State);
+            }
+            staged_observed.clone()
+        } else if self.root_observed_committed {
+            if self.selected_root_member != Some(root_member)
+                || !source_observed.copies.contains(root_copy)
+            {
+                return Err(OperationError::State);
+            }
+            source_observed.clone()
+        } else {
+            if source_observed
+                .copies
+                .iter()
+                .any(|copy| copy.copy_id == root_copy.copy_id)
+            {
+                return Err(OperationError::State);
+            }
+            let mut observed = source_observed.clone();
+            observed.copies.push(root_copy.clone());
+            self.pending_root = Some((root_member, root_copy.clone(), observed.clone()));
+            observed
+        };
+        if self.root_observed_committed && self.selected_root_member != Some(root_member) {
+            return Err(OperationError::State);
+        }
+        Ok(InheritedSource {
+            raw_fd: file.as_raw_fd(),
+            acquisition_id: root_copy.acquisition_operation_id,
+            observation_id: self.root_observation_id,
+            envelope: v2::Envelope {
+                version: 2,
+                planned: self.plan.clone(),
+                observed: Some(v2::Observed::SourceV1 { source: observed }),
+            },
+            acknowledged: self.root_observed_committed,
         })
     }
 }
@@ -333,6 +484,80 @@ pub(super) fn acknowledge(
         return Err(OperationError::State);
     }
     source.observed_committed = true;
+    Ok(())
+}
+
+pub(super) fn acknowledge_root(
+    role: &mut OwnedRole,
+    member: Uuid,
+    operation: Uuid,
+) -> Result<(), OperationError> {
+    let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
+    if source.root_observation_id != operation
+        || !source.observed_committed
+        || source.lease_issued
+        || source
+            .result
+            .as_ref()
+            .is_none_or(|result| result.file.is_none() || result.observed.is_none())
+    {
+        return Err(OperationError::State);
+    }
+    if source.root_observed_committed {
+        return if source.selected_root_member.is_some() && source.pending_root.is_none() {
+            Ok(())
+        } else {
+            Err(OperationError::State)
+        };
+    }
+    let (root_member, root_copy, observed) = source
+        .pending_root
+        .as_ref()
+        .cloned()
+        .ok_or(OperationError::State)?;
+    let v2::MemberPlan::SourceV1 { source: plan, .. } = &source.plan else {
+        return Err(OperationError::State);
+    };
+    let base = source
+        .result
+        .as_ref()
+        .and_then(|result| result.observed.as_ref())
+        .ok_or(OperationError::State)?;
+    let planned_graph_id = match &plan.recovery {
+        v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
+    };
+    let mut source_copies = base.copies.iter().filter(|copy| {
+        matches!(copy.owner,
+            v2::CopyOwner::DaemonSourceCell { owner_id, graph_id, member_id }
+                if owner_id == plan.filesystem_domain.daemon_owner_id
+                    && graph_id == planned_graph_id
+                    && member_id == plan.member_id)
+    });
+    let source_copy = source_copies.next().ok_or(OperationError::State)?;
+    let added: Vec<_> = observed
+        .copies
+        .iter()
+        .filter(|copy| !base.copies.contains(copy))
+        .collect();
+    if added.len() != 1
+        || added[0] != &root_copy
+        || !matches!(added[0].owner,
+            v2::CopyOwner::OwnedRoot { graph_id, root_member_id }
+                if graph_id == planned_graph_id && root_member_id.uuid() == root_member)
+        || source_copies.next().is_some()
+        || !plan.planned_copies.contains(&root_copy)
+        || added[0].parent_copy_id != Some(source_copy.copy_id)
+    {
+        return Err(OperationError::State);
+    }
+    source
+        .result
+        .as_mut()
+        .ok_or(OperationError::State)?
+        .observed = Some(observed);
+    source.selected_root_member = Some(root_member);
+    source.root_observed_committed = true;
+    source.pending_root = None;
     Ok(())
 }
 

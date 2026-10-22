@@ -24,6 +24,10 @@ const ENV_ENTRY_LIMIT: usize = 32;
 /// This owns only planning data; it holds no source descriptor or child proof.
 pub struct SoftwareAvcCommand {
     program: PathBuf,
+    source_path: PathBuf,
+    source_id: i64,
+    scanner_size: i64,
+    scanner_mtime: i64,
     args: Vec<String>,
     env: Vec<(OsString, OsString)>,
     runtime_cache: PathBuf,
@@ -136,6 +140,10 @@ impl SoftwareAvcCommand {
         }
         let command = Self {
             program,
+            source_path: source.path.clone(),
+            source_id: source.id,
+            scanner_size: source.size,
+            scanner_mtime: source.mtime,
             args,
             env,
             runtime_cache,
@@ -144,6 +152,16 @@ impl SoftwareAvcCommand {
         validate_collection_limits(&command)?;
         command.resident_memory_bytes()?;
         Ok(command)
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn matches_source(
+        &self,
+        source: &super::FiniteSourceRequest,
+    ) -> bool {
+        source.path == self.source_path
+            && source.media_file_id == self.source_id.to_string()
+            && source.scanner_size == self.scanner_size
+            && source.scanner_mtime == self.scanner_mtime
     }
 
     pub(in crate::adaptive_resources::runtime) fn program(&self) -> &PathBuf {
@@ -173,6 +191,7 @@ impl SoftwareAvcCommand {
     ) -> io::Result<usize> {
         let mut total = size_of::<Self>()
             .checked_add(self.program.capacity())
+            .and_then(|n| n.checked_add(self.source_path.capacity()))
             .and_then(|n| n.checked_add(self.runtime_cache.capacity()))
             .and_then(|n| n.checked_add(self.args.capacity().checked_mul(size_of::<String>())?))
             .and_then(|n| {

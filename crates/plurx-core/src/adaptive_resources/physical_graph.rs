@@ -308,7 +308,7 @@ impl OwnedPhysicalGraph {
         command: &mut Command,
         work: ChildWork,
     ) -> io::Result<GraphRoot> {
-        self.spawn_root_inner(command, work, None).await
+        self.spawn_root_inner(command, work, None, None).await
     }
 
     pub(super) async fn spawn_durable_root(
@@ -317,7 +317,19 @@ impl OwnedPhysicalGraph {
         work: ChildWork,
         arm: super::runtime::DurableArm,
     ) -> io::Result<GraphRoot> {
-        self.spawn_root_inner(command, work, Some(arm)).await
+        self.spawn_root_inner(command, work, Some(arm), None).await
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn spawn_selected_durable_root(
+        &mut self,
+        command: &mut Command,
+        work: ChildWork,
+        arm: super::runtime::DurableArm,
+        entered: &mut bool,
+    ) -> io::Result<GraphRoot> {
+        self.spawn_root_inner(command, work, Some(arm), Some(entered))
+            .await
     }
 
     async fn spawn_root_inner(
@@ -325,6 +337,7 @@ impl OwnedPhysicalGraph {
         command: &mut Command,
         work: ChildWork,
         arm: Option<super::runtime::DurableArm>,
+        mut entered: Option<&mut bool>,
     ) -> io::Result<GraphRoot> {
         let custody = self.custody();
         let mut members = custody.members.lock().await;
@@ -342,7 +355,15 @@ impl OwnedPhysicalGraph {
                 ..Default::default()
             },
         )?;
+        if entered.as_deref().is_some_and(|entered| *entered) {
+            return Err(io::Error::other("selected root launch was already entered"));
+        }
         begin_acquisition_with_arm(&self.ledger, custody, &mut members, arm.as_ref())?;
+        // Set in the same uninterrupted graph-lock scope as native entry. A
+        // cancelled graph-lock waiter cannot falsely consume this launch slot.
+        if let Some(entered) = entered.as_mut() {
+            **entered = true;
+        }
         // A returned spawn error is NOT no-spawn proof, including attach/resume
         // failures inside the shared launcher. Ledger custody remains held.
         let (child, job) = match spawn_job_custodied(command, work) {

@@ -90,6 +90,10 @@ impl SoftwareAvcPumpPlan {
         Ok(result)
     }
 
+    pub(super) fn segment_count(&self) -> usize {
+        self.plan.entries.len()
+    }
+
     /// Explicit retained partitions, not the final end-to-end profile. Engine
     /// merge/transformation peaks and runtime/journal state still need their
     /// own partition before a production demand or close receipt can rely on it.
@@ -197,11 +201,12 @@ impl SoftwarePump {
         };
         // Signal the original launcher registration before waiting for stderr.
         // The original ChildJob stays in graph custody; a PID lookup is absent.
-        let kill_error = if matches!(outcome, Outcome::Failed(_)) {
-            control.start_kill().err().map(|error| error.kind())
-        } else {
-            None
-        };
+        let kill_error =
+            if matches!(outcome, Outcome::Failed(_)) || !complete.load(Ordering::Acquire) {
+                control.start_kill().err().map(|error| error.kind())
+            } else {
+                None
+            };
         (outcome, complete.load(Ordering::Acquire), kill_error)
     }
     async fn produce_inner(

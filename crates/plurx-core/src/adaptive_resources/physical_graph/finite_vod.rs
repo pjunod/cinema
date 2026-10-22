@@ -44,7 +44,7 @@ impl OwnedPhysicalGraph {
         root: GraphRoot,
         member: Uuid,
         arm: super::super::runtime::DurableArm,
-        pump: SoftwarePump,
+        pump: &mut Option<SoftwarePump>,
     ) -> io::Result<GraphFiniteVodTask> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let custody = self.custody();
@@ -65,6 +65,8 @@ impl OwnedPhysicalGraph {
             ));
         }
         let minimum_memory = pump
+            .as_ref()
+            .ok_or_else(|| io::Error::other("finite VOD pump already entered"))?
             .minimum_memory_bytes()?
             .checked_add(u64::try_from(resident_memory_bytes()?).map_err(io::Error::other)?)
             .and_then(|n| n.checked_add(std::mem::size_of::<FiniteRecord>() as u64))
@@ -110,6 +112,7 @@ impl OwnedPhysicalGraph {
         let result = Arc::clone(&finished);
         // Only this exact concrete implementation receives the guarded readers.
         // No await or caller factory separates creation from retaining its task.
+        let pump = pump.take().expect("validated retained pump");
         let task = runtime.spawn(async move {
             let terminal = pump.run(readers, control).await;
             if let Ok(mut result) = result.lock() {
