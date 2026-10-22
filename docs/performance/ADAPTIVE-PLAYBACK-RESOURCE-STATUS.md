@@ -24,25 +24,26 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`3e9edcdf4` adds NEW scratch-v2 immutable names/ceilings versus observed native
-IDs and bounded event results in the SAME journal. Projection/head/global sequence
-update atomically; restoration folds exact refs, never a giant film JSON or hash
-as proof. `cdf580eb0` adds bounded reader open/read/joined-close audit, preserving
-leases/buffers through EOF and producer freeze. Old scratch-v1 equality, DDL,
-fingerprints and historical dispatch stay unchanged. These data are NOT receipts.
-`4c6c3021a` puts the real ordinary VOD payload move and registration-before-entry
-latch on its retained blocking publisher; no hidden Tokio fs wrapper. Prior
-concrete actor/terminal/source/journal ownership remains, including cancellation.
+`1584a357c` replaces the actual Unix VOD publisher's reusable bare-path temporary
+with a held no-follow directory, exclusive unique temporary object, checked write
+range, actual descriptor identity/size/512-byte-block allocation and native
+no-replace rename. Failed partial/conflicting objects retain their descriptor and
+facts; `a4465e4b0` keeps that unresolved state visible after consuming the job error.
+`521a6d5fb` authors deterministic cancellation inside the actual acquired-file
+native body, not only a wrapper. Success closes the writable copy; none of these
+facts mint finite acquisition, closure or refund authority. Non-Unix is legacy.
 
-Pinned1.97.1 core+daemon PASS141.483s; only changed core38.276s then8.200s.
-New bodies COMPILED NOT RUN; warnings, NOT strict Clippy. Windowsfc096 prior
-core+daemon PASS101.291s retained; new source scopes not claimed Windows-qualified.
-Admission STILL LEGACY. The actual sink still uses bare paths/rename. Missing:
-held-directory native custody, source/copy/HTTP leases, bounded index-map memory
-reservation, allocation-overage debt/fence, snapshot refs/RetainedAssetsV2 and ONE
-durable R→S/private-proof swap. No full growth/physical-quota/cap compliance claim.
-Detailed growth design is delivered, not a gate. Positive exact old-domain restart
-evidence and remaining M0–M7 integration are open; no receipt/refund/behavior pass.
+Pinned1.97.1 affected daemon all-target check PASS81.476s on current source;
+earlier invalidated scopes125.448s/29.359s/18.346s retained, not repeated passes.
+Nine new bodies COMPILED NOT RUN; warnings, NOT strict Clippy. Controller reports
+exact142b Windows core+daemon PASS149.755s; changed daemon scope not yet qualified.
+Retained `3e9edcdf4`/`cdf580eb0` provide bounded scratch-v2 event/reader audit in the
+SAME journal; old v1 equality/DDL/history unchanged. Original payload/entry-latch,
+actor/terminal/source ownership remain. Admission STILL LEGACY. Missing: actual
+prearmed storage-root/init bootstrap and scratch write-ahead/native composition,
+source/copy/HTTP leases, bounded index/native memory, allocation-overage debt/fence,
+snapshot refs/RetainedAssetsV2, ONE durable R→S/private-proof swap, positive exact
+old-domain restart and remaining M0–M7. No full growth/physical-quota/behavior pass.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
