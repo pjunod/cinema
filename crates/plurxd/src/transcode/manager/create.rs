@@ -722,7 +722,7 @@ impl TranscodeManager {
             && !req
                 .candidate_context
                 .as_ref()
-                .is_some_and(|context| context.selected_candidate.processed_hdr10)
+                .is_some_and(|context| context.selected_candidate.processed_dv)
         {
             return Err(vod_refusal_error(
                 "candidate_recipe_unavailable",
@@ -1005,7 +1005,7 @@ impl TranscodeManager {
         let (req, degraded_processing) = match req
             .candidate_context
             .as_ref()
-            .filter(|context| context.selected_candidate.processed_hdr10)
+            .filter(|context| context.selected_candidate.processed_dv)
         {
             Some(context) => match context.ordinary_request.as_deref() {
                 Some(ordinary) if ordinary.file_id == req.file_id => {
@@ -1177,7 +1177,7 @@ impl TranscodeManager {
         reorder_frames: bool,
         context: &CandidateExecutionContext,
     ) -> Result<[u8; 32], String> {
-        if context.selected_candidate.processed_hdr10 {
+        if context.selected_candidate.processed_dv {
             return Err(vod_refusal_error(
                 "candidate_recipe_changed",
                 "processed HDR10 requires its admitted executable, not ordinary plan equality",
@@ -1384,7 +1384,6 @@ impl TranscodeManager {
         }
         #[cfg(target_os = "linux")]
         {
-            use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
             // Two processed destinations. A Profile 7 copy converted to 8.1
             // for a Dolby Vision display becomes the reconstructed 8.1 (the
             // FEL rebuilt into the picture, a new RPU) under FEL re-encode.
@@ -1633,7 +1632,7 @@ impl TranscodeManager {
                 );
             }
             let digest = encoding.processed_candidate_digest(&file, &binding)?;
-            if original.selected_candidate.processed_hdr10 && digest != original.recipe_digest {
+            if original.selected_candidate.processed_dv && digest != original.recipe_digest {
                 return Err(vod_refusal_error(
                     "candidate_recipe_changed",
                     "processed candidate inputs changed during qualification",
@@ -1685,60 +1684,16 @@ impl TranscodeManager {
             }
             let facts = Self::quality_facts_from_snapshot(&planning)
                 .ok_or("processed client facts unavailable")?;
-            let contract = encoding.plan.output_contract();
-            let Some((width, height_px)) =
-                contract.effective_width().zip(contract.effective_height())
-            else {
-                return Err("the processed recipe has no effective geometry".into());
-            };
-            if !super::manager_candidates::processed_client_compatible(
-                caps,
+            let candidate = super::manager_candidates::prepared_processed_candidate(
+                digest,
                 &encoding.plan,
+                &encoding.options,
+                caps,
                 &facts,
                 destination,
-            ) {
-                return Err("the processed recipe is not one this client can decode".into());
-            }
-            let actual_audio = encoding
-                .options
-                .audio
-                .as_ref()
-                .ok_or("the processed recipe has no resolved audio answer")?;
-            if projected
-                .audio_delivery
-                .as_ref()
-                .is_none_or(|expected| expected.byte_identity() != actual_audio.byte_identity())
-            {
-                return Err("the processed audio differs from its canonical encoded claim".into());
-            }
-            trial.audio_delivery = Some(actual_audio.clone());
-            let audio = if encoding.plan.options().input_has_audio {
-                u64::from(encoding.options.audio_bitrate_kbps) * 1000
-            } else {
-                0
-            };
-            let candidate = QualityCandidate {
-                id: CandidateId::for_recipe_digest(digest),
-                recipe_digest: digest,
-                route: CandidateRoute::Encode,
-                planned_codec: Some("hevc".into()),
-                processed_hdr10: true,
-                normalized_geometry: encoding.options.normalized_geometry,
-                width,
-                height: height_px,
-                target_height: u32::try_from(encoding.options.target_height)
-                    .map_err(|_| "processed rung overflow")?,
-                average_bps: Some(u64::from(encoding.options.video_bitrate_kbps) * 1000 + audio),
-                peak_bps: Some(u64::from(encoding.options.video_bitrate_kbps) * 1500 + audio),
-                grade: if destination == DvDestination::Sdr {
-                    OutputGrade::Sdr
-                } else {
-                    OutputGrade::Hdr10
-                },
-                decoder_compatible: true,
-                complete_cache: false,
-                sustainable: true,
-            };
+                projected.audio_delivery.as_ref(),
+            )?;
+            trial.audio_delivery = encoding.options.audio.clone();
             let mut context = Self::candidate_context(&candidate);
             context.display_target = display_target;
             context.display_target_note = display_target_note;
@@ -1752,7 +1707,7 @@ impl TranscodeManager {
             // if the prepared graph cannot be consumed; a client that named
             // the processed candidate itself has no such fallback.
             context.ordinary_request =
-                (!original.selected_candidate.processed_hdr10).then(|| Box::new(request.clone()));
+                (!original.selected_candidate.processed_dv).then(|| Box::new(request.clone()));
             trial.candidate_context = Some(Box::new(context));
             trial.hdr10 = destination != DvDestination::Sdr;
             let lease_binding = trial.processed_preparation_binding(recovery)?;
@@ -2962,7 +2917,7 @@ impl TranscodeManager {
                 );
                 let (actual, route) = if let Some(encoding) = encoding {
                     (
-                        if context.selected_candidate.processed_hdr10 {
+                        if context.selected_candidate.processed_dv {
                             encoding.processed_candidate_digest(
                                 file,
                                 context
@@ -3296,7 +3251,7 @@ impl TranscodeManager {
             || context.normalized_geometry != prepared.encoding.options.normalized_geometry
             || context.profile != prepared.encoding.options.auto_quality_rate_profile
             || !context.selected_candidate.decoder_compatible
-            || !context.selected_candidate.processed_hdr10
+            || !context.selected_candidate.processed_dv
             || context.selected_candidate.route
                 != plurx_core::playback::candidate::CandidateRoute::Encode
             || context.selected_candidate.planned_codec.as_deref() != Some("hevc")
@@ -3420,7 +3375,7 @@ impl TranscodeManager {
         let (req, root_admission) = match req
             .candidate_context
             .as_ref()
-            .filter(|context| context.selected_candidate.processed_hdr10)
+            .filter(|context| context.selected_candidate.processed_dv)
         {
             Some(context) => match self
                 .admit_prepared_processing(req, context, recovery, &file)
@@ -4494,7 +4449,7 @@ impl TranscodeManager {
             let processed = remote
                 .candidate_catalog
                 .as_ref()
-                .is_some_and(|catalog| catalog.candidate.processed_hdr10);
+                .is_some_and(|catalog| catalog.candidate.processed_dv);
             let root_admission = if processed {
                 let Some(predecessor) = processed_predecessor.as_ref() else {
                     return false;

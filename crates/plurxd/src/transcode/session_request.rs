@@ -1391,7 +1391,7 @@ pub(crate) fn continuous_test_candidate_context(
     height: u32,
 ) -> CandidateExecutionContext {
     super::TranscodeManager::candidate_context(&plurx_core::playback::candidate::QualityCandidate {
-        processed_hdr10: false,
+        processed_dv: false,
         id,
         recipe_digest: digest,
         route: plurx_core::playback::candidate::CandidateRoute::Encode,
@@ -1805,7 +1805,7 @@ mod prepared_candidate_tests {
             .as_mut()
             .expect("context")
             .selected_candidate
-            .processed_hdr10 = true;
+            .processed_dv = true;
         assert_ne!(
             changed
                 .processed_preparation_binding(&recovery)

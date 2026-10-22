@@ -1342,7 +1342,7 @@ async fn fixture_with_audio(
         recipe_digest,
         route: CandidateRoute::Encode,
         planned_codec: Some("hevc".into()),
-        processed_hdr10: true,
+        processed_dv: true,
         normalized_geometry: false,
         width: raster.0,
         height: raster.1,

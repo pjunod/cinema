@@ -881,7 +881,7 @@ pub(crate) struct ProcessedReuseSeed {
 impl ProcessedReuseSeed {
     fn from_request(request: &SessionRequest) -> Option<Self> {
         let context = request.candidate_context.as_ref()?;
-        context.selected_candidate.processed_hdr10.then_some(())?;
+        context.selected_candidate.processed_dv.then_some(())?;
         Some(Self {
             query: context.catalog_query.clone()?,
             caps: context.canonical_caps.clone()?,

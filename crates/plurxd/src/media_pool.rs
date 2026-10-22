@@ -1508,7 +1508,7 @@ impl MediaPool {
             // A peer's description cannot restore this process's one-shot
             // executable or exact parent credit. Ingress decides support.
             for entry in &mut outcome.candidates {
-                if entry.candidate.processed_hdr10 {
+                if entry.candidate.processed_dv {
                     entry.dispatch_supported = false;
                     entry.candidate.sustainable = false;
                     entry.candidate.complete_cache = false;

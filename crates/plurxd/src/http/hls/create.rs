@@ -48,7 +48,7 @@ pub(super) fn auto_encode_fallback<'a>(
     fn encode(candidate: &plurx_core::playback::candidate::QualityCandidate) -> bool {
         candidate.decoder_compatible
             && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
-            && (!candidate.processed_hdr10 || candidate.playable())
+            && (!candidate.processed_dv || candidate.playable())
     }
     fn at_height(
         list: &[plurx_core::playback::candidate::QualityCandidate],
@@ -71,7 +71,7 @@ pub(super) fn auto_encode_fallback<'a>(
 }
 
 /// Cold ordinary output may acquire its first bounded window. Processed output
-/// still needs the complete executable HDR10 recipe and production proof.
+/// still needs the complete executable processed recipe and production proof.
 pub(super) fn auto_bootstrap_encode_fallback(
     catalog: &[plurx_core::playback::candidate::QualityCandidate],
     height: i64,
@@ -81,10 +81,22 @@ pub(super) fn auto_bootstrap_encode_fallback(
         .filter(|candidate| {
             candidate.decoder_compatible
                 && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
-                && (!candidate.processed_hdr10 || candidate.playable())
+                && (!candidate.processed_dv || candidate.playable())
                 && i64::from(candidate.target_height) <= height
         })
         .max_by_key(|candidate| candidate.target_height)
+}
+
+/// Admission is for the exact prepared recipe, independent of its SDR/HDR grade.
+pub(crate) fn processed_candidate_is_admitted(
+    admitted: &[plurx_core::playback::candidate::QualityCandidate],
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+) -> bool {
+    admitted.iter().any(|admitted| {
+        admitted.id == candidate.id
+            && admitted.recipe_digest == candidate.recipe_digest
+            && admitted.playable()
+    })
 }
 
 /// Replace one local descriptive row with its admitted executable facts.
@@ -116,7 +128,7 @@ pub(super) fn eligible_quality_workers(
         entry.dispatch_supported
             && !entry.partial
             && entry.candidate.decoder_compatible
-            && (!entry.candidate.processed_hdr10 || entry.candidate.playable())
+            && (!entry.candidate.processed_dv || entry.candidate.playable())
     });
     workers
         .iter()
@@ -148,7 +160,7 @@ pub(super) fn prefer_equivalent_hevc<'a>(
                 other.identity_matches()
                     && other.decoder_compatible
                     && other.planned_codec.as_deref() == Some("hevc")
-                    && other.processed_hdr10 == chosen.processed_hdr10
+                    && other.processed_dv == chosen.processed_dv
                     && other.route == chosen.route
                     && other.grade == chosen.grade
                     && other.normalized_geometry == chosen.normalized_geometry
@@ -3716,10 +3728,7 @@ async fn create_with_purpose_inner(
                     // from being adopted here leaves that start in place and
                     // is reported with it, like every other declined
                     // qualification.
-                    let adopted = if !admitted
-                        .iter()
-                        .any(|admitted| admitted.id == candidate.id && admitted.playable())
-                    {
+                    let adopted = if !processed_candidate_is_admitted(&admitted, &candidate) {
                         Err(if recovered {
                             "Auto's link evidence for this playback does not admit the \
                              processed candidate's bitrate"
