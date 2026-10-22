@@ -4845,7 +4845,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Worker-refinement conformance: +1 15-second `tokio::time::timeout` in the
 # `#[cfg(test)]` `library_work::tests::next_worker_event` barrier helper. It
 # bounds receipt of the selected event; timeout is failure, not join evidence.
-expected_occurrences = 1846
+# Async driver ownership review (2026-10-22, source 196beb093): +1 timer is
+# library_work.rs:513, tests::library_worker_ready_work_precedes_burst_pressure_ticks.
+# Its paused-clock fixture owns a local 250ms interval until return/drop and
+# awaits tick futures through the shared select_work selector. At most three
+# decisions exercise an always-ready work future against ready pressure ticks;
+# the assertions require work on decision zero and exactly one work poll.
+# This finite schedule detects tick-first starvation without a timeout or task.
+# It owns no process, admission, publisher, queue token or production resource.
+# The production pressure interval moved from library_work.rs to
+# library_work/env.rs:97, TokioEnvironment::poll_work, with no constructor delta;
+# that interval remains local to the admission-retaining work-selection scope.
+# Patterns, roots and exact equality stay intact; no new shipped timer is added.
+expected_occurrences = 1847
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

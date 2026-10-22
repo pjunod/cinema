@@ -2202,7 +2202,32 @@ assert.equal(context.ACT_TIMER, null);
         catalog_step = steps["Check validation catalog and contract unit tests"].split("      - uses:", 1)[0]
         self.assertIn("make validation-lint", catalog_step)
         self.assertNotIn("compile_only", catalog_step)
-        for job in ("rust_compile", "web_static", "apple_compile", "android_compile", "effort_gate"):
+        # compile_only never disables a required job or the Rust compile
+        # commands. It suppresses only the bounded formal acceptance added to
+        # full effort runs; its selector and required compile remain active.
+        rust_compile = jobs["rust_compile"]
+        rust_header = rust_compile.split("\n    steps:", 1)[0]
+        self.assertNotIn("compile_only", rust_header)
+        rust_steps = workflow_step_blocks(rust_compile)
+        compile_step = rust_steps["Compile every Rust target without executing tests"]
+        self.assertNotIn("compile_only", compile_step)
+        formal_steps = {
+            "Provision the pinned TLC toolchain for async driver refinement",
+            "Build async driver refinement graph and control inputs",
+            "Qualify async driver refinement with pinned TLC",
+            "Snapshot compact async driver refinement evidence",
+            "Preserve async driver refinement evidence",
+        }
+        self.assertTrue(formal_steps <= rust_steps.keys())
+        for name in formal_steps:
+            with self.subTest(formal_step=name):
+                self.assertIn("!inputs.compile_only", rust_steps[name])
+        for name, step in rust_steps.items():
+            if "compile_only" in step:
+                with self.subTest(formal_step=name):
+                    self.assertIn(name, formal_steps)
+                    self.assertIn("!inputs.compile_only", step)
+        for job in ("web_static", "apple_compile", "android_compile", "effort_gate"):
             with self.subTest(required_job=job):
                 self.assertNotIn("compile_only", jobs[job])
         for path in (".github/workflows/ci.yml", ".github/workflows/main-fast-lane.yml"):
