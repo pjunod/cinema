@@ -139,7 +139,9 @@ class IsolatedAcceptance:
             qualified=self.prequalified.get(self._qualification_key(case,artifacts,commands))
             if qualified is not None:
                 family,prerequisite,qualified_baseline=qualified
-                if self.stager.family_plan(handle,commands)!=family:raise AcceptanceAdapterError("FamilyPlanChangedAfterQualification")
+                current_family=self.stager.family_plan(handle,commands)
+                if self.stager.family_identity(current_family)!=self.stager.family_identity(family):raise AcceptanceAdapterError("FamilyPlanChangedAfterQualification")
+                family=current_family
                 baseline_public={"status":"verified","digest":prerequisite.digest}
                 prerequisite_public=checked_public(prerequisite.public(),{"qualified","unavailable"})
             else:
@@ -153,7 +155,11 @@ class IsolatedAcceptance:
                 prerequisite_public=checked_public(prerequisite.public(),{"qualified","unavailable"})
             if prerequisite_public["status"]!="qualified":result["elapsed_seconds"]=time.monotonic()-started;return result
             if prerequisite.family!=family.family or re.fullmatch(r"[a-f0-9]{64}",prerequisite.binding_digest) is None:raise AcceptanceAdapterError("InvalidFamilyQualification")
-            if getattr(family,"schema_version",1)==2:self.stager.adopt_qualified_runtime(handle,qualified_baseline,prerequisite)
+            if getattr(family,"schema_version",1)==2:
+                current_family=self.stager.family_plan(handle,commands)
+                if self.stager.family_identity(current_family)!=self.stager.family_identity(family):raise AcceptanceAdapterError("FamilyPlanChangedAfterQualification")
+                self.stager.adopt_qualified_runtime(handle,qualified_baseline,prerequisite)
+                family=self.stager.family_plan(handle,commands)
             # Reuse also requires actual current containment and qualified family proof.
             first_config=self._configuration(handle,commands[0]);first_proof=self.api.probe(first_config)
             first_public=checked_public(first_proof.public(),{"verified","unavailable"})
