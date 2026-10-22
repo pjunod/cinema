@@ -1,7 +1,8 @@
-"""Draft OCI-boundary tests with a wholly synthetic engine, never real proof.
+"""Synthetic boundary contracts and opt-in real isolated-controller regressions.
 
-Deferred until final review. No fixture image, observation or callback qualifies
-an actual acceptance result. Temporary fixtures use durable owned target paths.
+Deferred until final review. The synthetic engine never proves OCI isolation;
+real controller tests require explicit reviewed image/engine configuration.
+All sources are synthetic and never qualify actual study acceptance.
 """
 from dataclasses import replace
 import errno
@@ -41,6 +42,8 @@ class SyntheticEngine:
         self.bad_hmac = False
         self.oom_killed = False
         self.structured_packet = True
+        self.quiet_writable_override = None
+        self.build_jobs_override = None
 
     def inspect(self, config, name):
         return [{"Image": self.image_id, "State": {"Running": True, "OOMKilled": self.oom_killed},
@@ -79,7 +82,10 @@ class SyntheticEngine:
                     "network": {"interfaces": ["lo"], "errno": errno.ENETUNREACH},
                     "filesystem": {"candidate": {"writable": not config.candidate_readonly, "errno": errno.EROFS if config.candidate_readonly else 0},
                                    "runtime": {"writable": True, "errno": 0},
-                                   "grader": {"writable": False, "errno": errno.EROFS}},
+                                   "grader": {"writable": False, "errno": errno.EROFS},
+                                   "quiet_logs": {"writable": isolation._quiet_log_mount(config) if self.quiet_writable_override is None else self.quiet_writable_override,
+                                                  "errno": 0 if isolation._quiet_log_mount(config) else errno.ENOENT}},
+                    "build_environment": {"CARGO_BUILD_JOBS": self.build_jobs_override or isolation._environment(config)["CARGO_BUILD_JOBS"]} if config.require_rust else {},
                     "versions": {"python": "3.13.0", "python_executable": config.python_executable,
                                  "rustc": {"returncode": 0, "output": self.rust_version},
                                  "cargo": {"returncode": 0, "output": "cargo 1.97.1 (synthetic fixture)"}}}
@@ -219,6 +225,75 @@ class KnowledgeIsolationTests(unittest.TestCase):
         wrapper.write_text("changed wrapper")
         with self.assertRaises(isolation.IsolationError):
             isolation.probe(config)
+
+    def quiet_configuration(self):
+        wrapper = self.config.candidate_root / "scripts/quiet"
+        wrapper.parent.mkdir(exist_ok=True)
+        wrapper.write_bytes((Path(__file__).resolve().parents[2] / "scripts/quiet").read_bytes())
+        wrapper.chmod(0o755)
+        trusted = isolation.TrustedSourceFile("scripts/quiet", hashlib.sha256(wrapper.read_bytes()).hexdigest())
+        argv = ("/work/scripts/quiet", self.config.cargo_executable, "--version")
+        return replace(self.config, require_rust=True, candidate_readonly=True, acceptance_argv=(argv,),
+                       trusted_wrappers=(trusted,), source_commit="a" * 40, source_archive_sha256="c" * 64)
+
+    def test_quiet_mount_is_narrow_measured_and_bound_to_fresh_probe(self):
+        config = self.quiet_configuration()
+        receipt = isolation.probe(config)
+        self.assertEqual(receipt.status, "verified")
+        before = json.loads(receipt.private_path.read_bytes())["configuration"]
+        mounts = isolation._mounts(config)
+        self.assertIn((config.candidate_root, "/work", True), mounts)
+        self.assertIn((config.runtime_root / "quiet-logs", "/work/target/quiet", False), mounts)
+        self.assertEqual(len(mounts), 4)
+        self.assertTrue(before["quiet_log_mount"])
+        self.assertEqual(len(before["mount_identity"]), len(mounts))
+        self.assertEqual([row[0] for row in before["mountpoint_identity"]], [".runtime", "target", "target/quiet"])
+        args = isolation._container_arguments(config, "synthetic-name")
+        self.assertIn("type=bind,src=" + str(config.candidate_root) + ",dst=/work,bind-propagation=rprivate,readonly", args)
+        self.assertIn("type=bind,src=" + str(config.runtime_root / "quiet-logs") + ",dst=/work/target/quiet,bind-propagation=rprivate", args)
+        log = config.runtime_root / "quiet-logs/synthetic.log"
+        log.write_text("controller-owned wrapper output")
+        private, after = isolation._prepare(config)
+        self.assertEqual(before["sources"]["candidate"], after["sources"]["candidate"])
+        self.assertNotEqual(before["sources"]["runtime"], after["sources"]["runtime"])
+        self.assertIsNone(isolation._issued_probe(receipt, private, after))
+        self.assertEqual(list((config.candidate_root / "target/quiet").iterdir()), [])
+        old_mountpoint = config.candidate_root / "target/quiet"
+        old_mountpoint.rename(config.candidate_root / "target/empty-old-mountpoint")
+        old_mountpoint.mkdir()
+        _, replaced_mountpoint = isolation._prepare(config)
+        self.assertEqual(after["sources"]["candidate"], replaced_mountpoint["sources"]["candidate"])
+        self.assertNotEqual(after["mountpoint_identity"], replaced_mountpoint["mountpoint_identity"])
+        observed = self.engine.inspect(config, "synthetic-name")
+        observed[0]["Mounts"][-1]["RW"] = False
+        with self.assertRaises(isolation.IsolationError): isolation._observed_security(config, observed)
+
+    def test_quiet_mountpoint_and_actual_write_observation_cannot_be_forged(self):
+        config = self.quiet_configuration()
+        self.engine.quiet_writable_override = False
+        self.assertEqual(isolation.probe(config).status, "unavailable")
+        self.assertEqual(self.engine.alive, set())
+        source_log = config.candidate_root / "target/quiet/source-file"
+        source_log.write_text("must not be hidden by runtime mount")
+        with self.assertRaises(isolation.IsolationError): isolation.probe(config)
+        source_log.unlink()
+        (config.runtime_root / "quiet-logs").rmdir()
+        (config.runtime_root / "quiet-logs").symlink_to(config.runtime_root / "tmp", target_is_directory=True)
+        with self.assertRaises(isolation.IsolationError): isolation.probe(config)
+
+    def test_rust_jobs_default_preserves_and_probes_explicit_frozen_extra(self):
+        config = replace(self.config, require_rust=True)
+        self.assertEqual(isolation._environment(config)["CARGO_BUILD_JOBS"], "1")
+        self.assertNotIn("CARGO_BUILD_JOBS", isolation._environment(self.config))
+        one = isolation.probe(config)
+        two = isolation.probe(replace(config, environment=(("CARGO_BUILD_JOBS", "2"),)))
+        self.assertEqual((one.status, two.status), ("verified", "verified"))
+        self.assertNotEqual(one.config_digest, two.config_digest)
+        self.assertEqual(json.loads(two.private_path.read_bytes())["observations"]["observed_probes"]["build_environment"],
+                         {"CARGO_BUILD_JOBS": "2"})
+        self.engine.build_jobs_override = "2"
+        self.assertEqual(isolation.probe(config).status, "unavailable")
+        self.assertEqual(self.engine.alive, set())
 
     def test_only_exact_archive_bound_rust_source_exceptions_are_permitted(self):
         relative = "crates/plurx-core/src/secrets.rs"
@@ -688,6 +763,28 @@ class KnowledgeIsolationTests(unittest.TestCase):
         with self.assertRaises(isolation.IsolationError):
             isolation._worker_configuration(config, plan)
 
+    def test_worker_never_inherits_protected_quiet_wrapper_or_runtime_logs(self):
+        protected = self.quiet_configuration()
+        config, plan = self.protected_plan()
+        config = replace(config, require_rust=True, trusted_wrappers=protected.trusted_wrappers,
+                         source_commit=protected.source_commit, source_archive_sha256=protected.source_archive_sha256)
+        _, payload = isolation._prepare(config)
+        current, worker_payload = isolation._worker_configuration(config, plan)
+        self.assertTrue(payload["quiet_log_mount"])
+        self.assertFalse(worker_payload["quiet_log_mount"])
+        self.assertNotIn("/work/target/quiet", [target for _, target, _ in isolation._mounts(current)])
+        for left, _, _ in isolation._mounts(config):
+            for right, _, _ in isolation._mounts(current):
+                self.assertFalse(left.is_relative_to(right) or right.is_relative_to(left))
+        rust_plan = replace(plan, worker=replace(plan.worker, config=replace(plan.worker.config, require_rust=True)))
+        rust_worker, _ = isolation._worker_configuration(config, rust_plan)
+        self.assertEqual(isolation._environment(rust_worker)["CARGO_BUILD_JOBS"], "1")
+        explicit_worker, _ = isolation._worker_configuration(replace(config, environment=(("CARGO_BUILD_JOBS", "3"),)), rust_plan)
+        self.assertEqual(isolation._environment(explicit_worker)["CARGO_BUILD_JOBS"], "3")
+        copied = replace(plan, worker=replace(plan.worker, config=replace(plan.worker.config,
+                                        trusted_wrappers=config.trusted_wrappers)))
+        with self.assertRaises(isolation.IsolationError): isolation._worker_configuration(config, copied)
+
     def test_protected_rpc_rejects_worker_outcomes_unordered_frames_and_code_objects(self):
         config, plan = self.protected_plan()
         worker = plan.worker
@@ -724,6 +821,148 @@ class KnowledgeIsolationTests(unittest.TestCase):
             result = isolation.execute_step(first, plan, 0, isolation.probe(first), prerequisite=prerequisite)
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(self.engine.alive, set())
+
+
+@unittest.skipUnless(os.environ.get("PLURX_KNOWLEDGE_OCI_IMAGE") and os.environ.get("PLURX_KNOWLEDGE_OCI_ENGINE"),
+                     "requires explicit reviewed immutable OCI image and engine; never synthetic proof")
+class ReviewedControllerOciTests(unittest.TestCase):
+    """Opt-in real controller argv/provenance tests; execute only after review.
+
+    Uses wholly synthetic source/grader fixtures and the public OCI boundary.
+    No account, model, private plan, Gold, or actual study acceptance is loaded.
+    """
+    def setUp(self):
+        base = Path.cwd() / "target/agent-fixtures/.hermes/hdr-collaboration/workspaces/controller-oci"
+        base.mkdir(parents=True, exist_ok=True)
+        self.directory = tempfile.TemporaryDirectory(prefix="roles-", dir=base)
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve()
+        for name in ("protected-source", "protected-export", "protected-runtime",
+                     "worker-source", "worker-export", "worker-runtime"):
+            (self.root / name).mkdir(mode=0o755)
+        for role in ("protected", "worker"):
+            source = self.root / (role + "-source")
+            (source / "validation").mkdir()
+            (source / "validation/__init__.py").write_text("")
+            (source / "validation/synthetic_role.py").write_text("VALUE = " + repr(role) + "\n")
+            (source / ("only_" + role + ".py")).write_text("VALUE = " + repr(role) + "\n")
+            (source / "sitecustomize.py").write_text("raise RuntimeError('ambient startup must stay disabled')\n")
+        worker_source = r"""
+import importlib.util,sys
+from pathlib import Path
+import validation.synthetic_role as fixture
+def dispatch(method,args,kwargs,context):
+    assert method=='health' and args==[] and kwargs=={}
+    assert sys.flags.isolated==1 and sys.flags.no_site==1
+    assert fixture.__file__=='/work/validation/synthetic_role.py'
+    assert importlib.util.find_spec('only_protected') is None
+    return {'value':{'role':fixture.VALUE,'quiet_files':[p.name for p in Path('/work/target/quiet').glob('*')]}}
+"""
+        protected_source = r"""
+import hashlib,importlib.util,subprocess,sys
+from pathlib import Path
+import validation.synthetic_role as fixture
+def run(mode,argv,context):
+    assert sys.flags.isolated==1 and sys.flags.no_site==1
+    assert fixture.__file__=='/work/validation/synthetic_role.py' and fixture.VALUE=='protected'
+    assert importlib.util.find_spec('only_worker') is None
+    response=rpc('health',[],{})
+    assert response=={'value':{'role':'worker','quiet_files':[]}}
+    if argv[0]=='/work/scripts/quiet':
+        result=subprocess.run(argv,cwd=context['step']['cwd'],env=context['effective_environment'],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+        assert result.returncode==0
+        logs=sorted(Path('/work/target/quiet').glob('*.log'))
+        assert logs and any('cargo ' in p.read_text() for p in logs)
+        response=rpc('health',[],{})
+        assert response=={'value':{'role':'worker','quiet_files':[]}}
+    try:
+        Path('/work/forbidden-source-write').write_text('must fail')
+    except OSError:
+        pass
+    else:
+        raise AssertionError('protected source writable')
+    kind=context['step']['kind']
+    return {'protocol':2,'outcome':'prerequisite-passed' if mode=='prerequisite' else 'passed','completed':True,
+        'evidence':{'kind':kind,'identity':'synthetic actual isolated role imports and topology',
+        'sha256':hashlib.sha256(Path(fixture.__file__).read_bytes()).hexdigest(),
+        'completed_checks':3,'failed_checks':0,'skipped_checks':0}}
+"""
+        (self.root / "worker-export/worker.py").write_text(worker_source)
+        (self.root / "worker-export/rpc-contract.json").write_text('{"protocol":2,"operations":["health"]}\n')
+        (self.root / "protected-export/protected.py").write_text(protected_source)
+        self.python = os.environ.get("PLURX_KNOWLEDGE_OCI_PYTHON", "/usr/bin/python3")
+        self.config = isolation.IsolationConfig(engine=Path(os.environ["PLURX_KNOWLEDGE_OCI_ENGINE"]),
+            endpoint=os.environ.get("PLURX_KNOWLEDGE_OCI_ENDPOINT", "unix:///var/run/docker.sock"),
+            image=os.environ["PLURX_KNOWLEDGE_OCI_IMAGE"], owned_root=self.root,
+            candidate_root=self.root / "protected-source", grader_root=self.root / "protected-export",
+            runtime_root=self.root / "protected-runtime", candidate_readonly=True,
+            python_executable=self.python,
+            rustc_executable=os.environ.get("PLURX_KNOWLEDGE_OCI_RUSTC", "/usr/bin/rustc"),
+            cargo_executable=os.environ.get("PLURX_KNOWLEDGE_OCI_CARGO", "/usr/bin/cargo"),
+            acceptance_argv=((self.python, "/grader/protected.py", "/work"),), uid=65534, gid=65534)
+        self.addCleanup(isolation._ISSUED.clear)
+        self.addCleanup(isolation._QUALIFIED.clear)
+        self.addCleanup(isolation._STEPS.clear)
+        self.addCleanup(isolation._CONSUMED_STEPS.clear)
+        self.addCleanup(isolation._ACTIVE_ROOTS.clear)
+        self.addCleanup(isolation._RESERVED_STEPS.clear)
+
+    def run_roles(self, *, quiet=False):
+        config = self.config
+        if quiet:
+            wrapper = config.candidate_root / "scripts/quiet"
+            wrapper.parent.mkdir()
+            wrapper.write_bytes((Path(__file__).resolve().parents[2] / "scripts/quiet").read_bytes())
+            wrapper.chmod(0o755)
+            argv = ("/work/scripts/quiet", config.cargo_executable, "--version")
+            config = replace(config, require_rust=True, acceptance_argv=(argv,),
+                trusted_wrappers=(isolation.TrustedSourceFile("scripts/quiet", hashlib.sha256(wrapper.read_bytes()).hexdigest()),),
+                source_commit="a" * 40, source_archive_sha256="c" * 64)
+        argv = config.acceptance_argv[0]
+        worker_argv = (self.python, "/grader/worker.py")
+        worker_config = replace(config, candidate_root=self.root / "worker-source",
+            grader_root=self.root / "worker-export", runtime_root=self.root / "worker-runtime",
+            acceptance_argv=(worker_argv,), trusted_wrappers=(), uid=1000, gid=1000)
+        worker = isolation.ProtectedWorkerPlan(worker_config,
+            isolation.TrustedSourceFile("worker.py", hashlib.sha256((worker_config.grader_root / "worker.py").read_bytes()).hexdigest()),
+            worker_argv, ("health",), hashlib.sha256((worker_config.grader_root / "rpc-contract.json").read_bytes()).hexdigest(),
+            hashlib.sha256((config.grader_root / "protected.py").read_bytes()).hexdigest())
+        prerequisite_step = isolation.ExecutionStep("imports", argv, writes={"runtime"}, kind="prerequisite")
+        assertion_step = isolation.ExecutionStep("checks", argv, writes={"runtime"})
+        plan = isolation.FamilyPlanV2("synthetic-real-role-provenance", (prerequisite_step,), (assertion_step,),
+            isolation.TrustedSourceFile("protected.py", worker.proxy_sha256), worker=worker)
+        calls = []
+        actual_popen = isolation.subprocess.Popen
+        def observed_popen(arguments, **kwargs):
+            calls.append(arguments)
+            return actual_popen(arguments, **kwargs)
+        with patch.object(isolation.subprocess, "Popen", side_effect=observed_popen):
+            proof = isolation.probe(config)
+            self.assertEqual(proof.status, "verified")
+            qualification = isolation.qualify_family(config, plan, proof)
+            self.assertEqual(qualification.status, "qualified")
+            execution = isolation.execute_plan(config, isolation.probe(config), family=plan, prerequisite=qualification)
+            self.assertEqual((execution.status, execution.classification), ("passed", "passed"))
+        for code in (isolation._PROTECTED_CONTROLLER, isolation._WORKER_CONTROLLER):
+            launches = [args for args in calls if code in args]
+            self.assertTrue(launches, "must traverse actual isolated controller launch")
+            for args in launches:
+                index = args.index(code)
+                self.assertEqual(args[index - 3:index], ["-I", "-S", "-c"])
+        if quiet:
+            logs = config.runtime_root / "quiet-logs"
+            self.assertTrue(list(logs.glob("*.log")))
+            self.assertEqual(list((config.candidate_root / "target/quiet").iterdir()), [])
+            self.assertFalse((worker_config.runtime_root / "quiet-logs").exists())
+        self.assertFalse((config.candidate_root / "forbidden-source-write").exists())
+        self.assertEqual(isolation._OWNED_CONTAINERS, set())
+
+    def test_actual_isolated_controller_argv_imports_only_its_verified_role_source(self):
+        self.run_roles()
+
+    def test_unchanged_quiet_wrapper_writes_only_protected_runtime_with_source_readonly(self):
+        self.run_roles(quiet=True)
 
 
 if __name__ == "__main__":

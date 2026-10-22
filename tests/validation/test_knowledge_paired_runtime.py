@@ -185,6 +185,8 @@ class PairedRuntimeContracts(unittest.TestCase):
         initial = owner.source_manifest(current.candidate)
         (baseline.candidate / 'synthetic.py').write_bytes(b'setup rewrote its private helper')
         (baseline.runtime / 'installed').write_bytes(b'protected final runtime')
+        (baseline.runtime / 'quiet-logs').mkdir()
+        (baseline.runtime / 'quiet-logs/check.log').write_bytes(b'protected wrapper log')
         (baseline.worker_runtime / 'compiled').write_bytes(b'worker final runtime')
         body = {'schema_version': 2, 'status': 'qualified', 'initial_protected_source': initial,
                 'after': {'runtime': paired.measure_tree(baseline.runtime),
@@ -197,6 +199,8 @@ class PairedRuntimeContracts(unittest.TestCase):
         self.assertEqual((current.candidate / 'synthetic.py').read_bytes(), b'initial protected source')
         self.assertEqual(paired.measure_tree(current.runtime), body['after']['runtime'])
         self.assertEqual(paired.measure_tree(current.worker_runtime), body['after']['worker_runtime'])
+        self.assertEqual((current.runtime / 'quiet-logs/check.log').read_bytes(), b'protected wrapper log')
+        self.assertFalse((current.worker_runtime / 'quiet-logs').exists())
 
 
 if __name__ == '__main__':

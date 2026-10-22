@@ -267,11 +267,18 @@ _IMAGE = re.compile(r"(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}\Z")
 _SOURCE_EXCEPTIONS = frozenset({"crates/plurx-core/src/secrets.rs", "crates/plurx-compat-jellyfin/src/credentials.rs"})
 _WRAPPERS = frozenset({"scripts/quiet"})
 _SUPERVISOR = "import time; time.sleep(86400)"
+# Both controllers see their own independently verified /work bind mount.
+# Keep isolated Python startup; never recover ambient PYTHONPATH/site roots.
+_ROLE_IMPORT_BOOTSTRAP = r'''
+source_root="/work"
+if not os.path.isdir(source_root) or os.path.islink(source_root):raise RuntimeError("role source mount unavailable")
+sys.path.insert(0,source_root)
+'''
 _PROBE_CODE = r'''
 import errno,json,os,platform,socket,subprocess,sys
 sentinel, rustc, cargo, rust_required = sys.argv[1:]
 filesystem={}
-for label,directory in (("candidate","/work"),("runtime","/work/.runtime/tmp"),("grader","/grader")):
+for label,directory in (("candidate","/work"),("runtime","/work/.runtime/tmp"),("grader","/grader"),("quiet_logs","/work/target/quiet")):
     path=directory+"/.isolation-write-probe-"+str(os.getpid())
     try:
         descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -300,12 +307,14 @@ if rust_required == "yes":
     for name,path in (("rustc",rustc),("cargo",cargo)):
         outcome=subprocess.run([path,"--version"],cwd="/",stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         versions[name]={"returncode":outcome.returncode,"output":outcome.stdout.decode("utf-8","replace").strip()}
-print(json.dumps({"outside":outside,"network":{"interfaces":sorted(name for _,name in socket.if_nameindex()),"errno":network_errno},"versions":versions,"filesystem":filesystem},sort_keys=True))
+build_environment={"CARGO_BUILD_JOBS":os.environ.get("CARGO_BUILD_JOBS")} if rust_required=="yes" else {}
+print(json.dumps({"outside":outside,"network":{"interfaces":sorted(name for _,name in socket.if_nameindex()),"errno":network_errno},"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
 '''
 
 
 _OUTCOME_CONTROLLER = r'''
 import base64,contextlib,ctypes,hashlib,hmac,json,os,sys
+''' + _ROLE_IMPORT_BOOTSTRAP + r'''
 source,digest,mode,argv,context,limit=sys.argv[1:]
 argv=json.loads(argv);context=json.loads(context);limit=int(limit)
 auth=json.loads(sys.stdin.buffer.read(4097));secret=bytes.fromhex(auth["secret"])
@@ -392,7 +401,8 @@ _PROTECTED_CONTROLLER = _OUTCOME_CONTROLLER.replace(
     'print(canonical({"kind":"outcome","packet":{"body":body,"hmac":hmac.new(secret,canonical(body).encode(),hashlib.sha256).hexdigest()}}))')
 
 _WORKER_CONTROLLER = r'''
-import hashlib,json,sys
+import hashlib,json,os,sys
+''' + _ROLE_IMPORT_BOOTSTRAP + r'''
 source,digest,argv,context,bound=sys.argv[1:]
 argv=json.loads(argv);context=json.loads(context);bound=int(bound)
 with open(source,"rb") as stream:code=stream.read(8*1024*1024+1)
@@ -620,7 +630,22 @@ def _prepare(config: IsolationConfig):
                  and key not in reserved and key not in {"LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV"}
                  and not any(word in key for word in ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")), "unsafe callback environment key")
         _require(isinstance(value, str) and "\0" not in value and len(value) <= 4096, "bounded callback environment value required")
-    # Runtime artifacts have a dedicated durable mount; raw logs are outside it.
+    # The immutable quiet wrapper has one fixed output path. Only a registered,
+    # hash-verified protected wrapper receives this runtime-backed child mount.
+    if _quiet_log_mount(config):
+        for path in (config.candidate_root / "target", config.candidate_root / "target" / "quiet"):
+            if not path.exists():
+                path.mkdir(mode=0o755)
+            _no_symlinks(path, directory=True)
+        _require(not any((config.candidate_root / "target" / "quiet").iterdir()),
+                 "quiet log mountpoint must contain no source files")
+        logs = config.runtime_root / "quiet-logs"
+        if not logs.exists():
+            logs.mkdir(mode=0o777)
+        _no_symlinks(logs, directory=True)
+        logs.chmod(0o777)
+    # Runtime artifacts, including protected wrapper logs, share one measured
+    # durable state tree. Empty source mountpoints add no hidden source bytes.
     mountpoint = config.candidate_root / ".runtime"
     if not mountpoint.exists():
         mountpoint.mkdir(mode=0o755)
@@ -655,7 +680,10 @@ def _prepare(config: IsolationConfig):
                "caches": [_manifest(Path(cache.source), max_bytes=config.cache_max_bytes) for cache in config.readonly_caches]}
     payload = {"engine": str(config.engine), "engine_digest": engine_digest, "endpoint": config.endpoint,
                "image": config.image, "root": str(root), "mounts": [(str(p), target, ro) for p, target, ro in _mounts(config)],
-               "mount_identity": [(path.stat().st_dev, path.stat().st_ino) for path in mounts],
+               "mount_identity": [(path.stat().st_dev, path.stat().st_ino) for path, _, _ in _mounts(config)],
+               "quiet_log_mount": _quiet_log_mount(config),
+               "mountpoint_identity": [(str(path.relative_to(config.candidate_root)), path.stat().st_dev, path.stat().st_ino)
+                                       for path in _candidate_mountpoints(config)],
                "sources": sources, "argv": config.acceptance_argv, "candidate_readonly": config.candidate_readonly, "working_directory": config.working_directory, "environment": sorted(_environment(config).items()),
                "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit,
                           config.runtime_max_bytes, config.cache_max_bytes],
@@ -664,7 +692,9 @@ def _prepare(config: IsolationConfig):
                                   "members": sorted((v.path, v.sha256, v.git_blob) for v in source_members.values())},
                "user": [config.uid, config.gid], "runtimes": [config.python_executable, config.rustc_executable, config.cargo_executable, config.require_rust],
                "supervisor": _bytes_digest(_SUPERVISOR.encode()), "probe": _bytes_digest(_PROBE_CODE.encode()),
-               "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode()), "executor": _bytes_digest(Path(__file__).read_bytes())}
+               "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode()),
+               "role_import_bootstrap": _bytes_digest(_ROLE_IMPORT_BOOTSTRAP.encode()),
+               "executor": _bytes_digest(Path(__file__).read_bytes())}
     return private, payload
 
 
@@ -675,12 +705,26 @@ def _environment(config):
             "CARGO_NET_OFFLINE": "true", "PYTHONDONTWRITEBYTECODE": "1",
             "PATH": ":".join(dict.fromkeys((str(Path(config.python_executable).parent), str(Path(config.rustc_executable).parent), str(Path(config.cargo_executable).parent), "/usr/bin", "/bin"))),
             "RUSTC": config.rustc_executable, "CARGO": config.cargo_executable, "RUSTC_WRAPPER": "",
-            "RUSTC_WORKSPACE_WRAPPER": "", "RUSTUP_TOOLCHAIN": "1.97.1", **dict(config.environment)}
+            "RUSTC_WORKSPACE_WRAPPER": "", "RUSTUP_TOOLCHAIN": "1.97.1",
+            **({"CARGO_BUILD_JOBS": "1"} if config.require_rust else {}), **dict(config.environment)}
+
+
+def _quiet_log_mount(config):
+    return any(entry.path == "scripts/quiet" for entry in config.trusted_wrappers)
+
+
+def _candidate_mountpoints(config):
+    points = [config.candidate_root / ".runtime"]
+    if _quiet_log_mount(config):
+        points.extend((config.candidate_root / "target", config.candidate_root / "target/quiet"))
+    return points
 
 
 def _mounts(config):
+    logs = [(config.runtime_root / "quiet-logs", "/work/target/quiet", False)] if _quiet_log_mount(config) else []
     return [(config.candidate_root, "/work", config.candidate_readonly), (config.runtime_root, "/work/.runtime", False),
-            (config.grader_root, "/grader", True), *((Path(cache.source), cache.target, True) for cache in config.readonly_caches)]
+            (config.grader_root, "/grader", True), *logs,
+            *((Path(cache.source), cache.target, True) for cache in config.readonly_caches)]
 
 
 def _engine_environment(config):
@@ -854,8 +898,14 @@ def _configuration_probe(config, private):
                  and (not config.candidate_readonly or observed["filesystem"]["candidate"]["errno"] in {errno.EROFS, errno.EACCES})
                  and observed["filesystem"]["runtime"]["writable"] is True
                  and observed["filesystem"]["grader"]["writable"] is False and observed["filesystem"]["grader"]["errno"] in {errno.EROFS, errno.EACCES}, "filesystem permissions unproved")
+        quiet = observed["filesystem"]["quiet_logs"]
+        _require(quiet["writable"] is _quiet_log_mount(config) and
+                 (_quiet_log_mount(config) or quiet["errno"] in {errno.EROFS, errno.EACCES, errno.ENOENT}),
+                 "protected quiet log write boundary unproved")
         _require(bool(re.fullmatch(r"3\.[0-9]+\.[0-9]+", observed["versions"]["python"])), "Python runtime unavailable")
         if config.require_rust:
+            _require(observed["build_environment"] == {"CARGO_BUILD_JOBS": _environment(config)["CARGO_BUILD_JOBS"]},
+                     "Rust build environment unproved")
             rust = observed["versions"]["rustc"]
             cargo = observed["versions"]["cargo"]
             _require(rust["returncode"] == 0 and re.match(r"rustc 1\.97\.1(?: |$)", rust["output"]), "pinned Rust runtime unavailable")
@@ -928,7 +978,9 @@ def _family_binding(payload, plan, baseline_source_digest, observed_runtime):
             "source_archive": payload["source_archive"], "grader": payload["sources"]["grader"],
             "runtime_dependencies": payload["sources"]["runtime"], "caches": payload["sources"]["caches"],
             "runtimes": payload["runtimes"], "environment": payload["environment"],
-            "limits": payload["limits"], "user": payload["user"], "controller": _bytes_digest(_OUTCOME_CONTROLLER.encode())}
+            "limits": payload["limits"], "user": payload["user"], "controller": _bytes_digest(_OUTCOME_CONTROLLER.encode()),
+            "quiet_log_mount": payload["quiet_log_mount"], "role_import_bootstrap": payload["role_import_bootstrap"],
+            "probe": payload["probe"], "executor": payload["executor"]}
 
 
 def _issued_probe(receipt, private, payload):
@@ -1121,6 +1173,7 @@ def _worker_configuration(config, plan, step=None):
     _require((config.candidate_readonly or trusted_install) and current.candidate_readonly and config.uid != current.uid,
              "protected source policy and readonly worker/distinct UID required")
     _require(worker.argv in current.acceptance_argv and current.python_executable == worker.argv[0], "registered fixed worker runtime required")
+    _require(not current.trusted_wrappers and not _quiet_log_mount(current), "worker cannot receive protected wrapper logs")
     for left, target, readonly in _mounts(config):
         for right, other_target, other_readonly in _mounts(current):
             shared_cache = (readonly and other_readonly and target.startswith("/offline-cache/")
@@ -1434,7 +1487,8 @@ def _v2_policy(config, payload, plan, step=None):
             "effective_environments": [[sorted(_environment(_step_config(config, step)).items()) for step in steps]
                                        for steps in (plan.prerequisite_steps, plan.acceptance_steps)],
             "supervisor": payload["supervisor"], "probe": payload["probe"], "controller": payload["outcome_controller"],
-            "candidate_readonly": payload["candidate_readonly"], "executor": payload["executor"]}
+            "candidate_readonly": payload["candidate_readonly"], "quiet_log_mount": payload["quiet_log_mount"],
+            "role_import_bootstrap": payload["role_import_bootstrap"], "executor": payload["executor"]}
     if plan.worker is not None:
         worker_config, worker_payload = _worker_configuration(config, plan, step)
         result["candidate_readonly"] = [[part.protected_readonly for part in steps]
@@ -1443,6 +1497,8 @@ def _v2_policy(config, payload, plan, step=None):
             ("engine_digest", "endpoint", "image", "argv", "candidate_readonly", "limits", "source_archive", "user", "runtimes")}
         result["worker_policy"]["grader"] = worker_payload["sources"]["grader"]
         result["worker_policy"]["caches"] = worker_payload["sources"]["caches"]
+        result["worker_policy"]["quiet_log_mount"] = worker_payload["quiet_log_mount"]
+        result["worker_policy"]["role_import_bootstrap"] = worker_payload["role_import_bootstrap"]
         result["broker"] = _bytes_digest(_PROTECTED_CONTROLLER.encode() + _WORKER_CONTROLLER.encode() + _RESOURCE_CODE.encode())
     return result
 
@@ -1543,11 +1599,11 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
         return _unavailable_step(private, plan, mode, index, "fresh-probe-required", prerequisite)
     versions = issued[1]["observations"]["observed_probes"]["versions"]
     parent = _issued_step(previous) if previous is not None else None
-    work_identity = {key: before[key] for key in ("root", "mount_identity")}
+    work_identity = {key: before[key] for key in ("root", "mount_identity", "mountpoint_identity")}
     work_identity["mounts"] = [(path, target) for path, target, readonly in before["mounts"]]
     if plan.worker is not None:
         _, worker_identity = _worker_configuration(config, plan, step)
-        work_identity["worker"] = {key: worker_identity[key] for key in ("root", "mounts", "mount_identity")}
+        work_identity["worker"] = {key: worker_identity[key] for key in ("root", "mounts", "mount_identity", "mountpoint_identity")}
     baseline = before_sources.get("worker_candidate", before_sources["candidate"])
     qualification = None
     if mode == "acceptance":
