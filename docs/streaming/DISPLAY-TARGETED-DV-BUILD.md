@@ -1,36 +1,175 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A P8 cells passed; scanner controls partially passed, fixture repair pending review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (source), coordinator (native/media/publication) ·
+**Status:** PR A has reviewed source and completed non-P7 evidence; additive P7 continuation and promotion remain open · **Updated:** 2026-10-22 · **Owner:** direct GPT (PR #1216), Sol (source), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
+
+## PR B implementation checkpoint
+
+**Authored, not qualified (2026-10-22).** Explicit targeted HDR10 windows now
+resolve output mastering metadata before encoding and author it after successful
+private helper/encoder completion, before encoded-window validation and
+publication. The writer is independent of the encoder family. The same payloads
+replace stale encoder declarations in hvcC, init `mdcv`/`clli` and prefix SEI on
+every IRAP; unrelated SEI, coded picture NALs, audio and sample timing survive.
+The completed trailer is rebuilt because init/sample growth moves offsets.
+
+Consistent title L9 supplies mastering primaries. Its preset coordinates come
+from the pinned Dolby Vision dependency; custom coordinates convert from
+1/32767 into ST 2086's 1/50000 units. Missing L9 may use MDCV from the exact
+selected held source stream's already-attested probe side data. Contradictory
+L9, reserved or unrepresentable primaries, malformed/conflicting source MDCV,
+and missing source primaries refuse the explicit target with a named reason.
+No BT.2020 container colour tag or assumed P3 gamut supplies missing mastering
+facts. Title L6 supplies the minimum; missing L6 uses trusted source MDCV, then the
+established renderer floor of 0.005 nits when MDCV is absent. Contradictory L6
+and source minima outside the renderer range refuse. The effective minimum is
+resolved before helper/export policy and rendition identity are frozen; helper
+arguments, completed-plan black level, trace validation, init and IRAP metadata
+all consume that same target. A frozen target cannot silently acquire another
+minimum. Maximum luminance is the bucket,
+MaxCLL is min(bucket, scanned title L1 peak), and MaxFALL is zero (unknown).
+Default/master and elided policies retain their original encoded bytes.
+
+Authored regressions cover preset/custom units and unknown/conflict handling,
+selected-stream rational MDCV parsing, stale prefix/suffix SEI replacement for
+IRAP types and NAL length sizes, identical init/in-band payloads, unchanged
+coded pictures/audio/timing, and an independent decoded-frame ffprobe check.
+No regression has run: completed-code independent review precedes functional
+validation. Pinned compilation, independent review, once-only regressions,
+actual encoder-family/device acceptance and publication remain open. No targeting
+control or later C–F feature is introduced by B.
+
+**Independent-review P2 repair authored:** the previous output-only source-MDCV
+fallback could label 0.0017 nits while the helper and semantic target still used
+0.005. `resolve_source` now chooses one effective target before execution, and
+metadata accepts only that resolved target. Consistent L9 with missing L6/MDCV
+uses the established floor; unknown primaries and inconsistent L6/L9 still
+refuse. Focused unexecuted controls bind source17 through helper args, completed
+black level, semantic identity, trace, init and every IRAP. New pinned compile
+and narrow independent closure are required; no previous pass is relabelled.
+
+
+## PR C source checkpoint (2026-10-22)
+
+**Status:** source authored in an isolated branch; independent completed-code
+review, pinned compilation, focused regressions and publication remain open.
+PR B metadata is integrated into this candidate; its acceptance remains required
+before the setting is published. No functional pass or physical display
+acceptance is claimed here.
+
+- `DisplayCaps.max_nits` remains an optional integer; optional `peak_source`
+  is `platform` or `viewer`. Both sources use the exact downward bucket table.
+  No display minimum is collected. The server selects from the admitted
+  canonical caps and source-fenced complete-title probe; Unknown, incomplete,
+  ineligible and elided titles retain the exact master export policy, with the
+  reason in plan notes and Activity.
+- `playback.dolby_vision_display_target` / `dolby_vision_display_target` is an
+  independent default-off Developer preference. Helper/HDR10-E, active peak
+  reports, current-schema scan/eligibility counts and per-bucket storage are
+  advisory observations. None disables the toggle, rejects Save or changes the
+  saved choice. This switch never enables HDR10-E itself.
+- A live processed trial freezes an explicit title-qualified target in its
+  private candidate context and runtime recipe. Every later window uses that
+  same policy. Exact predecessor-root reuse also requires target equality;
+  ordinary VOD and pre-encode paths always keep `None` (master). The client
+  snapshot is unchanged for prepared successors and Auto rung selection.
+  The accepted probe's selected playable stream resolves the effective mastering
+  minimum before this context or preparation identity is frozen. The held-source
+  constructor independently resolves the same title/stream facts and compares
+  the exact target; a source17 floor cannot retain the old default50 identity.
+
+- **Cache disposition:** the current architecture marks processed roots
+  `ephemeral_processing`; `RetainedRegistry::offer` excludes them. There are
+  zero reusable retained buckets per title, satisfying the at-most-two bound.
+  No persisted bucket cache or new LRU is introduced. Existing private-root
+  readers, preparation reservations and shared disk budget own retirement and
+  pressure. Developer distinguishes live materialized media bytes from zero
+  retained cache bytes for each bucket. Activity says that targeting renders
+  live and has no retained bucket cache.
+- DYN uses a `DisplayTargetMapping` operation from the current published
+  effective-processing receipt, and names the bucket and **L1 only** limit.
+  A configured target alone cannot activate the badge. Activity reports the
+  raw peak, platform/viewer provenance, selected target or master, and live
+  rendering.
+- **Whole-session refusal:** an invalid runtime L1 refuses the frozen
+  targeted rendition and fences its processing episode; later windows never
+  silently become master. Before publication the established whole-start
+  fallback/refusal remains, with its actual delivered grade. It is not called
+  reconstructed master. A separate processed-master retry is not implemented:
+  the existing runtime boundary erases source/RPU/encoder/target refusals into
+  `String`, so a safe target-specific retry requires a typed error seam first.
+  No string-matching retry, watchdog or per-window fallback is added.
+
+Static inspection only: changed JavaScript files parse with `node --check`;
+`git diff --check` passes. Local rustfmt parsed/formatted changed Rust sources;
+this does not establish pinned compilation. Knowledge context identified the
+six-rule curated routing boundary with no conflicts. The requested
+`--base origin/main --worktree` obligation query refused with `KnowledgeError`;
+`--base HEAD --worktree` against the actual A base returned the standing
+capability-profile and execution-plan obligations, with no conflicts. These
+existing routing decisions are unchanged; graph metadata does not establish
+execution or targeting acceptance.
+
+Authored regression anchors (not executed):
+
+- `caps.rs::display_peak_bucket_rounds_down_and_unknown_stays_master`
+- `enhancement.rs::targeted_hdr10_dyn_names_bucket_and_l1_limit`
+- `dv_processing/tests.rs::effective_target_report_rejects_ambiguous_or_unsupported_buckets`
+- `manager/create.rs::display_target_declines_are_named_and_elision_is_master`
+- `manager/create.rs::source_mastering_resolves_before_the_live_target_is_frozen`
+- `session_request.rs::resolved_source_floor_changes_the_actual_processed_preparation_binding`
+- `http/tests.rs::display_target_setting_defaults_off_and_saves_despite_unmet_advice`
+- `settings-sections.test.js`: editable targeting and existing independent-save,
+  stale-reply and replacement-card tests extended to the new preference.
 
 ## PR A implementation checkpoint
 
-- **Current qualification (2026-10-22; supersedes historical states below):**
-  the independently approved base-receipt repair compiled and its exact new
-  regression passed once. Both real P8 mapped cells, 1000 and 1600 nits, passed
-  with complete 17,983-frame L1 observation and target-operation receipts.
-  Retain these and the prior 99 Rust / 141 shader / 70 helper passes unchanged.
-  P7's corrected copied interval passed all payload/timing/audio/FEL/raw-L1
-  preparation checks, but its decoded scanner exited 1 with no aggregate:
-  `complete selected video duration tag`. The selected video starts at 0.125 s,
-  ends at 750.165 s and declares `DURATION=00:12:30.165000000`; subtracting its
-  origin compares the wrong domain. The sibling renderer already uses the
-  selected-track tag as an endpoint. Only the scanner's two comparisons change;
-  relative `AVStream.duration`, independent selected-video coverage, decoder
-  drains and the one-tick allowance remain intact. No endpoint-or-span fallback,
-  audio/container substitution or real-input retiming/tag rewrite is introduced.
-  Scanner-only linking and independent delta review passed. The manual control
-  `tools/dv_processing/controls/test_scan_duration_tag.py` passed nine P7 scanner
-  observations, then failed before its truncation scan: a time cutoff produced
-  14 rather than 17 coded packets. The control-only repair copies exactly 17 AUs,
-  muxes full unrelated audio separately, verifies original payload/PTS/durations,
-  and preserves the 18-picture endpoint declaration. Hash-bound continuation
-  retains the nine passes without remux/probe/scan replay. New control-delta review,
-  repaired P7 truncation and ten unexecuted P8 observations precede failed P7
-  decoded/policy and mapped cells. No scanner rebuild or unchanged-pass replay.
-  Separate FEL integration, one fast lane and API merge remain open.
-  No display/deployment/client-DYN/general Dolby accuracy claim; output-metadata
-  PR B must land before any user-exposed targeting setting.
+- **Current qualification (2026-10-22):** the original `a49`/`c036` source
+  review is retained. Scanner controls have 20 passes. The standalone P7 run
+  retained its actual `c036` listing, 17,983 valid frames, observed maximum
+  3,441 nits, and passing policy results. Owner-interrupted attempt 258 stopped
+  at 1,000 nits after 137/1,000 and is neither a product defect nor a pass;
+  1,600 nits was not run. Additive continuation 259 completed the same
+  17,983-frame scan (zero missing/invalid, maximum 3,441 nits), then its
+  1,000-nit cell failed with true exit 101: the helper required an observed
+  zero source origin. Its 1,600-nit cell was not run; there are zero new
+  mapped-P7 passes. The unchanged original input has held FORMAT/video origin
+  0.125 seconds and audio start 0.135 seconds. Its original packet cadence
+  agrees with the output grid within the existing 1 ms source tick after
+  subtracting that common origin; input retiming is neither needed nor used.
+
+  The bounded root-cause candidate carries the exact observed common origin
+  from the held probe into absolute source windows, helper receipt validation
+  and both output-grid mappings. Original BL/EL/RPU keys and the soundtrack's
+  held FORMAT offset stay intact. Missing, negative, producer-default or
+  differing FORMAT/video origins still refuse explicitly. Candidate source,
+  authored regressions and the [origin contract](DV_PROCESSING_TOOLS.md#three-clocks-share-one-observed-common-origin)
+  await independent delta review, native helper rebuild/daemon relink and
+  focused qualification. No test or native success is inferred from source.
+
+  Current-main source integration is `a316`, plus test-only missing scanner
+  fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.
+  The original compile exposed E0063 in a scanner `/bin/false` test fixture;
+  that fixture-only repair passed failed-only compile 261 on exact
+  `fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8` with pinned Rust 1.97.1 and true
+  outer exit 0. The check covered `plurxd` and `plurx-core` all targets with
+  `hiqlite-contract-tests`, without units. PR B integration `2038269` is queued
+  for pinned compile 262. Retain prior 99 Rust passes, the new receipt regression,
+  141 shader cases / 866,304 samples, 70 helper results, and P8 passes with
+  their original source attribution; do not replay or relabel them.
+
+  Separate FEL comparison/interpreter work is excluded from PR A: no reviewed
+  production fix is available to integrate (the original contract, §§113–115,
+  permits this separation). Full-app C1 still has a final source-EOF failure;
+  full-clip and general FEL accuracy remain unclaimed. PR #1216 is owned by
+  direct GPT/root; existing full and delta reviews remain retained. Narrow
+  integration review, completed P7 evidence, current fast lane, and API merge
+  with 22 regression anchors remain open. B metadata `2038269` is complete but
+  unqualified. C server and D client work are being implemented by separate Sol
+  agents in isolated clones; E/F remain planned. No setting is exposed before B,
+  and Apple peak reporting, device acceptance, and deployment are not claimed.
+
+### Historical qualification records (not current status)
 
 - The corrected real P8 excerpt reached complete 17,983-frame L1 observation and
   master preparation, then its single 1000-nit test failed with exit 101: the
@@ -102,7 +241,7 @@
   shader, policy/store/helper and prior B evidence; check only genuinely changed
   surfaces, not whole suites or reviews for base motion. No display/deploy claim.
 
-### Historical source checkpoints (not current acceptance)
+#### Original source checkpoints (historical)
 
 - Independent Astra reviewed the complete `0d47bc6ac` candidate: one blocking F1,
   unrelated chapters/HEVC/content-encoding grafts invalidating title generations.
@@ -537,7 +676,7 @@ a per-window target/master mix.
 
 | Level | Test | Proves |
 |---|---|---|
-| Core unit | bucket mapping, including elision; caps parsing of `min_nits`/`source` | mapping is total, rounds down, refuses junk |
+| Core unit | bucket mapping, including elision; caps parsing of `max_nits`/`peak_source` | mapping is total, rounds down, refuses junk |
 | Core unit | `playback_enhancement` with `display_target` | DYN active only with a target, and the text names the nits |
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
 | Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
@@ -568,8 +707,8 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 |---|---|---|
 | A | Title L1 scan (stored with the DV facts) + helper target policy + L1 → CIE_Y + ST 2094-10 + `DvExportPolicy` identity + report operation + control scripts | server image |
 | B | MDCV/CLL writer for processed output (post-encode, reusing `hdr10_index.rs`) | server image |
-| C | Caps `min_nits`/`source`, buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
-| D | Android HdrCapabilities + web display-peak setting (+ Apple value) | server image (web) + Android build |
+| C | Caps `max_nits`/`peak_source` (no display minimum), buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
+| D | Android / Android TV HdrCapabilities + web display-peak setting; Apple excluded in phase 1 | server image (web) + Android build |
 | E | Phase 2 trims (after acceptance) | server image |
 | F | Phase 3 SDR target | server image |
 

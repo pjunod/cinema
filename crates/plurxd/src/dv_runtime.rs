@@ -74,6 +74,7 @@ impl ToolSet {
     pub(crate) fn lifecycle_fixture(identity: DvBackendIdentity) -> Self {
         Self {
             renderer: PathBuf::from("/bin/false"),
+            scanner: PathBuf::from("/bin/false"),
             renderer_env: Vec::new(),
             identity,
             artifacts: Arc::new(Vec::new()),
@@ -416,7 +417,19 @@ impl PrivateWindow {
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
         let bytes = match destination {
-            DvDestination::Hdr10 => self.encoded,
+            DvDestination::Hdr10 => match self.display_target {
+                Some(target) => {
+                    let metadata = target
+                        .output_metadata()
+                        .map_err(|error| error.to_string())?;
+                    plurx_core::transcode::dv_processing::dv_author_hdr10_window(
+                        &self.encoded,
+                        metadata,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+                None => self.encoded,
+            },
             DvDestination::Profile81 => dv_author_profile81_window(
                 &self.encoded,
                 raster,
@@ -558,16 +571,98 @@ pub(crate) fn completed_window_encoder(
     }
 }
 
+/// Parse only the already-attested selected video stream, never a container or
+/// another track. FFprobe's rational values are converted with integer rounding
+/// to ST 2086 units. A missing record differs from malformed/conflicting data.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_mastering_metadata(
+    stream: &serde_json::Value,
+) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+    use plurx_core::transcode::dv_processing::DvSourceMastering;
+    let invalid = || "targeted HDR10 source MDCV malformed or conflicting".to_owned();
+    let Some(records) = stream.get("side_data_list") else {
+        return Ok(None);
+    };
+    let records = records.as_array().ok_or_else(invalid)?;
+    fn scaled(record: &serde_json::Value, field: &str, scale: u64) -> Option<u64> {
+        let text = record.get(field)?.as_str()?;
+        let (numerator, denominator) = text.split_once('/')?;
+        let numerator = numerator.parse::<u64>().ok()?;
+        let denominator = denominator.parse::<u64>().ok()?;
+        if denominator == 0 {
+            return None;
+        }
+        let value = u128::from(numerator) * u128::from(scale);
+        u64::try_from((value + u128::from(denominator / 2)) / u128::from(denominator)).ok()
+    }
+    let mut result = None;
+    let mut previous_maximum = None;
+    for record in records.iter().filter(|record| {
+        record
+            .get("side_data_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("Mastering display metadata")
+    }) {
+        let mut xy = [0; 8];
+        for (at, name) in [
+            "red_x",
+            "red_y",
+            "green_x",
+            "green_y",
+            "blue_x",
+            "blue_y",
+            "white_point_x",
+            "white_point_y",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            xy[at] = scaled(record, name, 50_000)
+                .and_then(|v| u16::try_from(v).ok())
+                .ok_or_else(invalid)?;
+        }
+        let minimum = scaled(record, "min_luminance", 10_000)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(invalid)?;
+        let maximum = scaled(record, "max_luminance", 10_000).ok_or_else(invalid)?;
+        if maximum == 0 || maximum > 100_000_000 || u64::from(minimum) >= maximum {
+            return Err(invalid());
+        }
+        plurx_core::fmp4::Hdr10OutputMetadata::new(xy, 10_000, minimum, 0)
+            .map_err(|_| invalid())?;
+        let next = DvSourceMastering {
+            primaries_rgbw: xy,
+            min_1e4_nits: minimum,
+        };
+        if result.is_some_and(|old| old != next)
+            || previous_maximum.is_some_and(|old| old != maximum)
+        {
+            return Err(invalid());
+        }
+        result = Some(next);
+        previous_maximum = Some(maximum);
+    }
+    Ok(result)
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) struct RuntimeRecipe {
     pub(crate) tools: Arc<ToolSet>,
     pub(crate) source: Arc<crate::fragment_index_cluster::SourceFence>,
     pub(crate) source_offsets: Arc<tokio::sync::Semaphore>,
     pub(crate) source_tick: (u32, u32),
+    pub(crate) source_origin: plurx_core::transcode::dv_processing::DvSourceOrigin,
     pub(crate) native_bl: (u32, u32),
     /// The held demux origin the Encoding froze for its soundtrack.
     pub(crate) source_clock: plurx_core::transcode::VodSourceClock,
+    /// Selected held stream side data. Parse failures affect explicit targets
+    /// only; default/master processing does not consume or invent these facts.
+    pub(crate) source_mastering:
+        Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
     pub(crate) preferences: plurx_core::transcode::dv_processing::DvPreferences,
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) display_target_note: Option<String>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) encoder: plurx_core::transcode::Encoder,
@@ -589,6 +684,21 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// Physical/internal callers resolve before constructing the export policy;
+    /// a frozen live target is rechecked and cannot acquire another floor.
+    pub(crate) fn resolve_display_target(
+        &self,
+        target: plurx_core::transcode::dv_processing::DvDisplayTarget,
+    ) -> Result<plurx_core::transcode::dv_processing::DvDisplayTarget, String> {
+        let source = if target.needs_source_mastering() {
+            self.source_mastering.clone()?
+        } else {
+            None
+        };
+        target
+            .resolve_source(source)
+            .map_err(|error| error.to_string())
+    }
     pub(crate) fn clear_published_window(&self) {
         self.published_receipt
             .lock()
@@ -686,31 +796,19 @@ impl RuntimeRecipe {
         entry: &plurx_core::segplan::PlanEntry,
         grid: plurx_core::transcode::VodFrameGrid,
     ) -> Result<crate::dv_segment::SegmentWindow, String> {
-        fn subtract_tick(value: u64, grid: u32, tick: (u32, u32)) -> Result<(i64, u32), String> {
-            let numerator = (i128::from(value) * i128::from(tick.1)
-                - i128::from(tick.0) * i128::from(grid))
-            .max(0);
-            let denominator = u64::from(grid) * u64::from(tick.1);
-            let mut a = numerator as u128;
-            let mut b = u128::from(denominator);
-            while b != 0 {
-                (a, b) = (b, a % b);
-            }
-            let divisor = a.max(1);
-            Ok((
-                i64::try_from(numerator / divisor as i128)
-                    .map_err(|_| "source window numerator overflow")?,
-                u32::try_from(u128::from(denominator) / divisor)
-                    .map_err(|_| "source window clock overflow")?,
-            ))
-        }
         let end = entry
             .start_ticks
             .checked_add(entry.duration_ticks)
             .ok_or("window endpoint overflow")?;
         Ok(crate::dv_segment::SegmentWindow {
-            start: subtract_tick(entry.start_ticks, grid.numerator, self.source_tick)?,
-            end: subtract_tick(end, grid.numerator, self.source_tick)?,
+            start: self
+                .source_origin
+                .source_boundary(entry.start_ticks, grid.numerator, self.source_tick)
+                .map_err(|e| e.to_string())?,
+            end: self
+                .source_origin
+                .source_boundary(end, grid.numerator, self.source_tick)
+                .map_err(|e| e.to_string())?,
             max_preroll: 512,
         })
     }
@@ -784,13 +882,14 @@ impl RuntimeRecipe {
             cancel,
             registration_hook,
             absolute_deadline,
-            None,
+            self.display_target,
         )
         .await
     }
 
-    /// Explicit internal control policy; ordinary production entrypoints above
-    /// always pass None. No environment/caps/settings selection occurs here.
+    /// Explicit immutable policy; live preparation freezes the title-qualified
+    /// target, ordinary VOD/pre-encode recipes retain None. No per-window
+    /// environment/caps/settings selection occurs here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,
@@ -823,6 +922,9 @@ impl RuntimeRecipe {
                 "DV processing previously failed for this playback/source/settings/backend".into(),
             );
         }
+        let display_target = display_target
+            .map(|target| self.resolve_display_target(target))
+            .transpose()?;
         let cancellation = cancel.clone();
         let result: Result<_, String> = async {
             use plurx_core::transcode::dv_processing::{
@@ -940,6 +1042,7 @@ impl RuntimeRecipe {
             let first_frame = entry.start_ticks / u64::from(grid.denominator);
             let observed = private.observe(
                 &window,
+                self.source_origin,
                 plan.decode().input_video_stream(),
                 0,
                 grid,
@@ -1065,6 +1168,7 @@ impl RuntimeRecipe {
                 source_keys: &source_keys,
                 source_rpus: &source_rpus,
                 source_tick: self.source_tick,
+                source_origin: self.source_origin,
                 grid,
                 first_global_frame: first_frame,
                 encoded: &verified.bytes,
@@ -1480,6 +1584,17 @@ fn timestamp(value: &str) -> Result<plurx_core::transcode::dv_processing::DvTime
         .map_err(|e| e.to_string())
 }
 #[cfg(target_os = "linux")]
+fn validate_window_origin(
+    origin: &str,
+    provenance: &str,
+    expected: plurx_core::transcode::dv_processing::DvSourceOrigin,
+) -> Result<(), String> {
+    if provenance != "observed_stream_start_time" || timestamp(origin)? != expected.timestamp() {
+        return Err("source window origin differs from observed held common origin".into());
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
 fn tick_timestamp(
     ticks: i64,
     clock: (u32, u32),
@@ -1504,6 +1619,7 @@ impl PrivateWindow {
     pub(crate) fn observe(
         &self,
         window: &crate::dv_segment::SegmentWindow,
+        source_origin: plurx_core::transcode::dv_processing::DvSourceOrigin,
         stream: u32,
         epoch: u64,
         grid: plurx_core::transcode::VodFrameGrid,
@@ -1640,6 +1756,11 @@ impl PrivateWindow {
             || "bt2020-pq-master-clip".to_owned(),
             DvDisplayTarget::output_policy,
         );
+        validate_window_origin(
+            &complete.source_origin,
+            &complete.origin_provenance,
+            source_origin,
+        )?;
         if tick.0 == 0
             || complete.frames != frames
             || pairs.len() != frames
@@ -1656,8 +1777,6 @@ impl PrivateWindow {
             || complete.preroll_pairs > usize::from(window.max_preroll)
             || complete.paired_pictures > usize::from(window.max_preroll) + frames + 1
             || complete.source_bytes_read > 128 * 1024 * 1024
-            || complete.source_origin != "0/1"
-            || complete.origin_provenance != "observed_stream_start_time"
             || complete.membership != "frame_pts_in_half_open_window_durations_unclipped"
             || timestamp(&complete.requested_start)?
                 != DvTimestamp::new(window.start.0, window.start.1).map_err(|e| e.to_string())?
@@ -1685,7 +1804,16 @@ impl PrivateWindow {
             .values()
             .map(|row| serde_json::to_value(row).expect("integer target trace serializes"))
             .collect();
-        let mut trace = Vec::new();
+        let mut trace = serde_json::to_vec(&(
+            "observed_common_stream_format_origin-v1",
+            source_origin,
+            complete.origin_provenance.as_str(),
+            stream,
+            epoch,
+            window.start,
+            window.end,
+        ))
+        .map_err(|e| e.to_string())?;
         let timing = self.evidence.timing()?;
         let expected_timing = String::from_utf8(timing).map_err(|e| e.to_string())?;
         let mut observed_timing = String::new();
@@ -1825,7 +1953,7 @@ impl PrivateWindow {
             return Err("private timing differs from the source trace".into());
         }
         let source_keys: Vec<_> = pictures.iter().map(|frame| frame.key.clone()).collect();
-        dv_map_source_to_output_grid(&source_keys, tick, grid, first_frame, frames)
+        dv_map_source_to_output_grid(&source_keys, tick, source_origin, grid, first_frame, frames)
             .map_err(|e| e.to_string())?;
         Ok(ObservedWindow {
             pictures,
@@ -1836,6 +1964,43 @@ impl PrivateWindow {
             runtime_device,
             decoder,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod source_origin_tests {
+    use super::validate_window_origin;
+    use plurx_core::transcode::{
+        dv_processing::{DvSourceOrigin, DvTimestamp},
+        VodSourceClock,
+    };
+
+    #[test]
+    fn renderer_receipt_requires_exact_observed_held_common_origin() {
+        for (origin, micros, equivalent) in [("0/1", 0, "0/1000"), ("1/8", 125000, "125/1000")] {
+            let expected = DvSourceOrigin::observed_common(
+                DvTimestamp::new(micros, 1000000).expect("valid expected held-format timestamp"),
+                VodSourceClock::ReportedOrigin(micros),
+            )
+            .expect("valid observed common origin");
+            for actual in [origin, equivalent] {
+                validate_window_origin(actual, "observed_stream_start_time", expected)
+                    .expect("matching held-origin receipt");
+            }
+            for wrong in ["1/7", "124/1000", "N/A", "1/0", "9223372036854775808/1"] {
+                assert!(
+                    validate_window_origin(wrong, "observed_stream_start_time", expected).is_err()
+                );
+            }
+            for provenance in [
+                "",
+                "unknown",
+                "producer_default_zero",
+                "first_window_picture",
+            ] {
+                assert!(validate_window_origin(origin, provenance, expected).is_err());
+            }
+        }
     }
 }
 
@@ -1893,6 +2058,46 @@ mod helper_decoder_tests {
             assert!(parse(forged).validate(target, raw).is_err(), "{field}");
         }
         assert!(parse(valid).validate(target, b"not an RPU").is_err());
+    }
+
+    #[test]
+    fn resolved_source_floor_is_required_by_the_helper_trace() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+        else {
+            panic!("target");
+        };
+        let target = target
+            .resolve_source(Some(DvSourceMastering {
+                primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+                min_1e4_nits: 17,
+            }))
+            .expect("source floor");
+        assert_eq!(target.endpoint_args(), ["17", "4000"]);
+        let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
+        let (max, avg) = target.validate_rpu(raw).expect("retained L1");
+        let mut row = serde_json::json!({"frame":0,"nits":1600,"method":DISPLAY_TARGET_METHOD,
+            "curve":"annex-b2-rgb","max_pq":max,"avg_pq":avg,"max0_fallback":max==0,
+            "title_min_1e4":17,"title_peak":4000});
+        let parse = |row| serde_json::from_value::<super::DisplayTargetRow>(row).expect("trace");
+        assert!(parse(row.clone()).validate(target, raw).is_ok());
+        row["title_min_1e4"] = 50.into();
+        assert!(
+            parse(row).validate(target, raw).is_err(),
+            "old default floor cannot describe source17 execution"
+        );
     }
 
     #[test]
@@ -2293,5 +2498,65 @@ mod hdr10e_export_throughput {
             .find("writer_wait_idle()")
             .expect("previous frame written");
         assert!(idle < handoff.find("release_held()").expect("surfaces released"));
+    }
+}
+
+#[cfg(test)]
+mod output_metadata_tests {
+    use super::source_mastering_metadata;
+    #[test]
+    fn targeted_metadata_source_fallback_requires_complete_selected_stream_mdcv() {
+        let record = serde_json::json!({"side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000",
+            "green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000",
+            "white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "max_luminance":"4000/1","min_luminance":"17/10000"});
+        let stream = |records| serde_json::json!({"side_data_list":records});
+        let actual = source_mastering_metadata(&stream(vec![record.clone()]))
+            .expect("valid MDCV")
+            .expect("present");
+        assert_eq!(
+            actual.primaries_rgbw,
+            [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450]
+        );
+        assert_eq!(actual.min_1e4_nits, 17);
+        assert_eq!(
+            source_mastering_metadata(&stream(vec![record.clone(), record.clone()]))
+                .expect("same duplicate"),
+            Some(actual)
+        );
+        assert_eq!(
+            source_mastering_metadata(&serde_json::json!({"color_primaries":"bt2020"}))
+                .expect("missing"),
+            None
+        );
+        for field in ["red_x", "white_point_y", "min_luminance", "max_luminance"] {
+            let mut partial = record.clone();
+            partial.as_object_mut().expect("record").remove(field);
+            assert!(
+                source_mastering_metadata(&stream(vec![partial])).is_err(),
+                "partial {field}"
+            );
+        }
+        for (field, value) in [
+            ("green_x", "1/0"),
+            ("red_y", "NaN"),
+            ("blue_x", "70000/50000"),
+            ("min_luminance", "5000/1"),
+            ("max_luminance", "0/1"),
+        ] {
+            let mut invalid = record.clone();
+            invalid[field] = value.into();
+            assert!(
+                source_mastering_metadata(&stream(vec![invalid])).is_err(),
+                "invalid {field}"
+            );
+        }
+        for (field, value) in [("red_x", "33000/50000"), ("max_luminance", "1000/1")] {
+            let mut conflicting = record.clone();
+            conflicting[field] = value.into();
+            assert!(source_mastering_metadata(&stream(vec![record.clone(), conflicting])).is_err());
+        }
     }
 }

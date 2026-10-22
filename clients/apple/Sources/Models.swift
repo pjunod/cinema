@@ -987,6 +987,20 @@ struct EffectiveProcessingReport: Equatable, Codable {
             + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
     }
 
+    private struct WireOperation: Decodable {
+        var name: String
+        private enum Keys: String, CodingKey { case target = "DisplayTargetMapping" }
+        private struct Target: Decodable { var nits: Int }
+        init(from decoder: Decoder) throws {
+            if let string = try? decoder.singleValueContainer().decode(String.self) { name = string; return }
+            let values = try decoder.container(keyedBy: Keys.self)
+            let nits = try values.decode(Target.self, forKey: .target).nits
+            guard [400, 600, 1000, 1600, 2000, 4000].contains(nits) else {
+                throw DecodingError.dataCorruptedError(forKey: .target, in: values, debugDescription: "unsupported display target")
+            }
+            name = "DisplayTargetMapping:\(nits)"
+        }
+    }
     private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, felContributed, appliedOperations }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
@@ -994,7 +1008,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
         hdr10Enhanced = ((try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == true)
             && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
-        appliedOperations = (try? values?.decode([String].self, forKey: .appliedOperations)) ?? []
+        appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
     }
 
     init(generation: String, hdr10Enhanced: Bool, felContributed: Bool, appliedOperations: [String]) {

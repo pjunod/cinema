@@ -1,6 +1,8 @@
 //! Explicit title-qualified target policy. No client/caps or settings routing.
 use super::DvContractError;
-use crate::scan::dv_title::{DvTitleStats, MasteringLuminance, TitleEligibility};
+use crate::scan::dv_title::{
+    DvTitleStats, MasteringLuminance, MasteringPrimaries, TitleConstant, TitleEligibility,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -12,6 +14,9 @@ pub struct DvDisplayTarget {
     nits: u32,
     mastering: MasteringLuminance,
     max_l1_pq: u16,
+    mastering_luminance: TitleConstant<MasteringLuminance>,
+    mastering_primaries: TitleConstant<MasteringPrimaries>,
+    resolved_primaries: Option<[u16; 8]>,
     title_stats_sha256: [u8; 32],
 }
 
@@ -63,11 +68,7 @@ impl DvDisplayTarget {
                 reason: DvDisplayTargetDecline::TitleIneligible(eligibility),
             });
         }
-        let code = f64::from(stats.max_l1_pq.expect("eligible title has a maximum")) / 4095.0;
-        let p = code.powf(32.0 / 2523.0);
-        let title_nits = 10000.0
-            * ((p - 3424.0 / 4096.0).max(0.0) / (2413.0 / 128.0 - 2392.0 / 128.0 * p))
-                .powf(16384.0 / 2610.0);
+        let title_nits = pq_nits(stats.max_l1_pq.expect("eligible title has a maximum"));
         if title_nits <= f64::from(nits) {
             return Ok(DvDisplayTargetChoice::Master {
                 reason: DvDisplayTargetDecline::TitleFits { nits },
@@ -77,6 +78,9 @@ impl DvDisplayTarget {
             nits,
             mastering: stats.mastering_or_default(),
             max_l1_pq: stats.max_l1_pq.expect("eligible title maximum"),
+            mastering_luminance: stats.mastering_luminance,
+            mastering_primaries: stats.mastering_primaries,
+            resolved_primaries: None,
             title_stats_sha256: Sha256::digest(
                 serde_json::to_vec(&stats).expect("integer title stats serialize"),
             )
@@ -106,6 +110,75 @@ impl DvDisplayTarget {
     pub fn mastering(self) -> MasteringLuminance {
         self.mastering
     }
+    pub fn needs_source_mastering(self) -> bool {
+        matches!(self.mastering_primaries, TitleConstant::Unknown)
+            || matches!(self.mastering_luminance, TitleConstant::Unknown)
+    }
+
+    /// Resolve once, before export/helper policy or rendition identity is frozen.
+    /// The renderer and output declarations consume this same effective floor.
+    /// Missing L6 uses trusted source MDCV, then the established renderer floor;
+    /// contradictory title facts never use fallback values.
+    pub fn resolve_source(
+        mut self,
+        source: Option<DvSourceMastering>,
+    ) -> Result<Self, DvContractError> {
+        let original = self;
+        if source.is_some_and(|value| value.min_1e4_nits > 10_000) {
+            return Err(DvContractError::Invalid(
+                "targeted HDR10 source minimum exceeds renderer range",
+            ));
+        }
+        let primaries =
+            match self.mastering_primaries {
+                TitleConstant::Consistent(value) => l9_primaries(value)?,
+                TitleConstant::Unknown => source
+                    .ok_or(DvContractError::Invalid(
+                        "targeted HDR10 mastering primaries unknown (no title L9 or source MDCV)",
+                    ))?
+                    .primaries_rgbw,
+                TitleConstant::Inconsistent => {
+                    return Err(DvContractError::Invalid(
+                        "targeted HDR10 title L9 mastering primaries inconsistent",
+                    ))
+                }
+            };
+        self.mastering.min_1e4_nits = match self.mastering_luminance {
+            TitleConstant::Consistent(value) => value.min_1e4_nits,
+            TitleConstant::Unknown => source.map_or(50, |value| value.min_1e4_nits),
+            TitleConstant::Inconsistent => {
+                return Err(DvContractError::Invalid(
+                    "targeted HDR10 title L6 mastering luminance inconsistent",
+                ))
+            }
+        };
+        self.resolved_primaries = Some(primaries);
+        self.output_metadata()?;
+        if original.resolved_primaries.is_some() && original != self {
+            return Err(DvContractError::Invalid(
+                "targeted HDR10 source mastering changed after policy freeze",
+            ));
+        }
+        Ok(self)
+    }
+
+    /// No independent fallback here: metadata must describe the exact resolved
+    /// target already supplied to helper execution and semantic/cache identity.
+    pub fn output_metadata(self) -> Result<crate::fmp4::Hdr10OutputMetadata, DvContractError> {
+        let primaries = self.resolved_primaries.ok_or(DvContractError::Invalid(
+            "targeted HDR10 source mastering has not been resolved",
+        ))?;
+        // Eligible target selection proves L1 peak > bucket. Retain the min
+        // explicitly so the static CLL bound follows the same title policy.
+        let max_cll = pq_nits(self.max_l1_pq).min(f64::from(self.nits)).ceil() as u16;
+        crate::fmp4::Hdr10OutputMetadata::new(
+            primaries,
+            self.nits,
+            self.mastering.min_1e4_nits,
+            max_cll,
+        )
+        .map_err(|_| DvContractError::Invalid("targeted HDR10 metadata cannot be represented"))
+    }
     pub fn output_policy(self) -> String {
         format!("bt2020-pq-target-{}", self.nits)
     }
@@ -117,10 +190,50 @@ impl DvDisplayTarget {
     }
 }
 
+/// A source MDCV fallback, captured from the selected held video stream. Its
+/// units already match ST 2086; it never substitutes container colour tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DvSourceMastering {
+    pub primaries_rgbw: [u16; 8],
+    pub min_1e4_nits: u32,
+}
+
+fn pq_nits(code: u16) -> f64 {
+    let p = (f64::from(code) / 4095.0).powf(32.0 / 2523.0);
+    10000.0
+        * ((p - 3424.0 / 4096.0).max(0.0) / (2413.0 / 128.0 - 2392.0 / 128.0 * p))
+            .powf(16384.0 / 2610.0)
+}
+
+fn l9_primaries(value: MasteringPrimaries) -> Result<[u16; 8], DvContractError> {
+    use dolby_vision::rpu::extension_metadata::PREDEFINED_COLORSPACE_PRIMARIES;
+    let invalid = || DvContractError::Invalid("targeted HDR10 L9 primaries cannot be represented");
+    let coordinates = if value.index == 255 {
+        let custom = value.custom_xy.ok_or_else(invalid)?;
+        custom.map(|v| f64::from(v) / 32767.0)
+    } else {
+        if value.custom_xy.is_some() {
+            return Err(invalid());
+        }
+        *PREDEFINED_COLORSPACE_PRIMARIES
+            .get(usize::from(value.index))
+            .ok_or_else(invalid)?
+    };
+    if coordinates.chunks_exact(2).any(|xy| {
+        !(0.0..=1.0).contains(&xy[0])
+            || !(0.0..=1.0).contains(&xy[1])
+            || xy[1] == 0.0
+            || xy[0] + xy[1] > 1.00001
+    }) {
+        return Err(invalid());
+    }
+    Ok(coordinates.map(|v| (v * 50_000.0).round() as u16))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::dv_title::{TitleConstant, SCHEMA};
+    use crate::scan::dv_title::SCHEMA;
     fn stats() -> DvTitleStats {
         DvTitleStats {
             schema: SCHEMA,
@@ -134,6 +247,200 @@ mod tests {
             mastering_primaries: TitleConstant::Unknown,
         }
     }
+    #[test]
+    fn target_metadata_uses_exact_l9_units_and_source_fallback_without_masking_conflicts() {
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        assert_eq!(
+            l9_primaries(MasteringPrimaries {
+                index: 0,
+                custom_xy: None
+            })
+            .expect("P3D65"),
+            p3
+        );
+        assert_eq!(
+            l9_primaries(MasteringPrimaries {
+                index: 2,
+                custom_xy: None
+            })
+            .expect("BT2020"),
+            [35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450]
+        );
+        assert_eq!(
+            l9_primaries(MasteringPrimaries {
+                index: 255,
+                custom_xy: Some([22282, 10485, 8683, 22609, 4915, 1966, 10246, 10780])
+            })
+            .expect("custom L9"),
+            [34001, 15999, 13250, 34500, 7500, 3000, 15635, 16449]
+        );
+        for index in [6, 7, 8, 9, 254] {
+            assert!(
+                l9_primaries(MasteringPrimaries {
+                    index,
+                    custom_xy: None
+                })
+                .is_err(),
+                "negative/unrepresentable/reserved preset {index}"
+            );
+        }
+        assert!(l9_primaries(MasteringPrimaries {
+            index: 255,
+            custom_xy: Some([65535; 8])
+        })
+        .is_err());
+        let source = DvSourceMastering {
+            primaries_rgbw: p3,
+            min_1e4_nits: 17,
+        };
+        let target = |luminance, primaries| {
+            let DvDisplayTargetChoice::Target(target) = DvDisplayTarget::for_title(
+                1600,
+                Some(DvTitleStats {
+                    mastering_luminance: luminance,
+                    mastering_primaries: primaries,
+                    ..stats()
+                }),
+            )
+            .expect("title") else {
+                panic!("target");
+            };
+            target
+        };
+        let missing = target(TitleConstant::Unknown, TitleConstant::Unknown);
+        assert!(missing.needs_source_mastering());
+        assert!(missing.resolve_source(None).is_err());
+        assert_eq!(
+            missing
+                .resolve_source(Some(source))
+                .expect("resolve source MDCV")
+                .output_metadata()
+                .expect("source MDCV fallback"),
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 17, 1600).expect("expected metadata")
+        );
+        let known = target(
+            TitleConstant::Consistent(MasteringLuminance {
+                min_1e4_nits: 50,
+                max_nits: 4000,
+            }),
+            TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        );
+        assert!(!known.needs_source_mastering());
+        assert_eq!(
+            known
+                .resolve_source(Some(source))
+                .expect("resolve L6/L9")
+                .output_metadata()
+                .expect("L6/L9 win"),
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 50, 1600).expect("expected metadata")
+        );
+        for contradictory in [
+            target(TitleConstant::Inconsistent, TitleConstant::Unknown),
+            target(TitleConstant::Unknown, TitleConstant::Inconsistent),
+        ] {
+            assert!(contradictory.resolve_source(Some(source)).is_err());
+        }
+    }
+
+    #[test]
+    fn resolved_floor_unifies_helper_metadata_and_identity_with_renderer_fallback() {
+        use super::super::DvExportPolicy;
+        let p3 = [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450];
+        let DvDisplayTargetChoice::Target(proposal) = DvDisplayTarget::for_title(
+            1600,
+            Some(DvTitleStats {
+                mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                    index: 0,
+                    custom_xy: None,
+                }),
+                ..stats()
+            }),
+        )
+        .expect("title") else {
+            panic!("target");
+        };
+        assert!(
+            proposal.output_metadata().is_err(),
+            "unresolved proposals cannot author metadata"
+        );
+        let source = DvSourceMastering {
+            primaries_rgbw: p3,
+            min_1e4_nits: 17,
+        };
+        let resolved = proposal
+            .resolve_source(Some(source))
+            .expect("source MDCV minimum");
+        let fallback = proposal
+            .resolve_source(None)
+            .expect("consistent L9 and established renderer floor");
+        assert_eq!(resolved.endpoint_args(), ["17", "4000"]);
+        assert_eq!(resolved.mastering().min_1e4_nits, 17);
+        assert_eq!(fallback.endpoint_args(), ["50", "4000"]);
+        assert_eq!(
+            resolved.output_metadata().expect("resolved metadata"),
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 17, 1600).expect("expected metadata")
+        );
+        assert_eq!(
+            fallback.output_metadata().expect("fallback metadata"),
+            crate::fmp4::Hdr10OutputMetadata::new(p3, 1600, 50, 1600).expect("expected metadata")
+        );
+        let export = |target| DvExportPolicy::DisplayTargetYuv420p10V1 {
+            raster: (64, 64),
+            target,
+        };
+        assert_ne!(
+            export(resolved).target_parameters(),
+            export(fallback).target_parameters()
+        );
+        assert_eq!(
+            serde_json::to_value(resolved).expect("serialized policy")["mastering"]["min_1e4_nits"],
+            17
+        );
+        assert_eq!(
+            resolved
+                .resolve_source(Some(source))
+                .expect("same frozen source"),
+            resolved
+        );
+        assert!(
+            resolved.resolve_source(None).is_err(),
+            "a frozen source floor must not become the default"
+        );
+        for min_1e4_nits in [10001, u32::MAX] {
+            assert!(proposal
+                .resolve_source(Some(DvSourceMastering {
+                    min_1e4_nits,
+                    ..source
+                }))
+                .is_err());
+        }
+        let unknown = DvDisplayTarget {
+            mastering_primaries: TitleConstant::Unknown,
+            ..proposal
+        };
+        assert!(
+            unknown.resolve_source(None).is_err(),
+            "missing primaries still refuse"
+        );
+        let known_l6 = DvDisplayTarget {
+            mastering_luminance: TitleConstant::Consistent(MasteringLuminance {
+                min_1e4_nits: 50,
+                max_nits: 4000,
+            }),
+            ..proposal
+        };
+        assert_eq!(
+            known_l6
+                .resolve_source(Some(source))
+                .expect("L6 wins")
+                .endpoint_args(),
+            ["50", "4000"]
+        );
+    }
+
     #[test]
     fn target_identity_separates_buckets_and_elision_is_exact_master() {
         use super::super::DvExportPolicy;

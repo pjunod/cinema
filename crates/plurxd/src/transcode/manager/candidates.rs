@@ -1703,6 +1703,8 @@ impl TranscodeManager {
         CandidateExecutionContext {
             catalog_query: None,
             prepared_processing: None,
+            display_target: None,
+            display_target_note: None,
             ordinary_request: None,
             retained_output: None,
             canonical_caps: None,
@@ -1882,10 +1884,11 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
 /// some of them as unset. Widening it changes no planning identity:
 /// `PlanningBinding::from_snapshot` hashes the file, probe, reorder flag and
 /// generation, never this map.
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 24] = [
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 25] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::DV_HDR_PROCESSING,
+    keys::DV_DISPLAY_TARGET,
     keys::DV_FEL_REENCODE,
     keys::AUDIO_LANG,
     keys::SUB_LANG,

@@ -205,3 +205,14 @@ test('a prepared successor adopts the enhancement on its action, null when absen
   gated.clearEffectiveProcessing(gated.PLAYER);
   assert.deepEqual(pills(gated),[],'FEL/RPU wait for a current effective_processing report');
 });
+
+
+test('current display-target mapping operation objects retain the accepted HDR10 report',()=>{
+  const context=setup();
+  context.PLAYER.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:1600}});
+  assert.equal(badge(context).arrow,'HDR10-E');
+  for(const operation of [{DisplayTargetMapping:{nits:100}}, {DisplayTargetMapping:{nits:'1600'}}, {DisplayTargetMapping:{nits:1600,other:1}}]) {
+    context.PLAYER.effectiveProcessing.applied_operations=[operation];
+    assert.equal(context.playerEffectiveProcessing(context.PLAYER),null);
+  }
+});
