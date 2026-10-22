@@ -518,7 +518,8 @@ pub struct CandidateExecutionContext {
     /// actual dispatch reacquires it; this is never client-supplied authority.
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     /// Explicit live-only policy, derived from current admitted caps and the
-    /// fenced complete-title probe. Ordinary VOD/pre-encode contexts use None.
+    /// fenced complete-title probe and resolved source mastering. The effective
+    /// floor is fixed before preparation identity; ordinary VOD/pre-encode use None.
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display_target_note: Option<String>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
@@ -1647,6 +1648,74 @@ mod prepared_candidate_tests {
         assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(prepared.take([1; 32]).is_err());
         assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn resolved_source_floor_changes_the_actual_processed_preparation_binding() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let recovery = SessionRecoveryIdentity {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+            incarnation_id: "incarnation-a".into(),
+            recovery_epoch: "epoch-a".into(),
+        };
+        let mut request:SessionRequest = serde_json::from_value(serde_json::json!({
+            "file_id":1,"playback_id":"resolved-floor-binding","request_id":"incarnation-a","automatic":true,
+            "kind":{"kind":"transcode","height":720},"start_seconds":0.0,"audio_offset_ms":0,"hdr10":true,"presentation":"vod"})).expect("request");
+        let mut context = continuous_test_candidate_context(
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest([3; 32]),
+            [3; 32],
+            720,
+        );
+        context.owner_node_id = Some("node-a".into());
+        context.canonical_caps =
+            Some(serde_json::from_value(serde_json::json!({"v":2})).expect("caps"));
+        context.planning_binding = Some(crate::media_pool::PlanningBinding {
+            generation: 1,
+            source_digest: "source-a".into(),
+        });
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let DvDisplayTargetChoice::Target(proposal) =
+            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+        else {
+            panic!("target")
+        };
+        let source = DvSourceMastering {
+            primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+            min_1e4_nits: 17,
+        };
+        context.display_target = Some(
+            proposal
+                .resolve_source(Some(source))
+                .expect("resolved source floor"),
+        );
+        request.candidate_context = Some(Box::new(context));
+        let source_binding = request
+            .processed_preparation_binding(&recovery)
+            .expect("source binding");
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .display_target = Some(proposal.resolve_source(None).expect("renderer fallback"));
+        assert_ne!(
+            source_binding,
+            request
+                .processed_preparation_binding(&recovery)
+                .expect("fallback binding")
+        );
     }
 
     #[test]

@@ -73,6 +73,11 @@ acceptance is claimed here.
   same policy. Exact predecessor-root reuse also requires target equality;
   ordinary VOD and pre-encode paths always keep `None` (master). The client
   snapshot is unchanged for prepared successors and Auto rung selection.
+  The accepted probe's selected playable stream resolves the effective mastering
+  minimum before this context or preparation identity is frozen. The held-source
+  constructor independently resolves the same title/stream facts and compares
+  the exact target; a source17 floor cannot retain the old default50 identity.
+
 - **Cache disposition:** the current architecture marks processed roots
   `ephemeral_processing`; `RetainedRegistry::offer` excludes them. There are
   zero reusable retained buckets per title, satisfying the at-most-two bound.
@@ -111,6 +116,8 @@ Authored regression anchors (not executed):
 - `enhancement.rs::targeted_hdr10_dyn_names_bucket_and_l1_limit`
 - `dv_processing/tests.rs::effective_target_report_rejects_ambiguous_or_unsupported_buckets`
 - `manager/create.rs::display_target_declines_are_named_and_elision_is_master`
+- `manager/create.rs::source_mastering_resolves_before_the_live_target_is_frozen`
+- `session_request.rs::resolved_source_floor_changes_the_actual_processed_preparation_binding`
 - `http/tests.rs::display_target_setting_defaults_off_and_saves_despite_unmet_advice`
 - `settings-sections.test.js`: editable targeting and existing independent-save,
   stale-reply and replacement-card tests extended to the new preference.

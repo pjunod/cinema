@@ -1266,8 +1266,43 @@ impl TranscodeManager {
         let Some(bucket) = display.and_then(|display| display.hdr10_target_bucket()) else {
             return Ok((None, Some("your display did not report a supported HDR peak (400–4999 nits), so the master grade is sent".into())));
         };
-        match DvDisplayTarget::for_title(bucket, probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json)).map_err(|e| e.to_string())? {
-            DvDisplayTargetChoice::Target(target) => Ok((Some(target), Some(format!("HDR10-E: per-shot L1 mapped for {bucket} nits; rendered live, with no retained bucket cache (L1 only; creative trims are not applied)")))),
+        match DvDisplayTarget::for_title(
+            bucket,
+            probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json),
+        )
+        .map_err(|e| e.to_string())?
+        {
+            DvDisplayTargetChoice::Target(target) => {
+                // Resolve the effective source floor BEFORE the private context,
+                // prepared lease and rendition identity freeze this policy.
+                let source = if target.needs_source_mastering() {
+                    let document: serde_json::Value =
+                        serde_json::from_str(probe.ok_or("complete-title probe unavailable")?)
+                            .map_err(|error| error.to_string())?;
+                    let selected = crate::decode_facts::first_playable_video_index(&document);
+                    let stream = document
+                        .get("streams")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|streams| {
+                            streams.iter().find(|stream| {
+                                selected.is_some_and(|index| {
+                                    stream.get("index").and_then(serde_json::Value::as_u64)
+                                        == Some(u64::from(index))
+                                })
+                            })
+                        });
+                    stream
+                        .map(crate::vodencode::dv_runtime::source_mastering_metadata)
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
+                let target = target
+                    .resolve_source(source)
+                    .map_err(|error| error.to_string())?;
+                Ok((Some(target), Some(format!("HDR10-E: per-shot L1 mapped for {bucket} nits; rendered live, with no retained bucket cache (L1 only; creative trims are not applied)"))))
+            }
             DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason()))),
         }
     }
@@ -2537,6 +2572,7 @@ impl TranscodeManager {
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    let source_mastering = crate::vodencode::dv_runtime::source_mastering_metadata(stream);
                     let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
                     // Recheck against the exact stored document compared with
                     // this held source. A title scan replacement cannot reuse
@@ -2545,6 +2581,14 @@ impl TranscodeManager {
                         let selected = plurx_core::transcode::dv_processing::DvDisplayTarget::for_title(
                             target.nits(), probe.as_deref().and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json))
                             .map_err(|error| error.to_string())?;
+                        let selected = match selected {
+                            plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(proposal) => {
+                                let source = if proposal.needs_source_mastering() { source_mastering.clone()? } else { None };
+                                plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(
+                                    proposal.resolve_source(source).map_err(|error| error.to_string())?)
+                            }
+                            other => other,
+                        };
                         if selected != plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(target) {
                             return Err("complete-title display-target scan changed during preparation".into());
                         }
@@ -2554,7 +2598,7 @@ impl TranscodeManager {
                         display_target,
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
                         display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
-                        source_mastering: crate::vodencode::dv_runtime::source_mastering_metadata(stream),
+                        source_mastering,
                         destination, mode, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
@@ -5127,6 +5171,76 @@ mod display_target_policy_tests {
         scan::dv_title::*,
     };
     #[test]
+    fn source_mastering_resolves_before_the_live_target_is_frozen() {
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let record = serde_json::json!({"side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000","white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "max_luminance":"4000/1","min_luminance":"17/10000"});
+        let mut unrelated = record.clone();
+        unrelated["min_luminance"] = "999/10000".into();
+        let document = serde_json::json!({PROBE_FIELD:stats,"streams":[
+            {"index":0,"codec_type":"video","disposition":{"attached_pic":1},"side_data_list":[unrelated.clone()]},
+            {"index":1,"codec_type":"audio","side_data_list":[unrelated]},
+            {"index":7,"codec_type":"video","side_data_list":[record]}]});
+        let display = DisplayCaps {
+            max_nits: Some(1600),
+            ..Default::default()
+        };
+        let select = |document: &serde_json::Value| {
+            TranscodeManager::display_target_policy(
+                true,
+                Some(&display),
+                Some(&document.to_string()),
+            )
+        };
+        let frozen = select(&document)
+            .expect("selected source mastering")
+            .0
+            .expect("target");
+        assert_eq!(frozen.endpoint_args(), ["17", "4000"]);
+        assert_eq!(
+            serde_json::to_value(frozen).expect("frozen identity")["mastering"]["min_1e4_nits"],
+            17
+        );
+        let missing = serde_json::json!({PROBE_FIELD:stats});
+        let fallback = select(&missing)
+            .expect("known L9 and renderer floor")
+            .0
+            .expect("target");
+        assert_eq!(fallback.endpoint_args(), ["50", "4000"]);
+        assert_ne!(
+            serde_json::to_value(frozen).expect("source identity"),
+            serde_json::to_value(fallback).expect("fallback identity")
+        );
+        let mut unknown = missing.clone();
+        unknown[PROBE_FIELD]["mastering_primaries"] =
+            serde_json::to_value(TitleConstant::<MasteringPrimaries>::Unknown).expect("unknown");
+        assert!(select(&unknown).is_err());
+        for field in ["mastering_primaries", "mastering_luminance"] {
+            let mut contradictory = document.clone();
+            contradictory[PROBE_FIELD][field] = serde_json::json!({"state":"inconsistent"});
+            assert!(select(&contradictory).is_err(), "{field}");
+        }
+        let mut unsupported = document;
+        unsupported["streams"][2]["side_data_list"][0]["min_luminance"] = "10001/10000".into();
+        assert!(select(&unsupported).is_err());
+    }
+
+    #[test]
     fn display_target_declines_are_named_and_elision_is_master() {
         let stats = DvTitleStats {
             schema: SCHEMA,
@@ -5137,7 +5251,10 @@ mod display_target_policy_tests {
             invalid_l1_frames: 0,
             max_l1_pq: Some(4095),
             mastering_luminance: TitleConstant::Unknown,
-            mastering_primaries: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
         };
         let probe = |stats| serde_json::json!({PROBE_FIELD:stats}).to_string();
         let high = probe(stats);
