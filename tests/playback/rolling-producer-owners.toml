@@ -1,3 +1,31 @@
+# Shared playback cache ownership review (2026-10-21, source 99a968993):
+# Codex reviewed the lifecycle sites and their exact census against origin/main.
+# Astra independently approved all seven count changes and their lifecycle owners.
+# +10 namespaced tasks: one node-local 15s upkeep loop stops on its shutdown
+# token; three coordinator owners perform physical inventory and owner callbacks;
+# six test-only drivers cover timeout/fencing, cancelled copying and VOD replay.
+# Blocking inventory retains its single I/O permit until the scan actually ends.
+# Callback tasks retain their single-flight permit after waiter timeout; eviction
+# additionally retains its prefix fence through callback completion. Cancellation
+# cannot expose the namespace while unlink is running. A timeout does not
+# forcibly cancel detached filesystem work. Existing copyseg and
+# subtitle copy workers now carry their reservations/pins through physical work;
+# moving those constructors adds no production task site or producer authority.
+# +19 timers: nine bounded coordinator waits/cadence, two scratch PUT/DELETE
+# framing bounds, one post-child pretranscode upload drain and one dependency
+# read before VOD eviction; the other six are finite fixture observations.
+# +2 Command/+2 launch sites are test-only: a 40s kill-on-drop FFmpeg graph
+# output and an awaited finite 16KiB shell writer with a 4KiB child file limit.
+# The other +7 launch-shaped methods are HTTP response status assertions.
+# +1 kill-on-drop is that same FFmpeg fixture, not a confirmed-reap receipt.
+# +1 free/UFCS lifecycle site ignores SIGXFSZ only in the child's pre_exec hook;
+# RLIMIT_FSIZE then returns EFBIG to tee's onfail=ignore, preserving the index.
+# +1 rendition_build_gate reference takes the existing exact-key gate during
+# VOD eviction, before reader/producer/dependency checks; it starts no builder.
+# Resulting structural totals: 995 tasks, 1846 timers, 294 Commands, 792 launch
+# shapes, 72 free/UFCS lifecycle calls and 111 kill-on-drop constructors.
+# Patterns, scan roots, exact equality and every forbidden-shape zero stay intact.
+
 # System comparison ownership review (PR #1243, 2026-10-20):
 # The shared launcher/guard was adversarially reviewed by Astra; Sol reviewed
 # this exact census delta. comparison.rs adds one background job-owned FFmpeg
@@ -2067,7 +2095,8 @@ pattern = "rendition_build_gate"
 # PR #947 after integrating main 1088d7529: base 30; repair delta +2.
 # Cleanup and conservative cold revalidation take the existing exact-key gate;
 # neither creates a competing build owner.
-expected_occurrences = 33
+# Shared cache eviction takes this same keyed gate before retiring a title.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3155,7 +3184,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Worker-refinement conformance: +1 `tokio::spawn` in the `#[cfg(test)]`
 # `library_work::tests::spawn_worker` helper. Its returned JoinHandle is awaited
 # by each schedule; this adds no production task owner or shipped behavior.
-expected_occurrences = 985
+expected_occurrences = 995
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4816,7 +4845,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Worker-refinement conformance: +1 15-second `tokio::time::timeout` in the
 # `#[cfg(test)]` `library_work::tests::next_worker_event` barrier helper. It
 # bounds receipt of the selected event; timeout is failure, not join evidence.
-expected_occurrences = 1827
+expected_occurrences = 1846
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
@@ -5273,7 +5302,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # a three-frame control. Each output future is directly awaited and has
 # kill_on_drop(true); no separate per-command timeout or process-group/reap
 # guarantee on cancellation is asserted. No production launcher is added.
-expected_occurrences = 292
+expected_occurrences = 294
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -5909,7 +5938,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # awaited output calls for the test mux/probe/control commands above. Ordinary
 # completion waits for each child; kill-on-drop is a cancellation backstop,
 # not independent confirmed-reap evidence. No production launch is added.
-expected_occurrences = 783
+expected_occurrences = 792
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -6277,7 +6306,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # Browser restart cancellation: +1 is the async HelperCompletion::wait method
 # declaration in dv_segment. It observes one retained watch-channel result;
 # it neither signals an OS child nor creates another process/reap owner.
-expected_occurrences = 71
+expected_occurrences = 72
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]
@@ -6412,7 +6441,7 @@ pattern = "kill_on_drop\\s*\\("
 # PR1225: +3 in manager/processed_reuse_tests.rs:825/845/1103, the same
 # directly awaited test mux/probe/control commands. These guards request child
 # kill if their output future drops; they are not confirmed-reap receipts.
-expected_occurrences = 110
+expected_occurrences = 111
 # Promotion union: final count is measured after architectural conflict resolution.
 
 [[module_structures]]

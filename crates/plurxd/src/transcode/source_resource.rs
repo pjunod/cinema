@@ -48,6 +48,7 @@ impl SourceResourceReadCustody {
         etag_stem: &str,
         delivery: &Arc<crate::meter::Meter>,
     ) -> std::io::Result<crate::vodserve::SegmentReady> {
+        let cache_pin = crate::playback_cache::pin(path)?;
         let path = path.to_owned();
         let custody = self.clone();
         let (file, len) = tokio::task::spawn_blocking(move || {
@@ -86,6 +87,7 @@ impl SourceResourceReadCustody {
             // Source's actual response/producer custody owns this file. Local
             // retained-cache admission cannot confer authority in this namespace.
             retained_lease: None,
+            cache_pin,
             file: tokio::fs::File::from_std(file),
             len,
             etag: format!("{etag_stem}-{len}"),

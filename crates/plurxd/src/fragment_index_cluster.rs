@@ -215,7 +215,7 @@ impl SourceFence {
             Err(error) => {
                 return Some(format!(
                     "the source descriptor could not be stated: {error}"
-                ))
+                ));
             }
         };
         #[cfg(unix)]
@@ -363,16 +363,135 @@ pub(crate) async fn open_source_playback_fence(
     })
 }
 
+pub(crate) fn register_playback_cache(
+    budget: &std::sync::Arc<crate::playback_cache::PlaybackCacheBudget>,
+    runtime_root: &Path,
+    store: std::sync::Arc<dyn Store>,
+    node: String,
+) {
+    budget.register(std::sync::Arc::new(FragmentCacheOwner {
+        root: cache_root(runtime_root),
+        store,
+        node,
+    }));
+}
+
+struct FragmentCacheOwner {
+    root: PathBuf,
+    store: std::sync::Arc<dyn Store>,
+    node: String,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for FragmentCacheOwner {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        let mut prefixes = match tokio::fs::read_dir(&self.root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut candidates = Vec::new();
+        while let Some(prefix) = prefixes.next_entry().await? {
+            let metadata = tokio::fs::symlink_metadata(prefix.path()).await?;
+            if !metadata.is_dir() {
+                continue;
+            }
+            let mut files = tokio::fs::read_dir(prefix.path()).await?;
+            while let Some(file) = files.next_entry().await? {
+                let metadata = tokio::fs::symlink_metadata(file.path()).await?;
+                if !metadata.is_file() {
+                    continue;
+                }
+                let name = file.file_name();
+                let name = name.to_string_lossy();
+                let is_index = name.strip_suffix(".idx").is_some_and(valid_digest);
+                let stale_temporary = name.ends_with(".tmp")
+                    && metadata.modified()?.elapsed().unwrap_or_default()
+                        >= Duration::from_secs(60 * 60);
+                if !is_index && !stale_temporary {
+                    continue;
+                }
+                candidates.push(crate::playback_cache::CacheCandidate {
+                    path: file.path(),
+                    last_used: metadata.accessed().or_else(|_| metadata.modified())?,
+                });
+            }
+        }
+        Ok(candidates)
+    }
+
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if candidate.path.parent().and_then(Path::parent) != Some(self.root.as_path()) {
+            return Ok(false);
+        }
+        let Some(name) = candidate.path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(false);
+        };
+        let key = name.strip_suffix(".idx").filter(|key| valid_digest(key));
+        if key.is_none() && !name.ends_with(".tmp") {
+            return Ok(false);
+        }
+        match tokio::fs::remove_file(&candidate.path).await {
+            Ok(()) => {
+                if let Some(key) = key {
+                    // The global artifact remains valid on other holders;
+                    // only this node's disposable local copy is retired.
+                    self.store
+                        .forget_cluster_fragment_index_location(key, &self.node)
+                        .await
+                        .map_err(std::io::Error::other)?;
+                }
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Keeps the common playback pin alive for a streamed peer response.
+pub(crate) struct PinnedFragmentBlob {
+    file: tokio::fs::File,
+    _pin: Option<crate::playback_cache::CachePin>,
+}
+
+impl tokio::io::AsyncRead for PinnedFragmentBlob {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.file).poll_read(context, buffer)
+    }
+}
+impl tokio::io::AsyncSeek for PinnedFragmentBlob {
+    fn start_seek(mut self: std::pin::Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+        std::pin::Pin::new(&mut self.file).start_seek(position)
+    }
+    fn poll_complete(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        std::pin::Pin::new(&mut self.file).poll_complete(context)
+    }
+}
+
 pub(crate) fn cache_root(cache_dir: &Path) -> PathBuf {
     cache_dir.join("fragment-index-v2")
 }
 
-fn cache_path(root: &Path, cache_key: &str) -> Option<PathBuf> {
+pub(crate) fn cache_path(root: &Path, cache_key: &str) -> Option<PathBuf> {
     valid_digest(cache_key).then(|| root.join(&cache_key[..2]).join(format!("{cache_key}.idx")))
 }
 
 pub(crate) async fn remove_local_blob(root: &Path, cache_key: &str) -> bool {
     let Some(path) = cache_path(root, cache_key) else {
+        return false;
+    };
+    let Ok(_eviction) = crate::playback_cache::begin_eviction(&path) else {
         return false;
     };
     match tokio::fs::remove_file(path).await {
@@ -443,6 +562,9 @@ pub(crate) async fn sweep_local_orphans(
     let mut last = after.to_owned();
     for (name, path) in candidates.into_iter().take(page_len) {
         last = name.clone();
+        let Ok(_eviction) = crate::playback_cache::begin_eviction(&path) else {
+            continue;
+        };
         if let Some(cache_key) = name.strip_suffix(".idx") {
             if store
                 .cluster_fragment_index_artifact(cache_key)
@@ -490,11 +612,12 @@ pub(crate) async fn sweep_local_orphans(
 pub(crate) async fn open_verified_local_blob(
     root: &Path,
     artifact: &ClusterFragmentIndexArtifact,
-) -> Result<Option<tokio::fs::File>, String> {
+) -> Result<Option<PinnedFragmentBlob>, String> {
     let Some(path) = cache_path(root, &artifact.cache_key) else {
         return Err("invalid fragment-index cache key".to_owned());
     };
-    let mut file = match tokio::fs::File::open(&path).await {
+    let pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
+    let mut file = match plurx_core::fs_secure::open_read_nofollow(&path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("open {}: {error}", path.display())),
@@ -541,7 +664,7 @@ pub(crate) async fn open_verified_local_blob(
     file.seek(SeekFrom::Start(0))
         .await
         .map_err(|error| format!("rewind {}: {error}", path.display()))?;
-    Ok(Some(file))
+    Ok(Some(PinnedFragmentBlob { file, _pin: pin }))
 }
 
 pub(crate) async fn read_local_blob(
@@ -551,6 +674,7 @@ pub(crate) async fn read_local_blob(
     let Some(path) = cache_path(root, &artifact.cache_key) else {
         return Err("invalid fragment-index cache key".to_owned());
     };
+    let _pin = crate::playback_cache::pin(&path).map_err(|error| error.to_string())?;
     let metadata = match tokio::fs::metadata(&path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -585,14 +709,17 @@ pub(crate) async fn install_local_blob(
     let parent = path
         .parent()
         .ok_or_else(|| "fragment-index cache path has no parent".to_owned())?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("create {}: {error}", parent.display()))?;
     if let Ok(Some(existing)) = read_local_blob(root, artifact).await {
         if existing == blob {
             return Ok(());
         }
     }
+    let reservation = crate::playback_cache::reserve(parent, blob.len() as u64)
+        .await
+        .map_err(|error| format!("fragment-index disk budget: {error}"))?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| format!("create {}: {error}", parent.display()))?;
     let staging = parent.join(format!(
         ".{}.{}.tmp",
         artifact.cache_key,
@@ -623,6 +750,9 @@ pub(crate) async fn install_local_blob(
         tokio::fs::rename(&staging, &path)
             .await
             .map_err(|error| format!("publish {}: {error}", path.display()))?;
+    }
+    if let Some(reservation) = reservation {
+        reservation.commit(blob.len() as u64);
     }
     Ok(())
 }
@@ -1199,6 +1329,10 @@ async fn hydrate_inner(
     artifact: &ClusterFragmentIndexArtifact,
     publish: bool,
 ) -> Result<Option<FragmentIndex>, String> {
+    let publication_path = cache_path(root, &artifact.cache_key)
+        .ok_or_else(|| "invalid fragment-index cache key".to_owned())?;
+    let _publication_pin = crate::playback_cache::pin(&publication_path)
+        .map_err(|error| format!("fragment-index publication is busy: {error}"))?;
     match read_local_blob(root, artifact).await {
         Ok(Some(blob)) => {
             let index = decode_artifact(&blob, artifact)?;

@@ -399,6 +399,8 @@ impl SessionDir {
         name: &str,
         bytes: &[u8],
     ) -> std::io::Result<Option<crate::rolling_output::CommittedObject>> {
+        let mut playback_write =
+            crate::playback_cache::reserve(&self.dir, bytes.len().saturating_mul(2) as u64).await?;
         let authorized = self
             .authorize_write(name, bytes.len().saturating_mul(2))
             .await?;
@@ -408,15 +410,23 @@ impl SessionDir {
         let written = async {
             let owned = bytes.to_vec();
             let target = tmp.clone();
-            let digest = tokio::task::spawn_blocking(move || {
-                use sha2::Digest;
-                std::fs::write(&target, &owned)?;
-                Ok::<_, std::io::Error>(
-                    measured.then(|| -> [u8; 32] { sha2::Sha256::digest(&owned).into() }),
-                )
-            })
-            .await
-            .map_err(std::io::Error::other)??;
+            let landed_bytes = bytes.len();
+            let (digest, held_reservation) =
+                blocking_reserved_write(playback_write.take(), move || {
+                    use sha2::Digest;
+                    let written = std::fs::write(&target, &owned).map(|()| {
+                        measured.then(|| -> [u8; 32] { sha2::Sha256::digest(&owned).into() })
+                    });
+                    // This worker survives cancellation of the awaiting producer.
+                    // It must retain and settle both allocation authorities itself.
+                    if let Some(authorized) = authorized {
+                        authorized.landed(i64::try_from(landed_bytes).unwrap_or(i64::MAX));
+                    }
+                    written
+                })
+                .await?;
+            playback_write = held_reservation;
+            let digest = digest?;
             tokio::fs::rename(&tmp, self.dir.join(name)).await?;
             Ok::<_, std::io::Error>(digest.map(|digest| crate::rolling_output::CommittedObject {
                 bytes: bytes.len() as u64,
@@ -429,12 +439,10 @@ impl SessionDir {
         // the write and the next directory walk is charged rather than free.
         // A failed write returns the reservation and charges the temporary
         // file's own length, which cleanup owns.
-        if let Some(authorized) = authorized {
-            // The same length either way. A failed write usually leaves the
-            // temporary file behind at its full length, and a partial one is
-            // still bytes the directory owes, so charging the slice is the
-            // conservative answer and cleanup owns what is actually there.
-            authorized.landed(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+        if let Some(write) = playback_write {
+            // Failed writes may have left a temporary member; conservatively
+            // retain its charge until the next physical inventory.
+            write.commit(bytes.len() as u64);
         }
         if let Ok(Some(object)) = &written {
             if let Some(collector) = &self.retained {
@@ -1302,6 +1310,21 @@ pub fn supports(video_codec: Option<&str>) -> bool {
     matches!(video_codec, Some("hevc" | "h265" | "h264" | "avc"))
 }
 
+/// A cancelled async caller cannot cancel a blocking filesystem write. Move
+/// its grant into the worker and return it only after the filesystem settles;
+/// dropping an abandoned result then forces a fresh physical inventory.
+async fn blocking_reserved_write<T: Send + 'static>(
+    reservation: Option<crate::playback_cache::CacheReservation>,
+    write: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<(
+    std::io::Result<T>,
+    Option<crate::playback_cache::CacheReservation>,
+)> {
+    tokio::task::spawn_blocking(move || (write(), reservation))
+        .await
+        .map_err(std::io::Error::other)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1311,6 +1334,90 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::ReadBuf;
+
+    #[tokio::test]
+    async fn shared_playback_budget_refuses_copy_before_writing_and_recovers_after_cleanup() {
+        let temporary = crate::test_tempdir().expect("temporary");
+        let root = std::fs::canonicalize(temporary.path()).expect("root");
+        let live = root.join("rolling");
+        std::fs::create_dir(&live).expect("live");
+        let other = root.join("stored-subtitle");
+        std::fs::write(&other, vec![1u8; 48 * 1024]).expect("existing cache");
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(store, vec![root.clone()]);
+        budget.configure_for_test(64 * 1024);
+        let writer = SessionDir::new(live.clone(), 0, 4, None);
+        let error = writer
+            .publish_file("seg00000.m4s", &vec![2u8; 16 * 1024])
+            .await
+            .expect_err("other namespace consumes capacity");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(!live.join("seg00000.m4s").exists());
+        assert!(!live.join("seg00000.m4s.tmp").exists());
+        let eviction = crate::playback_cache::begin_eviction(&other).expect("fence");
+        std::fs::remove_file(&other).expect("cleanup");
+        drop(eviction);
+        writer
+            .publish_file("seg00000.m4s", &vec![2u8; 16 * 1024])
+            .await
+            .expect("recovered capacity");
+        assert_eq!(
+            std::fs::metadata(live.join("seg00000.m4s"))
+                .expect("segment")
+                .len(),
+            16 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_copy_holds_budget_until_disk_write_settles() {
+        let temporary = crate::test_tempdir().expect("temporary");
+        let root = std::fs::canonicalize(temporary.path()).expect("root");
+        let store: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(store, vec![root.clone()]);
+        budget.configure_for_test(16 * 1024);
+        let baseline = budget.used_bytes().await.expect("initial inventory");
+        budget.configure_for_test(baseline + 16 * 1024);
+        let output = root.join("segment.tmp");
+        let reservation = crate::playback_cache::reserve(&output, 16 * 1024)
+            .await
+            .expect("grant");
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let target = output.clone();
+        let writer = tokio::spawn(blocking_reserved_write(reservation, move || {
+            started.send(()).expect("started");
+            blocked.recv().expect("release");
+            std::fs::write(target, vec![7u8; 16 * 1024])
+        }));
+        waiting.await.expect("worker running");
+        writer.abort();
+        assert!(writer.await.expect_err("cancelled").is_cancelled());
+        assert!(crate::playback_cache::is_pinned(&output));
+        assert!(crate::playback_cache::reserve(&root.join("competing"), 1)
+            .await
+            .is_err());
+        release.send(()).expect("finish blocking write");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while crate::playback_cache::is_pinned(&output) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker settled");
+        assert_eq!(
+            std::fs::metadata(&output).expect("written").len(),
+            16 * 1024
+        );
+        assert!(
+            crate::playback_cache::reserve(&root.join("after-settlement"), 1)
+                .await
+                .is_err(),
+            "abandoned output remains physically charged"
+        );
+    }
 
     struct BrokenPipe;
 

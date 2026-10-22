@@ -59,10 +59,9 @@ pub(crate) const MAX_TRACK_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const TRANSIENT_ATTEMPTS: u32 = 3;
 /// Hex characters of the sha256 carried in a stored track's file name.
 const SHA_PREFIX_CHARS: usize = 16;
-/// A safety rail on the store's total size, not a working budget: a real PGS
-/// track is single-digit megabytes, so this is set well above any real
-/// library's footprint and exists so a bad producer cannot fill the disk.
-pub(crate) const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+/// Local reconciliation has no separate byte allowance. Production disk
+/// admission and LRU eviction belong to the shared playback-cache budget.
+pub(crate) const MAX_STORE_BYTES: u64 = u64::MAX;
 /// Directories examined per sweep call.
 pub(crate) const SWEEP_PAGE: usize = 256;
 /// How long a directory with no readable manifest is left alone before the
@@ -746,6 +745,7 @@ pub(crate) struct KeptTrack {
     path: PathBuf,
     sha256: String,
     format: RepresentationFormat,
+    _cache_pin: Option<std::sync::Arc<crate::playback_cache::CachePin>>,
 }
 
 impl KeptTrack {
@@ -790,7 +790,7 @@ pub(crate) fn is_mpegts_container(file: &MediaFile) -> bool {
 /// overlay has no "nothing to show" answer and demuxes the source.
 ///
 /// A miss or an `empty` answer is counted here. A `kept` answer is counted
-/// when it is opened — [`open_verified`] or [`copy_verified`] — because that
+/// when it is opened — [`open_verified`] or [`copy_verified_bounded`] — because that
 /// is when the store's bytes are actually relied on, and when a hash mismatch
 /// or a swept file turns it into a miss after all.
 pub(crate) async fn lookup(
@@ -1002,6 +1002,17 @@ async fn install_hydrated(
         return false;
     };
     let dir = file_dir(&access.root, file.id);
+    // Admission precedes the file lock: reclaim may need that same lock for
+    // another source directory. The reservation pins this directory itself.
+    let reservation = match crate::playback_cache::reserve(
+        &dir,
+        (bytes.len() as u64).saturating_add(MAX_MANIFEST_BYTES),
+    )
+    .await
+    {
+        Ok(reservation) => reservation,
+        Err(_) => return false,
+    };
     let _guard = file_lock(&access.root, file.id).lock().await;
     if tokio::fs::create_dir_all(&dir).await.is_err() {
         return false;
@@ -1103,6 +1114,9 @@ async fn install_hydrated(
         }
     }
     record_access(&dir).await;
+    if let Some(reservation) = reservation {
+        reservation.commit(directory_bytes(&dir).await);
+    }
     true
 }
 
@@ -1276,7 +1290,12 @@ async fn classify(
             if representation_file_name(ordinal, format, sha256).as_deref() != Some(name) {
                 return Lookup::Miss(MissReason::Stale);
             }
+            let cache_pin = match crate::playback_cache::pin(&dir) {
+                Ok(pin) => pin.map(std::sync::Arc::new),
+                Err(_) => return Lookup::Miss(MissReason::Absent),
+            };
             Lookup::Kept(KeptTrack {
+                _cache_pin: cache_pin,
                 consumer,
                 path: dir.join(name),
                 dir,
@@ -1323,10 +1342,31 @@ enum Opened {
 pub(crate) async fn open_verified(kept: &KeptTrack) -> Option<std::fs::File> {
     let path = kept.path.clone();
     let expected = kept.sha256.clone();
-    let opened = tokio::task::spawn_blocking(move || open_and_hash(&path, &expected, None))
-        .await
-        .unwrap_or(Opened::Miss(MissReason::Absent));
+    let cache_pin = kept._cache_pin.clone();
+    let opened = tokio::task::spawn_blocking(move || {
+        let _cache_pin = cache_pin;
+        open_and_hash(&path, &expected, None)
+    })
+    .await
+    .unwrap_or(Opened::Miss(MissReason::Absent));
     finish_open(kept, opened).await
+}
+
+/// A verified peer artifact whose lease follows the actual response reader.
+/// Field order closes the file before releasing the shared disk pin.
+pub(crate) struct PinnedSubtitleBlob {
+    file: tokio::fs::File,
+    _pin: Option<crate::playback_cache::CachePin>,
+}
+
+impl tokio::io::AsyncRead for PinnedSubtitleBlob {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.file).poll_read(context, buffer)
+    }
 }
 
 /// Open only a representation named by this node's readable manifest for a
@@ -1337,8 +1377,9 @@ pub(crate) async fn open_verified_for_peer(
     file_id: i64,
     ordinal: i64,
     format: RepresentationFormat,
-) -> Option<(std::fs::File, u64)> {
+) -> Option<(PinnedSubtitleBlob, u64)> {
     let dir = file_dir(root, file_id);
+    let cache_pin = crate::playback_cache::pin(&dir).ok()?;
     let manifest = read_manifest(&dir).await?;
     if manifest.file_id != file_id {
         return None;
@@ -1354,33 +1395,106 @@ pub(crate) async fn open_verified_for_peer(
     }
     let path = dir.join(name);
     let expected = sha256.to_owned();
-    let opened = tokio::task::spawn_blocking(move || open_and_hash(&path, &expected, None))
-        .await
-        .ok()?;
+    let (opened, cache_pin) =
+        tokio::task::spawn_blocking(move || (open_and_hash(&path, &expected, None), cache_pin))
+            .await
+            .ok()?;
     let Opened::Verified(file) = opened else {
         return None;
     };
     let bytes = file.metadata().ok()?.len();
-    Some((file, bytes))
+    Some((
+        PinnedSubtitleBlob {
+            file: tokio::fs::File::from_std(file),
+            _pin: cache_pin,
+        },
+        bytes,
+    ))
 }
 
 /// Copy a kept track to `destination` while verifying it, in one read.
 ///
 /// `destination` must not exist. On any miss it is removed again, so the
 /// caller is left exactly where it was and runs today's extraction.
+#[cfg(test)]
 pub(crate) async fn copy_verified(kept: &KeptTrack, destination: &Path) -> bool {
+    let reservation = match crate::playback_cache::reserve(destination, MAX_TRACK_BYTES).await {
+        Ok(reservation) => reservation,
+        Err(_) => return false,
+    };
+    let copied = copy_verified_bounded(kept, destination, MAX_TRACK_BYTES).await;
+    if copied {
+        if let Some(reservation) = reservation {
+            reservation.commit(
+                tokio::fs::metadata(destination)
+                    .await
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(MAX_TRACK_BYTES),
+            );
+        }
+    }
+    copied
+}
+
+pub(crate) async fn copy_verified_bounded(
+    kept: &KeptTrack,
+    destination: &Path,
+    max_bytes: u64,
+) -> bool {
+    let reservation = match crate::playback_cache::reserve(destination, max_bytes).await {
+        Ok(reservation) => reservation,
+        Err(_) => return false,
+    };
+    let source_pin = kept._cache_pin.clone();
     let path = kept.path.clone();
     let expected = kept.sha256.clone();
     let target = destination.to_owned();
-    let opened =
-        tokio::task::spawn_blocking(move || open_and_hash(&path, &expected, Some(&target)))
-            .await
-            .unwrap_or(Opened::Miss(MissReason::Absent));
-    let verified = finish_open(kept, opened).await.is_some();
-    if !verified {
-        let _ = tokio::fs::remove_file(destination).await;
+    let worker = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        pause_copy_worker(&target);
+        let opened = open_and_hash(&path, &expected, Some((&target, max_bytes)));
+        if matches!(opened, Opened::Verified(_)) {
+            if let Some(reservation) = reservation {
+                reservation.commit(
+                    std::fs::metadata(&target)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(max_bytes),
+                );
+            }
+        } else {
+            // The worker cleans its own partial output even if no waiter
+            // remains to observe the failure.
+            let _ = std::fs::remove_file(&target);
+        }
+        (opened, source_pin)
+    })
+    .await;
+    let Ok((opened, _source_pin)) = worker else {
+        return false;
+    };
+    finish_open(kept, opened).await.is_some()
+}
+
+#[cfg(test)]
+type CopyWorkerPauses = std::sync::Mutex<
+    std::collections::HashMap<PathBuf, std::sync::Arc<crate::seam_hooks::AsyncPause>>,
+>;
+
+#[cfg(test)]
+fn copy_worker_pauses() -> &'static CopyWorkerPauses {
+    static PAUSES: std::sync::OnceLock<CopyWorkerPauses> = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+fn pause_copy_worker(path: &Path) {
+    let pause = copy_worker_pauses()
+        .lock()
+        .expect("copy worker pauses")
+        .remove(path);
+    if let Some(pause) = pause {
+        tokio::runtime::Handle::current().block_on(pause.hold());
     }
-    verified
 }
 
 async fn finish_open(kept: &KeptTrack, opened: Opened) -> Option<std::fs::File> {
@@ -1397,7 +1511,7 @@ async fn finish_open(kept: &KeptTrack, opened: Opened) -> Option<std::fs::File> 
     }
 }
 
-fn open_and_hash(path: &Path, expected: &str, copy_to: Option<&Path>) -> Opened {
+fn open_and_hash(path: &Path, expected: &str, copy_to: Option<(&Path, u64)>) -> Opened {
     use std::io::{Read, Seek, Write};
 
     let mut file = match plurx_core::fs_secure::open_read_nofollow_blocking(path) {
@@ -1414,8 +1528,15 @@ fn open_and_hash(path: &Path, expected: &str, copy_to: Option<&Path>) -> Opened 
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_TRACK_BYTES {
         return Opened::Miss(MissReason::HashMismatch);
     }
+    let copy_limit = copy_to
+        .map(|(_, limit)| limit)
+        .unwrap_or(MAX_TRACK_BYTES)
+        .min(MAX_TRACK_BYTES);
+    if metadata.len() > copy_limit {
+        return Opened::Miss(MissReason::HashMismatch);
+    }
     let mut copy = match copy_to {
-        Some(target) => match std::fs::OpenOptions::new()
+        Some((target, _)) => match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(target)
@@ -1435,7 +1556,7 @@ fn open_and_hash(path: &Path, expected: &str, copy_to: Option<&Path>) -> Opened 
             Err(_) => return Opened::Miss(MissReason::Absent),
         };
         total = total.saturating_add(read as u64);
-        if total > MAX_TRACK_BYTES {
+        if total > copy_limit {
             return Opened::Miss(MissReason::HashMismatch);
         }
         hash.update(&buffer[..read]);
@@ -1705,8 +1826,15 @@ where
     let mut outcome = SweepOutcome::default();
     let mut last = after;
     for file_id in ids.into_iter().take(page_len) {
-        let _guard = file_lock(root, file_id).lock().await;
         let dir = file_dir(root, file_id);
+        let _guard = file_lock(root, file_id).lock().await;
+        let _eviction = match crate::playback_cache::begin_eviction(&dir) {
+            Ok(guard) => guard,
+            Err(_) => {
+                last = Some(file_id);
+                continue;
+            }
+        };
         let doomed = match read_manifest(&dir).await {
             Some(manifest) => match row(file_id).await? {
                 None => true,
@@ -1918,6 +2046,10 @@ async fn enforce_cap(
             break;
         }
         let _guard = file_lock(root, file_id).lock().await;
+        let _eviction = match crate::playback_cache::begin_eviction(&dir) {
+            Ok(guard) => guard,
+            Err(_) => continue,
+        };
         match remove_dir(&dir).await {
             Ok(()) => {
                 evicted += 1;
@@ -2006,8 +2138,8 @@ pub struct GateState {
     pub reason: Option<String>,
 }
 
-pub(crate) fn diagnostics(switch_on: bool, runtime_cache: &Path) -> StoreDiagnostics {
-    let gate = match crate::subtitle_ride_along::gate_verdict(switch_on, runtime_cache) {
+pub(crate) async fn diagnostics(switch_on: bool, runtime_cache: &Path) -> StoreDiagnostics {
+    let mut gate = match crate::subtitle_ride_along::gate_verdict(switch_on, runtime_cache) {
         Ok(()) => GateState {
             open: true,
             reason: None,
@@ -2020,11 +2152,22 @@ pub(crate) fn diagnostics(switch_on: bool, runtime_cache: &Path) -> StoreDiagnos
     let (attempted, [kept, empty, malformed, transient], written, published) =
         crate::subtitle_ride_along::snapshot();
     let footprint = footprint();
+    let cap_bytes = match crate::playback_cache::lookup(runtime_cache) {
+        Some(budget) => match budget.ceiling_bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                gate.open = false;
+                gate.reason = Some(format!("shared playback disk budget unavailable: {error}"));
+                0
+            }
+        },
+        None => 32 * 1024 * 1024 * 1024,
+    };
     StoreDiagnostics {
         footprint_age_ms: footprint
             .map(|footprint| unix_ms().saturating_sub(footprint.measured_at_ms).max(0)),
         footprint,
-        cap_bytes: MAX_STORE_BYTES,
+        cap_bytes,
         riding: crate::subtitle_ride_along::active_rides(),
         tracks_attempted: attempted,
         kept,
@@ -2127,6 +2270,300 @@ pub(crate) mod testing {
         )
         .expect("write manifest");
         dir
+    }
+}
+
+/// A recursive candidate retains its inspected parent and child identity.
+/// Neither a renamed parent nor a symlink substituted at its former pathname
+/// can redirect cleanup to another tree.
+#[derive(Clone)]
+pub(crate) struct PlaybackDirectoryRemoval {
+    parent: plurx_core::fs_secure::SecureDirectory,
+    name: String,
+    identity: plurx_core::fs_secure::FileIdentity,
+}
+
+impl PlaybackDirectoryRemoval {
+    pub(crate) async fn bind(
+        parent: &plurx_core::fs_secure::SecureDirectory,
+        name: &str,
+    ) -> std::io::Result<Self> {
+        let child = parent.open_child_directory(name).await?;
+        Ok(Self {
+            parent: parent.clone(),
+            name: name.to_owned(),
+            identity: child.identity().await?,
+        })
+    }
+    pub(crate) async fn remove(&self) -> std::io::Result<bool> {
+        match self
+            .parent
+            .remove_child_tree_checked(&self.name, self.identity, 120_100, 32)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Register subtitle artifacts with the node's one playback disk budget.
+/// Deletion stays here so directory locks and replicated holder rows retain
+/// the same semantics as ordinary subtitle-source reconciliation.
+pub(crate) fn register_playback_cache(
+    budget: &std::sync::Arc<crate::playback_cache::PlaybackCacheBudget>,
+    runtime_root: &Path,
+    subs_root: &Path,
+    catalog: std::sync::Arc<dyn plurx_core::store::Store>,
+    node_id: &str,
+) {
+    crate::pgs_overlay::register_playback_cache(budget, subs_root);
+    budget.register(std::sync::Arc::new(SubtitleCacheOwner {
+        sources: store_root(runtime_root),
+        sidecars: subs_root.to_owned(),
+        catalog,
+        node_id: node_id.to_owned(),
+        directories: Default::default(),
+        sidecar_parents: Default::default(),
+    }));
+    budget.register(std::sync::Arc::new(RuntimeCacheOwner {
+        root: runtime_root.to_owned(),
+        directories: Default::default(),
+    }));
+}
+
+/// Only namespaces with explicit owners are reclaimable. In particular this
+/// never walks arbitrary runtime files or treats the runtime root as a unit.
+struct RuntimeCacheOwner {
+    root: PathBuf,
+    directories: std::sync::Mutex<std::collections::HashMap<PathBuf, PlaybackDirectoryRemoval>>,
+}
+
+impl RuntimeCacheOwner {
+    fn disposable_directory(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if path.parent() == Some(self.root.as_path()) {
+            return matches!(
+                name,
+                "gpu-cache" | "mesa_shader_cache" | "mesa_shader_cache_db" | "ComputeCache"
+            );
+        }
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        (parent == self.root.join(crate::fontenv::FONT_ENVIRONMENT_DIR) && !name.starts_with('.'))
+            || (parent == self.root.join("subtitle-transcription") && name.starts_with("attempt-"))
+            || (parent == store_root(&self.root)
+                && (name.starts_with(".stage-") || name.starts_with(".selftest-")))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for RuntimeCacheOwner {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        self.directories.lock().expect("runtime candidates").clear();
+        let mut result = Vec::new();
+        for root in [
+            self.root.clone(),
+            self.root.join(crate::fontenv::FONT_ENVIRONMENT_DIR),
+            self.root.join("subtitle-transcription"),
+            store_root(&self.root),
+        ] {
+            let parent = match plurx_core::fs_secure::SecureDirectory::open(&root).await {
+                Ok(parent) => parent,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let mut entries = match tokio::fs::read_dir(root).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !self.disposable_directory(&path) {
+                    continue;
+                }
+                let metadata = match tokio::fs::symlink_metadata(&path).await {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if !metadata.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let binding = match PlaybackDirectoryRemoval::bind(&parent, name).await {
+                    Ok(binding) => binding,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                self.directories
+                    .lock()
+                    .expect("runtime candidates")
+                    .insert(path.clone(), binding);
+                result.push(crate::playback_cache::CacheCandidate {
+                    path,
+                    last_used: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                });
+            }
+        }
+        Ok(result)
+    }
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if !self.disposable_directory(&candidate.path) {
+            return Ok(false);
+        }
+        let binding = self
+            .directories
+            .lock()
+            .expect("runtime candidates")
+            .remove(&candidate.path);
+        let Some(binding) = binding else {
+            return Ok(false);
+        };
+        binding.remove().await
+    }
+}
+
+struct SubtitleCacheOwner {
+    sources: PathBuf,
+    sidecars: PathBuf,
+    catalog: std::sync::Arc<dyn plurx_core::store::Store>,
+    node_id: String,
+    directories: std::sync::Mutex<std::collections::HashMap<PathBuf, PlaybackDirectoryRemoval>>,
+    sidecar_parents: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, (plurx_core::fs_secure::SecureDirectory, String)>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for SubtitleCacheOwner {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        use crate::playback_cache::CacheCandidate;
+        self.directories.lock().expect("source candidates").clear();
+        self.sidecar_parents
+            .lock()
+            .expect("sidecar candidates")
+            .clear();
+        let sources = match plurx_core::fs_secure::SecureDirectory::open(&self.sources).await {
+            Ok(parent) => Some(parent),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut candidates = Vec::new();
+        match list_file_dirs(&self.sources).await {
+            Ok(ids) => {
+                for id in ids {
+                    let path = file_dir(&self.sources, id);
+                    let last_used = tokio::fs::metadata(path.join(".access"))
+                        .await
+                        .or(tokio::fs::metadata(&path).await)
+                        .and_then(|metadata| metadata.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    let Some(parent) = sources.as_ref() else {
+                        continue;
+                    };
+                    let binding =
+                        match PlaybackDirectoryRemoval::bind(parent, &format!("f{id}")).await {
+                            Ok(binding) => binding,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error),
+                        };
+                    self.directories
+                        .lock()
+                        .expect("source candidates")
+                        .insert(path.clone(), binding);
+                    candidates.push(CacheCandidate { path, last_used });
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let sidecars = match plurx_core::fs_secure::SecureDirectory::open(&self.sidecars).await {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+            Err(error) => return Err(error),
+        };
+        let mut entries = match tokio::fs::read_dir(&self.sidecars).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+            Err(error) => return Err(error),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !metadata.is_file() || !(name.starts_with('f') || name.starts_with(".tmp-")) {
+                continue;
+            }
+            self.sidecar_parents
+                .lock()
+                .expect("sidecar candidates")
+                .insert(entry.path(), (sidecars.clone(), name.to_string()));
+            candidates.push(CacheCandidate {
+                path: entry.path(),
+                last_used: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            });
+        }
+        Ok(candidates)
+    }
+
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        if candidate.path.parent() == Some(self.sources.as_path()) {
+            let Some(file_id) = candidate
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix('f'))
+                .and_then(|id| id.parse::<i64>().ok())
+            else {
+                return Ok(false);
+            };
+            let Ok(_guard) = file_lock(&self.sources, file_id).try_lock() else {
+                return Ok(false);
+            };
+            let binding = self
+                .directories
+                .lock()
+                .expect("source candidates")
+                .remove(&candidate.path);
+            let Some(binding) = binding else {
+                return Ok(false);
+            };
+            if !binding.remove().await? {
+                return Ok(false);
+            }
+            delete_swept_publications(Some((self.catalog.as_ref(), &self.node_id)), file_id).await;
+            return Ok(true);
+        }
+        if candidate.path.parent() != Some(self.sidecars.as_path()) {
+            return Ok(false);
+        }
+        let binding = self
+            .sidecar_parents
+            .lock()
+            .expect("sidecar candidates")
+            .remove(&candidate.path);
+        let Some((parent, name)) = binding else {
+            return Ok(false);
+        };
+        crate::subtitles::evict_playback_sidecar(&candidate.path, &parent, &name).await
     }
 }
 
@@ -2410,6 +2847,259 @@ mod tests {
             .await
             .expect("rows")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_budget_reclaims_idle_sidecars_then_sources_and_forgets_holder_rows() {
+        let base = crate::test_tempdir().expect("playback cache");
+        let runtime = base.path().join("runtime");
+        let subs = base.path().join("subs");
+        std::fs::create_dir_all(&subs).expect("sidecars");
+        let source_root = store_root(&runtime);
+        let dir = file_dir(&source_root, 7);
+        let entry = kept(&dir, 0, &[b's'; 64 * 1024]);
+        write_manifest(&source_root, 7, stamp(10, 20, None, None), vec![entry]);
+        let sidecar = subs.join("f7-s0-10-20.vtt");
+        std::fs::write(&sidecar, [b'v'; 64 * 1024]).expect("sidecar");
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(10);
+        std::fs::File::create(dir.join(".access"))
+            .expect("access")
+            .set_modified(old)
+            .expect("old access");
+        std::fs::File::open(&sidecar)
+            .expect("sidecar")
+            .set_modified(old + Duration::from_secs(10))
+            .expect("newer access");
+        let catalog: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        catalog
+            .upsert_subtitle_source_publication(&publication(0, "extracted", "kept", 1))
+            .await
+            .expect("holder row");
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            catalog.clone(),
+            vec![base.path().to_owned()],
+        );
+        budget.configure_for_test(u64::MAX);
+        register_playback_cache(&budget, &runtime, &subs, catalog.clone(), "lab4");
+        let used = budget.used_bytes().await.expect("inventory");
+        budget.configure_for_test(used + 16 * 1024);
+        let reader = crate::playback_cache::pin(&dir).expect("reader pin");
+        let grant = crate::playback_cache::reserve(&subs.join("new.vtt"), 32 * 1024)
+            .await
+            .expect("reclaim sidecar")
+            .expect("configured");
+        assert!(dir.exists(), "an active source remains available");
+        assert!(
+            !sidecar.exists(),
+            "global LRU skips pinned source and reclaims sidecar"
+        );
+        grant.commit(0);
+        assert_eq!(
+            catalog
+                .list_subtitle_source_publications(7, 10, 20)
+                .await
+                .expect("rows")
+                .len(),
+            1
+        );
+        drop(reader);
+        let used = budget.used_bytes().await.expect("remaining inventory");
+        budget.configure_for_test(used + 16 * 1024);
+        let grant = crate::playback_cache::reserve(&subs.join("later.vtt"), 32 * 1024)
+            .await
+            .expect("reclaim source")
+            .expect("configured");
+        assert!(
+            !dir.exists(),
+            "released source participates in the same LRU"
+        );
+        assert!(
+            catalog
+                .list_subtitle_source_publications(7, 10, 20)
+                .await
+                .expect("rows")
+                .is_empty(),
+            "eviction removes the replicated holder advertisement"
+        );
+        grant.commit(0);
+    }
+
+    #[tokio::test]
+    async fn shared_budget_reclaims_abandoned_runtime_stages_without_touching_live_ones() {
+        let base = crate::test_tempdir().expect("runtime");
+        let runtime = base.path().join("runtime");
+        let root = store_root(&runtime);
+        let live = root.join(".stage-live");
+        let abandoned = root.join(".stage-abandoned");
+        for path in [&live, &abandoned] {
+            std::fs::create_dir_all(path).expect("stage");
+            std::fs::write(path.join("s0.sup"), [1_u8; 64 * 1024]).expect("stage bytes");
+        }
+        let catalog: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let budget =
+            crate::playback_cache::PlaybackCacheBudget::new(catalog.clone(), vec![runtime.clone()]);
+        budget.configure_for_test(u64::MAX);
+        register_playback_cache(
+            &budget,
+            &runtime,
+            &base.path().join("subs"),
+            catalog,
+            "lab4",
+        );
+        let _active = crate::playback_cache::pin(&live).expect("active stage pin");
+        let used = budget.used_bytes().await.expect("stage inventory");
+        budget.configure_for_test(used - 16 * 1024);
+        budget.sweep().await.expect("reclaim abandoned stage");
+        assert!(live.join("s0.sup").exists());
+        assert!(!abandoned.exists());
+    }
+
+    #[tokio::test]
+    async fn shared_budget_reclaims_restart_sidecar_temps_but_keeps_live_temps() {
+        let base = crate::test_tempdir().expect("cache");
+        let runtime = base.path().join("runtime");
+        let subs = base.path().join("subs");
+        std::fs::create_dir_all(&subs).expect("sidecars");
+        let idle = subs.join(".tmp-restart.vtt");
+        let live = subs.join(".tmp-live.vtt");
+        for path in [&idle, &live] {
+            std::fs::write(path, [1_u8; 64 * 1024]).expect("temporary bytes");
+        }
+        let catalog: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            catalog.clone(),
+            vec![base.path().to_owned()],
+        );
+        budget.configure_for_test(u64::MAX);
+        register_playback_cache(&budget, &runtime, &subs, catalog, "lab4");
+        let _writer = crate::playback_cache::pin(&live).expect("active writer");
+        let used = budget.used_bytes().await.expect("inventory");
+        budget.configure_for_test(used - 16 * 1024);
+        budget.sweep().await.expect("evict restart leftovers");
+        assert!(!idle.exists());
+        assert!(
+            live.exists(),
+            "an ongoing extraction's temporary pathname remains pinned"
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_copy_waiter_cannot_release_a_blocked_workers_source_or_disk_grant() {
+        let base = crate::test_tempdir().expect("copy cache");
+        let runtime = base.path().join("runtime");
+        let root = store_root(&runtime);
+        let subs = base.path().join("subs");
+        std::fs::create_dir_all(&subs).expect("sidecars");
+        let source = base.path().join("source.mkv");
+        std::fs::write(&source, b"source").expect("source");
+        let live = stamp_of(&source);
+        let file = media_file(7, source, live.size as i64, live.mtime);
+        let directory = file_dir(&root, 7);
+        let track = kept(&directory, 0, b"verified copy");
+        write_manifest(&root, 7, live, vec![track]);
+        let catalog: std::sync::Arc<dyn plurx_core::store::Store> =
+            std::sync::Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("catalog"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(
+            catalog.clone(),
+            vec![base.path().to_owned()],
+        );
+        budget.configure_for_test(u64::MAX);
+        register_playback_cache(&budget, &runtime, &subs, catalog, "lab4");
+        let access = StoreAccess::new(root, true);
+        let Lookup::Kept(track) =
+            lookup(&access, Consumer::Overlay, &file, 0, Live::Stamp(live)).await
+        else {
+            panic!("kept source");
+        };
+        let target = subs.join(".tmp-canceled-copy.vtt");
+        let pause = crate::seam_hooks::AsyncPause::new("subtitle blocking copy worker");
+        copy_worker_pauses()
+            .lock()
+            .expect("copy pauses")
+            .insert(target.clone(), pause.clone());
+        let worker_target = target.clone();
+        let operation =
+            tokio::spawn(
+                async move { copy_verified_bounded(&track, &worker_target, 64 * 1024).await },
+            );
+        let held = pause.reached().await;
+        operation.abort();
+        assert!(operation.await.expect_err("waiter canceled").is_cancelled());
+        assert!(
+            crate::playback_cache::is_pinned(&directory),
+            "the blocking worker still owns its source"
+        );
+        assert!(
+            crate::playback_cache::is_pinned(&target),
+            "the blocking writer still owns its destination"
+        );
+        let charged = budget.used_bytes().await.expect("active writer inventory");
+        budget.configure_for_test(charged);
+        assert!(
+            crate::playback_cache::reserve(&subs.join("another.vtt"), 1)
+                .await
+                .is_err(),
+            "the canceled waiter does not lend the worker's grant to another writer"
+        );
+        held.release();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while crate::playback_cache::is_pinned(&directory)
+                || crate::playback_cache::is_pinned(&target)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("blocking worker settles");
+        assert_eq!(
+            std::fs::read(target).expect("settled copy"),
+            b"verified copy"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_eviction_uses_the_inspected_parent_after_its_path_is_replaced() {
+        use crate::playback_cache::CacheOwner;
+        let base = crate::test_tempdir().expect("runtime");
+        let runtime = base.path().join("runtime");
+        let parent = runtime.join("subtitle-transcription");
+        let original = parent.join("attempt-old");
+        std::fs::create_dir_all(&original).expect("owned stage");
+        std::fs::write(original.join("caption.vtt"), b"disposable").expect("owned output");
+        let owner = RuntimeCacheOwner {
+            root: runtime.clone(),
+            directories: Default::default(),
+        };
+        let candidate = owner
+            .candidates()
+            .await
+            .expect("inspect")
+            .into_iter()
+            .find(|candidate| candidate.path == original)
+            .expect("runtime candidate");
+        let outside = base.path().join("private");
+        std::fs::create_dir_all(outside.join("attempt-old")).expect("private directory");
+        let private = outside.join("attempt-old/secret");
+        std::fs::write(&private, b"private bytes").expect("private file");
+        let held_parent = runtime.join("parked-transcription");
+        std::fs::rename(&parent, &held_parent).expect("replace parent");
+        std::os::unix::fs::symlink(&outside, &parent).expect("outside symlink");
+        owner
+            .evict(&candidate)
+            .await
+            .expect("remove inspected stage");
+        assert_eq!(
+            std::fs::read(private).expect("private bytes retained"),
+            b"private bytes"
+        );
+        assert!(
+            !held_parent.join("attempt-old").exists(),
+            "only the originally inspected inode was reclaimed"
+        );
     }
 
     #[test]
