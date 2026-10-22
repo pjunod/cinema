@@ -16,6 +16,7 @@ use crate::resource_custody::{
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
+mod live_settlement;
 mod pipe_drains;
 
 #[derive(Default)]

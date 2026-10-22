@@ -4,7 +4,7 @@
 use super::*;
 use crate::resource_custody::{ClosedMemberFact, MemberKind, RecoveryMethod};
 
-const LOCATOR: &str = "discard-root-pipes-v1";
+pub(super) const LOCATOR: &str = "discard-root-pipes-v1";
 
 impl NodeResourceRuntime {
     pub(crate) async fn spawn_pipe_drain(
