@@ -44,6 +44,7 @@ const esc = (value) => String(value)
 let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
+const TEST_FILTER = process.env.SETTINGS_TEST_FILTER;
 
 test("media support warning remains prominent for a working encoder with missing required Metal", () => {
   const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
@@ -208,11 +209,22 @@ test("node transcoder save binds the request to the displayed node and preserves
   assert.equal(button.disabled,false);
 });
 async function main() {
+  // Test registrations continue below this call site; let the script finish
+  // loading before deciding which names to run.
+  await Promise.resolve();
+  const filters = TEST_FILTER ? TEST_FILTER.split("|") : [];
+  let matched = 0;
   for (const { name, run } of QUEUE) {
+    if (TEST_FILTER && !filters.some((part) => name.includes(part))) continue;
+    matched += 1;
     started += 1;
     try { await run(); process.stdout.write(`PASS ${name}\n`); }
     catch (error) { failures += 1; process.stderr.write(`FAIL ${name}\n${error && error.stack}\n`); }
     finished += 1;
+  }
+  if (TEST_FILTER && matched === 0) {
+    process.stderr.write(`No settings tests matched SETTINGS_TEST_FILTER=${TEST_FILTER}\n`);
+    failures += 1;
   }
 }
 
@@ -2210,7 +2222,7 @@ test("DV preference saves roundtrip either choice and preserve advisory failures
       const writes=[],nodes={[id]:{checked:false},[`${id}-error`]:{textContent:""},[`${id}-card`]:{outerHTML:""}};
       let reject=false;
       const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
-        `${shippedSource(name)} return ${name};`)(
+        `${shippedSource(name)}\nreturn ${name};`)(
         {getElementById:key=>{assert.ok(key in nodes);return nodes[key];}},
         async(path,request)=>{assert.equal(request.method,"PUT");writes.push([path,request.body]);if(reject)throw new Error("Write failed");return {...request.body,dolby_vision_convert:false};},
         value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings[field]}`;},readiness,()=>{});
@@ -2242,7 +2254,7 @@ test("DV preference responses preserve newer edits and replacement cards", async
       let resolve,requested,cached;
       const pending=new Promise(done=>{resolve=done;});
       const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
-        `${shippedSource(name)} return ${name};`)(
+        `${shippedSource(name)}\nreturn ${name};`)(
         {getElementById:key=>nodes[key]},
         (_path,request)=>{requested=request.body;return pending;},
         value=>{cached=value;return value;},()=>"saved:true",{},()=>{});
