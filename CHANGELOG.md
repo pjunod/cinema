@@ -36,6 +36,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Display-targeted HDR10 resolves one mastering minimum before helper execution
+  and rendition identity: consistent title L6, trusted source MDCV, then the
+  established renderer floor. Completed reports and output metadata describe
+  that exact target; metadata cannot select a different black floor afterward.
+
 - Explicit internal display-targeted HDR10 windows carry consistent post-encode
   mastering/content-light declarations in init boxes and every IRAP prefix SEI,
   independent of encoder family. Mastering primaries/minimum use title L9/L6 or

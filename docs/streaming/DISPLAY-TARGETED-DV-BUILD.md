@@ -20,8 +20,13 @@ selected held source stream's already-attested probe side data. Contradictory
 L9, reserved or unrepresentable primaries, malformed/conflicting source MDCV,
 and missing source primaries refuse the explicit target with a named reason.
 No BT.2020 container colour tag or assumed P3 gamut supplies missing mastering
-facts. Title L6 supplies the minimum; missing L6 may use the source MDCV minimum,
-and contradictory/missing minima refuse. Maximum luminance is the bucket,
+facts. Title L6 supplies the minimum; missing L6 uses trusted source MDCV, then the
+established renderer floor of 0.005 nits when MDCV is absent. Contradictory L6
+and source minima outside the renderer range refuse. The effective minimum is
+resolved before helper/export policy and rendition identity are frozen; helper
+arguments, completed-plan black level, trace validation, init and IRAP metadata
+all consume that same target. A frozen target cannot silently acquire another
+minimum. Maximum luminance is the bucket,
 MaxCLL is min(bucket, scanned title L1 peak), and MaxFALL is zero (unknown).
 Default/master and elided policies retain their original encoded bytes.
 
@@ -33,6 +38,16 @@ No regression has run: completed-code independent review precedes functional
 validation. Pinned compilation, independent review, once-only regressions,
 actual encoder-family/device acceptance and publication remain open. No targeting
 control or later C–F feature is introduced by B.
+
+**Independent-review P2 repair authored:** the previous output-only source-MDCV
+fallback could label 0.0017 nits while the helper and semantic target still used
+0.005. `resolve_source` now chooses one effective target before execution, and
+metadata accepts only that resolved target. Consistent L9 with missing L6/MDCV
+uses the established floor; unknown primaries and inconsistent L6/L9 still
+refuse. Focused unexecuted controls bind source17 through helper args, completed
+black level, semantic identity, trace, init and every IRAP. New pinned compile
+and narrow independent closure are required; no previous pass is relabelled.
+
 
 ## PR C source checkpoint (2026-10-22)
 
@@ -58,6 +73,11 @@ acceptance is claimed here.
   same policy. Exact predecessor-root reuse also requires target equality;
   ordinary VOD and pre-encode paths always keep `None` (master). The client
   snapshot is unchanged for prepared successors and Auto rung selection.
+  The accepted probe's selected playable stream resolves the effective mastering
+  minimum before this context or preparation identity is frozen. The held-source
+  constructor independently resolves the same title/stream facts and compares
+  the exact target; a source17 floor cannot retain the old default50 identity.
+
 - **Cache disposition:** the current architecture marks processed roots
   `ephemeral_processing`; `RetainedRegistry::offer` excludes them. There are
   zero reusable retained buckets per title, satisfying the at-most-two bound.
@@ -96,6 +116,8 @@ Authored regression anchors (not executed):
 - `enhancement.rs::targeted_hdr10_dyn_names_bucket_and_l1_limit`
 - `dv_processing/tests.rs::effective_target_report_rejects_ambiguous_or_unsupported_buckets`
 - `manager/create.rs::display_target_declines_are_named_and_elision_is_master`
+- `manager/create.rs::source_mastering_resolves_before_the_live_target_is_frozen`
+- `session_request.rs::resolved_source_floor_changes_the_actual_processed_preparation_binding`
 - `http/tests.rs::display_target_setting_defaults_off_and_saves_despite_unmet_advice`
 - `settings-sections.test.js`: editable targeting and existing independent-save,
   stale-reply and replacement-card tests extended to the new preference.
