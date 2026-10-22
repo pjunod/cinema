@@ -5,6 +5,10 @@
 // we do not assert that arbitrary event streams eventually terminate.
 use crate::library_lifecycle::*;
 
+// Call the pinned Kani AssertHook directly so literal theorem labels survive
+// no_std analysis. Core formatting-based assert/expect macros lose their text
+// on this frontend and pull irrelevant panic-formatting machinery into proofs.
+
 fn interrupt() -> Interrupt {
     match kani::any::<u8>() % 4 {
         0 => Interrupt::QueueLoss,
@@ -80,6 +84,21 @@ fn enabled_event(current: State) -> Event {
     }
 }
 
+// A proof-only Result guard. Each call expands a reached assertion with its
+// literal theorem label. Err returns a typed placeholder only after that
+// assertion has failed; this is never an assumption or production fallback.
+macro_rules! accepted_step {
+    ($current:expr, $input:expr, $label:literal $(,)?) => {{
+        let current = $current;
+        let result = step(current, $input);
+        kani::assert(result.is_ok(), $label);
+        match result {
+            Ok(next) => next,
+            Err(Stale) => (current, Effects::empty()),
+        }
+    }};
+}
+
 fn rank(current: State) -> u8 {
     match current {
         State::Initial => 0,
@@ -110,17 +129,19 @@ fn t1_all_typed_inputs_total_deterministic() {
     let current = state();
     let input = event();
     let first = step(current, input);
-    assert_eq!(first, step(current, input), "T1 deterministic shared step");
-    assert_eq!(
-        first.is_ok(),
-        accepted_pair(current, input),
-        "T1 exact accepted event kinds"
+    kani::assert(
+        (first) == (step(current, input)),
+        "T1 deterministic shared step",
+    );
+    kani::assert(
+        (first.is_ok()) == (accepted_pair(current, input)),
+        "T1 exact accepted event kinds",
     );
     if let Ok((next, effects)) = first {
-        assert!(rank(next) > rank(current), "T1 accepted DAG rank increases");
-        assert!(
+        kani::assert(rank(next) > rank(current), "T1 accepted DAG rank increases");
+        kani::assert(
             effects.as_slice().len() <= 6,
-            "T1 bounded well formed effects"
+            "T1 bounded well formed effects",
         );
     }
     // State and Event are Copy values passed by value. Err(Stale) has no
@@ -147,21 +168,21 @@ fn t2_every_reachable_prefix_gates_process() {
             accepted_bind = true;
         }
         let (next, effects) =
-            step(current, input).expect("reachable process-gating event accepted");
-        assert!(rank(next) > rank(current), "T2 accepted DAG rank increases");
+            accepted_step!(current, input, "T2 reachable protocol event accepted");
+        kani::assert(rank(next) > rank(current), "T2 accepted DAG rank increases");
         for effect in effects.as_slice() {
             match effect {
                 Effect::AcquireDomain => {
                     starts += 1;
-                    assert!(
+                    kani::assert(
                         current == State::Initial && starts == 1,
-                        "T2 one shot initialization"
+                        "T2 one shot initialization",
                     );
                 }
                 Effect::Process => {
-                    assert!(
+                    kani::assert(
                         acquired && accepted_bind && processes == 0,
-                        "T2 process requires acquired domain and accepted bind"
+                        "T2 process requires acquired domain and accepted bind",
                     );
                     processes += 1;
                 }
@@ -170,7 +191,10 @@ fn t2_every_reachable_prefix_gates_process() {
         }
         current = next;
     }
-    assert_eq!(current, State::Terminal, "T2 complete accepted trace bound");
+    kani::assert(
+        (current) == (State::Terminal),
+        "T2 complete accepted trace bound",
+    );
 }
 
 #[kani::proof]
@@ -196,104 +220,103 @@ fn t3_every_prefix_retains_resources_terminal_cleanup_ordered() {
         match input {
             Event::DomainOutcome { acquired: true, .. } => domain = true,
             Event::WorkJoined { .. } => {
-                assert!(
+                kani::assert(
                     work && join_requested && admission && domain && publisher,
-                    "T3 resources retained through work join"
+                    "T3 resources retained through work join",
                 );
                 work = false;
                 joined = true;
             }
             Event::DomainReleased { .. } => {
-                assert!(
+                kani::assert(
                     release_requested && domain && !publisher && !work && admission,
-                    "T3 release completes while admission retained"
+                    "T3 release completes while admission retained",
                 );
                 domain = false;
             }
             _ => {}
         }
         let (next, effects) =
-            step(current, input).expect("reachable resource-lifetime event accepted");
-        assert!(rank(next) > rank(current), "T3 accepted DAG rank increases");
+            accepted_step!(current, input, "T3 reachable protocol event accepted");
+        kani::assert(rank(next) > rank(current), "T3 accepted DAG rank increases");
         for (index, effect) in effects.as_slice().iter().enumerate() {
-            assert!(admission, "T3 admission is last effect");
+            kani::assert(admission, "T3 admission is last effect");
             if matches!(
                 effect,
                 Effect::AcquireDomain | Effect::Bind | Effect::Process | Effect::ReleaseDomain
             ) {
-                assert_eq!(
-                    index + 1,
-                    effects.as_slice().len(),
-                    "T3 outcome-producing effect is last in its list"
+                kani::assert(
+                    (index + 1) == (effects.as_slice().len()),
+                    "T3 outcome-producing effect is last in its list",
                 );
             }
             match effect {
-                Effect::AcquireDomain => assert!(
+                Effect::AcquireDomain => kani::assert(
                     queue && !domain && !publisher,
-                    "T3 acquire retains admission and queue"
+                    "T3 acquire retains admission and queue",
                 ),
                 Effect::Bind => {
-                    assert!(domain && queue && !publisher, "T3 bind owns domain");
+                    kani::assert(domain && queue && !publisher, "T3 bind owns domain");
                     publisher = true;
                 }
                 Effect::Process => {
-                    assert!(
+                    kani::assert(
                         domain && publisher && queue && !work && !processed,
-                        "T3 process resource ownership"
+                        "T3 process resource ownership",
                     );
                     work = true;
                     processed = true;
                 }
                 Effect::RevokeDomain => {
-                    assert!(
+                    kani::assert(
                         work && domain && publisher && !join_requested,
-                        "T3 revoke before join"
+                        "T3 revoke before join",
                     );
                     revoked = true;
                 }
                 Effect::CancelWork => {
-                    assert!(work && revoked && !join_requested, "T3 cancel before join")
+                    kani::assert(work && revoked && !join_requested, "T3 cancel before join")
                 }
                 Effect::AwaitWorkJoin => {
-                    assert!(
+                    kani::assert(
                         work && domain && publisher && !join_requested,
-                        "T3 await before resource release"
+                        "T3 await before resource release",
                     );
                     join_requested = true;
                 }
                 Effect::DropPublisher => {
-                    assert!(
+                    kani::assert(
                         publisher && domain && !work && (!processed || joined),
-                        "T3 publisher dropped after work joined"
+                        "T3 publisher dropped after work joined",
                     );
                     publisher = false;
                 }
                 Effect::ReleaseDomain => {
-                    assert!(
+                    kani::assert(
                         domain && !publisher && !work && !release_requested,
-                        "T3 publisher dropped before domain release"
+                        "T3 publisher dropped before domain release",
                     );
                     release_requested = true;
                 }
-                Effect::Settle(_) => assert!(
+                Effect::Settle(_) => kani::assert(
                     queue && !domain && !publisher && !work,
-                    "T3 settlement after local release completion"
+                    "T3 settlement after local release completion",
                 ),
                 Effect::RetireQueue => {
-                    assert!(
+                    kani::assert(
                         queue && !domain && !publisher && !work,
-                        "T3 retire after release"
+                        "T3 retire after release",
                     );
                     queue = false;
                 }
                 Effect::DropAdmission => {
-                    assert!(
+                    kani::assert(
                         !queue
                             && !domain
                             && !publisher
                             && !work
                             && index + 1 == effects.as_slice().len(),
-                        "T3 queue retired before admission dropped last"
+                        "T3 queue retired before admission dropped last",
                     );
                     admission = false;
                     admission_drops += 1;
@@ -301,30 +324,33 @@ fn t3_every_prefix_retains_resources_terminal_cleanup_ordered() {
             }
         }
         if next != State::Terminal {
-            assert!(
+            kani::assert(
                 admission && queue,
-                "T3 nonterminal prefix retains admission and queue"
+                "T3 nonterminal prefix retains admission and queue",
             );
         } else {
-            assert!(
+            kani::assert(
                 !admission && !queue && !domain && !publisher && !work && admission_drops == 1,
-                "T3 terminal cleanup exactly once"
+                "T3 terminal cleanup exactly once",
             );
         }
         current = next;
     }
-    assert_eq!(current, State::Terminal, "T3 complete accepted trace bound");
+    kani::assert(
+        (current) == (State::Terminal),
+        "T3 complete accepted trace bound",
+    );
 }
 
 fn release_effects(kind: SettlementKind, now: i64, delay: i64) -> Effects {
-    step(
+    accepted_step!(
         State::Releasing { settlement: kind },
         Event::DomainReleased {
             now_ms: now,
             retry_delay_ms: delay,
         },
+        "T4 T5 release event accepted"
     )
-    .expect("release event accepted")
     .1
 }
 
@@ -335,113 +361,117 @@ fn t4_refusal_interrupt_and_completion_settlement_policy() {
     let delay: i64 = kani::any();
     let cause = interrupt();
     let ok: bool = kani::any();
-    let (_, refused) = step(
+    let (_, refused) = accepted_step!(
         State::Claimed,
         Event::DomainOutcome {
             acquired: false,
             now_ms: now,
         },
-    )
-    .expect("domain refusal accepted");
-    assert_eq!(
-        refused.as_slice(),
-        &[
-            Effect::Settle(Settlement::Yield {
-                not_before_ms: now.saturating_add(5_000)
-            }),
-            Effect::RetireQueue,
-            Effect::DropAdmission
-        ],
-        "T4 domain refusal yields without retry"
+        "T4 reachable protocol event accepted"
     );
-    let (releasing, refused_bind) = step(
+    kani::assert(
+        (refused.as_slice())
+            == (&[
+                Effect::Settle(Settlement::Yield {
+                    not_before_ms: now.saturating_add(5_000),
+                }),
+                Effect::RetireQueue,
+                Effect::DropAdmission,
+            ]),
+        "T4 domain refusal yields without retry",
+    );
+    let (releasing, refused_bind) = accepted_step!(
         State::DomainAcquired,
         Event::BindOutcome { accepted: false },
-    )
-    .expect("bind refusal accepted");
-    assert_eq!(
-        releasing,
-        State::Releasing {
-            settlement: SettlementKind::Refused
-        },
-        "T4 bind refusal settlement"
+        "T4 reachable protocol event accepted"
     );
-    assert_eq!(
-        refused_bind.as_slice(),
-        &[Effect::DropPublisher, Effect::ReleaseDomain],
-        "T4 bind refusal releases without processing"
+    kani::assert(
+        (releasing)
+            == (State::Releasing {
+                settlement: SettlementKind::Refused,
+            }),
+        "T4 bind refusal settlement",
     );
-    let (processing, interrupt_effects) =
-        step(State::Bound, Event::Interrupt(cause)).expect("interrupt accepted");
+    kani::assert(
+        (refused_bind.as_slice()) == (&[Effect::DropPublisher, Effect::ReleaseDomain]),
+        "T4 bind refusal releases without processing",
+    );
+    let (processing, interrupt_effects) = accepted_step!(
+        State::Bound,
+        Event::Interrupt(cause),
+        "T4 reachable protocol event accepted"
+    );
     match cause {
-        Interrupt::QueueLoss | Interrupt::DomainLoss | Interrupt::Pressure => assert_eq!(
-            interrupt_effects.as_slice(),
-            &[
-                Effect::RevokeDomain,
-                Effect::CancelWork,
-                Effect::AwaitWorkJoin
-            ],
-            "T4 loss interrupts revoke cancel and join in order"
+        Interrupt::QueueLoss | Interrupt::DomainLoss | Interrupt::Pressure => kani::assert(
+            (interrupt_effects.as_slice())
+                == (&[
+                    Effect::RevokeDomain,
+                    Effect::CancelWork,
+                    Effect::AwaitWorkJoin,
+                ]),
+            "T4 loss interrupts revoke cancel and join in order",
         ),
-        Interrupt::Completed => assert_eq!(
-            interrupt_effects.as_slice(),
-            &[Effect::AwaitWorkJoin],
-            "T4 completed work only joins without revocation or cancellation"
+        Interrupt::Completed => kani::assert(
+            (interrupt_effects.as_slice()) == (&[Effect::AwaitWorkJoin]),
+            "T4 completed work only joins without revocation or cancellation",
         ),
     }
-    let (releasing, _) = step(processing, Event::WorkJoined { ok }).expect("work join accepted");
+    let (releasing, _) = accepted_step!(
+        processing,
+        Event::WorkJoined { ok },
+        "T4 reachable protocol event accepted"
+    );
     let expected_kind = match cause {
         Interrupt::DomainLoss | Interrupt::Pressure => SettlementKind::Interrupted,
         Interrupt::QueueLoss | Interrupt::Completed if !ok => SettlementKind::Retry,
         _ => SettlementKind::None,
     };
-    assert_eq!(
-        releasing,
-        State::Releasing {
-            settlement: expected_kind
-        },
-        "T4 interruption selects settlement policy"
+    kani::assert(
+        (releasing)
+            == (State::Releasing {
+                settlement: expected_kind,
+            }),
+        "T4 interruption selects settlement policy",
     );
     for kind in [SettlementKind::Refused, expected_kind] {
         let effects = release_effects(kind, now, delay);
         match kind {
-            SettlementKind::Refused => assert_eq!(
-                effects.as_slice(),
-                &[
-                    Effect::Settle(Settlement::Yield {
-                        not_before_ms: now.saturating_add(5_000)
-                    }),
-                    Effect::RetireQueue,
-                    Effect::DropAdmission
-                ],
-                "T4 bind refusal yields five seconds after release"
+            SettlementKind::Refused => kani::assert(
+                (effects.as_slice())
+                    == (&[
+                        Effect::Settle(Settlement::Yield {
+                            not_before_ms: now.saturating_add(5_000),
+                        }),
+                        Effect::RetireQueue,
+                        Effect::DropAdmission,
+                    ]),
+                "T4 bind refusal yields five seconds after release",
             ),
-            SettlementKind::Interrupted => assert_eq!(
-                effects.as_slice(),
-                &[
-                    Effect::Settle(Settlement::Yield {
-                        not_before_ms: now.saturating_add(1_000)
-                    }),
-                    Effect::RetireQueue,
-                    Effect::DropAdmission
-                ],
-                "T4 pressure and domain loss yield one second after release"
+            SettlementKind::Interrupted => kani::assert(
+                (effects.as_slice())
+                    == (&[
+                        Effect::Settle(Settlement::Yield {
+                            not_before_ms: now.saturating_add(1_000),
+                        }),
+                        Effect::RetireQueue,
+                        Effect::DropAdmission,
+                    ]),
+                "T4 pressure and domain loss yield one second after release",
             ),
-            SettlementKind::Retry => assert_eq!(
-                effects.as_slice(),
-                &[
-                    Effect::Settle(Settlement::Retry {
-                        not_before_ms: now.saturating_add(delay)
-                    }),
-                    Effect::RetireQueue,
-                    Effect::DropAdmission
-                ],
-                "T4 failed nonyielded work retries"
+            SettlementKind::Retry => kani::assert(
+                (effects.as_slice())
+                    == (&[
+                        Effect::Settle(Settlement::Retry {
+                            not_before_ms: now.saturating_add(delay),
+                        }),
+                        Effect::RetireQueue,
+                        Effect::DropAdmission,
+                    ]),
+                "T4 failed nonyielded work retries",
             ),
-            SettlementKind::None => assert_eq!(
-                effects.as_slice(),
-                &[Effect::RetireQueue, Effect::DropAdmission],
-                "T4 successful nonyielded work does not settle"
+            SettlementKind::None => kani::assert(
+                (effects.as_slice()) == (&[Effect::RetireQueue, Effect::DropAdmission]),
+                "T4 successful nonyielded work does not settle",
             ),
         }
     }
@@ -453,18 +483,18 @@ fn check_time(effects: Effects, now: i64, delta: i64) {
             let (Settlement::Yield { not_before_ms } | Settlement::Retry { not_before_ms }) =
                 settlement;
             if delta >= 0 {
-                assert!(
+                kani::assert(
                     *not_before_ms >= now,
-                    "T5 nonnegative settlement delay never wraps below now"
+                    "T5 nonnegative settlement delay never wraps below now",
                 );
             }
             // Independent wider arithmetic oracle; no assumption restricts i64 inputs.
             let mathematical_sum = i128::from(now) + i128::from(delta);
             let expected =
                 mathematical_sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
-            assert_eq!(
-                *not_before_ms, expected,
-                "T5 exact saturating addition for all i64 inputs"
+            kani::assert(
+                (*not_before_ms) == (expected),
+                "T5 exact saturating addition for all i64 inputs",
             );
         }
     }
@@ -475,14 +505,14 @@ fn check_time(effects: Effects, now: i64, delta: i64) {
 fn t5_all_i64_settlement_arithmetic_saturates() {
     let now = kani::any();
     let delay = kani::any();
-    let (_, refused) = step(
+    let (_, refused) = accepted_step!(
         State::Claimed,
         Event::DomainOutcome {
             acquired: false,
             now_ms: now,
         },
-    )
-    .expect("refusal accepted");
+        "T5 reachable protocol event accepted"
+    );
     check_time(refused, now, 5_000);
     check_time(
         release_effects(SettlementKind::Refused, now, delay),
@@ -508,62 +538,57 @@ fn t6_all_typed_stale_pairs_and_terminal_reentry_rejected() {
     let input = event();
     let result = step(current, input);
     if !accepted_pair(current, input) {
-        assert_eq!(
-            result,
-            Err(Stale),
-            "T6 all stale state event pairs rejected without effects"
+        kani::assert(
+            (result) == (Err(Stale)),
+            "T6 all stale state event pairs rejected without effects",
         );
     }
-    assert_eq!(
-        step(State::Terminal, input),
-        Err(Stale),
-        "T6 terminal rejects every typed event"
+    kani::assert(
+        (step(State::Terminal, input)) == (Err(Stale)),
+        "T6 terminal rejects every typed event",
     );
     if current != State::Claimed {
-        assert_eq!(
-            step(
+        kani::assert(
+            (step(
                 current,
                 Event::DomainOutcome {
                     acquired: true,
-                    now_ms: kani::any()
-                }
-            ),
-            Err(Stale),
-            "T6 domain outcome cannot be repeated outside claimed"
+                    now_ms: kani::any(),
+                },
+            )) == (Err(Stale)),
+            "T6 domain outcome cannot be repeated outside claimed",
         );
     }
-    let (after_refusal, _) = step(
+    let (after_refusal, _) = accepted_step!(
         State::DomainAcquired,
         Event::BindOutcome { accepted: false },
-    )
-    .expect("refusal accepted");
+        "T6 reachable protocol event accepted"
+    );
     if let Ok((_, effects)) = step(after_refusal, input) {
         for effect in effects.as_slice() {
-            assert!(
+            kani::assert(
                 !matches!(
                     effect,
                     Effect::Process | Effect::Bind | Effect::AcquireDomain
                 ),
-                "T6 bind refusal cannot restart processing"
+                "T6 bind refusal cannot restart processing",
             );
         }
     }
-    let (terminal, _) = step(
+    let (terminal, _) = accepted_step!(
         after_refusal,
         Event::DomainReleased {
             now_ms: kani::any(),
             retry_delay_ms: kani::any(),
         },
-    )
-    .expect("release accepted");
-    assert_eq!(
-        terminal,
-        State::Terminal,
-        "T6 refused bind terminates after release acknowledgment"
+        "T6 reachable protocol event accepted"
     );
-    assert_eq!(
-        step(terminal, input),
-        Err(Stale),
-        "T6 refused bind remains terminal"
+    kani::assert(
+        (terminal) == (State::Terminal),
+        "T6 refused bind terminates after release acknowledgment",
+    );
+    kani::assert(
+        (step(terminal, input)) == (Err(Stale)),
+        "T6 refused bind remains terminal",
     );
 }

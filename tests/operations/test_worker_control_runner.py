@@ -91,6 +91,7 @@ class WorkerControlVerdictTests(unittest.TestCase):
         self.assertEqual(result["status_counts"], {"SUCCESS": 1, "UNREACHABLE": 1, "FAILURE": 0})
         for altered in (
             output.replace('core::result::unwrap_failed.assertion.1', 'slice.array_bounds.1'),
+            output.replace('core::result::unwrap_failed.assertion.1', "core::fmt::Arguments::<'_>::from_str.assertion.1").replace('reachable process-gating event accepted', 'attempt to shift left with overflow'),
             output.replace('reachable process-gating event accepted', 'T3 unreachable specification'),
             output.replace('(1 unreachable)', ''),
             output.replace('(1 unreachable)', '(2 unreachable)'),

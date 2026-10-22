@@ -90,3 +90,11 @@ Fable 5.1 reviewed candidate `58a10429c57847ea4539ac763a01cb837d4de156` in task 
 The lower-model proof lane owns A1–A3; the coordinator owns A4/A5, exact-candidate qualification and merge. The controller and driver remain frozen. Fable requires another review only if their DAG or operation order changes. One post-review native positive target calibrates the parser against the real tool; the first full six-positive/three-control qualification is reserved for the Linux CI job.
 
 A1/A2 proof assertions and A3 explicit parser policy are integrated without changing the production controller/driver. A native T2 positive calibration will capture the actual pinned output before committing its fixture. No full package acceptance or post-change runtime qualification has run yet.
+
+### Calibration and runtime results — first candidate
+
+The five affected worker schedules passed on `1e4556f614bf6d6272896579a972782153d993ea` (1.87 seconds execution, 335 seconds cold compilation). The count/name wrapper returned a bookkeeping failure because its expected namespace omitted `state::`; the saved original log was validated against all five actual full names and the exact 5/0 result. No passing test was replayed.
+
+The first native T2 calibration reported 242 successful checks and one unreachable check in 9.393 seconds solver time. Its aggregate acceptance remained false: the strict parser rejected a formatting-related unreachable overflow check, and ordinary Rust assertion macros had lost their custom messages in Kani's no-std analysis. The root-cause repair uses the pinned Kani assertion primitive with literal labels and checked result guards in the proof module. It does not loosen the parser or change production Rust. A second T2 calibration is necessary because those solver inputs changed.
+
+Runtime retention is bound to the actual tested candidate. All ordinary production source/manifests remain unchanged; the proof module is excluded from normal compilation by `cfg(kani)`, confirmed by retained compiler dependency information. A source bridge records that distinction instead of relabelling the old execution as a new binary run.
