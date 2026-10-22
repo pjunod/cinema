@@ -96,11 +96,14 @@ static void test_only_trim_changes_native_output(void) {
   pl_tex output = dv_trim_render(&state, log, gpu, source, sop, 1000);
   require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = output, .ptr = a)), "A read");
   assert(!memcmp(pixels, a, sizeof(a))); // EXACT neutral, no PQ round trip
+  trim.word[DT_SLOPE] = 2560; dv_trim_inferred_sop(&trim, sop);
+  output = dv_trim_render(&state, log, gpu, source, sop, 1000);
+  require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = output, .ptr = a)), "nonneutral A read");
   trim.word[DT_SLOPE] = 3072; dv_trim_inferred_sop(&trim, sop);
   output = dv_trim_render(&state, log, gpu, source, sop, 1000);
   require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = output, .ptr = b)), "B read");
-  assert(memcmp(a, b, sizeof(a))); // only actual trim changed in one dispatch cache
-  trim.word[DT_SLOPE] = 2048; dv_trim_inferred_sop(&trim, sop);
+  assert(memcmp(a, b, sizeof(a))); // same shader body; only actual trim changed
+  trim.word[DT_SLOPE] = 2560; dv_trim_inferred_sop(&trim, sop);
   output = dv_trim_render(&state, log, gpu, source, sop, 1000);
   require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = output, .ptr = again)), "A repeat read");
   assert(!memcmp(a, again, sizeof(a))); // no stale B curve on returning to A
