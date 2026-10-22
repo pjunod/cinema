@@ -1,7 +1,8 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-21 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-10-22 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+- **2026-10-22 · Rust admission refinement:** [live ledger](docs/cluster/RUST-ADMISSION-REFINEMENT-STATUS.md); actual admission/SQL source map and pinned compiler baseline established; Fable design/tool feasibility precede production-core proof. Owner: Codex coordinator; PR opening.
 - **2026-10-21 · Worker refinement:** [live ledger](docs/cluster/WORKER-REFINEMENT-STATUS.md); seven Rust schedules pass; two complete workers, reviewed correspondence and observation projection built. Qualification and landing receipt: [PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Owner: Codex coordinator.
 - **2026-10-21 · Avatar Dolby Vision:** [live diagnosis and evidence](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); Intel repair #1250 deployed and Apple TV confirmed. Follow-up corrects shared capability/timeline contracts; Astra approved, Rust regression and 38 web tests passed; injected Safari reports FEL/RPU/DYN and 3,010 frames / zero drops. [Automatic frame-drop capture](docs/clients/FRAME-DROP-RECORDER.md) is built; production acceptance, slow startup and original display-drop trigger remain open. Paul owns deployment.
 - **2026-10-21 · Operation progress:** [live ledger](docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.
