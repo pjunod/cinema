@@ -660,6 +660,9 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) source_mastering:
         Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
     pub(crate) preferences: plurx_core::transcode::dv_processing::DvPreferences,
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) display_target_note: Option<String>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) encoder: plurx_core::transcode::Encoder,
@@ -876,13 +879,14 @@ impl RuntimeRecipe {
             cancel,
             registration_hook,
             absolute_deadline,
-            None,
+            self.display_target,
         )
         .await
     }
 
-    /// Explicit internal control policy; ordinary production entrypoints above
-    /// always pass None. No environment/caps/settings selection occurs here.
+    /// Explicit immutable policy; live preparation freezes the title-qualified
+    /// target, ordinary VOD/pre-encode recipes retain None. No per-window
+    /// environment/caps/settings selection occurs here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,

@@ -523,7 +523,16 @@ native Mac processing and negotiated HEVC output for new plans. Saving either
 choice is accepted on every platform regardless of advisory readiness;
 existing sessions retain their captured plan. `macos_video_processing` is the
 read-only runtime report, including `hevc_output_enabled` and per-graph
-observations. The Developer readiness item `macos_hevc_output` reports
+observations.
+The independent `dolby_vision_display_target` boolean defaults
+false and saves regardless of readiness. Its Developer item reports helper and
+HDR10-E preference, active processed-root peak reports, title-scan eligibility
+counts and per-bucket live media versus retained-cache bytes. Display caps accept
+optional integer `display.max_nits` and optional `display.peak_source` (`platform`
+or `viewer`); no display minimum is collected. Unknown/out-of-range peaks keep
+the master grade. See [the targeting contract](streaming/DISPLAY-TARGETED-DV-BUILD.md#server-phase-1).
+
+The Developer readiness item `macos_hevc_output` reports
 `hevc_effective_encoder`, `hevc_sdr`, `hevc_hdr10` and
 `hevc_delivery_qualification` requirements. Missing
 observations mean unobserved, not supported; a pending probe means unknown.

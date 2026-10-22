@@ -4471,6 +4471,8 @@ async fn auto_receipt_bootstrap_requires_own_eof_and_cannot_admit_upgrade() {
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
         catalog_query: None,
         prepared_processing: None,
+        display_target: None,
+        display_target_note: None,
         ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,
@@ -4910,6 +4912,8 @@ async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_a
     request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
         catalog_query: None,
         prepared_processing: None,
+        display_target: None,
+        display_target_note: None,
         ordinary_request: None,
         planning_snapshot: None,
         retained_output: None,

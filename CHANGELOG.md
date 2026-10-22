@@ -10,11 +10,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional display-targeted HDR10-E selects a supported downward bucket from
+  the viewer's reported peak, with platform/viewer provenance, complete-title
+  L1 eligibility and master elision. The independent Developer preference is
+  off by default and readiness never blocks saving it. Activity names the
+  actual live target/master choice; DYN requires a published L1-only mapping
+  receipt. Targeted roots remain private live output, outside retained VOD
+  caches; pre-encodes and ordinary VOD remain master-only.
+
 - Internal display-targeted HDR10-E groundwork: complete-title L1 coverage,
   consistent L6/L9 facts, six explicit target identities and a stateless public
   Annex B.2/B.3 RGB shader with named engineering edge extensions. Exact requested
   policy and raw-RPU L1 are checked before helper output is accepted. No display
-  selection, metadata writer or targeted playback is exposed yet; no proprietary
+  selection was exposed by this groundwork alone; no proprietary
   Dolby, perceptual-equivalence or display-accuracy claim.
   Title acquisition uses durable source/scanner generations, retains demand on
   scheduler preemption, suppresses manual cancellation, and yields its one-thread

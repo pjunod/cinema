@@ -1514,9 +1514,11 @@ pub(super) fn session_enhancement(
             Some("hdr10") => match (effective, processed_fel) {
                 (Some(report), _) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: report.fel_contributed(),
+                    display_target: report.display_target_nits(),
                 },
                 (None, Some(fel)) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: fel,
+                    display_target: None,
                 },
                 (None, None) => EnhancementRoute::Hdr10Base,
             },
@@ -3641,6 +3643,13 @@ async fn create_with_purpose_inner(
             .await
         {
             Ok(Some((mut processed, candidate))) => {
+                if let Some(note) = processed
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.display_target_note.as_ref())
+                {
+                    plan_notes.push(note.clone());
+                }
                 if let Some(source) = source.as_ref() {
                     // A distinct, strict processed-recipe check stays inside
                     // the original create deadline. Ordinary catalog/advisory

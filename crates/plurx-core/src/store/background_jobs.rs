@@ -1906,6 +1906,7 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError>;
+    async fn dv_title_readiness(&self) -> Result<super::dv_title_jobs::TitleReadiness, StoreError>;
     async fn dv_title_demands(
         &self,
         scanner: &str,
@@ -2413,6 +2414,9 @@ LIMIT 1
         request: super::background_jobs_probe::ApplyProbeJob,
     ) -> Result<bool, StoreError> {
         super::background_jobs_probe::apply(self, request).await
+    }
+    async fn dv_title_readiness(&self) -> Result<super::dv_title_jobs::TitleReadiness, StoreError> {
+        super::dv_title_jobs::readiness(self).await
     }
     async fn dv_title_demands(
         &self,

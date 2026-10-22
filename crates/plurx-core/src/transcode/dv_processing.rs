@@ -100,6 +100,15 @@ impl DvEffectiveProcessingReport {
     pub fn fel_contributed(&self) -> bool {
         self.fel_contributed
     }
+    /// Only an observed operation in the current published receipt enables DYN.
+    pub fn display_target_nits(&self) -> Option<u32> {
+        self.applied_operations
+            .iter()
+            .find_map(|operation| match operation {
+                DvOperation::DisplayTargetMapping { nits } => Some(*nits),
+                _ => None,
+            })
+    }
     /// Whether the served window's source pictures were decoded on the GPU.
     pub fn gpu_decoded(&self) -> bool {
         self.gpu_decoded
@@ -135,6 +144,8 @@ impl DvEffectiveProcessingReport {
             || operations.len() != wire.applied_operations.len()
             || !operations.contains(&DvOperation::RpuColorConversion)
             || !operations.contains(&DvOperation::TargetMapping)
+            || operations.iter().filter(|op| matches!(op, DvOperation::DisplayTargetMapping { .. })).count() > 1
+            || operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { nits } if !DISPLAY_TARGET_BUCKETS.contains(nits)))
             || wire.fel_contributed && !operations.contains(&DvOperation::LinearNlqResidual)
         {
             return None;

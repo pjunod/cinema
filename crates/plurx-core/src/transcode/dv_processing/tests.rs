@@ -1491,3 +1491,49 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
     assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), grid, 0, 48).is_err());
     assert!(dv_map_source_to_output_grid(&source, (1, 24), grid, 0, 48).is_err());
 }
+
+#[test]
+fn effective_target_report_rejects_ambiguous_or_unsupported_buckets() {
+    let generation = "00000000-0000-4000-8000-000000000001";
+    let report = |targets: &[u32]| {
+        let mut operations = vec![DvOperation::RpuColorConversion, DvOperation::TargetMapping];
+        operations.extend(
+            targets
+                .iter()
+                .map(|nits| DvOperation::DisplayTargetMapping { nits: *nits }),
+        );
+        serde_json::to_vec(
+            &serde_json::json!({"generation":generation,"hdr10_enhanced":true,
+            "fel_contributed":false,"applied_operations":operations}),
+        )
+        .expect("report")
+    };
+    let master =
+        DvEffectiveProcessingReport::from_owner_wire(&report(&[]), generation, Some("hdr10"))
+            .expect("master report");
+    assert_eq!(master.display_target_nits(), None);
+    let targeted =
+        DvEffectiveProcessingReport::from_owner_wire(&report(&[1600]), generation, Some("hdr10"))
+            .expect("target report");
+    assert_eq!(targeted.display_target_nits(), Some(1600));
+    for buckets in [&[999][..], &[1000, 1600][..], &[1600, 1600][..]] {
+        assert!(DvEffectiveProcessingReport::from_owner_wire(
+            &report(buckets),
+            generation,
+            Some("hdr10")
+        )
+        .is_none());
+    }
+    assert!(DvEffectiveProcessingReport::from_owner_wire(
+        &report(&[1600]),
+        generation,
+        Some("sdr")
+    )
+    .is_none());
+    assert!(DvEffectiveProcessingReport::from_owner_wire(
+        &report(&[1600]),
+        "00000000-0000-4000-8000-000000000002",
+        Some("hdr10")
+    )
+    .is_none());
+}
