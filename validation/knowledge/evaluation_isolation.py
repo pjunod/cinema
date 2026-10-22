@@ -343,7 +343,7 @@ if rust_required == "yes":
     for name,path in (("rustc",rustc),("cargo",cargo)):
         outcome=subprocess.run([path,"--version"],cwd="/",stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         versions[name]={"returncode":outcome.returncode,"output":outcome.stdout.decode("utf-8","replace").strip()}
-build_environment={"CARGO_BUILD_JOBS":os.environ.get("CARGO_BUILD_JOBS")} if rust_required=="yes" else {}
+build_environment={key:os.environ.get(key) for key in ("CARGO_BUILD_JOBS","CARGO_PROFILE_DEV_DEBUG","CARGO_PROFILE_TEST_DEBUG")} if rust_required=="yes" else {}
 print(json.dumps({"outside":outside,"network":{"interfaces":interfaces,"links":links,"ipv4_routes":ipv4_routes,"ipv6_routes":ipv6_routes,**error_observation(network_errno)},"guest_errno":guest_errno,"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
 '''
 
@@ -742,7 +742,7 @@ def _environment(config):
             "PATH": ":".join(dict.fromkeys((str(Path(config.python_executable).parent), str(Path(config.rustc_executable).parent), str(Path(config.cargo_executable).parent), "/usr/bin", "/bin"))),
             "RUSTC": config.rustc_executable, "CARGO": config.cargo_executable, "RUSTC_WRAPPER": "",
             "RUSTC_WORKSPACE_WRAPPER": "", "RUSTUP_TOOLCHAIN": "1.97.1",
-            **({"CARGO_BUILD_JOBS": "1"} if config.require_rust else {}), **dict(config.environment)}
+            **({"CARGO_BUILD_JOBS": "1", "CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0"} if config.require_rust else {}), **dict(config.environment)}
 
 
 def _quiet_log_mount(config):
@@ -1018,7 +1018,8 @@ def _configuration_probe(config, private):
                  "protected quiet log write boundary unproved")
         _require(bool(re.fullmatch(r"3\.[0-9]+\.[0-9]+", observed["versions"]["python"])), "Python runtime unavailable")
         if config.require_rust:
-            _require(observed["build_environment"] == {"CARGO_BUILD_JOBS": _environment(config)["CARGO_BUILD_JOBS"]},
+            build_keys = ("CARGO_BUILD_JOBS", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")
+            _require(observed["build_environment"] == {key: _environment(config).get(key) for key in build_keys},
                      "Rust build environment unproved")
             rust = observed["versions"]["rustc"]
             cargo = observed["versions"]["cargo"]

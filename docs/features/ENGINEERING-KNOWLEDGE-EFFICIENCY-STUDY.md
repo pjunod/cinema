@@ -203,8 +203,10 @@ thresholds remain unchanged.
 Astra R2 closed F1–F7 and N1. The final narrow R4 review approved execution
 source at `e39859ea8a7ccb9df34717f68608d549077c38f1`, tree
 `d8ab8210c6bbc5c271743d994c0f37c1e0c2f53b`, with no blocking findings.
-Its exact map binds all 35 modules and 11 assets; subsequent fixture and
-ledger commits leave those 46 execution inputs unchanged.
+Its exact map binds all 35 modules and 11 assets. Fixture and ledger commits
+through `8caee3d6` leave those 46 execution inputs unchanged. The measured
+build-profile correction below changes the isolation module and therefore
+requires a new exact-map review before further qualification.
 
 | Independent artifact | SHA-256 |
 |---|---|
@@ -227,8 +229,8 @@ contradictory observations still refuse qualification.
 | Required CI run 5783 | 2,108 Python passes retained; three failures and two OCI skips explicitly recorded. |
 | Three failed synthetic checks | Passed on their own after the fake engine honored Docker's exact owned-container-name filter; 0.869 seconds. Production code was unchanged. |
 | Explicit actual OCI controls | Both passed with no skips. Original receipt SHA-256 `f8306ed5b6d96000eb2c30f298fee0bae686990bda58c1ef9dcb980a293534e8`; scoped unchanged-control proof `8bfff8ff0ea817c342e561169a3a1fb4431a6f92ca16a4a430ac978a9087a8d2`. |
-| Current-head required CI | Pending in PR #1262. A later runtime-download DNS failure occurred before tests. Fresh runs are required: the authenticated receipt policy rejects job reruns. |
-| Private study qualification and provider calls | Not started; public controls do not qualify frozen private acceptance bundles. |
+| Required CI on `8caee3d6` | Passed, including Rust and Main promotion. It retained 2,066 passes and selected 47 checks: 45 new passes and two OCI skips, in 3.639 seconds. Fresh runs are required; the receipt policy rejects job reruns. |
+| First private qualification | Refused at a Rust candidate build: 0/4 family seals, 0/12 navigation views, and zero count/inference calls or study answers. The measured OOM cause is recorded below. |
 
 CI adopts only attributable successes whose declared inputs remain valid;
 it must not turn historical passes or the three local repairs into an
@@ -237,6 +239,43 @@ and five-mode navigation qualification remain prerequisites to calibration.
 The frozen cases, model settings, original thresholds and 3,000,000-token
 ceiling are unchanged. Source approval and prerequisite checks establish no
 comparative token savings or documentation-reliability result.
+
+## Pre-answer compiler policy — fit the measured workload
+
+The first actual private qualification stopped after 208.053 seconds, before
+calibration. A focused replay of only the failed build measured compiler
+exit 101 with SIGKILL, no Rust error codes, and cgroup event deltas of
+`oom=1`, `oom_kill=1`, `max=3795`. Docker also reported an OOM kill. The
+container's memory and swap limits were both 4,294,967,296 bytes, with two
+CPUs and 128 PIDs. This is measured container memory exhaustion; it is not
+evidence of a model, source-logic or comparative-arm regression.
+
+The earlier public compiler proof used `CARGO_PROFILE_DEV_DEBUG=0`; the
+failed actual build left it unset and emitted `-C debuginfo=2`. Those public
+proofs also omitted `hiqlite-store`, so they did not establish resource fit
+for the actual feature-enabled prerequisite. The [candidate driver](../../validation/knowledge/study_driver/rust_driver_factory.py)
+retains that required feature and its exact frozen commands. Actual Docker
+capacity was 8,318,709,760 bytes, so an 8 GiB container limit was not a sound
+local repair. No global Docker configuration was changed.
+
+The common study environment will default both `CARGO_PROFILE_DEV_DEBUG`
+and `CARGO_PROFILE_TEST_DEBUG` to `0`, alongside `CARGO_BUILD_JOBS=1`, only
+for Rust-required execution. Explicit frozen environment values take
+precedence. The immutable probe must observe every effective value, and
+configuration/probe/source identities must bind them. The memory, CPU and
+PID bounds remain unchanged. Cargo documents [debug information](https://doc.rust-lang.org/cargo/reference/profiles.html#debug)
+and [debug assertions](https://doc.rust-lang.org/cargo/reference/profiles.html#debug-assertions)
+as separate settings; this amendment changes debug symbols, not assertions,
+optimization level or feature selection.
+
+This correction was chosen before any count, inference, answer or scorer
+existed and applies identically to every arm. It changes generic executor
+policy rather than frozen case data or the closed resource-options API.
+Source recheck and fresh actual qualification remain required; reducing
+debug information has not yet been shown sufficient for the full chain.
+The failed stage, warm state, compiler output and cgroup proof are retained.
+The safe OOM diagnostic receipt SHA-256 is
+`fa744cb45fef6c6798cb6852f9a73a12f0dcb6fbd8b564dd99c3325dc423df8b`.
 
 ## Results and interpretation
 

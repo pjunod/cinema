@@ -22,12 +22,15 @@ complete. Actual Astra R4 source closure approved all 46 execution inputs at
 unchanged. Two explicit actual OCI controls passed without skips. The first
 required CI run retained 2,108 Python passes; its three synthetic cleanup
 fixture failures passed after the fake engine honored the exact name filter.
-Current-head required CI remains pending in PR #1262. Fresh CI runs preserve
+Required CI passed on `8caee3d6` in PR #1262, including Rust and Main
+promotion. Actual private qualification then refused at a measured 4 GiB
+compiler OOM, before calibration. The common debug-symbol policy correction
+requires a new source review and fresh qualification. Fresh CI runs preserve
 valid authenticated per-test successes; job reruns are refused by policy.
 
 Sol 6.1 owns runtime repairs and focused CI diagnosis; custodian C owns private
-staging/scoring. The integrator owns publication and the live ledger. No
-private acceptance qualification, model study or token-count call has run.
+staging/scoring. The integrator owns publication and the live ledger. Private qualification has not completed; no model study or token-count
+call has run.
 Gold stays outside builder, reviewer and record-author contexts.
 
 The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md) records the

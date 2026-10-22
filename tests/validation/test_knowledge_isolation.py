@@ -65,6 +65,7 @@ class SyntheticEngine:
         self.structured_packet = True
         self.quiet_writable_override = None
         self.build_jobs_override = None
+        self.build_environment_override = None
 
     def inspect(self, config, name):
         return [{"Image": self.image_id, "State": {"Running": True, "OOMKilled": self.oom_killed},
@@ -107,7 +108,9 @@ class SyntheticEngine:
                                    "grader": {"writable": False, **synthetic_guest_error(30)},
                                    "quiet_logs": {"writable": isolation._quiet_log_mount(config) if self.quiet_writable_override is None else self.quiet_writable_override,
                                                   **synthetic_guest_error(0 if isolation._quiet_log_mount(config) else 2)}},
-                    "build_environment": {"CARGO_BUILD_JOBS": self.build_jobs_override or isolation._environment(config)["CARGO_BUILD_JOBS"]} if config.require_rust else {},
+                    "build_environment": ({key: isolation._environment(config).get(key) for key in ("CARGO_BUILD_JOBS", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG")}
+                        | ({"CARGO_BUILD_JOBS": self.build_jobs_override} if self.build_jobs_override is not None else {})
+                        | (self.build_environment_override or {})) if config.require_rust else {},
                     "versions": {"python": "3.13.0", "python_executable": config.python_executable,
                                  "rustc": {"returncode": 0, "output": self.rust_version},
                                  "cargo": {"returncode": 0, "output": "cargo 1.97.1 (synthetic fixture)"}}}
@@ -410,15 +413,29 @@ class KnowledgeIsolationTests(unittest.TestCase):
     def test_rust_jobs_default_preserves_and_probes_explicit_frozen_extra(self):
         config = replace(self.config, require_rust=True)
         self.assertEqual(isolation._environment(config)["CARGO_BUILD_JOBS"], "1")
+        self.assertEqual(isolation._environment(config)["CARGO_PROFILE_DEV_DEBUG"], "0")
+        self.assertEqual(isolation._environment(config)["CARGO_PROFILE_TEST_DEBUG"], "0")
         self.assertNotIn("CARGO_BUILD_JOBS", isolation._environment(self.config))
+        self.assertNotIn("CARGO_PROFILE_DEV_DEBUG", isolation._environment(self.config))
+        self.assertNotIn("CARGO_PROFILE_TEST_DEBUG", isolation._environment(self.config))
         one = isolation.probe(config)
-        two = isolation.probe(replace(config, environment=(("CARGO_BUILD_JOBS", "2"),)))
+        explicit = replace(config, environment=(
+            ("CARGO_BUILD_JOBS", "2"), ("CARGO_PROFILE_DEV_DEBUG", "1"), ("CARGO_PROFILE_TEST_DEBUG", "2")))
+        two = isolation.probe(explicit)
         self.assertEqual((one.status, two.status), ("verified", "verified"))
         self.assertNotEqual(one.config_digest, two.config_digest)
         self.assertEqual(json.loads(two.private_path.read_bytes())["observations"]["observed_probes"]["build_environment"],
-                         {"CARGO_BUILD_JOBS": "2"})
+                         {"CARGO_BUILD_JOBS": "2", "CARGO_PROFILE_DEV_DEBUG": "1", "CARGO_PROFILE_TEST_DEBUG": "2"})
         self.engine.build_jobs_override = "2"
         self.assertEqual(isolation.probe(config).status, "unavailable")
+        self.assertEqual(self.engine.alive, set())
+        self.engine.build_jobs_override = None
+        self.engine.build_environment_override = {"CARGO_PROFILE_DEV_DEBUG": "2"}
+        self.assertEqual(isolation.probe(config).status, "unavailable")
+        self.engine.build_environment_override = None
+        self.engine.mutate_probe = lambda body: body["build_environment"].pop("CARGO_PROFILE_TEST_DEBUG")
+        self.assertEqual(isolation.probe(config).status, "unavailable")
+        self.engine.mutate_probe = None
         self.assertEqual(self.engine.alive, set())
 
     def test_only_exact_archive_bound_rust_source_exceptions_are_permitted(self):
