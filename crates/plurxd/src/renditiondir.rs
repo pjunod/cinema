@@ -38,6 +38,8 @@ use plurx_core::fmp4::{
 use sha2::{Digest, Sha256};
 
 use crate::titlestore::{Manifest, ReaderWindow, SegState};
+#[cfg(unix)]
+mod native_publication;
 mod owned_publication;
 
 /// The initialization segment's name, as every other producer writes it.
@@ -213,10 +215,14 @@ pub struct RenditionDir {
 }
 
 /// One actual atomic publication, not a task ID or a boolean close assertion.
-/// Serializing here also prevents two cancelled writes reusing the same .tmp.
+/// Native acquisition/results remain owned independently of a cancelled join.
 #[derive(Debug, Default)]
 struct PendingWrites {
     pending: tokio::sync::Mutex<Option<PendingWrite>>,
+    #[cfg(unix)]
+    native: std::sync::Mutex<
+        Option<std::sync::Arc<std::sync::Mutex<native_publication::PublicationIo>>>,
+    >,
 }
 #[derive(Debug)]
 struct PendingWrite {
