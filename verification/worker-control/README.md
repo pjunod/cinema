@@ -1,7 +1,7 @@
 # Worker controller — check the production Rust decision body
 
-**Status:** implemented; awaiting independent review and exact-source qualification.
-No product proof or negative control has been accepted yet.
+**Status:** implemented; Fable final review delivered and amendments implemented.
+Full six-target/three-control qualification and landing are tracked in [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260).
 
 This package checks the ordinary `library_lifecycle::step` body in the
 zero-dependency `plurx-worker-control` crate. The production library worker calls
@@ -58,8 +58,9 @@ Independent cases continue after a target failure. Resume retains a prior succes
 only after validating its log digest, exact command, full strict result parsing,
 identical solver inputs and tool hashes, and the exact mutation where applicable.
 Its original candidate identity stays in the result, with an explicit source
-bridge if only runner/control metadata changed. Failed, missing or incompatible
-cases run again; full qualification still requires all six plus three. Retained
+bridge if only runner/control metadata changed. An earlier parser rejection may be retained only after the repaired parser fully
+accepts the original complete log, with original rejection and all bindings preserved.
+Failed solver executions, missing or incompatible cases run again; full qualification still requires all six plus three. Retained
 logs are copied byte-for-byte into the new artifact. Preserve the original
 output as well, including archived control sources.
 
@@ -117,6 +118,8 @@ remains open.
 
 ## Review amendments and result interpretation
 
-Fable task `t_e69efaca` approved the production extraction with proof/runner amendments. T4 additionally pins the exact interruption effect list; T3 requires every outcome-producing effect to end its list, matching the driver handoff. Positive qualification requires present theorem-labelled specification assertions to report `SUCCESS`. Only unmarked compiler panic/expect checks may report `UNREACHABLE`; unexpected statuses or inconsistent summary counts reject the result. The pinned tool's actual positive output is preserved as a parser fixture with recorded provenance. A partial native parser-calibration run is not full package acceptance.
+Fable task `t_e69efaca` approved the production extraction with proof/runner amendments. T4 additionally pins the exact interruption effect list; T3 requires every outcome-producing effect to end its list, matching the driver handoff. Positive qualification requires present theorem-labelled specification assertions to report `SUCCESS`. Only unmarked compiler panic/expect checks and the exact source-pinned panic-formatting guard may report `UNREACHABLE`; unexpected statuses or inconsistent summary counts reject the result. The pinned tool's actual positive output is preserved as a parser fixture with recorded provenance. A partial native parser-calibration run is not full package acceptance.
 
 Harness specification assertions call `kani::assert` with literal labels. The pinned frontend loses custom messages from core formatting-based Rust assertion macros in this no-std package. Checked result guards avoid that formatting path without assuming transition success or substituting production behavior. The parser remains strict about unexpected unreachable safety checks.
+
+The observed formatting exception requires the exact emitted property name, left-shift description, `library/core/src/fmt/mod.rs:820:38` location and SHA-256 of the actual scoped rust-src file. The real T2 fixture records that one unreachable compiler guard and five successful specification assertions. Wrong source/location, failure, undetermined output or an unreachable specification assertion rejects qualification. Reinterpreting the immutable calibration log does not run the solver again and does not establish full package acceptance.

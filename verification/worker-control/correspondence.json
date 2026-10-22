@@ -15,7 +15,7 @@
         "CallerReturn"
       ],
       "driver_operation": "self.acquire_job(format!(\"scan:library:{library_id}\"))",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Domain acquisition outcome is an environmental input; the controller does not implement Store/Raft."
     },
     {
@@ -29,7 +29,7 @@
         "BindSend"
       ],
       "driver_operation": "fence.bind_library(...)",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Existing binder retains token-mutex then publication-read-lock ordering and SQL authority checks outside the controller."
     },
     {
@@ -43,7 +43,7 @@
         "Reconcile"
       ],
       "driver_operation": "self.process_library_requests(...)",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "A single effect invokes a complete asynchronous processing path; internal publication and durable completion are not local controller theorems."
     },
     {
@@ -54,7 +54,7 @@
         "ReleaseJoin"
       ],
       "driver_operation": "lease.revoke()",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Related model actions coarsen several causes; there is no one-to-one action simulation."
     },
     {
@@ -64,7 +64,7 @@
         "QueueLoss"
       ],
       "driver_operation": "cancellation.cancel()",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Cancellation requests do not establish future termination."
     },
     {
@@ -74,14 +74,14 @@
         "ScanFinish"
       ],
       "driver_operation": "work.as_mut().await or selected completed result",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "The real join stays inside the work future lexical scope; eventual filesystem/process return remains assumed."
     },
     {
       "effect": "DropPublisher",
       "existing_model_actions": [],
       "driver_operation": "drop(publisher.take()...)",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "No dedicated model action represents this Rust handle drop. Do not equate it with the publication RwLock guard."
     },
     {
@@ -94,7 +94,7 @@
         "CallerReturn"
       ],
       "driver_operation": "lease.take().release().await",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Consumes the local lease handle after the release attempt returns; ambiguous failure does not establish durable lease disappearance."
     },
     {
@@ -104,7 +104,7 @@
         "CallerReturn"
       ],
       "driver_operation": "settle_library(...)",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Yield/retry policy and signed saturation are local controller decisions. Store acceptance remains environmental."
     },
     {
@@ -114,7 +114,7 @@
         "FinishRetire"
       ],
       "driver_operation": "active.take().finish().await",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "Queue-heartbeat join and retirement internals are delegated; their completion is not proved by the controller."
     },
     {
@@ -123,7 +123,7 @@
         "DropAdmission"
       ],
       "driver_operation": "drop(admission.take()...)",
-      "status": "driver-executed via controller; review and runtime qualification pending",
+      "status": "driver-executed via controller; independently reviewed; selected runtime schedules passed, not exhaustive async coverage",
       "boundary": "The controller orders this last; the driver performs the actual physical guard drop."
     }
   ]

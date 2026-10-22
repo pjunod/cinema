@@ -17,5 +17,6 @@
       "archive": "kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz",
       "sha256": "32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3"
     }
-  }
+  },
+  "fmt_stdlib_sha256": "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106317c3"
 }

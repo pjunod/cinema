@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import importlib.machinery
 import importlib.util
 import unittest
@@ -42,6 +44,43 @@ def log(*, failed: bool = False, property_class: str = "assertion", description:
         f"VERIFICATION:- {'FAILED' if failed else 'SUCCESSFUL'}\n"
         f"Complete - {int(not failed)} successfully verified harnesses, {int(failed)} failures, 1 total.\n"
     )
+
+
+def real_positive() -> tuple[str, dict]:
+    directory = ROOT / "tests/fixtures/worker-control"
+    log_path = directory / "positive-t2-kani-0.68.0.txt"
+    provenance = json.loads((directory / "positive-t2-kani-0.68.0.provenance.json").read_text())
+    if hashlib.sha256(log_path.read_bytes()).hexdigest() != provenance["fixture_sha256"]:
+        raise AssertionError("real pinned fixture digest differs from its provenance")
+    return log_path.read_text(), provenance
+
+
+class WorkerControlPinnedPositiveTests(unittest.TestCase):
+    def test_real_pinned_positive_with_all_literal_markers_succeeds(self) -> None:
+        output, provenance = real_positive()
+        result = runner.verdict(output, 0, provenance["harness"], None,
+                                fmt_stdlib_sha256=provenance["reparse_tools"]["fmt_stdlib_sha256"])
+        self.assertEqual(result, provenance["parse_result"])
+        self.assertEqual(result["status_counts"], {"SUCCESS": 246, "UNREACHABLE": 1, "FAILURE": 0})
+        self.assertEqual(result["specification_assertions"], 5)
+        self.assertFalse(provenance["acceptance"])
+        self.assertEqual(provenance["raw_log_sha256"], "49de1f27032977f3e0bfad1abc38287c9d81057eafe50d4574e1c0e5beabe84e")
+
+    def test_observed_format_guard_requires_exact_tuple_location_and_source_pin(self) -> None:
+        output, provenance = real_positive()
+        for changed, pin in (
+            (output, None),
+            (output, "0" * 64),
+            (output.replace(runner.FMT_GUARD_NAME, runner.FMT_GUARD_NAME + "_other"), runner.FMT_STDLIB_SHA256),
+            (output.replace(runner.FMT_GUARD_DESCRIPTION, "attempt to shift right with overflow"), runner.FMT_STDLIB_SHA256),
+            (output.replace(runner.FMT_GUARD_LOCATION, runner.FMT_GUARD_LOCATION.replace(":820:38", ":821:38")), runner.FMT_STDLIB_SHA256),
+            (output.replace("(1 unreachable)", "(2 unreachable)"), runner.FMT_STDLIB_SHA256),
+            (output.replace("- Status: UNREACHABLE", "- Status: FAILURE"), runner.FMT_STDLIB_SHA256),
+            (output.replace("- Status: UNREACHABLE", "- Status: UNDETERMINED"), runner.FMT_STDLIB_SHA256),
+        ):
+            with self.subTest(pin=pin, changed=changed[-300:]), self.assertRaises(RuntimeError):
+                runner.verdict(changed, 0, provenance["harness"], None, fmt_stdlib_sha256=pin)
+
 
 
 class WorkerControlInventoryTests(unittest.TestCase):
@@ -180,6 +219,55 @@ class WorkerControlResumeTests(unittest.TestCase):
                 self.assertIsNone(runner.retain_previous(prior, output, HARNESS, current, {"driver_sha256": "other-tool"}, None, None))
                 log_path.write_text(log() + "corruption")
                 self.assertIsNone(runner.retain_previous(prior, output, HARNESS, current, tools, None, None))
+
+
+
+class WorkerControlRejectedParserReuseTests(unittest.TestCase):
+    def test_real_log_is_reused_after_parser_repair_but_bad_attempts_are_not(self) -> None:
+        raw, provenance = real_positive()
+        harness = provenance["harness"]
+        name = harness.rsplit("::", 1)[1]
+        base = ROOT / "target/worker-control-runner-fixtures"
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as directory:
+            prior, output = Path(directory) / "prior", Path(directory) / "next"
+            prior.mkdir(); output.mkdir()
+            source = copy.deepcopy(provenance["source_binding"])
+            tools = provenance["reparse_tools"]
+            def captured_command(args, cwd, env, log_path, **kwargs):
+                log_path.write_text(raw)
+                return 0, raw
+            with mock.patch.object(runner, "validate_case_sources"), mock.patch.object(runner, "command", side_effect=captured_command) as executed:
+                with mock.patch.object(runner, "verdict", side_effect=RuntimeError("previous strict parser rejected pinned guard")):
+                    with self.assertRaises(RuntimeError):
+                        runner.verify(Path("unused"), {}, prior, harness, source, tools,
+                                      manifest=prior / "source/Cargo.toml")
+                case_path = prior / f"{name}.json"
+                rejected = json.loads(case_path.read_text())
+                self.assertEqual(rejected["execution_directory"], str(prior))
+                self.assertTrue(rejected["unwinding_checks"] and rejected["default_safety_checks"])
+                retained = runner.verify(Path("unused"), {}, output, harness, source, tools,
+                                         manifest=output / "source/Cargo.toml", prior=prior)
+                self.assertEqual(executed.call_count, 1, "compatible raw proof must not execute the solver again")
+                self.assertEqual(retained["outcome"], "proved")
+                self.assertEqual(retained["original_parser_rejection"]["error"], rejected["error"])
+                self.assertNotIn("error", retained)
+                self.assertEqual(retained["source"], source)
+                self.assertEqual(retained["revalidated_by_parser_sha256"], runner.digest(ROOT / "scripts/check-worker-control"))
+                for kind in ("weak command", "timeout", "compiler", "missing harness"):
+                    bad = copy.deepcopy(rejected)
+                    log_path = prior / f"{name}.log"
+                    log_path.write_text(raw)
+                    if kind == "weak command": bad["command"].append("--no-unwinding-checks")
+                    elif kind == "timeout": bad["exit_code"] = None
+                    elif kind == "compiler":
+                        bad["exit_code"] = 1
+                        log_path.write_text("error: failed to compile proof crate\n")
+                    else: log_path.write_text(raw.replace(f"Checking harness {harness}...", "no matching harness"))
+                    bad["log_sha256"] = runner.digest(log_path)
+                    runner.write_json(case_path, bad)
+                    with self.subTest(kind=kind):
+                        self.assertIsNone(runner.retain_previous(prior, output, harness, source, tools, None, None))
 
 
 

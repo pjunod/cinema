@@ -180,7 +180,10 @@ def toolchain(cache: Path, output: Path, provision: bool) -> tuple[dict, dict, P
     code, version = command(["cargo-kani", "--version"], ROOT, env, output / "verifier-version.log", executable=driver)
     if code or version.strip().splitlines() != [f"Kani Rust Verifier {pin['kani']} (cargo plugin)", f"CBMC {pin['cbmc']}"]:
         raise RuntimeError("Kani/CBMC version mismatch")
-    return env, {"platform": key, "archive_sha256": native["sha256"],
+    fmt_source = compiler / "lib/rustlib/src/rust/library/core/src/fmt/mod.rs"
+    if pin.get("fmt_stdlib_sha256") != FMT_STDLIB_SHA256 or digest(fmt_source) != FMT_STDLIB_SHA256:
+        raise RuntimeError("pinned panic-formatting stdlib source is missing or differs")
+    return env, {"platform": key, "fmt_stdlib_sha256": digest(fmt_source), "archive_sha256": native["sha256"],
                  "version": version.strip(), "rustc": rustc.strip(),
                  "driver_sha256": digest(driver), "cbmc_sha256": digest(bundle / "bin/cbmc"),
                  "compiler_sha256": digest(compiler / "bin/rustc")}, driver
@@ -264,9 +267,14 @@ def parse_inventory(data: dict) -> list[str]:
 
 
 SPEC_MARKER = re.compile(r"\bT[1-6]\b")
+FMT_STDLIB_SHA256 = "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106317c3"
+FMT_GUARD_NAME = "core::fmt::Arguments::<'_>::from_str.assertion.1"
+FMT_GUARD_DESCRIPTION = "attempt to shift left with overflow"
+FMT_GUARD_LOCATION = "library/core/src/fmt/mod.rs:820:38 in function core::fmt::Arguments::<'_>::from_str"
 
 
-def allowed_unreachable(name: str, description: str) -> bool:
+def allowed_unreachable(name: str, description: str, location: str = "",
+                        fmt_stdlib_sha256: str | None = None) -> bool:
     """Only compiler unreachable/panic/expect guards may be unreachable.
 
     T-labelled specification assertions must actually be checked, even when
@@ -274,6 +282,13 @@ def allowed_unreachable(name: str, description: str) -> bool:
     """
     if SPEC_MARKER.search(description):
         return False
+    # One observed compiler panic-formatting guard, pinned to the exact source
+    # and location. This never permits reachable overflow, unknown statuses or
+    # any theorem assertion to be ignored. See the real calibration fixture.
+    if (name == FMT_GUARD_NAME and description == FMT_GUARD_DESCRIPTION
+            and location.endswith(FMT_GUARD_LOCATION)
+            and fmt_stdlib_sha256 == FMT_STDLIB_SHA256):
+        return True
     if re.search(r"\.unreachable\.\d+$", name) and description == "unreachable code":
         return True
     return (".assertion." in name and
@@ -306,8 +321,10 @@ def check_summary(log: str, checks: list[tuple[str, str, str]]) -> None:
         raise RuntimeError("parenthetical summary counts do not match property statuses")
 
 
-def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list[str] | None = None) -> dict:
-    checks = re.findall(r'Check \d+: ([^\n]+)\n\s*- Status: ([A-Z_]+)\n\s*- Description: "([^\n]*)"', log)
+def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list[str] | None = None,
+            fmt_stdlib_sha256: str | None = None) -> dict:
+    observations = re.findall(r'Check \d+: ([^\n]+)\n\s*- Status: ([A-Z_]+)\n\s*- Description: "([^\n]*)"(?:\n\s*- Location: ([^\n]+))?', log)
+    checks = [(name, status, description) for name, status, description, _ in observations]
     indices = re.findall(r'^Check (\d+):', log, re.M)
     if indices != [str(index) for index in range(1, len(checks) + 1)]:
         raise RuntimeError("incomplete, duplicate or malformed property results")
@@ -318,8 +335,8 @@ def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list
         raise RuntimeError("missing property results")
     check_summary(log, checks)
     failures = [(name, status, description) for name, status, description in checks if status == "FAILURE"]
-    for name, status, description in checks:
-        if status == "UNREACHABLE" and allowed_unreachable(name, description):
+    for name, status, description, location in observations:
+        if status == "UNREACHABLE" and allowed_unreachable(name, description, location, fmt_stdlib_sha256):
             continue
         if status not in {"SUCCESS", "FAILURE"}:
             raise RuntimeError(f"unchecked, vacuous or unknown property status: {name}: {status}")
@@ -354,7 +371,7 @@ def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list
             "status_counts": {status: sum(actual == status for _, actual, _ in checks)
                               for status in ("SUCCESS", "UNREACHABLE", "FAILURE")},
             "specification_assertions": len(labelled),
-            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only nonmarker compiler panic/expect guards"}
+            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only nonmarker panic/expect guards or exact source-pinned panic-format guard"}
 
 
 def mutate_source(original: str, control: dict) -> str:
@@ -415,10 +432,22 @@ def retain_previous(prior: Path | None, output: Path, harness: str, source: dict
                 return None
         if previous["command"] != expected_command or previous["unwinding_checks"] is not True or previous["default_safety_checks"] is not True:
             return None
-        parsed = verdict(log_path.read_text(), previous["exit_code"], harness, marker, allowed)
-        if parsed["outcome"] != previous["outcome"]:
-            return None
+        parsed = verdict(log_path.read_text(), previous["exit_code"], harness, marker, allowed,
+                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"))
         retained = dict(previous)
+        if parsed["outcome"] != previous["outcome"]:
+            if previous["outcome"] != "rejected":
+                return None
+            # The solver need not run again merely because an earlier strict
+            # parser rejected its complete output. Every binding above and the
+            # current full verdict must pass before this promotion is possible.
+            retained["original_parser_rejection"] = {
+                "outcome": previous["outcome"], "error": previous.get("error"),
+                "receipt_sha256": digest(case), "receipt": str(case),
+            }
+            retained.update(parsed)
+            retained.pop("error", None)
+            retained["revalidated_by_parser_sha256"] = digest(ROOT / "scripts/check-worker-control")
         retained["retained_from"] = {"receipt": str(case), "receipt_sha256": digest(case),
                                       "log": str(log_path), "log_sha256": digest(log_path)}
         retained["source_bridge"] = {"current_candidate": new_candidate,
@@ -451,11 +480,14 @@ def verify(driver: Path, env: dict, output: Path, harness: str, source: dict, to
     try:
         code, log = command(args, output, env, log_path, executable=driver)
         validate_case_sources(output, source, marker is not None)
-        result = verdict(log, code, harness, marker, allowed)
+        result = verdict(log, code, harness, marker, allowed,
+                         fmt_stdlib_sha256=tools.get("fmt_stdlib_sha256"))
     except RuntimeError as error:
         write_json(output / f"{name}.json", {"harness": harness, "outcome": "rejected",
                    "error": str(error), "exit_code": code, "source": source, "tools": tools,
-                   "command": args, "log_sha256": digest(log_path) if log_path.exists() else None})
+                   "command": args, "execution_directory": str(output),
+                   "unwinding_checks": True, "default_safety_checks": True,
+                   "log_sha256": digest(log_path) if log_path.exists() else None})
         raise
     result.update({"source": source, "tools": tools, "command": args, "execution_directory": str(output), "log_sha256": digest(log_path),
                    "unwinding_checks": True, "default_safety_checks": True})

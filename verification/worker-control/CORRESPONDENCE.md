@@ -1,6 +1,6 @@
 # Controller correspondence — emitted effects and real driver operations
 
-**Status:** implementation integrated; independent review and post-change qualification pending.
+**Status:** implementation integrated; Fable final review delivered and amendments implemented; five selected runtime schedules passed. Complete proof qualification and landing are tracked in [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260).
 
 The production worker and proof harness call the identical `library_lifecycle::step` function. The driver owns the real guards and asynchronous operations. The [machine-readable table](correspondence.json) names related actions in the unchanged worker model. This descriptive relation is not a trace translator, enabledness equivalence or fair simulation proof.
 

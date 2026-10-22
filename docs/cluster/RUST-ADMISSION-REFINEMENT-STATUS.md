@@ -1,6 +1,6 @@
 # Rust worker controller — verify the post-claim lifecycle
 
-**Status:** open; implementation integrated; final Fable review delivered; review amendments implemented; parser calibration and qualification pending · **Updated:** 2026-10-22 · **Owner:** Codex coordinator · **Branch:** `codex/admission-rust-refinement` · **PR:** [#1260](http://forge.lan:3000/noirr/plurx/pulls/1260), draft; coordinator owns implementation integration, qualification and merge.
+**Status:** open; implementation integrated; final Fable review delivered; review amendments implemented; real-output parser calibration passed; full Linux qualification pending · **Updated:** 2026-10-22 · **Owner:** Codex coordinator · **Branch:** `codex/admission-rust-refinement` · **PR:** [#1260](http://forge.lan:3000/noirr/plurx/pulls/1260), draft; coordinator owns implementation integration, qualification and merge.
 
 Companion to [worker refinement](WORKER-REFINEMENT-STATUS.md), which delivered two complete model workers and selected Rust conformance. This phase starts a machine-checked implementation proof; it does not claim complete Rust simulation or cluster-wide deadlock freedom.
 
@@ -23,7 +23,7 @@ Fair-execution transfer, Tokio/OS scheduling, Store/SQL semantics and external c
 
 Selected tool: Kani 0.68.0 over the same ordinary Rust step body called by the production driver. A scoped native macOS arm64 calibration passed a symbolic-input check, detected an intentionally false assertion and rejected insufficient loop unwinding. Those are tool capability checks, not Plurx proof acceptance. The proof compiler is nightly-2026-08-21; CBMC is 6.11.0. The selected frontend and all runtime dependencies must be pinned, checksummed and available on the intended platform. The ordinary build remains Rust 1.97.1. A proof frontend's different compiler cannot substitute for that build.
 
-Native capability calibration established the tool route before implementation. Compiling the exact staged production controller and its six-target inventory is the next source-bound tooling check; it is not proof acceptance. The decision considers actual Rust semantics, proof scope, macOS arm64 support, installation/build costs and trusted adapters. No production feature gate, watchdog or testing-framework replacement belongs to this work.
+Native capability calibration established the tool route before implementation. The exact staged production controller compiled with the expected six-target inventory. Inventory compilation is not proof acceptance. The decision considers actual Rust semantics, proof scope, macOS arm64 support, installation/build costs and trusted adapters. No production feature gate, watchdog or testing-framework replacement belongs to this work.
 
 ## 4. Ownership — one coherent reviewable protocol slice
 
@@ -55,7 +55,7 @@ Retain prior TLC results as claims about their actual unchanged models/configura
 - Ripwire initially refused because its binary was absent; scoped source ranges supplied navigation. `make hooks` subsequently installed the normal hooks and Ripwire in the owned clone.
 - Fable 5.1 produced the design report on task `t_51737056`, run 17. The run exhausted its eight-turn budget after writing the report; the coordinator accepts its concrete advice with the clarifications below. This is design advice, not final independent review.
 - GPT-6.1 Sol owns the new zero-dependency `plurx-worker-control` crate and production driver conversion in an isolated builder clone. Proof tooling is a separate lower-model lane after the interface is stable.
-- No implementation proof, post-change unit qualification or merge is claimed yet.
+- These are implementation-stage facts. Current review and focused runtime results are recorded below; complete six-target/three-control acceptance and landing remain tracked in PR #1260.
 
 ## 7. Accepted design and remaining boundary
 
@@ -71,7 +71,7 @@ Retain the prior unchanged TLA model results at their original source identity. 
 
 ## 8. Integrated source and qualification plan
 
-Production extraction commit `a14a269c354f17677098f6886d4effb631e1568b` passed pinned daemon all-target compilation and the normal workspace Clippy/format/syntax hook before integration as `c742287a8`. No product unit or proof acceptance has run. Main remains the inspected base.
+Production extraction commit `a14a269c354f17677098f6886d4effb631e1568b` passed pinned daemon all-target compilation and the normal workspace Clippy/format/syntax hook before integration as `c742287a8`. This source-integration checkpoint preceded runtime/proof qualification; subsequent results are recorded below.
 
 The proof adapter stages complete production Rust files byte-for-byte into an isolated zero-dependency package and checks hashes before and after analysis. Its standalone manifest is a recorded packaging envelope, avoiding unrelated workspace dependency resolution. No second controller implementation is maintained. Ordinary production Rust compilation remains separate evidence.
 
@@ -89,7 +89,7 @@ Fable 5.1 reviewed candidate `58a10429c57847ea4539ac763a01cb837d4de156` in task 
 
 The lower-model proof lane owns A1–A3; the coordinator owns A4/A5, exact-candidate qualification and merge. The controller and driver remain frozen. Fable requires another review only if their DAG or operation order changes. One post-review native positive target calibrates the parser against the real tool; the first full six-positive/three-control qualification is reserved for the Linux CI job.
 
-A1/A2 proof assertions and A3 explicit parser policy are integrated without changing the production controller/driver. A native T2 positive calibration will capture the actual pinned output before committing its fixture. No full package acceptance or post-change runtime qualification has run yet.
+A1/A2 proof assertions and A3 explicit parser policy are integrated without changing the production controller/driver. The real pinned T2 output is retained as a path-redacted fixture with its original log hash and exact transformation provenance. The five runtime schedules passed; full package acceptance and landing are tracked in PR #1260.
 
 ### Calibration and runtime results — first candidate
 
@@ -98,3 +98,13 @@ The five affected worker schedules passed on `1e4556f614bf6d6272896579a972782153
 The first native T2 calibration reported 242 successful checks and one unreachable check in 9.393 seconds solver time. Its aggregate acceptance remained false: the strict parser rejected a formatting-related unreachable overflow check, and ordinary Rust assertion macros had lost their custom messages in Kani's no-std analysis. The root-cause repair uses the pinned Kani assertion primitive with literal labels and checked result guards in the proof module. It does not loosen the parser or change production Rust. A second T2 calibration is necessary because those solver inputs changed.
 
 Runtime retention is bound to the actual tested candidate. All ordinary production source/manifests remain unchanged; the proof module is excluded from normal compilation by `cfg(kani)`, confirmed by retained compiler dependency information. A source bridge records that distinction instead of relabelling the old execution as a new binary run.
+
+### Literal-label calibration and exact compiler guard
+
+The repaired T2 harness on `ecb9de29ffaa2b293c41168369a26a701335bacb` produced 246 successful properties, five successful literal specification assertions, and one unreachable compiler-formatting guard (7.391 seconds solver time). The original strict-parser rejection is retained. Reinterpreting that same immutable log with the repaired parser passes this single target without running the solver again; aggregate package acceptance remains false until all six targets and three controls qualify.
+
+The only added unreachable exception is the exact `core::fmt::Arguments::from_str` left-shift guard at `library/core/src/fmt/mod.rs:820:38`, with its full emitted property name, description, location suffix and actual scoped rust-src SHA-256 checked against the manifest pin. It is compiler panic-message formatting, outside the production controller. A failing or undetermined guard, another source pin/location, or an unreachable T1–T6 specification assertion still rejects qualification. Default safety and unwinding checks remain enabled.
+
+The committed real-output fixture preserves every non-path byte, including the tool's whitespace; its provenance states the original candidate, source/tool identities and path-only redactions. Parser-resume tests require exact solver inputs, command, tool identities and complete current-parser success before retaining a formerly rejected log, and preserve its original rejection. The final package run records native Linux provisioning and per-target solver timings in the PR evidence.
+
+This phase's merge-time qualification and landing receipt live in [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260). This ledger records the proof boundary and implementation decisions; the PR records the current candidate, required gate, retained runtime evidence and remaining work. No clustering test is removed.
