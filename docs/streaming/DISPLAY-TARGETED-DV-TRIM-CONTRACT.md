@@ -2,11 +2,13 @@
 
 **Status:** private candidate infrastructure, unmerged and unqualified ·
 **Executes:** phase 2 of [the build plan](DISPLAY-TARGETED-DV-BUILD.md) ·
-**Written:** 2026-10-22
+**Written:** 2026-10-22 · **Reference continuation:** 2026-10-22
 
 Companion to [the build plan](DISPLAY-TARGETED-DV-BUILD.md): this records what
 can be implemented from public sources, what remains inferred, and the exact
-observations needed before rendering creative trims in a viewer session.
+observations needed before rendering creative trims in a viewer session. The
+official software-reference path in §7 supports numerical color QC independently
+of the physical-device path; neither path is mislabeled as the other.
 Production remains L1-only, with `creative_trims_applied: false`. No setting,
 feature gate or production helper includes this candidate. Do not wire it into
 serving while the ICtCp contract and independent acceptance remain unresolved.
@@ -112,6 +114,8 @@ compression strengths distinguish fixed chroma scaling from mapping-dependent
 compensation; single-field changes distinguish sign/scale and combined changes
 reveal ordering. Capture/reference creation must be independently authorized
 and source-bound; an engineered reference packet is still labeled as such.
+Official software-rendered references can supply matched digital color values
+through §7; physical photometry is a separate acceptance scope.
 
 ## 5. Build and review precede every execution
 
@@ -169,4 +173,119 @@ invent thresholds, authenticate a device, prove chroma fidelity or authorize
 serving. Nonzero paired frames/patches and a true zero process exit are required
 for observations; none substitute for independent capture review. Actual
 creative-trim acceptance still needs the unresolved color contract, independently
-matched color measurements and an explicit owner/reviewer disposition.
+matched color observations and an explicit owner/reviewer disposition. The
+software-reference path below provides digital QC without requiring the viewer
+to supply instruments or technical packets.
+
+
+## 7. Official software references support numerical color QC
+
+With the user's EULA acceptance, the coordinator acquired source-bound output
+through the official Dolby Professional Tools 5.6.4 documented analysis,
+validation, target-info and CPU render interfaces. The source is an engineered,
+self-owned 256×128 full-range RGB16 BT.2020/PQ sequence: three identical frames
+at 24 fps. Fourteen references contain zero L8, positive/negative single-field
+L8 edits and a combined case. These are actual reference-rendered images,
+not a candidate run, physical photometry or completed trim acceptance. Vendor
+executables and documentation stay outside the repository. The coordinator
+owns packet preparation; the viewer need not identify equipment or supply
+technical files.
+
+The source is mastered at 4000 nits/0.005 nits with BT.2020/D65 primaries.
+The custom target is ID 255, 1000 nits/0.005 nits, PQ RGB computer range,
+16-bit BT.2020/D65. XML is 4.0.2, with actual CM version metadata preserved.
+Official target-info reports Application Type **ALL**. A friendly target name
+containing HOME does not establish HOME/CINEMA-specific behavior in this XML
+version. The adapter freezes and records these facts, source frame 0, PTS 0
+and duration 1/24 second, and the actual source/reference binary hashes.
+
+**XML-to-RPU association:** the new `xml-reference` mode in the existing
+[control generator](../../tools/dv_processing/controls/generator/src/xml_reference.rs)
+uses pinned public libdovi `CmXmlParser::parse_file`, overrides the documented
+profile to 8.1, calls `GenerateConfig::generate_rpu_list`, serializes each actual
+HEVC NAL and parses it again. This is the same supported importer path used by
+[dovi_tool's public generator](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/src/dovi/generator.rs),
+not a hand-written six-vector-to-RPU formula. Imported config, actual NAL,
+round-tripped JSON, shot ID and source-frame/edit offset are bound in the
+observation report. The generator refuses noncontiguous shots, gaps/overlaps,
+empty coverage and out-of-range edits because the library emits shots
+sequentially. These receipts establish the exercised public conversion path;
+they do not establish proprietary renderer equivalence.
+
+**Decoded source association:**
+[`compare_trim_software_reference.py`](../../tools/dv_processing/controls/compare_trim_software_reference.py)
+verifies complete transferred acquisition packets and true zero exits. A
+pinned public FFmpeg TIFF decoder reads the exact vendor-input source image and
+reference image as RGB16, preserving full-range channels without a color
+transform. The source codes are divided by 65535 and imported into native
+RGBA float32 PQ for the isolated candidate. Probe format/raster, decoder argv,
+source image, decoded bytes and float input all have separate hashes. This is
+a direct self-owned master-RGB mapping control, not an encoded-DV reconstruction
+or decoder-association proof. Each candidate-selected L8/L10 is checked against
+the actual converted RPU; XML vector labels alone cannot satisfy that check.
+
+**Baseline and trim delta:** the zero-L8 official XML also contains nonneutral
+derived L2 and L3 instructions. The SOP-only candidate does not apply them.
+Metafier also regenerates companion L2 instructions when applying the global L8
+edits. Their XML vectors and actual quantized RPU fields are recorded per case;
+this is an **L8-plus-companion-L2 metadata delta**, not a causally isolated
+L8-only experiment. The adapter makes no assumption about whether the official
+CM4 renderer uses those L2 values. All remaining XML/RPU metadata, including
+L1/L3, matrices and targets, must remain frozen (RPU CRC excluded). The adapter
+reports these errors separately, for all pixels and registered source patches:
+
+```text
+zero baseline error = candidate_zero − reference_zero
+absolute case error = candidate_case − reference_case
+trim delta error    = (candidate_case − candidate_zero)
+                    − (reference_case − reference_zero)
+```
+
+Each comparison uses normalized RGB/PQ and linear-light CIE XYZ in cd/m².
+XYZ is derived from public [BT.2020-2 table 3 primaries and D65](https://www.itu.int/rec/R-REC-BT.2020-2-201510-I/en)
+with the public ST2084 EOTF. There is no vendor-output fit or color calibration
+curve. Reports include signed mean, absolute mean, RMS and maximum absolute
+channel errors; the reference PQ code step is 1/65535. Delta separation does not
+remove nonlinear interactions with baseline or regenerated companion instructions. No numerical
+pass threshold or equivalence claim is manufactured.
+
+The coordinator compiles the generator with its pinned Rust 1.97.1 loop and
+public dependency source mounted at the control crate's existing `/dovi` path:
+
+```bash
+cargo build --locked --release \
+  --manifest-path tools/dv_processing/controls/generator/Cargo.toml
+```
+
+The `xml` feature adds the existing pinned `roxmltree` 0.20.0 dependency; its
+version/checksum are preserved from the repository's parser dependency lock.
+After completed-code independent review and fixes, run the authored boundary
+regressions and the single numerical-QC attempt:
+
+```bash
+PLURX_DV_CONTROL_SCRATCH="$OWNED_SCRATCH" \
+PLURX_DV_REFERENCE_PACKET="$TRIM_PACKET" \
+  python3 tools/dv_processing/controls/test_trim_software_reference.py
+
+python3 tools/dv_processing/controls/compare_trim_software_reference.py \
+  --baseline-packet "$SOURCE_PACKET" --reference-packet "$TRIM_PACKET" \
+  --converter "$CONTROL_GENERATOR" --decoder "$FFMPEG" --probe "$FFPROBE" \
+  --candidate "$TRIM_CANDIDATE" --source-archive "$EXACT_SOURCE_ARCHIVE" \
+  --dependency-manifest "$DEPENDENCY_MANIFEST" --output "$NEW_ATTEMPT"
+```
+
+The regression checks separate baseline/delta arithmetic, independent D65/XYZ
+witnesses, exact raster/range checks, converted-RPU selection, immutable fixed
+metadata, altered source-frame refusal and hash/true-exit boundaries. No tests
+or controls were run when authoring this continuation; compile/review/execution
+belong to the coordinator's evidence-bound batch.
+
+**How to read it:** `official-dolby-software-reference-numerical-qc` with
+`observations-only-not-acceptance` is useful digital reference evidence. It is
+not photometry, full Dolby conformance or automatic creative-trim acceptance.
+Public sources justify the supported XML importer, frozen input/output color
+math, selection/identity mechanics and illustrative RGB SOP equation. They
+still do not identify an ICtCp chroma-weight/saturation algorithm or justify
+replacing it with fitted weights. The raw-to-B.3 renderer bridge remains
+inferred. Those are implementation/contract gaps even after reference access
+has been resolved; E is not complete and production remains L1-only.
