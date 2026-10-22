@@ -101,6 +101,7 @@ class IsolationConfig:
     trusted_wrappers: tuple[TrustedSourceFile, ...] = ()
     runtime_max_bytes: int = 32 * 1024**3
     cache_max_bytes: int = 32 * 1024**3
+    candidate_readonly: bool = False
     working_directory: str = "/work"
     trusted_source_members: tuple[TrustedSourceMember, ...] = ()
 
@@ -137,11 +138,31 @@ class ExecutionStep:
     environment: tuple[tuple[str, str], ...] = ()
     writes: frozenset[str] = frozenset()
     kind: str = "assertion"
+    protected_readonly: bool = True
 
     def __post_init__(self):
         object.__setattr__(self, "argv", tuple(self.argv))
         object.__setattr__(self, "environment", tuple(sorted(tuple(pair) for pair in self.environment)))
         object.__setattr__(self, "writes", frozenset(self.writes))
+
+
+@dataclass(frozen=True)
+class ProtectedWorkerPlan:
+    """Candidate-only RPC role; no protected grader/outcome material is mounted."""
+    config: IsolationConfig
+    driver: TrustedSourceFile
+    argv: tuple[str, ...]
+    operations: tuple[str, ...]
+    schema_sha256: str
+    proxy_sha256: str
+    exception_types: tuple[str, ...] = ()
+    max_frame_bytes: int = 65536
+    max_requests: int = 4096
+    max_total_bytes: int = 16 * 1024 * 1024
+
+    def __post_init__(self):
+        for name in ("argv", "operations", "exception_types"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
 
 
 @dataclass(frozen=True)
@@ -151,6 +172,7 @@ class FamilyPlanV2:
     acceptance_steps: tuple[ExecutionStep, ...]
     driver: TrustedSourceFile
     schema_version: int = 2
+    worker: ProtectedWorkerPlan | None = None
 
     def __post_init__(self):
         for name in ("prerequisite_steps", "acceptance_steps"):
@@ -343,6 +365,62 @@ body={"nonce":auth["nonce"],"argv":argv,"mode":mode,"context":context,"driver_sh
 print(canonical({"body":body,"hmac":hmac.new(secret,canonical(body).encode(),hashlib.sha256).hexdigest()}))
 '''
 
+# The paired role uses separate stdio pipes, never a shared outcome socket or
+# a credential/key mounted into the candidate container.
+_PROTECTED_RPC = r'''
+wire_out=sys.__stdout__;wire_in=sys.__stdin__.buffer;rpc_sequence=0
+def rpc(method,args,kwargs):
+    global rpc_sequence
+    rpc_sequence+=1
+    frame={"kind":"rpc","request":{"protocol":2,"id":rpc_sequence,"method":method,"args":args,"kwargs":kwargs}}
+    raw=canonical(frame)
+    bound=context["rpc_limits"]["max_frame_bytes"]
+    if len(raw.encode())>bound:raise RuntimeError("RPC request bound")
+    wire_out.write(raw+"\n");wire_out.flush()
+    line=wire_in.readline(bound+2)
+    if not line.endswith(b"\n") or len(line)>bound+1:raise RuntimeError("RPC reply framing")
+    reply=json.loads(line)
+    if set(reply)!={"protocol","id","result"} or reply["protocol"]!=2 or reply["id"]!=rpc_sequence:raise RuntimeError("RPC reply identity")
+    return reply["result"]
+'''
+_PROTECTED_CONTROLLER = _OUTCOME_CONTROLLER.replace(
+    'auth=json.loads(sys.stdin.buffer.read(4097));secret=bytes.fromhex(auth["secret"])',
+    'auth=json.loads(sys.stdin.buffer.readline(4097));secret=bytes.fromhex(auth["secret"])\n' + _PROTECTED_RPC).replace(
+    'namespace={"__name__":"_trusted_family_driver","__file__":source}',
+    'namespace={"__name__":"_trusted_family_driver","__file__":source,"rpc":rpc}').replace(
+    'print(canonical({"body":body,"hmac":hmac.new(secret,canonical(body).encode(),hashlib.sha256).hexdigest()}))',
+    'print(canonical({"kind":"outcome","packet":{"body":body,"hmac":hmac.new(secret,canonical(body).encode(),hashlib.sha256).hexdigest()}}))')
+
+_WORKER_CONTROLLER = r'''
+import hashlib,json,sys
+source,digest,argv,context,bound=sys.argv[1:]
+argv=json.loads(argv);context=json.loads(context);bound=int(bound)
+with open(source,"rb") as stream:code=stream.read(8*1024*1024+1)
+if len(code)>8*1024*1024 or hashlib.sha256(code).hexdigest()!=digest:raise RuntimeError("worker driver identity")
+namespace={"__name__":"_candidate_rpc_driver","__file__":source}
+exec(compile(code,source,"exec"),namespace)
+sequence=0
+while True:
+    line=sys.stdin.buffer.readline(bound+2)
+    if not line:break
+    if not line.endswith(b"\n") or len(line)>bound+1:raise RuntimeError("worker framing")
+    request=json.loads(line);sequence+=1
+    if set(request)!={"protocol","id","method","args","kwargs"} or request["protocol"]!=2 or request["id"]!=sequence:raise RuntimeError("worker request identity")
+    result=namespace["dispatch"](request["method"],request["args"],request["kwargs"],context)
+    raw=json.dumps({"protocol":2,"id":sequence,"result":result},sort_keys=True,separators=(",",":"),allow_nan=False)
+    if len(raw.encode())>bound:raise RuntimeError("worker output bound")
+    sys.stdout.write(raw+"\n");sys.stdout.flush()
+'''
+_RESOURCE_CODE = r'''
+import json
+result={}
+for name in ("memory.events","pids.events"):
+    with open("/sys/fs/cgroup/"+name) as stream:
+        result[name]={key:int(value) for key,value in (line.split() for line in stream)}
+print(json.dumps(result,sort_keys=True))
+'''
+
+
 def _no_symlinks(path: Path, *, directory=False) -> Path:
     _require(path.is_absolute() and "," not in str(path) and "\n" not in str(path), "absolute literal path required")
     current = Path(path.anchor)
@@ -488,7 +566,7 @@ def _prepare(config: IsolationConfig):
                                 (config.runtime_max_bytes, 1, 128 * 1024**3), (config.cache_max_bytes, 1, 128 * 1024**3)):
         _require(type(value) is int and lower <= value <= upper, "finite execution bounds required")
     _require(type(config.cpus) in {int, float} and 0.1 <= config.cpus <= 16, "finite CPU bound required")
-    _require(type(config.require_rust) is bool, "explicit Rust requirement required")
+    _require(type(config.require_rust) is bool and type(config.candidate_readonly) is bool, "explicit runtime/mount policy required")
     for path in (config.python_executable, config.rustc_executable, config.cargo_executable):
         _container_executable(path)
     _workdir(config.working_directory, config)
@@ -578,7 +656,7 @@ def _prepare(config: IsolationConfig):
     payload = {"engine": str(config.engine), "engine_digest": engine_digest, "endpoint": config.endpoint,
                "image": config.image, "root": str(root), "mounts": [(str(p), target, ro) for p, target, ro in _mounts(config)],
                "mount_identity": [(path.stat().st_dev, path.stat().st_ino) for path in mounts],
-               "sources": sources, "argv": config.acceptance_argv, "working_directory": config.working_directory, "environment": sorted(_environment(config).items()),
+               "sources": sources, "argv": config.acceptance_argv, "candidate_readonly": config.candidate_readonly, "working_directory": config.working_directory, "environment": sorted(_environment(config).items()),
                "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit,
                           config.runtime_max_bytes, config.cache_max_bytes],
                "source_archive": {"commit": config.source_commit, "sha256": config.source_archive_sha256,
@@ -586,7 +664,7 @@ def _prepare(config: IsolationConfig):
                                   "members": sorted((v.path, v.sha256, v.git_blob) for v in source_members.values())},
                "user": [config.uid, config.gid], "runtimes": [config.python_executable, config.rustc_executable, config.cargo_executable, config.require_rust],
                "supervisor": _bytes_digest(_SUPERVISOR.encode()), "probe": _bytes_digest(_PROBE_CODE.encode()),
-               "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode())}
+               "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode()), "executor": _bytes_digest(Path(__file__).read_bytes())}
     return private, payload
 
 
@@ -601,7 +679,7 @@ def _environment(config):
 
 
 def _mounts(config):
-    return [(config.candidate_root, "/work", False), (config.runtime_root, "/work/.runtime", False),
+    return [(config.candidate_root, "/work", config.candidate_readonly), (config.runtime_root, "/work/.runtime", False),
             (config.grader_root, "/grader", True), *((Path(cache.source), cache.target, True) for cache in config.readonly_caches)]
 
 
@@ -772,7 +850,9 @@ def _configuration_probe(config, private):
         observed = json.loads(checked.stdout)
         _require(observed["outside"]["readable"] is False and observed["outside"]["errno"] in {errno.ENOENT, errno.EACCES}, "outside sentinel readable")
         _require(observed["network"]["interfaces"] == ["lo"] and observed["network"]["errno"] in {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EACCES, errno.EPERM}, "network denial unproved")
-        _require(observed["filesystem"]["candidate"]["writable"] is True and observed["filesystem"]["runtime"]["writable"] is True
+        _require(observed["filesystem"]["candidate"]["writable"] is (not config.candidate_readonly)
+                 and (not config.candidate_readonly or observed["filesystem"]["candidate"]["errno"] in {errno.EROFS, errno.EACCES})
+                 and observed["filesystem"]["runtime"]["writable"] is True
                  and observed["filesystem"]["grader"]["writable"] is False and observed["filesystem"]["grader"]["errno"] in {errno.EROFS, errno.EACCES}, "filesystem permissions unproved")
         _require(bool(re.fullmatch(r"3\.[0-9]+\.[0-9]+", observed["versions"]["python"])), "Python runtime unavailable")
         if config.require_rust:
@@ -1013,6 +1093,294 @@ def qualify_family(config: IsolationConfig, family: FamilyPlan | FamilyPlanV2, r
     return result
 
 
+def _worker_plan_data(worker):
+    _require(isinstance(worker, ProtectedWorkerPlan) and isinstance(worker.config, IsolationConfig), "typed protected worker required")
+    descriptor = _plan_data(FamilyPlan("protected-worker", (worker.argv,), (worker.argv,), worker.driver))
+    allowed = {"call", "constant", "cache_get", "cache_set", "cache_clear", "cache_update", "cache_keys",
+               "cache_snapshot", "cache_root", "health", "git_stub", "git_restore"}
+    _require(0 < len(worker.operations) <= len(allowed) and len(set(worker.operations)) == len(worker.operations)
+             and set(worker.operations) <= allowed, "closed RPC operations required")
+    _require(all(isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name) for name in worker.exception_types)
+             and len(set(worker.exception_types)) == len(worker.exception_types) <= 32, "closed RPC exception types required")
+    for digest in (worker.schema_sha256, worker.proxy_sha256):
+        _require(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest), "pinned RPC schema/proxy required")
+    for value, low, high in ((worker.max_frame_bytes, 1024, 65536), (worker.max_requests, 1, 100000),
+                             (worker.max_total_bytes, 1024, 64 * 1024 * 1024)):
+        _require(type(value) is int and low <= value <= high, "finite RPC bounds required")
+    return {"driver": descriptor["driver"], "argv": worker.argv, "operations": worker.operations,
+            "schema_sha256": worker.schema_sha256, "proxy_sha256": worker.proxy_sha256,
+            "exception_types": worker.exception_types, "max_frame_bytes": worker.max_frame_bytes,
+            "max_requests": worker.max_requests, "max_total_bytes": worker.max_total_bytes}
+
+
+def _worker_configuration(config, plan, step=None):
+    worker = plan.worker
+    _worker_plan_data(worker)
+    current = replace(worker.config, environment=config.environment, working_directory=config.working_directory)
+    trusted_install = step is not None and step.kind == "setup" and "candidate" in step.writes and step.protected_readonly is False
+    _require((config.candidate_readonly or trusted_install) and current.candidate_readonly and config.uid != current.uid,
+             "protected source policy and readonly worker/distinct UID required")
+    _require(worker.argv in current.acceptance_argv and current.python_executable == worker.argv[0], "registered fixed worker runtime required")
+    for left, target, readonly in _mounts(config):
+        for right, other_target, other_readonly in _mounts(current):
+            shared_cache = (readonly and other_readonly and target.startswith("/offline-cache/")
+                            and other_target.startswith("/offline-cache/") and left == right)
+            _require(shared_cache or not left.is_relative_to(right) and not right.is_relative_to(left), "protected/worker mounts overlap")
+    private, payload = _prepare(current)
+    expected = {worker.driver.path, "rpc-contract.json"}
+    actual = {path.relative_to(current.grader_root).as_posix() for path in current.grader_root.rglob("*") if stat.S_ISREG(path.lstat().st_mode)}
+    _require(actual == expected, "worker export must contain only its driver and closed contract")
+    for relative, expected_digest in ((worker.driver.path, worker.driver.sha256), ("rpc-contract.json", worker.schema_sha256)):
+        path = current.grader_root / relative
+        _require(_read_member(current.grader_root, path, path.lstat()) == expected_digest, "worker trusted export changed")
+    return current, payload
+
+
+def _rpc_inert(value, *, depth=0):
+    _require(depth <= 16, "RPC nesting bound exceeded")
+    if value is None or type(value) in {bool, str}:
+        return
+    if type(value) is int:
+        _require(-(2**63) <= value < 2**63, "bounded RPC integer required")
+        return
+    if type(value) is float:
+        _require(value == value and abs(value) <= 1.7976931348623157e308, "finite RPC number required")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _rpc_inert(item, depth=depth + 1)
+        return
+    _require(isinstance(value, dict) and all(isinstance(key, str) for key in value), "inert RPC JSON required")
+    for item in value.values():
+        _rpc_inert(item, depth=depth + 1)
+
+
+def _wire_json(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            _require(key not in result, "duplicate RPC object key")
+            result[key] = value
+        return result
+    def invalid(value):
+        raise IsolationError("non-finite RPC constant")
+    return json.loads(raw, object_pairs_hook=unique, parse_constant=invalid)
+
+
+def _rpc_request(frame, worker, expected):
+    _require(isinstance(frame, dict) and set(frame) == {"kind", "request"} and frame["kind"] == "rpc", "protected RPC frame required")
+    request = frame["request"]
+    _require(isinstance(request, dict) and set(request) == {"protocol", "id", "method", "args", "kwargs"}
+             and type(request["protocol"]) is int and request["protocol"] == 2
+             and type(request["id"]) is int and request["id"] == expected
+             and request["method"] in worker.operations, "closed ordered RPC request required")
+    _rpc_inert(request["args"])
+    _rpc_inert(request["kwargs"])
+    return request
+
+
+def _rpc_reply(frame, worker, expected):
+    _require(isinstance(frame, dict) and set(frame) == {"protocol", "id", "result"}
+             and type(frame["protocol"]) is int and frame["protocol"] == 2
+             and type(frame["id"]) is int and frame["id"] == expected, "ordered worker reply required")
+    result = frame["result"]
+    _require(isinstance(result, dict) and (set(result) == {"value"} or set(result) == {"exception"}), "closed worker result branch required")
+    if "exception" in result:
+        error = result["exception"]
+        _require(isinstance(error, dict) and set(error) == {"type", "message"} and error["type"] in worker.exception_types
+                 and isinstance(error["message"], str) and len(error["message"]) <= 4096, "declared inert exception required")
+    else:
+        _rpc_inert(result["value"])
+    return frame
+
+
+def _resource_counts(config, name, observer_uid):
+    result = _command(config, ["exec", "--user", str(observer_uid), "--workdir=/", name,
+                              config.python_executable, "-I", "-S", "-c", _RESOURCE_CODE])
+    _require(result.returncode == 0 and not result.timed_out and not result.output_limited, "worker resource observation unavailable")
+    data = json.loads(result.stdout)
+    _require(isinstance(data, dict) and set(data) == {"memory.events", "pids.events"}, "worker resource counters unavailable")
+    for key, required in (("memory.events", {"oom", "oom_kill", "max"}), ("pids.events", {"max"})):
+        _require(isinstance(data[key], dict) and required <= set(data[key])
+                 and all(type(value) is int and value >= 0 for value in data[key].values()), "worker resource counter schema")
+    return data
+
+
+def _duplex_broker(config, name, argv, plan, mode, context, worker_config, worker_name):
+    """Bounded relay: worker stdout can provide values, never grader outcomes."""
+    worker = plan.worker
+    secret, nonce = os.urandom(32), uuid.uuid4().hex
+    controller_context = {**context, "rpc_limits": {key: getattr(worker, key) for key in
+                          ("max_frame_bytes", "max_requests", "max_total_bytes")}}
+    protected_args = ["exec", "--interactive", "--workdir=/", name, config.python_executable, "-I", "-S", "-c",
+        _PROTECTED_CONTROLLER, "/grader/" + plan.driver.path, plan.driver.sha256, mode, _json(argv),
+        _json(controller_context), str(config.max_output_bytes)]
+    worker_context = {"protocol": 2, "schema_sha256": worker.schema_sha256, "argv": list(worker.argv)}
+    worker_args = ["exec", "--interactive", "--workdir=" + worker_config.working_directory, worker_name,
+        worker_config.python_executable, "-I", "-S", "-c", _WORKER_CONTROLLER, "/grader/" + worker.driver.path,
+        worker.driver.sha256, _json(worker.argv), _json(worker_context), str(worker.max_frame_bytes)]
+    processes = {}
+    selector = selectors.DefaultSelector()
+    pending = {role: bytearray() for role in ("protected", "worker")}
+    buffers = {role: bytearray() for role in pending}
+    output = {role + "_" + stream: bytearray() for role in pending for stream in ("stdout", "stderr")}
+    deadline = time.monotonic() + min(config.timeout_seconds, worker_config.timeout_seconds)
+    total = requests = 0
+    waiting = None
+    final_packet = None
+    timed_out = limited = False
+    unavailable = None
+
+    def queue(role, payload):
+        raw = _json(payload).encode() + b"\n"
+        _require(len(raw) <= worker.max_frame_bytes + 1, "RPC frame too large")
+        pending[role].extend(raw)
+        stream = processes[role].stdin
+        try:
+            selector.get_key(stream)
+        except KeyError:
+            selector.register(stream, selectors.EVENT_WRITE, (role, "stdin"))
+
+    try:
+        for role, current, arguments in (("worker", worker_config, worker_args), ("protected", config, protected_args)):
+            process = subprocess.Popen([str(current.engine), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=_engine_environment(current), close_fds=True)
+            processes[role] = process
+            for stream in (process.stdin, process.stdout, process.stderr):
+                os.set_blocking(stream.fileno(), False)
+            for label in ("stdout", "stderr"):
+                selector.register(getattr(process, label), selectors.EVENT_READ, (role, label))
+        queue("protected", {"secret": secret.hex(), "nonce": nonce})
+        while selector.get_map():
+            if time.monotonic() >= deadline:
+                timed_out = True
+                raise IsolationError("paired RPC deadline")
+            for key, _ in selector.select(min(0.1, max(0, deadline - time.monotonic()))):
+                role, stream = key.data
+                if stream == "stdin":
+                    written = os.write(key.fileobj.fileno(), pending[role])
+                    del pending[role][:written]
+                    if not pending[role]:
+                        selector.unregister(key.fileobj)
+                    continue
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    if stream == "stdout":
+                        _require(not buffers[role] and final_packet is not None, "premature or partial RPC EOF")
+                    continue
+                total += len(chunk)
+                limit = min(config.max_output_bytes, worker_config.max_output_bytes, worker.max_total_bytes)
+                if total > limit:
+                    limited = True
+                    raise IsolationError("paired RPC total/output bound")
+                output[role + "_" + stream].extend(chunk)
+                if stream == "stderr":
+                    continue
+                buffers[role].extend(chunk)
+                while b"\n" in buffers[role]:
+                    line, _, rest = buffers[role].partition(b"\n")
+                    buffers[role] = bytearray(rest)
+                    _require(len(line) <= worker.max_frame_bytes, "RPC frame bound")
+                    frame = _wire_json(line.decode("utf-8"))
+                    if role == "worker":
+                        _require(waiting is not None and final_packet is None, "unsolicited worker frame")
+                        reply = _rpc_reply(frame, worker, waiting)
+                        queue("protected", reply)
+                        waiting = None
+                    elif isinstance(frame, dict) and frame.get("kind") == "outcome":
+                        _require(set(frame) == {"kind", "packet"} and final_packet is None and waiting is None
+                                 and requests > 0, "protected completion order")
+                        final_packet = frame["packet"]
+                        for target in pending:
+                            _require(not pending[target], "completion with pending RPC data")
+                            processes[target].stdin.close()
+                    else:
+                        _require(final_packet is None and waiting is None and requests < worker.max_requests, "RPC order/request bound")
+                        request = _rpc_request(frame, worker, requests + 1)
+                        requests += 1
+                        waiting = requests
+                        queue("worker", request)
+                _require(len(buffers[role]) <= worker.max_frame_bytes, "RPC unterminated frame bound")
+        _require(final_packet is not None and waiting is None and all(process.wait(timeout=5) == 0 for process in processes.values()),
+                 "paired process completion unavailable")
+        body = final_packet["body"]
+        signature = hmac.new(secret, _json(body).encode(), hashlib.sha256).hexdigest()
+        _require(isinstance(final_packet["hmac"], str) and hmac.compare_digest(signature, final_packet["hmac"]), "protected outcome signature")
+        _require(body["nonce"] == nonce and body["argv"] == list(argv) and body["mode"] == mode
+                 and body["context"] == controller_context and body["driver_sha256"] == plan.driver.sha256,
+                 "protected outcome identity mismatch")
+        body["broker_proof"] = {"requests": requests, "bytes": total, "schema_sha256": worker.schema_sha256,
+                                "proxy_sha256": worker.proxy_sha256, "topology": "separate-container-stdio-v1"}
+    except (IsolationError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        unavailable = type(error).__name__
+        body = None
+    finally:
+        selector.close()
+        for process in processes.values():
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                body = None
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
+    raw = _json({key: base64.b64encode(value).decode() for key, value in output.items()}).encode()
+    return _Command(0 if body is not None else None, raw, (unavailable or "").encode(), timed_out, limited), body
+
+
+def _protected_packet(config, name, argv, plan, mode, context):
+    driver = config.grader_root / plan.driver.path
+    _no_symlinks(driver)
+    _require(_read_member(config.grader_root, driver, driver.lstat()) == plan.driver.sha256, "protected driver changed")
+    current_step = (plan.prerequisite_steps if mode == "prerequisite" else plan.acceptance_steps)[context["step_index"]]
+    worker_config, before = _worker_configuration(config, plan, current_step)
+    private = worker_config.owned_root / ".isolation"
+    worker_name = None
+    cleaned = False
+    outcome = _Command(None, b"", b"worker unavailable")
+    packet = None
+    try:
+        issued_probe = probe(worker_config)
+        _require(_issued_probe(issued_probe, private, _prepare(worker_config)[1]) is not None, "worker isolation unqualified")
+        worker_name, observations = _configuration_probe(worker_config, private)
+        previous = _ISSUED[id(issued_probe)][1]["observations"]
+        _require({key: value for key, value in observations.items() if key != "sentinel_digest"} ==
+                 {key: value for key, value in previous.items() if key != "sentinel_digest"}, "worker isolation changed")
+        expected_versions = context.get("expected_worker_versions")
+        _require(expected_versions is None or observations["observed_probes"]["versions"] == expected_versions,
+                 "qualified worker runtime changed")
+        _require(_prepare(worker_config)[1] == before, "worker state changed before RPC")
+        counters = _resource_counts(worker_config, worker_name, config.uid)
+        paired_context = {**context, "protected_sources": _prepare(config)[1]["sources"],
+                          "worker_sources": before["sources"], "schema_sha256": plan.worker.schema_sha256,
+                          "proxy_sha256": plan.worker.proxy_sha256}
+        outcome, packet = _duplex_broker(config, name, argv, plan, mode, paired_context, worker_config, worker_name)
+        after_counters = _resource_counts(worker_config, worker_name, config.uid)
+        _require(all(after_counters[group].get(key, 0) == counters[group].get(key, 0)
+                     for group, keys in (("memory.events", ("oom", "oom_kill", "max")), ("pids.events", ("max",))) for key in keys),
+                 "worker resource failure")
+        inspected = _command(worker_config, ["inspect", worker_name])
+        _require(inspected.returncode == 0 and not inspected.timed_out and not inspected.output_limited, "worker inspection unavailable")
+        state = json.loads(inspected.stdout)[0]["State"]
+        _require(state.get("Running") is True and state.get("OOMKilled") is False, "worker executor failure")
+        _require(packet is not None, "protected assertion packet unavailable")
+        packet["worker_proof"] = {"probe_digest": issued_probe.digest, "observations": observations,
+                                  "resources_before": counters, "resources_after": after_counters, "engine_state": state}
+    except (IsolationError, OSError, ValueError, KeyError, TypeError):
+        packet = None
+    finally:
+        if worker_name is not None:
+            cleaned = _cleanup(worker_config, worker_name)
+    if not cleaned:
+        packet = None
+    elif packet is not None:
+        packet["worker_proof"]["cleanup"] = cleaned.observations
+    return outcome, packet
+
+
 def _plan_v2_data(plan):
     _require(isinstance(plan, FamilyPlanV2) and type(plan.schema_version) is int and plan.schema_version == 2,
              "versioned typed family plan required")
@@ -1031,10 +1399,12 @@ def _plan_v2_data(plan):
             ids.add(step.id)
             _workdir(step.cwd)
             _require(step.kind in permitted and step.writes <= {"candidate", "runtime"}, "closed step kind/write policy required")
+            _require(type(step.protected_readonly) is bool and (step.protected_readonly
+                     or step.kind == "setup" and "candidate" in step.writes), "only trusted setup may write protected source")
             _require(len(step.environment) <= 32 and len(dict(step.environment)) == len(step.environment),
                      "unique bounded step environment required")
             rows.append({"id": step.id, "argv": step.argv, "cwd": step.cwd, "environment": step.environment,
-                         "writes": sorted(step.writes), "kind": step.kind})
+                         "writes": sorted(step.writes), "kind": step.kind, "protected_readonly": step.protected_readonly})
         result[name] = rows
     _require(any(step.kind in {"assertion", "compile"} for step in plan.acceptance_steps),
              "setup-only acceptance cannot qualify an outcome")
@@ -1042,24 +1412,47 @@ def _plan_v2_data(plan):
                                    tuple(s.argv for s in plan.acceptance_steps), plan.driver))
     _require(legacy["driver"] is not None, "immutable structured family driver required")
     result["driver"] = legacy["driver"]
+    result["worker"] = _worker_plan_data(plan.worker) if plan.worker is not None else None
     return result
 
 
-def _step_config(config, step):
-    return replace(config, environment=step.environment, working_directory=step.cwd)
+def _step_config(config, step, *, protected=False):
+    changes = {"environment": step.environment, "working_directory": step.cwd}
+    if protected:
+        changes["candidate_readonly"] = step.protected_readonly
+    return replace(config, **changes)
 
 
-def _v2_policy(config, payload, plan):
+def _v2_policy(config, payload, plan, step=None):
     # Staging paths/inodes may differ between baseline and patched exports.
     # Content, runtime identities and every effective step environment may not.
-    return {"plan": _plan_v2_data(plan), "image": payload["image"], "endpoint": payload["endpoint"],
+    result = {"plan": _plan_v2_data(plan), "image": payload["image"], "endpoint": payload["endpoint"],
             "engine": payload["engine_digest"], "grader": payload["sources"]["grader"],
             "caches": payload["sources"]["caches"], "source_archive": payload["source_archive"],
             "runtimes": payload["runtimes"], "limits": payload["limits"], "user": payload["user"],
             "registered_argv": payload["argv"], "readonly_targets": [cache.target for cache in config.readonly_caches],
             "effective_environments": [[sorted(_environment(_step_config(config, step)).items()) for step in steps]
                                        for steps in (plan.prerequisite_steps, plan.acceptance_steps)],
-            "supervisor": payload["supervisor"], "probe": payload["probe"], "controller": payload["outcome_controller"]}
+            "supervisor": payload["supervisor"], "probe": payload["probe"], "controller": payload["outcome_controller"],
+            "candidate_readonly": payload["candidate_readonly"], "executor": payload["executor"]}
+    if plan.worker is not None:
+        worker_config, worker_payload = _worker_configuration(config, plan, step)
+        result["candidate_readonly"] = [[part.protected_readonly for part in steps]
+                                       for steps in (plan.prerequisite_steps, plan.acceptance_steps)]
+        result["worker_policy"] = {key: worker_payload[key] for key in
+            ("engine_digest", "endpoint", "image", "argv", "candidate_readonly", "limits", "source_archive", "user", "runtimes")}
+        result["worker_policy"]["grader"] = worker_payload["sources"]["grader"]
+        result["worker_policy"]["caches"] = worker_payload["sources"]["caches"]
+        result["broker"] = _bytes_digest(_PROTECTED_CONTROLLER.encode() + _WORKER_CONTROLLER.encode() + _RESOURCE_CODE.encode())
+    return result
+
+
+def _plan_sources(config, payload, plan, step=None):
+    result = dict(payload["sources"])
+    if plan.worker is not None:
+        _, worker_payload = _worker_configuration(config, plan, step)
+        result.update({"worker_" + key: value for key, value in worker_payload["sources"].items()})
+    return result
 
 
 def _issued_step(receipt):
@@ -1141,15 +1534,21 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
              "configuration must match exact sealed step cwd/environment")
     _require(step.argv in config.acceptance_argv, "step argv not registered")
     private, before = _prepare(config)
-    policy = _v2_policy(config, before, plan)
+    _require(plan.worker is None or config.candidate_readonly == step.protected_readonly, "exact sealed protected mount mode required")
+    before_sources = _plan_sources(config, before, plan, step)
+    policy = _v2_policy(config, before, plan, step)
     policy_digest = _digest(policy)
     issued = _issued_probe(receipt, private, before)
     if issued is None:
         return _unavailable_step(private, plan, mode, index, "fresh-probe-required", prerequisite)
     versions = issued[1]["observations"]["observed_probes"]["versions"]
     parent = _issued_step(previous) if previous is not None else None
-    work_identity = {key: before[key] for key in ("root", "mounts", "mount_identity")}
-    baseline = before["sources"]["candidate"]
+    work_identity = {key: before[key] for key in ("root", "mount_identity")}
+    work_identity["mounts"] = [(path, target) for path, target, readonly in before["mounts"]]
+    if plan.worker is not None:
+        _, worker_identity = _worker_configuration(config, plan, step)
+        work_identity["worker"] = {key: worker_identity[key] for key in ("root", "mounts", "mount_identity")}
+    baseline = before_sources.get("worker_candidate", before_sources["candidate"])
     qualification = None
     if mode == "acceptance":
         entry = _QUALIFIED.get(id(prerequisite))
@@ -1167,12 +1566,15 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
     if index == 0:
         valid_order = previous is None
         if mode == "acceptance":
-            valid_order = valid_order and before["sources"]["runtime"] == qualification["after"]["runtime"]
+            valid_order = valid_order and all(before_sources[key] == qualification["after"][key]
+                for key in ("runtime", "worker_runtime") if key in before_sources)
+            if plan.worker is not None:
+                valid_order = valid_order and before_sources["candidate"] == qualification["initial_protected_source"]
     else:
         valid_order = (parent is not None and id(previous) not in _CONSUMED_STEPS and previous.status == "passed"
                        and previous.mode == mode and previous.index == index - 1
                        and previous.plan_digest == _digest(plan_data) and parent["policy_digest"] == policy_digest
-                       and parent["versions"] == versions and parent["after"] == before["sources"]
+                       and parent["versions"] == versions and parent["after"] == before_sources
                        and parent["work_identity"] == work_identity
                        and parent["prerequisite_digest"] == getattr(prerequisite, "digest", "")
                        and issued[1]["sequence"] >= parent["post_probe_sequence"])
@@ -1185,18 +1587,24 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
                "step_index": index, "previous_step_digest": getattr(previous, "digest", ""),
                "prerequisite_digest": getattr(prerequisite, "digest", ""), "baseline_source_digest": baseline,
                "effective_environment": _environment(config)}
+    if plan.worker is not None:
+        context["expected_worker_versions"] = (qualification or parent or {}).get("worker_versions")
     context = json.loads(_json(context))
     packet = outcome = observed = state = None
     cleaned = False
     name = None
     after = None
     post_issued = None
+    after_sources = None
     try:
         name, observed = _configuration_probe(config, private)
         _require({k: v for k, v in observed.items() if k != "sentinel_digest"} ==
                  {k: v for k, v in issued[1]["observations"].items() if k != "sentinel_digest"}, "observed isolation changed")
-        _require(_prepare(config)[1] == before, "step inputs changed before callback")
-        outcome, packet = _driver_packet(config, name, step.argv, plan, mode, context)
+        _require(_prepare(config)[1] == before and _plan_sources(config, before, plan, step) == before_sources, "step inputs changed before callback")
+        if plan.worker is None:
+            outcome, packet = _driver_packet(config, name, step.argv, plan, mode, context)
+        else:
+            outcome, packet = _protected_packet(config, name, step.argv, plan, mode, context)
         inspected = _command(config, ["inspect", name])
         _require(inspected.returncode == 0 and not inspected.timed_out and not inspected.output_limited, "step executor inspection unavailable")
         state = json.loads(inspected.stdout)[0]["State"]
@@ -1210,13 +1618,24 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
     if classification != "unavailable":
         try:
             _, after = _prepare(config)
-            _require(_v2_policy(config, after, plan) == policy, "immutable step policy changed")
-            for target in ("candidate", "runtime"):
-                _require(target in step.writes or before["sources"][target] == after["sources"][target], "undeclared step state change")
+            _require(_v2_policy(config, after, plan, step) == policy, "immutable step policy changed")
+            after_sources = _plan_sources(config, after, plan, step)
+            for target in ("candidate", "runtime", "worker_candidate", "worker_runtime"):
+                if target in before_sources:
+                    write_target = target.removeprefix("worker_")
+                    _require(target != "worker_candidate" and write_target in step.writes or before_sources[target] == after_sources[target], "undeclared step state change")
+            if plan.worker is not None:
+                worker_config, worker_after = _worker_configuration(config, plan, step)
+                worker_post = probe(worker_config)
+                worker_private, worker_final = _prepare(worker_config)
+                _require(_issued_probe(worker_post, worker_private, worker_final) is not None and worker_after == worker_final
+                         and _ISSUED[id(worker_post)][1]["observations"]["observed_probes"]["versions"] == packet["worker_proof"]["observations"]["observed_probes"]["versions"],
+                         "worker post-step state proof unavailable")
             post_probe = probe(config)
             final_private, final = _prepare(config)
             post_issued = _issued_probe(post_probe, final_private, final)
             _require(post_issued is not None and final == after
+                     and _plan_sources(config, final, plan, step) == after_sources
                      and post_issued[1]["observations"]["observed_probes"]["versions"] == versions,
                      "fresh post-step isolation/state proof unavailable")
         except (IsolationError, OSError, ValueError, KeyError, TypeError):
@@ -1226,7 +1645,9 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
             "plan_digest": _digest(plan_data), "policy_digest": policy_digest, "policy": policy, "mode": mode, "index": index,
             "step": context["step"], "work_identity": work_identity, "previous_step_digest": context["previous_step_digest"],
             "prerequisite_digest": context["prerequisite_digest"], "baseline_source_digest": baseline, "versions": versions,
-            "before": before["sources"], "after": None if after is None else after["sources"],
+            "worker_versions": packet["worker_proof"]["observations"]["observed_probes"]["versions"]
+                if packet is not None and plan.worker is not None else None,
+            "before": before_sources, "after": after_sources,
             "probe_digest": receipt.digest, "post_probe_digest": post_probe.digest if post_issued is not None else "",
             "post_probe_sequence": post_issued[1]["sequence"] if post_issued is not None else 0,
             "cleanup_proved": bool(cleaned), "cleanup_observations": getattr(cleaned, "observations", None),
@@ -1235,7 +1656,7 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
                 "stderr_base64": base64.b64encode(outcome.stderr).decode(), "returncode": outcome.returncode,
                 "timed_out": outcome.timed_out, "output_limited": outcome.output_limited}}
     semantic = {key: body[key] for key in ("plan_digest", "policy_digest", "mode", "index",
-                "baseline_source_digest", "versions", "before", "after", "classification")}
+                "baseline_source_digest", "versions", "worker_versions", "before", "after", "classification")}
     semantic["previous_binding"] = previous.binding_digest if previous is not None else ""
     semantic["prerequisite_binding"] = prerequisite.binding_digest if prerequisite is not None else ""
     binding = _digest(semantic)
@@ -1270,6 +1691,7 @@ def seal_prerequisites(plan: FamilyPlanV2, steps: tuple[StepReceipt, ...]) -> Pr
     final = records[-1]
     binding_data = {"plan": plan_data, "policy_digest": final["policy_digest"], "versions": final["versions"],
                     "baseline_source_digest": records[0]["baseline_source_digest"], "after": final["after"],
+                    "worker_versions": final.get("worker_versions"), "initial_protected_source": records[0]["before"]["candidate"],
                     "step_bindings": [step.binding_digest for step in steps]}
     binding = _digest(binding_data)
     body = {**binding_data, "schema_version": 2, "status": "qualified", "family": plan.family,
@@ -1285,7 +1707,7 @@ def _qualify_plan(config, plan, receipt):
     completed = []
     previous = None
     for index, step in enumerate(plan.prerequisite_steps):
-        current = _step_config(config, step)
+        current = _step_config(config, step, protected=plan.worker is not None)
         current_probe = receipt if index == 0 else probe(current)
         result = qualify_step(current, plan, index, current_probe, previous=previous)
         if result.status != "passed":
@@ -1311,7 +1733,7 @@ def execute_plan(config: IsolationConfig, receipt: ProbeReceipt, *, family: Fami
     completed = []
     status = classification = "unavailable"
     for index, step in enumerate(family.acceptance_steps):
-        current = _step_config(config, step)
+        current = _step_config(config, step, protected=family.worker is not None)
         current_probe = receipt if index == 0 else probe(current)
         result = execute_step(current, family, index, current_probe, prerequisite=prerequisite, previous=previous)
         completed.append(result)

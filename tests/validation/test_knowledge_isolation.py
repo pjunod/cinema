@@ -72,10 +72,12 @@ class SyntheticEngine:
             return result(b"synthetic-container-id\n")
         if arguments[0] == "inspect":
             return result(json.dumps(self.inspect(config, arguments[1])).encode())
+        if arguments[0] == "exec" and isolation._RESOURCE_CODE in arguments:
+            return result(json.dumps({"memory.events": {"oom": 0, "oom_kill": 0, "max": 0}, "pids.events": {"max": 0}}).encode())
         if arguments[0] == "exec" and isolation._PROBE_CODE in arguments:
             data = {"outside": {"readable": self.sentinel_readable, "errno": errno.ENOENT},
                     "network": {"interfaces": ["lo"], "errno": errno.ENETUNREACH},
-                    "filesystem": {"candidate": {"writable": True, "errno": 0},
+                    "filesystem": {"candidate": {"writable": not config.candidate_readonly, "errno": errno.EROFS if config.candidate_readonly else 0},
                                    "runtime": {"writable": True, "errno": 0},
                                    "grader": {"writable": False, "errno": errno.EROFS}},
                     "versions": {"python": "3.13.0", "python_executable": config.python_executable,
@@ -440,7 +442,8 @@ class KnowledgeIsolationTests(unittest.TestCase):
         return config, plan
 
     def v2_config(self, config, step):
-        return replace(config, environment=step.environment, working_directory=step.cwd)
+        return replace(config, environment=step.environment, working_directory=step.cwd,
+                       candidate_readonly=config.candidate_readonly and step.protected_readonly)
 
     def v2_qualified(self, config, plan):
         first = self.v2_config(config, plan.prerequisite_steps[0])
@@ -596,6 +599,131 @@ class KnowledgeIsolationTests(unittest.TestCase):
         for forbidden in (".git/config", ".aws/config", ".cargo/credentials", ".env", "auth.json"):
             with self.subTest(forbidden=forbidden), self.assertRaises(isolation.IsolationError):
                 isolation.probe(replace(config, trusted_source_members=(replace(member, path=forbidden),)))
+
+    def protected_plan(self):
+        config, plan = self.v2_plan()
+        for name in ("worker-candidate", "worker-export", "worker-runtime"):
+            (self.root / name).mkdir(exist_ok=True)
+        raw = b"# synthetic worker; never real candidate execution\n"
+        (self.root / "worker-export/worker.py").write_bytes(raw)
+        contract = b'{"protocol":2,"synthetic":true}\n'
+        (self.root / "worker-export/rpc-contract.json").write_bytes(contract)
+        (self.root / "worker-candidate/input.py").write_text("# synthetic candidate role only")
+        argv = ("/usr/bin/python3", "/grader/worker.py")
+        worker_config = replace(self.config, candidate_root=self.root / "worker-candidate",
+            grader_root=self.root / "worker-export", runtime_root=self.root / "worker-runtime",
+            acceptance_argv=(argv,), uid=1000, gid=1000, candidate_readonly=True)
+        worker = isolation.ProtectedWorkerPlan(worker_config,
+            isolation.TrustedSourceFile("worker.py", hashlib.sha256(raw).hexdigest()), argv,
+            ("health", "call", "cache_root"), hashlib.sha256(contract).hexdigest(), "e" * 64,
+            exception_types=("ReceiptError", "ValueError"))
+        return replace(config, candidate_readonly=True), replace(plan, worker=worker)
+
+    def protected_broker(self, config, name, argv, plan, mode, context, worker_config, worker_name):
+        # Synthetic authenticated-controller result seam, never runtime proof.
+        step = context["step"]
+        classification = ("setup-passed" if step["kind"] == "setup" else
+                          "prerequisite-passed" if mode == "prerequisite" else self.engine.family_outcome)
+        packet = {"driver_started": True, "driver_completed": True, "hardened": True,
+            "resources_verified": True, "resource_failure": False,
+            "result": {"protocol": 2, "outcome": classification, "completed": True,
+                "evidence": {"kind": step["kind"], "identity": "synthetic protected assertion",
+                    "sha256": "f" * 64, "completed_checks": 1,
+                    "failed_checks": int(classification.endswith("-failed")), "skipped_checks": 0}},
+            "broker_proof": {"requests": 1, "bytes": 123, "topology": "separate-container-stdio-v1"}}
+        return isolation._Command(0, b"synthetic raw private output", b""), packet
+
+    def test_protected_roles_bind_both_sources_runtimes_and_cleanup_before_scoring(self):
+        config, plan = self.protected_plan()
+        with patch.object(isolation, "_duplex_broker", side_effect=self.protected_broker):
+            prerequisite = self.v2_qualified(config, plan)
+            first = self.v2_config(config, plan.acceptance_steps[0])
+            result = isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite)
+        self.assertEqual(result.status, "passed")
+        steps = [body for receipt, body in isolation._STEPS.values() if receipt.mode == "acceptance"]
+        self.assertTrue(all("worker_candidate" in step["before"] and "worker_runtime" in step["after"] for step in steps))
+        self.assertTrue(all(step["structured_outcome"]["worker_proof"]["cleanup"]["list"]["stdout"] == "" for step in steps))
+        self.assertNotEqual(steps[0]["work_identity"]["mounts"], steps[0]["work_identity"]["worker"]["mounts"])
+        self.assertEqual(self.engine.alive, set())
+        self.assertEqual(set(result.public()), {"status", "digest"})
+
+    def test_protected_non_idempotent_install_uses_initial_source_and_final_runtime(self):
+        config, plan = self.protected_plan()
+        baseline_install = replace(plan.prerequisite_steps[0], writes={"candidate", "runtime"}, protected_readonly=False)
+        patch_install = replace(plan.acceptance_steps[0], protected_readonly=False)
+        plan = replace(plan, prerequisite_steps=(baseline_install, plan.prerequisite_steps[1]),
+                       acceptance_steps=(patch_install, plan.acceptance_steps[1]))
+        marker = config.candidate_root / "synthetic-installed-assertion.txt"
+        def install(*args):
+            current, _, _, _, _, context, _, _ = args
+            if context["step"]["kind"] == "setup":
+                self.assertFalse(current.candidate_readonly)
+                self.assertFalse(marker.exists(), "installer must not be repeated on its output")
+                marker.write_text("synthetic protected-only assertion fixture")
+            else:
+                self.assertTrue(current.candidate_readonly)
+            return self.protected_broker(*args)
+        with patch.object(isolation, "_duplex_broker", side_effect=install):
+            prerequisite = self.v2_qualified(config, plan)
+            marker.unlink()  # Trusted stager restores the pristine protected view.
+            first = self.v2_config(config, plan.acceptance_steps[0])
+            result = isolation.execute_plan(first, isolation.probe(first), family=plan, prerequisite=prerequisite)
+        self.assertEqual(result.status, "passed")
+        self.assertTrue(marker.exists())
+        self.assertFalse((plan.worker.config.candidate_root / marker.name).exists())
+        accepted = [body for receipt, body in isolation._STEPS.values() if receipt.mode == "acceptance"]
+        self.assertEqual([body["step"]["protected_readonly"] for body in accepted], [False, True])
+        self.assertEqual(accepted[0]["after"], accepted[1]["before"])
+
+    def test_protected_worker_cannot_mount_grader_share_uid_or_extra_exports(self):
+        config, plan = self.protected_plan()
+        for worker_config in (replace(plan.worker.config, uid=config.uid),
+                              replace(plan.worker.config, grader_root=config.grader_root),
+                              replace(plan.worker.config, candidate_root=config.candidate_root)):
+            with self.subTest(worker_config=worker_config), self.assertRaises(isolation.IsolationError):
+                isolation._worker_configuration(config, replace(plan, worker=replace(plan.worker, config=worker_config)))
+        with self.assertRaises(isolation.IsolationError):
+            isolation._worker_configuration(replace(config, candidate_readonly=False), plan)
+        (plan.worker.config.grader_root / "forbidden-grader.py").write_text("# never visible to candidate")
+        with self.assertRaises(isolation.IsolationError):
+            isolation._worker_configuration(config, plan)
+
+    def test_protected_rpc_rejects_worker_outcomes_unordered_frames_and_code_objects(self):
+        config, plan = self.protected_plan()
+        worker = plan.worker
+        forged = {"kind": "outcome", "packet": {"status": "passed"}}
+        with self.assertRaises(isolation.IsolationError):
+            isolation._rpc_reply(forged, worker, 1)
+        valid = {"protocol": 2, "id": 1, "result": {"value": {"tag": "tuple", "items": [1, "inert"]}}}
+        self.assertEqual(isolation._rpc_reply(valid, worker, 1), valid)
+        for frame in ({**valid, "id": 2}, {**valid, "secret": "not allowed"},
+                      {**valid, "result": {"exception": {"type": "SystemExit", "message": "forged"}}}):
+            with self.subTest(frame=frame), self.assertRaises(isolation.IsolationError):
+                isolation._rpc_reply(frame, worker, 1)
+        with self.assertRaises(isolation.IsolationError):
+            isolation._rpc_request({"kind": "rpc", "request": {"protocol": 2, "id": 1,
+                "method": "__import__", "args": [], "kwargs": {}}}, worker, 1)
+        for value in (object(), float("nan"), 2**100):
+            with self.subTest(value=type(value).__name__), self.assertRaises(isolation.IsolationError):
+                isolation._rpc_inert(value)
+        for raw in ('{"id":1,"id":2}', '{"value":NaN}'):
+            with self.assertRaises(isolation.IsolationError):
+                isolation._wire_json(raw)
+
+    def test_protected_worker_oom_or_missing_completion_remains_unavailable(self):
+        config, plan = self.protected_plan()
+        with patch.object(isolation, "_duplex_broker", side_effect=self.protected_broker):
+            prerequisite = self.v2_qualified(config, plan)
+            first = self.v2_config(config, plan.acceptance_steps[0])
+            receipt = isolation.probe(first)
+            self.engine.oom_killed = True
+            result = isolation.execute_step(first, plan, 0, receipt, prerequisite=prerequisite)
+            self.assertEqual(result.status, "unavailable")
+            self.engine.oom_killed = False
+        with patch.object(isolation, "_duplex_broker", return_value=(isolation._Command(1, b"forged stdout passed", b""), None)):
+            result = isolation.execute_step(first, plan, 0, isolation.probe(first), prerequisite=prerequisite)
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(self.engine.alive, set())
 
 
 if __name__ == "__main__":
