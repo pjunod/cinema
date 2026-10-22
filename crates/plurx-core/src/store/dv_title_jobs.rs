@@ -207,3 +207,39 @@ SELECT json_extract(body,'$.token.claim_id'),'publish_dv_title',body,
  'file_id',json_extract(body,'$.output.file_id'),'result_ref',output||'') ELSE json_object('outcome',outcome) END
 FROM verdict RETURNING result_json
 "#;
+
+/// Compact advisory catalogue reading. Only bounded title aggregates leave
+/// SQLite, never the potentially large ordinary probe document. The same
+/// parser/eligibility rule used by rendering owns the eligible count.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TitleReadiness {
+    pub scanned: u64,
+    pub eligible: u64,
+}
+
+pub(super) async fn readiness<T: QueueSql>(store: &T) -> Result<TitleReadiness, StoreError> {
+    let rows = store
+        .queue_sql(
+            r#"
+SELECT json_extract(probe_json,'$.plurx_dv_title_v1') AS result_json
+FROM files WHERE json_valid(probe_json)
+AND json_type(probe_json,'$.plurx_dv_title_v1')='object'
+AND json_extract(probe_json,'$.plurx_dv_title_v1.schema')=json_extract($1,'$.schema')
+"#
+            .into(),
+            encode(&serde_json::json!({"schema": crate::scan::dv_title::SCHEMA}))?,
+            false,
+            false,
+        )
+        .await?;
+    let mut result = TitleReadiness::default();
+    for row in rows {
+        if let Ok(stats) = decode::<DvTitleStats>(&row) {
+            if stats.schema == crate::scan::dv_title::SCHEMA {
+                result.scanned += 1;
+                result.eligible += u64::from(stats.eligibility() == TitleEligibility::Eligible);
+            }
+        }
+    }
+    Ok(result)
+}

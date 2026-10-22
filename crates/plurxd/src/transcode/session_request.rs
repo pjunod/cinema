@@ -517,6 +517,10 @@ pub struct CandidateExecutionContext {
     /// Private exact artifact chosen using a live measured-cost proof. The
     /// actual dispatch reacquires it; this is never client-supplied authority.
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
+    /// Explicit live-only policy, derived from current admitted caps and the
+    /// fenced complete-title probe. Ordinary VOD/pre-encode contexts use None.
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display_target_note: Option<String>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,

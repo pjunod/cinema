@@ -3,6 +3,70 @@
 **Status:** PR A P8 cells passed; scanner controls partially passed, fixture repair pending review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (source), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
+## PR C source checkpoint (2026-10-22)
+
+**Status:** source authored in an isolated branch; independent completed-code
+review, pinned compilation, focused regressions and publication remain open.
+PR B must be integrated before this setting is published. No functional pass
+or physical display acceptance is claimed here.
+
+- `DisplayCaps.max_nits` remains an optional integer; optional `peak_source`
+  is `platform` or `viewer`. Both sources use the exact downward bucket table.
+  No display minimum is collected. The server selects from the admitted
+  canonical caps and source-fenced complete-title probe; Unknown, incomplete,
+  ineligible and elided titles retain the exact master export policy, with the
+  reason in plan notes and Activity.
+- `playback.dolby_vision_display_target` / `dolby_vision_display_target` is an
+  independent default-off Developer preference. Helper/HDR10-E, active peak
+  reports, current-schema scan/eligibility counts and per-bucket storage are
+  advisory observations. None disables the toggle, rejects Save or changes the
+  saved choice. This switch never enables HDR10-E itself.
+- A live processed trial freezes an explicit title-qualified target in its
+  private candidate context and runtime recipe. Every later window uses that
+  same policy. Exact predecessor-root reuse also requires target equality;
+  ordinary VOD and pre-encode paths always keep `None` (master). The client
+  snapshot is unchanged for prepared successors and Auto rung selection.
+- **Cache disposition:** the current architecture marks processed roots
+  `ephemeral_processing`; `RetainedRegistry::offer` excludes them. There are
+  zero reusable retained buckets per title, satisfying the at-most-two bound.
+  No persisted bucket cache or new LRU is introduced. Existing private-root
+  readers, preparation reservations and shared disk budget own retirement and
+  pressure. Developer distinguishes live materialized media bytes from zero
+  retained cache bytes for each bucket. Activity says that targeting renders
+  live and has no retained bucket cache.
+- DYN uses a `DisplayTargetMapping` operation from the current published
+  effective-processing receipt, and names the bucket and **L1 only** limit.
+  A configured target alone cannot activate the badge. Activity reports the
+  raw peak, platform/viewer provenance, selected target or master, and live
+  rendering.
+- **Whole-session refusal:** an invalid runtime L1 refuses the frozen
+  targeted rendition and fences its processing episode; later windows never
+  silently become master. Before publication the established whole-start
+  fallback/refusal remains, with its actual delivered grade. It is not called
+  reconstructed master. A separate processed-master retry is not implemented:
+  the existing runtime boundary erases source/RPU/encoder/target refusals into
+  `String`, so a safe target-specific retry requires a typed error seam first.
+  No string-matching retry, watchdog or per-window fallback is added.
+
+Static inspection only: changed JavaScript files parse with `node --check`;
+`git diff --check` passes. Local rustfmt parsed/formatted changed Rust sources;
+this does not establish pinned compilation. Knowledge context identified the
+six-rule curated routing boundary with no conflicts. The requested
+`--base origin/main --worktree` obligation query refused with `KnowledgeError`;
+`--base HEAD --worktree` against the actual A base returned the standing
+capability-profile and execution-plan obligations, with no conflicts. These
+existing routing decisions are unchanged; graph metadata does not establish
+execution or targeting acceptance.
+
+Authored regression anchors (not executed):
+
+- `caps.rs::display_peak_bucket_rounds_down_and_unknown_stays_master`
+- `enhancement.rs::targeted_hdr10_dyn_names_bucket_and_l1_limit`
+- `manager/create.rs::display_target_declines_are_named_and_elision_is_master`
+- `http/tests.rs::display_target_setting_defaults_off_and_saves_despite_unmet_advice`
+- `settings-sections.test.js`: editable targeting and existing independent-save,
+  stale-reply and replacement-card tests extended to the new preference.
+
 ## PR A implementation checkpoint
 
 - **Current qualification (2026-10-22; supersedes historical states below):**
@@ -537,7 +601,7 @@ a per-window target/master mix.
 
 | Level | Test | Proves |
 |---|---|---|
-| Core unit | bucket mapping, including elision; caps parsing of `min_nits`/`source` | mapping is total, rounds down, refuses junk |
+| Core unit | bucket mapping, including elision; caps parsing of `max_nits`/`peak_source` | mapping is total, rounds down, refuses junk |
 | Core unit | `playback_enhancement` with `display_target` | DYN active only with a target, and the text names the nits |
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
 | Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
@@ -568,8 +632,8 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 |---|---|---|
 | A | Title L1 scan (stored with the DV facts) + helper target policy + L1 → CIE_Y + ST 2094-10 + `DvExportPolicy` identity + report operation + control scripts | server image |
 | B | MDCV/CLL writer for processed output (post-encode, reusing `hdr10_index.rs`) | server image |
-| C | Caps `min_nits`/`source`, buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
-| D | Android HdrCapabilities + web display-peak setting (+ Apple value) | server image (web) + Android build |
+| C | Caps `max_nits`/`peak_source` (no display minimum), buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
+| D | Android HdrCapabilities + web display-peak setting; Apple excluded in phase 1 | server image (web) + Android build |
 | E | Phase 2 trims (after acceptance) | server image |
 | F | Phase 3 SDR target | server image |
 

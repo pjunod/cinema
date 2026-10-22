@@ -1247,6 +1247,30 @@ impl TranscodeManager {
         Ok(DvSelection::KeepExisting(reason))
     }
 
+    pub(crate) fn display_target_policy(
+        enabled: bool,
+        display: Option<&plurx_core::playback::caps::DisplayCaps>,
+        probe: Option<&str>,
+    ) -> Result<
+        (
+            Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+            Option<String>,
+        ),
+        String,
+    > {
+        use plurx_core::transcode::dv_processing::{DvDisplayTarget, DvDisplayTargetChoice};
+        if !enabled {
+            return Ok((None, None));
+        }
+        let Some(bucket) = display.and_then(|display| display.hdr10_target_bucket()) else {
+            return Ok((None, Some("your display did not report a supported HDR peak (400–4999 nits), so the master grade is sent".into())));
+        };
+        match DvDisplayTarget::for_title(bucket, probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json)).map_err(|e| e.to_string())? {
+            DvDisplayTargetChoice::Target(target) => Ok((Some(target), Some(format!("HDR10-E: per-shot L1 mapped for {bucket} nits; rendered live, with no retained bucket cache (L1 only; creative trims are not applied)")))),
+            DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason()))),
+        }
+    }
+
     /// Freeze an executable encoded recipe before any rendition is named.
     /// Copy remains index-driven; selecting burn pixels requires an encoder
     /// even when the incoming request otherwise asks for source quality.
@@ -1421,6 +1445,19 @@ impl TranscodeManager {
             if height < 32 {
                 return Err("the source has no picture height to process".into());
             }
+            let target_enabled = !profile81
+                && plurx_core::store::stored_switch(
+                    planning
+                        .settings
+                        .get(keys::DV_DISPLAY_TARGET)
+                        .map(String::as_str),
+                    false,
+                );
+            let (display_target, display_target_note) = Self::display_target_policy(
+                target_enabled,
+                caps.display.as_ref(),
+                planning.probe_json.as_deref(),
+            )?;
             let (mut trial, projected) =
                 Self::processed_qualification_input(&planning, request, height)?;
             trial.request_id = Some(recovery.incarnation_id.clone());
@@ -1429,6 +1466,8 @@ impl TranscodeManager {
                 .as_mut()
                 .ok_or("processed trial context missing")?;
             context.prepared_processing = None;
+            context.display_target = display_target;
+            context.display_target_note = display_target_note.clone();
             context.retained_output = None;
             context.normalized_geometry = false;
             context.profile = None;
@@ -1448,7 +1487,8 @@ impl TranscodeManager {
                     .await
                     .filter(|root| root.encoding.options.target_height == height
                         && matches!(&root.encoding.dv_processing,
-                            plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination))
+                            plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination)
+                        && root.encoding.dv_runtime.as_ref().is_some_and(|runtime| runtime.display_target == display_target))
             } else {
                 None
             };
@@ -1610,6 +1650,8 @@ impl TranscodeManager {
                 sustainable: true,
             };
             let mut context = Self::candidate_context(&candidate);
+            context.display_target = display_target;
+            context.display_target_note = display_target_note;
             context.catalog_query = original.catalog_query.clone();
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = Some(binding);
@@ -2494,8 +2536,23 @@ impl TranscodeManager {
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
+                    // Recheck against the exact stored document compared with
+                    // this held source. A title scan replacement cannot reuse
+                    // an older live policy or silently change a later window.
+                    if let Some(target) = display_target {
+                        let selected = plurx_core::transcode::dv_processing::DvDisplayTarget::for_title(
+                            target.nits(), probe.as_deref().and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json))
+                            .map_err(|error| error.to_string())?;
+                        if selected != plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(target) {
+                            return Err("complete-title display-target scan changed during preparation".into());
+                        }
+                    }
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
                         source_tick, native_bl, source_clock, preferences,
+                        display_target,
+                        display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
+                        display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
                         destination, mode, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
@@ -5059,3 +5116,70 @@ mod retained_recovery_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod processed_reuse_tests;
+
+#[cfg(test)]
+mod display_target_policy_tests {
+    use super::*;
+    use plurx_core::{
+        playback::caps::{DisplayCaps, DisplayPeakSource},
+        scan::dv_title::*,
+    };
+    #[test]
+    fn display_target_declines_are_named_and_elision_is_master() {
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let probe = |stats| serde_json::json!({PROBE_FIELD:stats}).to_string();
+        let high = probe(stats);
+        let display = DisplayCaps {
+            max_nits: Some(1999),
+            peak_source: Some(DisplayPeakSource::Platform),
+            ..Default::default()
+        };
+        let select = |enabled, display, probe| {
+            TranscodeManager::display_target_policy(enabled, display, probe).expect("policy")
+        };
+        assert_eq!(
+            select(false, Some(&display), Some(high.as_str())),
+            (None, None)
+        );
+        let (target, note) = select(true, Some(&display), Some(high.as_str()));
+        assert_eq!(target.expect("target").nits(), 1600);
+        assert!(note.expect("note").contains("rendered live"));
+        let viewer = DisplayCaps {
+            peak_source: Some(DisplayPeakSource::Viewer),
+            ..display.clone()
+        };
+        assert_eq!(select(true, Some(&viewer), Some(high.as_str())).0, target);
+        for missing in [None, Some("{}"), Some("{broken")] {
+            let (target, note) = select(true, Some(&display), missing);
+            assert!(target.is_none());
+            assert!(note.expect("decline").contains("scan unavailable"));
+        }
+        let incomplete = probe(DvTitleStats {
+            complete: false,
+            ..stats
+        });
+        let (target, note) = select(true, Some(&display), Some(incomplete.as_str()));
+        assert!(target.is_none());
+        assert!(note.is_some());
+        let fits = probe(DvTitleStats {
+            max_l1_pq: Some(0),
+            ..stats
+        });
+        let (target, note) = select(true, Some(&display), Some(fits.as_str()));
+        assert!(target.is_none());
+        assert!(note.expect("elision").contains("already fits a 1600-nit"));
+        let (target, note) = select(true, None, Some(high.as_str()));
+        assert!(target.is_none());
+        assert!(note.expect("unknown").contains("master grade"));
+    }
+}

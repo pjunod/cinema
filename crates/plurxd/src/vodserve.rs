@@ -642,11 +642,27 @@ pub struct VodActivityObservation {
     pub control_age_ms: Option<u64>,
     pub producer_state: Option<String>,
     pub producer_hold: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_target: Option<DisplayTargetActivity>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DisplayTargetActivity {
+    pub reported_peak_nits: Option<i64>,
+    pub peak_source: Option<plurx_core::playback::caps::DisplayPeakSource>,
+    pub bucket_nits: Option<u32>,
+    pub live_rendering: bool,
+    pub note: String,
 }
 
 impl VodActivityObservation {
     pub(crate) fn bounded(&self) -> bool {
-        [
+        self.display_target.as_ref().is_none_or(|target| {
+            target.note.len() <= 512
+                && target.bucket_nits.is_none_or(|nits| {
+                    plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS.contains(&nits)
+                })
+        }) && [
             &self.control_demand,
             &self.render_state,
             &self.producer_state,
