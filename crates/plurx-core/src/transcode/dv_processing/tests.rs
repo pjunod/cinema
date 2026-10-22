@@ -1520,15 +1520,8 @@ fn common_source_origin_preserves_absolute_keys_across_film_windows() {
                     display_ordinal: frame,
                 })
                 .collect();
-            let mapped = dv_map_source_to_output_grid(
-                &keys,
-                (1, 1000),
-                origin,
-                grid,
-                first,
-                48,
-            )
-            .expect("complete bounded source window");
+            let mapped = dv_map_source_to_output_grid(&keys, (1, 1000), origin, grid, first, 48)
+                .expect("complete bounded source window");
             assert_eq!(
                 mapped.iter().map(|m| m.source.clone()).collect::<Vec<_>>(),
                 keys
@@ -1554,8 +1547,7 @@ fn common_source_origin_preserves_absolute_keys_across_film_windows() {
             let mut drift = keys.clone();
             drift[47].pts = DvTimestamp::new(
                 millis
-                    + i64::try_from((first + 47) * 1001 / 24)
-                        .expect("drift frame PTS fits i64")
+                    + i64::try_from((first + 47) * 1001 / 24).expect("drift frame PTS fits i64")
                     + 2,
                 1000,
             )
@@ -1598,8 +1590,7 @@ fn common_source_origin_bounds_are_absolute_exact_and_seek_stable() {
                 DvTimestamp::new(millis, 1000).expect("valid expected start timestamp")
             } else {
                 DvTimestamp::new(
-                    i64::try_from(first * 1000 / 24000)
-                        .expect("expected boundary offset fits i64")
+                    i64::try_from(first * 1000 / 24000).expect("expected boundary offset fits i64")
                         + millis
                         - 1,
                     1000,
@@ -1607,8 +1598,7 @@ fn common_source_origin_bounds_are_absolute_exact_and_seek_stable() {
                 .expect("valid expected boundary timestamp")
             };
             assert_eq!(
-                DvTimestamp::new(start.0, start.1)
-                    .expect("valid actual boundary timestamp"),
+                DvTimestamp::new(start.0, start.1).expect("valid actual boundary timestamp"),
                 expected
             );
             assert_eq!(
