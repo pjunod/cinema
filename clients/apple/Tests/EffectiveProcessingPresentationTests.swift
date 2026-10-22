@@ -8,6 +8,16 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         EffectiveProcessingReport(generation: generation, hdr10Enhanced: true,
             felContributed: true, appliedOperations: ["PolynomialReshape", "RpuColorConversion"])
     }
+    func testDisplayTargetOperationObjectRetainsCurrentReport() throws {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let wire = """
+        {"generation":"\(generation)","hdr10_enhanced":true,"fel_contributed":false,
+         "applied_operations":["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1600}}]}
+        """
+        let report = try decoder.decode(EffectiveProcessingReport.self, from: Data(wire.utf8))
+        XCTAssertTrue(report.matches(generation: generation, delivered: "hdr10"))
+        XCTAssertTrue(report.appliedOperations.contains("DisplayTargetMapping:1600"))
+    }
     func testEnhancementRequiresActiveReceiptGenerationAndKeepsFelSeparate() {
         let accepted = report()
         let badge = PlayerView.dynamicRangeBadge(hdr: "dolby_vision", hdrFormat: "Dolby Vision Profile 7",

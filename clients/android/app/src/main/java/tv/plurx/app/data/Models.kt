@@ -779,7 +779,15 @@ data class EffectiveProcessingReport(
             fun boolean(key: String): Boolean? = (objectValue[key] as? kotlinx.serialization.json.JsonPrimitive)
                 ?.takeIf { !it.isString }?.content?.let { when (it) { "true" -> true; "false" -> false; else -> null } }
             val operations = objectValue["applied_operations"] as? kotlinx.serialization.json.JsonArray ?: return null
-            val names = operations.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { item -> item.isString }?.content ?: return null }
+            val names = operations.map { item ->
+                (item as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: run {
+                    val operation = item as? kotlinx.serialization.json.JsonObject ?: return null
+                    val target = operation["DisplayTargetMapping"] as? kotlinx.serialization.json.JsonObject ?: return null
+                    val nits = (target["nits"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { !it.isString }?.content?.toIntOrNull() ?: return null
+                    if (operation.size != 1 || target.size != 1 || nits !in listOf(400, 600, 1000, 1600, 2000, 4000)) return null
+                    "DisplayTargetMapping:$nits"
+                }
+            }
             return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
                 boolean("fel_contributed") ?: return null, names)
         }
