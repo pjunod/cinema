@@ -4,7 +4,7 @@
 use super::*;
 use v2::scratch::bootstrap::*;
 #[cfg(unix)]
-mod native;
+pub(super) mod native;
 
 pub(super) struct BootstrapMember {
     plan: ScratchPlanV3,
@@ -15,6 +15,8 @@ pub(super) struct BootstrapMember {
     next_arm: Option<(v2::Id, BootstrapIoV1)>,
     #[cfg(unix)]
     native_root: Option<native::RootCell>,
+    #[cfg(unix)]
+    publication: Option<native::publication::Publication>,
 }
 
 impl NodeResourceRuntime {
@@ -119,6 +121,8 @@ impl NodeResourceRuntime {
                     next_arm: None,
                     #[cfg(unix)]
                     native_root: None,
+                    #[cfg(unix)]
+                    publication: None,
                 },
             );
         }

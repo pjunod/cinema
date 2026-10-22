@@ -4,7 +4,9 @@ use super::*;
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd};
 
-pub(super) fn mount_id(file: &File) -> v2::NativeValue<u64> {
+pub(in crate::adaptive_resources::runtime::operations) fn mount_id(
+    file: &File,
+) -> v2::NativeValue<u64> {
     #[cfg(target_os = "linux")]
     {
         let mut stat = std::mem::MaybeUninit::<libc::statx>::zeroed();
@@ -385,7 +387,7 @@ impl NodeResourceRuntime {
                 }
                 let enter = native.launch_next(&bootstrap.plan, io, &operation)?;
                 // Original handle is already installed in the SAME owned cell.
-                let _ = enter.send(());
+                self.release_native_entry(role.binding, enter)?;
             }
             let audit = native.join().await?.audit.clone();
             let completed = audit.outcome == v2::scratch::NativeOutcomeV1::Completed;

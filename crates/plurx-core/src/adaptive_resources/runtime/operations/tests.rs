@@ -4,6 +4,7 @@ use crate::adaptive_resources::{FamilyRoleDemand, WorkloadDemand};
 use crate::resource_custody::{InstallationContext, MemberKind, RecoveryMethod};
 use std::time::Duration;
 mod binding;
+mod native_entry;
 mod typed;
 
 fn vector(value: u64) -> ResourceVector {

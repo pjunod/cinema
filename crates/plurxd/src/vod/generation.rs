@@ -475,8 +475,11 @@ pub(super) async fn spawn_generation(
             .flatten();
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
-            rendition.source.as_ref().map(|source| &source.handle),
-            audio_source.as_ref().map(|audio| &audio.handle),
+            rendition
+                .source
+                .as_ref()
+                .map(|source| source.handle.as_ref()),
+            audio_source.as_ref().map(|audio| audio.handle.as_ref()),
             recipe
                 .encoding
                 .as_ref()
@@ -1028,7 +1031,7 @@ async fn run_landing_probe(
     command.args(args);
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     if let Some(reopened) = &reopened {
-        crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&reopened.handle, 3)]);
+        crate::ffmpeg::inherit_file_descriptors(&mut command, &[(reopened.handle.as_ref(), 3)]);
     }
     let output = crate::ffmpeg::bounded_command_output_cancellable(
         command,

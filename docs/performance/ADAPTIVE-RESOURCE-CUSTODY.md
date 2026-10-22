@@ -1,8 +1,8 @@
 # Adaptive resource custody — storage, startup and recovery limits
 
-Status: open; journal, startup and private owned-operation bridge compiled, not production
-physical admission or qualified recovery. Integration owner Sol 6.1; existing
-PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
+**Status:** open · journal, startup and private owned-operation bridge compiled;
+production physical admission and recovery remain incomplete. Integration owner:
+direct Codex harness (`/root`), draft PR #1248; former Hermes Sol task is parked. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 

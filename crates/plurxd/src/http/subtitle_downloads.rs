@@ -375,7 +375,23 @@ async fn movie_hash(file: &MediaFile) -> Option<String> {
     .ok()?
 }
 
-fn hash_held_source(mut handle: std::fs::File, size: u64, mtime: i64) -> Option<String> {
+trait HeldSource: std::io::Read + std::io::Seek {
+    fn metadata(&self) -> std::io::Result<std::fs::Metadata>;
+}
+
+impl HeldSource for std::fs::File {
+    fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        std::fs::File::metadata(self)
+    }
+}
+
+impl HeldSource for crate::fragment_index_cluster::SourceHandle {
+    fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        self.as_ref().metadata()
+    }
+}
+
+fn hash_held_source(mut handle: impl HeldSource, size: u64, mtime: i64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let before = handle.metadata().ok()?;
     let stamp = crate::fragment_index_cluster::source_stamp(&before);

@@ -19,7 +19,11 @@ use crate::resource_custody::{
     ProcessIdentity, RecoverySnapshot, Role,
 };
 
+#[cfg(unix)]
+pub mod finite_vod;
 mod operations;
+#[cfg(unix)]
+pub use operations::source_files::RetainedSourceLease;
 
 /// Nonclone, nonserde, same-live-operation acquisition capability. Only the
 /// retained operation bridge constructs it AFTER exact durable arm commit.

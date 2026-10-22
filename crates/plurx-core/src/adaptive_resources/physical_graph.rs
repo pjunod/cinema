@@ -186,7 +186,7 @@ impl ResourceReservation {
             .inner
             .lock()
             .map_err(|_| AdmissionRefusal::Unavailable)?;
-        if state.invalid {
+        if state.invalid || state.native_overage_fenced {
             return Err(AdmissionRefusal::Unavailable);
         }
         if state
@@ -472,7 +472,7 @@ fn begin_acquisition_with_arm(
         .inner
         .lock()
         .map_err(|_| io::Error::other("resource ledger unavailable"))?;
-    if state.invalid {
+    if state.invalid || state.native_overage_fenced {
         return Err(io::Error::other("resource ledger invalid"));
     }
     let epoch = state.epoch;

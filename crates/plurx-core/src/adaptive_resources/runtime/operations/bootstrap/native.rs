@@ -5,7 +5,8 @@ use super::*;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use tokio::task::JoinHandle;
-mod steps;
+pub(super) mod publication;
+pub(in crate::adaptive_resources::runtime::operations) mod steps;
 #[cfg(test)]
 mod tests;
 
@@ -240,7 +241,7 @@ impl NodeResourceRuntime {
             let (cell, enter) =
                 RootCell::launch(bootstrap.plan.filesystem_domain.clone(), io, copy)?;
             bootstrap.native_root = Some(cell);
-            let _ = enter.send(());
+            self.release_native_entry(role.binding, enter)?;
         }
         let native = bootstrap
             .native_root

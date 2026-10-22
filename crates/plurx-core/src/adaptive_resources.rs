@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::process::observation::Metric;
+use crate::process::observation::{Metric, UnknownReason};
 
 pub mod physical_graph;
 pub mod runtime;
@@ -75,6 +75,34 @@ impl ResourceVector {
             tuner_slots: self.tuner_slots.checked_sub(other.tuner_slots)?,
             scratch_bytes: self.scratch_bytes.checked_sub(other.scratch_bytes)?,
         })
+    }
+
+    fn positive_delta(self, previous: Self) -> Self {
+        Self {
+            cpu_ns_per_second: self
+                .cpu_ns_per_second
+                .saturating_sub(previous.cpu_ns_per_second),
+            peak_memory_bytes: self
+                .peak_memory_bytes
+                .saturating_sub(previous.peak_memory_bytes),
+            handles: self.handles.saturating_sub(previous.handles),
+            processes: self.processes.saturating_sub(previous.processes),
+            hardware_slots: self.hardware_slots.saturating_sub(previous.hardware_slots),
+            tuner_slots: self.tuner_slots.saturating_sub(previous.tuner_slots),
+            scratch_bytes: self.scratch_bytes.saturating_sub(previous.scratch_bytes),
+        }
+    }
+
+    fn componentwise_max(self, other: Self) -> Self {
+        Self {
+            cpu_ns_per_second: self.cpu_ns_per_second.max(other.cpu_ns_per_second),
+            peak_memory_bytes: self.peak_memory_bytes.max(other.peak_memory_bytes),
+            handles: self.handles.max(other.handles),
+            processes: self.processes.max(other.processes),
+            hardware_slots: self.hardware_slots.max(other.hardware_slots),
+            tuner_slots: self.tuner_slots.max(other.tuner_slots),
+            scratch_bytes: self.scratch_bytes.max(other.scratch_bytes),
+        }
     }
 
     fn exceeded(self, cap: Self) -> Option<ResourceDimension> {
@@ -233,6 +261,12 @@ struct Entry {
     durable: Option<Uuid>,
 }
 
+#[derive(Clone, Copy)]
+struct NativeOverageObservation {
+    binding: ReservationBinding,
+    observed_extra: ResourceVector,
+}
+
 struct State {
     epoch: u64,
     cap: Metric<ResourceVector>,
@@ -240,6 +274,11 @@ struct State {
     next_reservation: u64,
     next_family: u64,
     entries: BTreeMap<u64, Entry>,
+    // Bounded by MAX_RESERVATIONS active I/O observations. Entries are removed
+    // with their reservation so this cannot become lifetime history.
+    native_overages: BTreeMap<Uuid, NativeOverageObservation>,
+    native_overage_debt: ResourceVector,
+    native_overage_fenced: bool,
     trial: Option<BTreeSet<u64>>,
     invalid: bool,
     draining: bool,
@@ -272,11 +311,29 @@ pub struct LedgerSnapshot {
     pub held: usize,
     pub unknown_held: usize,
     pub trial_held: bool,
+    /// Cumulative extra charge observed by native-I/O snapshots. Overflowed
+    /// cumulative accounting reports Unknown rather than a misleading value.
+    pub native_overage_debt: Metric<ResourceVector>,
+    /// Once raised, only a separate explicit recovery policy may clear this.
+    pub native_overage_fenced: bool,
 }
 
 impl State {
+    fn fence_native_overage(&mut self, binding: ReservationBinding) {
+        self.invalid = true;
+        self.native_overage_fenced = true;
+        if let Some(entry) = self.entries.get_mut(&binding.reservation) {
+            if entry.binding == binding {
+                entry.state = ReservationState::UnknownHeld;
+            }
+        }
+    }
+
     fn assess(&self, demand: WorkloadDemand) -> Result<ResourceVector, AdmissionRefusal> {
         if self.invalid {
+            return Err(AdmissionRefusal::Unavailable);
+        }
+        if self.native_overage_fenced {
             return Err(AdmissionRefusal::Unavailable);
         }
         if demand.limit_epoch != self.epoch {
@@ -318,6 +375,8 @@ impl State {
         };
         self.used = next_used;
         self.entries.remove(&id);
+        self.native_overages
+            .retain(|_, observation| observation.binding.reservation != id);
         if let Some(members) = self.trial.as_mut() {
             members.remove(&id);
             if members.is_empty() {
@@ -347,6 +406,9 @@ impl ResourceLedger {
                 next_reservation: 1,
                 next_family: 1,
                 entries: BTreeMap::new(),
+                native_overages: BTreeMap::new(),
+                native_overage_debt: ResourceVector::default(),
+                native_overage_fenced: false,
                 trial: None,
                 invalid: false,
                 draining: false,
@@ -595,6 +657,85 @@ impl ResourceLedger {
         Ok(())
     }
 
+    /// Record a monotonically observed native resource overage against the
+    /// reservation that owns the I/O operation. This can only add charge; it
+    /// cannot authorize settlement or physical-close refunds. `observed_extra`
+    /// is a cumulative snapshot for this I/O identity, so repeated or lower
+    /// snapshots add no charge. Any positive increment fences all admissions
+    /// for this ledger until a separate recovery policy is implemented.
+    pub(crate) fn record_native_overage(
+        &self,
+        binding: ReservationBinding,
+        io_id: Uuid,
+        observed_extra: ResourceVector,
+    ) -> Result<(), AdmissionRefusal> {
+        if io_id.is_nil() || binding.ledger != self.id {
+            return Err(AdmissionRefusal::ReceiptMismatch);
+        }
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| AdmissionRefusal::Unavailable)?;
+        let previous = match state.native_overages.get(&io_id).copied() {
+            Some(previous) if previous.binding == binding => previous.observed_extra,
+            Some(_) => return Err(AdmissionRefusal::ReceiptMismatch),
+            None => ResourceVector::default(),
+        };
+        let entry_resources = state
+            .entries
+            .get(&binding.reservation)
+            .ok_or(AdmissionRefusal::UnknownReservation)
+            .and_then(|entry| {
+                (entry.binding == binding)
+                    .then_some(entry.resources)
+                    .ok_or(AdmissionRefusal::ReceiptMismatch)
+            })?;
+        let delta = observed_extra.positive_delta(previous);
+        if delta == ResourceVector::default() {
+            return Ok(());
+        }
+        if !state.native_overages.contains_key(&io_id)
+            && state.native_overages.len() >= MAX_RESERVATIONS
+        {
+            state.fence_native_overage(binding);
+            return Err(AdmissionRefusal::LedgerFull);
+        }
+        let Some(next_resources) = entry_resources.checked_add(delta) else {
+            state.fence_native_overage(binding);
+            return Err(AdmissionRefusal::ArithmeticOverflow);
+        };
+        let Some(next_used) = state.used.checked_add(delta) else {
+            state.fence_native_overage(binding);
+            return Err(AdmissionRefusal::ArithmeticOverflow);
+        };
+        let Some(next_debt) = state.native_overage_debt.checked_add(delta) else {
+            state.fence_native_overage(binding);
+            return Err(AdmissionRefusal::ArithmeticOverflow);
+        };
+        let Some(entry) = state.entries.get_mut(&binding.reservation) else {
+            state.invalid = true;
+            state.native_overage_fenced = true;
+            return Err(AdmissionRefusal::Unavailable);
+        };
+        entry.resources = next_resources;
+        // An overage proves that the reservation is already associated with
+        // native work. Dropping its ordinary handle must retain, never refund,
+        // the newly enlarged charge.
+        entry.state = ReservationState::UnknownHeld;
+        state.used = next_used;
+        state.native_overage_debt = next_debt;
+        state.native_overage_fenced = true;
+        let observed_extra = previous.componentwise_max(observed_extra);
+        state.native_overages.insert(
+            io_id,
+            NativeOverageObservation {
+                binding,
+                observed_extra,
+            },
+        );
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> Result<LedgerSnapshot, AdmissionRefusal> {
         let state = self
             .inner
@@ -610,6 +751,12 @@ impl ResourceLedger {
                 .filter(|entry| entry.state == ReservationState::UnknownHeld)
                 .count(),
             trial_held: state.trial.is_some(),
+            native_overage_debt: if state.invalid && state.native_overage_fenced {
+                Metric::Unknown(UnknownReason::Unbounded)
+            } else {
+                Metric::Known(state.native_overage_debt)
+            },
+            native_overage_fenced: state.native_overage_fenced,
         })
     }
 }
@@ -832,6 +979,117 @@ mod tests {
             ledger.snapshot().expect("unchanged snapshot").used,
             vector(u64::MAX)
         );
+    }
+
+    #[test]
+    fn native_overage_snapshots_add_only_new_monotonic_debt() {
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(100))).expect("ledger fixture");
+        let (reservation, _cleanup) = ledger.reserve(demand(1, false)).expect("reservation");
+        let binding = reservation.binding;
+        let io_id = Uuid::new_v4();
+
+        ledger
+            .record_native_overage(binding, io_id, vector(2))
+            .expect("first observed overage");
+        ledger
+            .record_native_overage(binding, io_id, vector(2))
+            .expect("duplicate snapshot is idempotent");
+        ledger
+            .record_native_overage(binding, io_id, vector(1))
+            .expect("lower snapshot cannot reduce observed debt");
+        assert_eq!(ledger.snapshot().expect("snapshot").used, vector(3));
+        assert_eq!(
+            ledger.snapshot().expect("snapshot").native_overage_debt,
+            Metric::Known(vector(2))
+        );
+
+        ledger
+            .record_native_overage(binding, io_id, vector(4))
+            .expect("increased cumulative snapshot");
+        assert_eq!(ledger.snapshot().expect("snapshot").used, vector(5));
+        assert_eq!(
+            ledger.snapshot().expect("snapshot").native_overage_debt,
+            Metric::Known(vector(4))
+        );
+        assert!(ledger.snapshot().expect("snapshot").native_overage_fenced);
+        drop(reservation);
+        let after_drop = ledger.snapshot().expect("charge survives reservation drop");
+        assert_eq!(after_drop.held, 1);
+        assert_eq!(after_drop.used, vector(5));
+    }
+
+    #[test]
+    fn native_overage_rejects_a_foreign_reservation_binding() {
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(10))).expect("ledger fixture");
+        let foreign =
+            ResourceLedger::new(1, Metric::Known(vector(10))).expect("foreign ledger fixture");
+        let (reservation, _cleanup) = foreign
+            .reserve(demand(1, false))
+            .expect("foreign reservation");
+        assert!(matches!(
+            ledger.record_native_overage(reservation.binding, Uuid::new_v4(), vector(1)),
+            Err(AdmissionRefusal::ReceiptMismatch)
+        ));
+        let snapshot = ledger.snapshot().expect("snapshot");
+        assert_eq!(snapshot.used, vector(0));
+        assert_eq!(snapshot.native_overage_debt, Metric::Known(vector(0)));
+        assert!(!snapshot.native_overage_fenced);
+    }
+
+    #[test]
+    fn native_overage_overflow_fences_and_retains_original_charge() {
+        let ledger =
+            ResourceLedger::new(1, Metric::Known(vector(u64::MAX))).expect("ledger fixture");
+        let (reservation, _cleanup) = ledger
+            .reserve(demand(u64::MAX, false))
+            .expect("maximum reservation");
+        assert!(matches!(
+            ledger.record_native_overage(reservation.binding, Uuid::new_v4(), vector(1)),
+            Err(AdmissionRefusal::ArithmeticOverflow)
+        ));
+        drop(reservation);
+
+        let snapshot = ledger.snapshot().expect("overflow snapshot");
+        assert_eq!(snapshot.used, vector(u64::MAX));
+        assert_eq!(snapshot.held, 1);
+        assert_eq!(
+            snapshot.native_overage_debt,
+            Metric::Unknown(UnknownReason::Unbounded)
+        );
+        assert!(snapshot.native_overage_fenced);
+        assert!(matches!(
+            ledger.reserve(demand(1, false)),
+            Err(AdmissionRefusal::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn native_overage_fence_survives_cap_refresh_and_reservation_release() {
+        let ledger = ResourceLedger::new(1, Metric::Known(vector(10))).expect("ledger fixture");
+        let (mut reservation, cleanup) = ledger.reserve(demand(1, false)).expect("reservation");
+        reservation.mark_spawn_possible().expect("spawn custody");
+        ledger
+            .record_native_overage(reservation.binding, Uuid::new_v4(), vector(1))
+            .expect("observed overage");
+        ledger
+            .update_hard_cap(2, Metric::Known(vector(100)))
+            .expect("cap refresh");
+        cleanup
+            .close(PhysicalCloseReceipt {
+                binding: cleanup.binding,
+            })
+            .expect("physical close releases reservation");
+
+        let snapshot = ledger.snapshot().expect("snapshot after close");
+        assert_eq!(snapshot.held, 0);
+        assert!(snapshot.native_overage_fenced);
+        assert!(matches!(
+            ledger.reserve(WorkloadDemand {
+                limit_epoch: 2,
+                ..demand(1, false)
+            }),
+            Err(AdmissionRefusal::Unavailable)
+        ));
     }
 
     #[test]

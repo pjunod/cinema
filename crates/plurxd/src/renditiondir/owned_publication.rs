@@ -5,6 +5,40 @@ use super::*;
 
 #[cfg(unix)]
 impl PendingWrites {
+    #[cfg(test)]
+    fn test_barrier(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let mut barrier = self.native_barrier.lock().unwrap();
+        assert!(barrier.is_none());
+        let (acquired, observed) = tokio::sync::oneshot::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        *barrier = Some(NativePublicationBarrier { acquired, release });
+        (observed, resume)
+    }
+
+    #[cfg(test)]
+    fn run_native(
+        &self,
+        native: &std::sync::Arc<std::sync::Mutex<native_publication::PublicationIo>>,
+    ) -> io::Result<()> {
+        let barrier = self.native_barrier.lock().unwrap().take();
+        if let Some(barrier) = barrier {
+            native.lock().unwrap().acquire()?;
+            let _ = barrier.acquired.send(());
+            barrier
+                .release
+                .recv()
+                .map_err(|_| io::Error::other("native test barrier closed after acquisition"))?;
+            native.lock().unwrap().publish_acquired()
+        } else {
+            native.lock().unwrap().run()
+        }
+    }
+
     pub(super) fn check_native_result(&self) -> io::Result<()> {
         let retained = self
             .native
@@ -60,10 +94,17 @@ fn start_publication(
         })?;
         #[cfg(unix)]
         {
-            native
-                .lock()
-                .map_err(|_| io::Error::other("native publication inventory unknown"))?
-                .run()
+            #[cfg(test)]
+            {
+                return _owner.run_native(&native);
+            }
+            #[cfg(not(test))]
+            {
+                native
+                    .lock()
+                    .map_err(|_| io::Error::other("native publication inventory unknown"))?
+                    .run()
+            }
         }
         #[cfg(not(unix))]
         {
@@ -77,6 +118,10 @@ fn start_publication(
 
 impl RenditionDir {
     pub(super) async fn publish_owned(&self, name: &str, bytes: Vec<u8>) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Some(finite) = &self.writes.finite {
+            return finite.publish(name, bytes).await;
+        }
         let mut pending = self.writes.pending.lock().await;
         join_pending_write(&mut pending).await?;
         let (write, release) = start_publication(
@@ -149,7 +194,7 @@ mod tests {
         )
         .unwrap();
         let native = dir.writes.native.lock().unwrap().as_ref().unwrap().clone();
-        let (acquired, resume) = native.lock().unwrap().test_barrier();
+        let (acquired, resume) = dir.writes.test_barrier();
         *dir.writes.pending.lock().await = Some(write);
         entry.send(()).unwrap();
         acquired.await.unwrap();
@@ -164,7 +209,7 @@ mod tests {
         );
         resume.send(()).unwrap();
         dir.join_writes().await.unwrap();
-        assert!(native.lock().unwrap().published);
+        assert!(native.lock().unwrap().published());
         assert!(!native.lock().unwrap().has_unresolved_object());
         assert_eq!(
             std::fs::read(root.path().join(INIT_NAME)).unwrap(),
@@ -190,7 +235,7 @@ mod tests {
             "actual handle joined"
         );
         let operation = dir.writes.native.lock().unwrap().as_ref().unwrap().clone();
-        let acquired = operation.lock().unwrap().acquired.unwrap().identity;
+        let acquired = operation.lock().unwrap().acquired().unwrap().identity();
         assert!(operation.lock().unwrap().has_unresolved_object());
         assert!(
             dir.join_writes().await.is_err(),
@@ -206,9 +251,9 @@ mod tests {
         assert!(retained
             .lock()
             .unwrap()
-            .acquired
+            .acquired()
             .unwrap()
-            .identity
+            .identity()
             .same_inode(acquired));
         assert_eq!(
             std::fs::read(root.path().join(INIT_NAME)).unwrap(),
@@ -225,7 +270,7 @@ mod tests {
             .await
             .unwrap();
         let first = dir.writes.native.lock().unwrap().as_ref().unwrap().clone();
-        assert!(first.lock().unwrap().published);
+        assert!(first.lock().unwrap().published());
         assert!(!first.lock().unwrap().has_unresolved_object());
         dir.publish_owned("seg00000.m4s", b"segment".to_vec())
             .await

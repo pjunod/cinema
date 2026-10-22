@@ -41,8 +41,8 @@ pub(super) async fn regenerate_init_head(
         .map_err(HeadRegenerationError::Failed)?;
     #[cfg(unix)]
     let descriptors = crate::producer_spawn::Descriptors::from_files(
-        Some(&source.handle),
-        audio_source.as_ref().map(|audio| &audio.handle),
+        Some(source.handle.as_ref()),
+        audio_source.as_ref().map(|audio| audio.handle.as_ref()),
         recipe
             .encoding
             .as_ref()

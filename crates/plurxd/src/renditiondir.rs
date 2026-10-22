@@ -39,6 +39,8 @@ use sha2::{Digest, Sha256};
 
 use crate::titlestore::{Manifest, ReaderWindow, SegState};
 #[cfg(unix)]
+mod finite_publication;
+#[cfg(unix)]
 mod native_publication;
 mod owned_publication;
 
@@ -223,6 +225,16 @@ struct PendingWrites {
     native: std::sync::Mutex<
         Option<std::sync::Arc<std::sync::Mutex<native_publication::PublicationIo>>>,
     >,
+    #[cfg(unix)]
+    finite: Option<finite_publication::FinitePublication>,
+    #[cfg(test)]
+    native_barrier: std::sync::Mutex<Option<NativePublicationBarrier>>,
+}
+#[cfg(test)]
+#[derive(Debug)]
+struct NativePublicationBarrier {
+    acquired: tokio::sync::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 #[derive(Debug)]
 struct PendingWrite {
@@ -268,6 +280,11 @@ impl RenditionDir {
     /// Drain actual publication work, independently of trailer/output success.
     /// This does not close cached files/readers or issue a physical receipt.
     pub(crate) async fn join_writes(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Some(finite) = &self.writes.finite {
+            finite.join().await?;
+            return Ok(());
+        }
         let mut pending = self.writes.pending.lock().await;
         join_pending_write(&mut pending).await?;
         #[cfg(unix)]

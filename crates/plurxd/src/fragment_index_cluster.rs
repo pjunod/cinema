@@ -1,7 +1,8 @@
 //! Content-addressed fragment-index blobs, source attestation, and peer hydration.
 
 use std::collections::HashMap;
-use std::io::SeekFrom;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -168,12 +169,90 @@ pub(crate) struct AttestedSource {
     pub(crate) observation: FragmentIndexSourceObservation,
 }
 
+pub(crate) enum SourceHandle {
+    Legacy(std::fs::File),
+    #[cfg(unix)]
+    Retained(plurx_core::adaptive_resources::runtime::RetainedSourceLease),
+}
+
+impl Deref for SourceHandle {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Legacy(file) => file,
+            #[cfg(unix)]
+            Self::Retained(lease) => lease.file(),
+        }
+    }
+}
+
+impl From<std::fs::File> for SourceHandle {
+    fn from(file: std::fs::File) -> Self {
+        Self::Legacy(file)
+    }
+}
+
+impl AsRef<std::fs::File> for SourceHandle {
+    fn as_ref(&self) -> &std::fs::File {
+        self
+    }
+}
+
+impl Read for SourceHandle {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut file = self.as_ref();
+        Read::read(&mut file, buffer)
+    }
+}
+
+impl Seek for SourceHandle {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let mut file = self.as_ref();
+        Seek::seek(&mut file, position)
+    }
+}
+
+impl Read for &SourceHandle {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut file = (**self).as_ref();
+        Read::read(&mut file, buffer)
+    }
+}
+
+impl Seek for &SourceHandle {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        let mut file = (**self).as_ref();
+        Seek::seek(&mut file, position)
+    }
+}
+
 pub(crate) struct SourceFence {
-    pub(crate) handle: std::fs::File,
+    pub(crate) handle: SourceHandle,
     object_version: String,
 }
 
 impl SourceFence {
+    #[cfg(unix)]
+    pub(crate) fn from_retained(
+        lease: plurx_core::adaptive_resources::runtime::RetainedSourceLease,
+        expected_object_version: &str,
+    ) -> Result<Self, String> {
+        let metadata = lease
+            .file()
+            .metadata()
+            .map_err(|error| format!("stating retained source descriptor: {error}"))?;
+        let object_version =
+            plurx_core::source_identity::SourceIdentity::from_metadata(&metadata).render_s1();
+        if object_version != expected_object_version {
+            return Err("retained source changed after cluster index resolution".to_owned());
+        }
+        Ok(Self {
+            handle: SourceHandle::Retained(lease),
+            object_version,
+        })
+    }
+
     pub(crate) fn object_version(&self) -> &str {
         &self.object_version
     }
@@ -182,7 +261,13 @@ impl SourceFence {
     /// opening /dev/fd/N duplicates its seek offset, unlike Linux procfs.
     /// Reopen by name only after checking the complete held object identity.
     pub(crate) async fn reopen(&self, file: &MediaFile) -> Result<Self, String> {
-        open_source_fence(file, Some(&self.object_version)).await
+        match &self.handle {
+            SourceHandle::Legacy(_) => open_source_fence(file, Some(&self.object_version)).await,
+            #[cfg(unix)]
+            SourceHandle::Retained(_) => Err(
+                "retained source requires a predeclared independent finite source copy".to_owned(),
+            ),
+        }
     }
 
     pub(crate) fn unchanged(&self) -> bool {
@@ -301,7 +386,7 @@ pub(crate) async fn open_source_fence(
             }
         }
         Ok(SourceFence {
-            handle: source.into_std().await,
+            handle: source.into_std().await.into(),
             object_version,
         })
     }
@@ -323,7 +408,7 @@ pub(crate) async fn open_source_fence(
             return Err("source changed after cluster index resolution".to_owned());
         }
         Ok(SourceFence {
-            handle: source,
+            handle: source.into(),
             object_version,
         })
     }
@@ -358,7 +443,7 @@ pub(crate) async fn open_source_playback_fence(
         return Err("Source file changed after its owned observation".to_owned());
     }
     Ok(SourceFence {
-        handle: source,
+        handle: source.into(),
         object_version,
     })
 }
@@ -1006,13 +1091,9 @@ pub(crate) fn source_still_matches(
 }
 
 fn scanner_identity_matches(metadata: &std::fs::Metadata, file: &MediaFile) -> Result<(), String> {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
-        .unwrap_or(0);
-    if metadata.len() != file.size.max(0) as u64 || modified != file.mtime {
+    if !plurx_core::source_identity::SourceIdentity::scanner_matches(
+        metadata, file.size, file.mtime,
+    ) {
         return Err("source no longer matches the scanner's size/mtime identity".to_owned());
     }
     Ok(())
@@ -1028,16 +1109,16 @@ fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
 /// The one rendering of a stat-named source object, shared by the attesting
 /// paths and item detail's observation-based lookup.
 fn stat_object_version(object: &crate::availability::StatObject) -> String {
-    format!(
-        "{ATTESTATION_REGIME}:{}:{}:{}:{}:{}:{}:{}",
+    plurx_core::source_identity::SourceIdentity::from_fields(
         object.dev,
         object.ino,
         object.size,
         object.mtime,
         object.mtime_nsec,
         object.ctime,
-        object.ctime_nsec
+        object.ctime_nsec,
     )
+    .render_s1()
 }
 
 /// What [`inspect_copy_source`] would answer, from a stat the caller already

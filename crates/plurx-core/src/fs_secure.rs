@@ -6,6 +6,8 @@
 //! path from a held current-directory descriptor, one component at a time
 //! with `openat(O_NOFOLLOW)` and keep the resulting descriptor as authority.
 
+pub mod publication;
+
 use std::ffi::{CStr, CString, OsString};
 use std::fs::File;
 use std::io;

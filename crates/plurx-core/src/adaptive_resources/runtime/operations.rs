@@ -20,8 +20,10 @@ use tokio::sync::Mutex as AsyncMutex;
 mod bootstrap;
 mod live_settlement;
 mod pipe_drains;
-mod plans;
+pub(super) mod plans;
 mod scratch;
+#[cfg(unix)]
+pub(super) mod source_files;
 pub(crate) use plans::{TypedGraphPlan, TypedMemberPlan};
 
 #[derive(Default)]
@@ -73,6 +75,8 @@ struct OwnedRole {
     scratch: BTreeMap<Uuid, scratch::ScratchMember>,
     // Same admitted member/ledger; V3 adds bootstrap state, not a second charge.
     bootstrap: BTreeMap<Uuid, bootstrap::BootstrapMember>,
+    #[cfg(unix)]
+    sources: BTreeMap<Uuid, source_files::SourceCell>,
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
@@ -99,6 +103,8 @@ enum Effect {
     Arm(Uuid),
     Scratch(Uuid),
     Bootstrap(Uuid),
+    #[cfg(unix)]
+    Source(Uuid),
     Enrich,
     Seal,
     Hold,
@@ -225,6 +231,56 @@ impl NodeResourceRuntime {
         let identity = self.ledger.new_family()?;
         book.families.insert(identity, self.journal.new_family());
         Ok(identity)
+    }
+
+    /// Drop only an unused selector after a definitely rejected preparation.
+    /// No obligation, charge or native owner is removed by this operation.
+    pub(crate) fn remove_unused_family(
+        &self,
+        family: FamilyIdentity,
+    ) -> Result<(), OperationError> {
+        let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
+        if book.family_users.contains_key(&family) {
+            return Err(OperationError::State);
+        }
+        book.families.remove(&family).ok_or(OperationError::State)?;
+        Ok(())
+    }
+
+    /// Linearize fresh native entry against epoch changes, drain and overage.
+    /// The original job is already registered. Refusal drops only its unopened
+    /// latch; its retained owner still joins and records the exact disposition.
+    pub(crate) fn release_native_entry(
+        &self,
+        binding: ReservationBinding,
+        enter: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), OperationError> {
+        let state = self
+            .ledger
+            .inner
+            .lock()
+            .map_err(|_| OperationError::State)?;
+        let entry = state
+            .entries
+            .get(&binding.reservation)
+            .ok_or(OperationError::State)?;
+        if binding.ledger != self.ledger.id
+            || entry.binding != binding
+            || state.invalid
+            || state.native_overage_fenced
+            || state.draining
+            || state.epoch != binding.allocation_epoch
+            || entry.durable.is_none()
+            || !matches!(
+                entry.state,
+                ReservationState::Reserved | ReservationState::SpawnPossible
+            )
+        {
+            return Err(OperationError::State);
+        }
+        // Sending is synchronous and performs no filesystem IO under this lock.
+        // An overage fence installed afterward cannot retroactively undo entry.
+        enter.send(()).map_err(|_| OperationError::State)
     }
 
     /// Synchronous OWNERSHIP transfer before the first await. All missing roles
@@ -418,6 +474,8 @@ impl NodeResourceRuntime {
                 typed_members,
                 scratch: BTreeMap::new(),
                 bootstrap: BTreeMap::new(),
+                #[cfg(unix)]
+                sources: BTreeMap::new(),
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),
@@ -549,6 +607,7 @@ impl NodeResourceRuntime {
             .lock()
             .map_err(|_| OperationError::State)?;
         if state.invalid
+            || state.native_overage_fenced
             || bundle
                 .roles
                 .iter()
@@ -1016,6 +1075,8 @@ impl NodeResourceRuntime {
         match transition.effect {
             Effect::Scratch(member) => scratch::acknowledge(role, member)?,
             Effect::Bootstrap(member) => bootstrap::acknowledge(role, member)?,
+            #[cfg(unix)]
+            Effect::Source(member) => source_files::acknowledge(role, member, ack.operation_id)?,
             _ => {}
         }
         role.sequence = ack.sequence;

@@ -17,6 +17,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md) | Verbatim historical M0 contract proposals and manager direction; not implementation or acceptance evidence. | done |
 | [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Retained internal parent/child and held-input native publisher compiled NOT RUN; ordinary admission/publication/retirement and remaining M0–M7 open. | open |
 | [ADAPTIVE-PLAYBACK-DELIVERY.md](ADAPTIVE-PLAYBACK-DELIVERY.md) | Authoritative ordinary VOD V1–V5 OPEN/CLOSED source list; separate R1 recovery, later M0–M7 generality and final acceptance. | open |
 | [ADAPTIVE-RESOURCE-CUSTODY.md](ADAPTIVE-RESOURCE-CUSTODY.md) | Local custody storage, live-close restrictions, startup refusal and backup/recovery limits. | open |

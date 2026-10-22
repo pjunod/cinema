@@ -30,6 +30,7 @@ pub mod fmp4;
 pub mod fs_secure;
 #[cfg(windows)]
 pub mod fs_secure_windows;
+pub mod source_identity;
 #[cfg(windows)]
 pub use fs_secure_windows as fs_secure;
 pub mod channel_subjects;
