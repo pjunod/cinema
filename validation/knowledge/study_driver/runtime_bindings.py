@@ -290,6 +290,7 @@ class Stage:
     worker_grader:Path|None=None
     worker_runtime:Path|None=None
     closed:bool=False
+    retired:bool=False
 
 class SourceStager:
     """Full frozen source goes only to the unprivileged private executor mount."""
@@ -302,6 +303,7 @@ class SourceStager:
         require(set(self.execution_options)<= {"timeout_seconds","max_output_bytes","memory_bytes","cpus","pids_limit","runtime_max_bytes","cache_max_bytes"},"ClosedExecutionResourceOptions")
         if self.seeder is not None and hasattr(self.seeder,"image"):
             require(self.seeder.image==self.image,"DependencySeedImageMismatch")
+        self._stages={};self._owned_root_identity=self._directory_identity(self.root)
         self.paired=None
         if paired_roles is not None:
             from .paired_runtime import PairedRoleStager
@@ -358,6 +360,7 @@ class SourceStager:
             else:
                 from .paired_runtime import readable_tree,runtime_layout
                 readable_tree(handle.candidate);readable_tree(handle.grader);runtime_layout(handle.runtime)
+            self._register_stage(handle)
             return handle
         except Exception:
             shutil.rmtree(root);raise
@@ -426,6 +429,7 @@ class SourceStager:
         if plan is None:return None
         spec=dict(handle.spec,source_transform=None,source_transform_target=None)
         baseline=self.prepare(spec,{},handle.artifacts,commands);handle.baseline_stage=baseline
+        self._stage_record(baseline)["pinned"]=True
         plan=self.family_plan(baseline,commands)
         if getattr(plan,"schema_version",1)==2:
             first=plan.prerequisite_steps[0]
@@ -474,6 +478,7 @@ class SourceStager:
             worker_config=worker_body["configuration"];all_sources["worker"]=worker_config["sources"];images["worker"]=worker_config["image"]
             observed["worker"]=worker_body["observations"]["observed_probes"]["versions"]
             policies["worker"]={key:worker_config[key] for key in ("environment","limits","user","runtimes","candidate_readonly","working_directory","supervisor","probe","outcome_controller","executor")}
+            self.record_receipt(handle,proof)
             handle.worker_verification_digest=proof.digest
         source_identity={key:value["candidate"] for key,value in all_sources.items()}
         grader_identity={key:value["grader"] for key,value in all_sources.items()}
@@ -481,13 +486,277 @@ class SourceStager:
         return {"source_bytes_modes_sha256":sha(canonical(source_identity)),"grader_bytes_modes_sha256":sha(canonical(grader_identity)),
             "image_sha256":sha(canonical(images)),"toolchain_runtime_dependencies_sha256":sha(canonical({"sources":runtime_identity,"observed":observed,"qualified_family_binding":prerequisite.binding_digest})),
             "environment_policy_sha256":sha(canonical({"roles":policies,"commands":commands,"family":self.family_identity(self.family_plan(handle,commands)),"runtime_bindings":file_sha(Path(__file__)),"paired_runtime":file_sha(Path(__file__).with_name("paired_runtime.py"))}))}
+    _SCRATCH_NAMES=("candidate","grader","runtime","worker-source","worker-export","worker-runtime")
+
+    @staticmethod
+    def _directory_identity(path):
+        info=no_links(path).lstat()
+        require(stat.S_ISDIR(info.st_mode),"StageDirectoryRequired")
+        return (info.st_dev,info.st_ino)
+
+    def _register_stage(self,handle):
+        # A Stage is an in-process capability, never a caller-supplied path.
+        if not hasattr(self,"_stages"):
+            self._stages={};self._owned_root_identity=self._directory_identity(self.root)
+        require(handle.root.parent==self.root and re.fullmatch(r"[a-f0-9]{32}",handle.root.name),"UnownedStage")
+        children={name:self._directory_identity(handle.root/name) for name in self._SCRATCH_NAMES if (handle.root/name).exists()}
+        require(set(children)>={"candidate","grader","runtime"},"IncompleteStage")
+        self._stages[id(handle)]={"handle":handle,"root":self._directory_identity(handle.root),"children":children,
+                                  "name":handle.root.name,"pinned":False,"closure":None,"retiring":False,"receipts":{}}
+
+    def _stage_record(self,handle):
+        record=getattr(self,"_stages",{}).get(id(handle))
+        require(record is not None and record["handle"] is handle and not handle.retired,"UnknownOrRetiredStage")
+        require(handle.root.name==record["name"] and self._directory_identity(self.root)==self._owned_root_identity and handle.root.parent==self.root
+                and self._directory_identity(handle.root)==record["root"],"StageIdentityChanged")
+        for name,identity in record["children"].items():
+            require(self._directory_identity(handle.root/name)==identity,"StageChildIdentityChanged")
+        return record
+
+    def _source_closure(self,handle):
+        from .paired_runtime import measure_tree
+        return {name:measure_tree(handle.root/name,candidate=name in {"candidate","worker-source"})
+                for name in ("candidate","grader","worker-source","worker-export") if (handle.root/name).exists()}
+
     def close(self,handle):
-        # Evidence stays durable/private. Isolation receipts prove container cleanup.
-        require(handle.root.parent==self.root and not handle.root.is_symlink(),"UnownedStage")
+        # Closing seals identities but deliberately does not make deletion eligible.
+        record=self._stage_record(handle)
         if handle.closed:return
         if handle.baseline_stage is not None:self.close(handle.baseline_stage)
-        durable(handle.root/"stage-closed.json",{"closed":True,"candidate_retained_private":True})
+        closure={"schema_version":1,"closed":True,"candidate_retained_private":True,
+                 "stage":handle.root.name,"source_identity":self._source_closure(handle)}
+        record["closure"]=durable(handle.root/"stage-closed.json",closure)
+        info=(handle.root/"stage-closed.json").lstat();record["closure_identity"]=(info.st_dev,info.st_ino)
         handle.closed=True
+
+    def record_receipt(self,handle,receipt):
+        """Capture exact trusted API returns plus its process-issued nested proofs."""
+        record=self._stage_record(handle)
+        types=tuple(getattr(self.api,name) for name in ("ProbeReceipt","StepReceipt","PrerequisiteReceipt","ExecutionResult"))
+        require(type(receipt) in types,"OriginalIsolationReceiptRequired")
+        authoritative={self.api.ProbeReceipt:"_ISSUED",self.api.StepReceipt:"_STEPS",self.api.PrerequisiteReceipt:"_QUALIFIED"}
+        registry_name=authoritative.get(type(receipt))
+        if registry_name is not None and receipt.status in {"verified","passed","failed","qualified"}:
+            issued=getattr(self.api,registry_name,{}).get(id(receipt))
+            require(issued is not None and issued[0] is receipt,"UnissuedIsolationReceipt")
+        originals=[(receipt,None)]
+        for name in ("_ISSUED","_STEPS","_QUALIFIED"):
+            registry=getattr(self.api,name,None)
+            require(isinstance(registry,dict),"IsolationReceiptAuthorityUnavailable")
+            for issued,body in registry.values():
+                if issued.private_path is not None and issued.private_path.parent==handle.root/".isolation":originals.append((issued,body))
+        for issued,body in originals:
+            path=issued.private_path
+            require(path is not None and path.parent==handle.root/".isolation","ReceiptStageMismatch")
+            info=no_links(path).lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=self.RECEIPT_FILE_MAX,"UnsafeIsolationReceipt")
+            require(re.fullmatch(r"(?:probe|step|execution|prerequisite)-[a-f0-9]{32}\.json",path.name),"UnknownIsolationReceiptName")
+            value=file_sha(path);require(value==issued.digest.removeprefix("sha256:"),"RecordedIsolationReceiptChanged")
+            parsed=private_json(path)
+            require(body is None or parsed==body,"IssuedIsolationReceiptChanged")
+            prior=record["receipts"].get(path.name)
+            require(prior is None or (prior["sha256"]==value and prior["identity"]==(info.st_dev,info.st_ino)),"RecordedIsolationReceiptChanged")
+            record["receipts"][path.name]={"sha256":value,"identity":(info.st_dev,info.st_ino),"bytes":info.st_size}
+        # Version-one qualification exposes child execution hashes, rather than
+        # StepReceipt objects. Only those exact trusted references grant credit.
+        references=[]
+        for original in tuple(record["receipts"]):
+            body=private_json(handle.root/".isolation"/original)
+            references.extend(row["digest"] for row in body.get("executions",()))
+        for expected in references:
+            if expected in {row["sha256"] for row in record["receipts"].values()}:continue
+            matches=[]
+            for path in (handle.root/".isolation").iterdir():
+                if not re.fullmatch(r"execution-[a-f0-9]{32}\.json",path.name):continue
+                info=no_links(path).lstat()
+                require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=self.RECEIPT_FILE_MAX,"UnsafeIsolationReceipt")
+                if file_sha(path)==expected:matches.append((path,info))
+            require(len(matches)==1,"ReferencedIsolationReceiptUnavailable")
+            path,info=matches[0];private_json(path)
+            record["receipts"][path.name]={"sha256":expected,"identity":(info.st_dev,info.st_ino),"bytes":info.st_size}
+        return receipt
+
+    # Closed, once-run evidence retention bounds; exceeding one is fail-stop.
+    RECEIPT_FILE_MAX=64*1024**2
+    RECEIPT_STAGE_MAX=128*1024**2
+    RECEIPT_TOTAL_MAX=2*1024**3
+
+    def bind_retirement_evidence(self,output_root,*,journal_root):
+        require(not hasattr(self,"_retirement_evidence_root"),"RetirementEvidenceAlreadyBound")
+        output=no_links(output_root);identity=self._directory_identity(output)
+        require(output!=self.root and self.root not in output.parents and output not in self.root.parents
+                and identity[0]!=self._owned_root_identity[0] and output.stat().st_mode&0o777==0o700,"ExternalRetirementEvidenceRequired")
+        journal=no_links(journal_root);journal_identity=self._directory_identity(journal)
+        require(journal!=self.root and self.root not in journal.parents
+                and journal_identity[0]!=self._owned_root_identity[0],"ExternalRetirementJournalRequired")
+        root=output/"stage-evidence";root.mkdir(mode=0o700)
+        fd=os.open(output,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        self._retirement_evidence_root=root;self._retirement_evidence_identity=self._directory_identity(root)
+        require(self._retirement_evidence_identity[0]==identity[0],"ExternalRetirementEvidenceDeviceChanged")
+        self._retirement_evidence_bytes=0
+
+    def terminal_stages(self):
+        return tuple(record["handle"] for record in self._stages.values() if not record["handle"].retired)
+
+    def retirement_evidence(self,handle):
+        """Validate trusted isolation receipts, retaining every original byte.
+
+        Only the executor writes .isolation. Runtime/quiet logs are not copied:
+        bounded captured diagnostics already live in these immutable receipts.
+        """
+        record=self._stage_record(handle)
+        require(handle.closed and record["closure"] is not None,"ClosedStageRequired")
+        closure_info=no_links(handle.root/"stage-closed.json").lstat()
+        require((closure_info.st_dev,closure_info.st_ino)==record["closure_identity"] and closure_info.st_nlink==1
+                and file_sha(handle.root/"stage-closed.json")==record["closure"],"StageClosureChanged")
+        closure=private_json(handle.root/"stage-closed.json")
+        require(closure["source_identity"]==self._source_closure(handle),"ClosedStageSourceChanged")
+        require(str(handle.root) not in getattr(self.api,"_ACTIVE_ROOTS",{str(handle.root)}),"StageExecutionStillActive")
+        private=handle.root/".isolation";receipts={};bodies={}
+        names=set()
+        if private.exists():
+            require(self._directory_identity(private)[0]==record["root"][0],"IsolationEvidenceDeviceChanged")
+            names={path.name for path in private.iterdir() if path.name!="engine-home"}
+        require(names==set(record["receipts"]),"UnrecordedIsolationEvidence")
+        for name,original in record["receipts"].items():
+            path=no_links(private/name);info=path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink==1
+                    and (info.st_dev,info.st_ino)==original["identity"] and info.st_size==original["bytes"]
+                    and file_sha(path)==original["sha256"],"RecordedIsolationReceiptChanged")
+            body=private_json(path);receipts[name]=original["sha256"];bodies[original["sha256"]]=body
+        for name,value in receipts.items():
+            body=bodies[value]
+            if name.startswith(("probe-","step-")) or "cleanup_proved" in body:
+                require(body.get("cleanup_proved") is True,"StageContainerCleanupUnproved")
+            else:
+                references=body.get("steps") if body.get("schema_version")==2 else [row["digest"] for row in body.get("executions",())]
+                require(isinstance(references,list) and references and all(ref in bodies and bodies[ref].get("cleanup_proved") is True for ref in references),"StageAggregateCleanupUnproved")
+        return {"stage":handle.root.name,"closure_sha256":record["closure"],"isolation_receipts":receipts}
+
+    def _archive_retirement_evidence(self,handle,evidence):
+        root=getattr(self,"_retirement_evidence_root",None)
+        require(root is not None and self._directory_identity(root)==self._retirement_evidence_identity,"RetirementEvidenceUnavailable")
+        record=self._stage_record(handle)
+        sources={"stage-closed.json":(handle.root/"stage-closed.json",record["closure"])}
+        sources.update({name:(handle.root/".isolation"/name,value) for name,value in evidence["isolation_receipts"].items()})
+        sizes={name:no_links(path).lstat().st_size for name,(path,value) in sources.items()}
+        manifest={"schema_version":1,"stage":record["name"],"files":{name:{"sha256":value,"bytes":sizes[name]} for name,(path,value) in sources.items()}}
+        total=sum(sizes.values())+len(canonical(manifest))+4096
+        require(all(size<=self.RECEIPT_FILE_MAX for size in sizes.values()) and total<=self.RECEIPT_STAGE_MAX
+                and self._retirement_evidence_bytes+total<=self.RECEIPT_TOTAL_MAX,"RetirementEvidenceBoundExceeded")
+        # Reserve before writing: a partial archive cannot reset the aggregate cap.
+        self._retirement_evidence_bytes+=total
+        target=root/record["name"];target.mkdir(mode=0o700)
+        directory=os.open(target,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            for name,(source,expected) in sources.items():
+                incoming=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+                outgoing=None
+                try:
+                    before=os.fstat(incoming)
+                    require(stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_size==sizes[name]
+                            and (before.st_dev,before.st_ino)==(record["closure_identity"] if name=="stage-closed.json" else record["receipts"][name]["identity"]),"RetirementEvidenceIdentityChanged")
+                    outgoing=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
+                    measured=hashlib.sha256();copied=0
+                    while chunk:=os.read(incoming,1024**2):
+                        copied+=len(chunk);require(copied<=sizes[name],"RetirementEvidenceChanged")
+                        measured.update(chunk)
+                        view=memoryview(chunk)
+                        while view:
+                            written=os.write(outgoing,view);require(written>0,"RetirementEvidenceShortWrite");view=view[written:]
+                    after=os.fstat(incoming)
+                    require(copied==sizes[name] and measured.hexdigest()==expected
+                            and (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
+                            ==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns),"RetirementEvidenceChanged")
+                    os.fsync(outgoing)
+                finally:
+                    os.close(incoming)
+                    if outgoing is not None:os.close(outgoing)
+                require(file_sha(no_links(target/name))==expected,"RetirementEvidenceCopyUnproved")
+            value=durable(target/"archive.json",manifest);os.fsync(directory)
+        finally:os.close(directory)
+        parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(parent)
+        finally:os.close(parent)
+        return {"stage":record["name"],"manifest_sha256":value,"bytes":total}
+
+    @staticmethod
+    def _check_scratch_tree(directory,device):
+        # Child links are unlinked, never followed. Only directory traversal
+        # needs no-follow descriptors and same-device mount-boundary checks.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                info=os.stat(entry.name,dir_fd=directory,follow_symlinks=False)
+                require(info.st_dev==device,"StageScratchDeviceChanged")
+                if stat.S_ISDIR(info.st_mode):
+                    child=os.open(entry.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+                    try:
+                        require((os.fstat(child).st_dev,os.fstat(child).st_ino)==(info.st_dev,info.st_ino),"StageScratchEntryChanged")
+                        SourceStager._check_scratch_tree(child,device)
+                    finally:os.close(child)
+
+    def _retirement_failure(self,handle,authorization,error,*,deletion_started):
+        root=self._retirement_evidence_root
+        require(self._directory_identity(root)==self._retirement_evidence_identity,"RetirementEvidenceUnavailable")
+        failure={"schema_version":1,"retired":False,"deletion_started":deletion_started,
+                 "error_class":type(error).__name__,"authorization":authorization}
+        durable(root/(handle.root.name+"-retirement-failed.json"),failure)
+        directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+
+    def retire(self,handle,authorization,*,terminal=False):
+        """Delete only registered reconstructible roots after trusted authorization.
+
+        The adapter supplies verified durable checkpoint identities; this method
+        owns filesystem eligibility and never accepts a deletion path.
+        """
+        self.admission.assert_current();record=self._stage_record(handle)
+        require(not record["pinned"] or terminal is True,"QualifiedBaselineStillPinned")
+        require(not record["retiring"] and set(authorization)=={"receipt_sha256","checkpoint_sha256","event"}
+                and authorization["event"] in ({"journal_finished"} if terminal else {"acceptance_finished"})
+                and all(re.fullmatch(r"[a-f0-9]{64}",authorization[key]) for key in ("receipt_sha256","checkpoint_sha256")),"InvalidStageRetirementAuthorization")
+        evidence=self.retirement_evidence(handle)
+        try:archive=self._archive_retirement_evidence(handle,evidence)
+        except BaseException as error:
+            try:self._retirement_failure(handle,authorization,error,deletion_started=False)
+            except BaseException as recording_error:raise error from recording_error
+            raise
+        require(getattr(shutil.rmtree,"avoids_symlink_attacks",False),"SafeStageRemovalUnavailable")
+        parent=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        directory=None
+        try:
+            require((os.fstat(parent).st_dev,os.fstat(parent).st_ino)==self._owned_root_identity,"StageParentChanged")
+            directory=os.open(handle.root.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+            require((os.fstat(directory).st_dev,os.fstat(directory).st_ino)==record["root"],"StageIdentityChanged")
+            for name,identity in record["children"].items():
+                child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+                try:
+                    require((os.fstat(child).st_dev,os.fstat(child).st_ino)==identity,"StageChildIdentityChanged")
+                    self._check_scratch_tree(child,identity[0])
+                finally:os.close(child)
+            durable(handle.root/"stage-retirement-intent.json",{"schema_version":1,"authorization":authorization,"evidence":evidence,"external_archive":archive,"scratch_roots":sorted(record["children"])})
+            record["retiring"]=True
+            for name in record["children"]:shutil.rmtree(name,dir_fd=directory)
+            os.fsync(directory)
+            require(all(not os.path.lexists(handle.root/name) for name in record["children"]),"StageScratchRemovalUnproved")
+            completed={"schema_version":1,"retired":True,"authorization":authorization,"external_archive":archive}
+            durable(self._retirement_evidence_root/handle.root.name/"retirement-completed.json",completed)
+            external=os.open(self._retirement_evidence_root/handle.root.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            try:os.fsync(external)
+            finally:os.close(external)
+            durable(handle.root/"stage-retired.json",completed)
+            os.fsync(directory);handle.retired=True
+        except BaseException as error:
+            # Preserve intent and all original receipts, even after partial deletion.
+            try:self._retirement_failure(handle,authorization,error,deletion_started=record["retiring"])
+            except BaseException as recording_error:raise error from recording_error
+            raise
+        finally:
+            if directory is not None:os.close(directory)
+            os.close(parent)
 
     def prepare_preflight(self):
         spec={"source_commit":self.baseline.commit,"source_tree":self.baseline.tree,"source_projections":{},"source_transform":None,"source_transform_target":None,"allowed_edit_paths":[]}

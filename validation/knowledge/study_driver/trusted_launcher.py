@@ -39,10 +39,17 @@ def read_exact(path,expected):
     require((p.parent.stat().st_mode&0o777)==0o700,"UnprotectedArtifactDirectory")
     raw=p.read_bytes();require(sha(raw)==expected,"ArtifactDigestMismatch");return json.loads(raw)
 
-def save_private(root,name,value):
+def save_private(root,name,value,*,replace=True):
     # Exact reviewed journal API is injected by the concrete source binder.
     require(callable(_ATOMIC_PRIVATE),"ReviewedAtomicCheckpointRequired")
-    return _ATOMIC_PRIVATE(root,name,value)
+    return _ATOMIC_PRIVATE(root,name,value) if replace else _ATOMIC_PRIVATE(root,name,value,replace=False)
+
+def checkpoint_acceptance(output_root,request_journal,acceptance_runner,run_id,receipt):
+    """Retirement is eligible only after both external durable boundaries."""
+    receipt_sha=save_private(output_root,"acceptance-"+sha(run_id.encode())+".private.json",receipt,replace=False)
+    checkpoint_sha=request_journal.append({"event":"acceptance_finished","run_id":run_id,"receipt_sha256":receipt_sha})
+    acceptance_runner.retire_acceptance(receipt,run_id=run_id,receipt_sha256=receipt_sha,checkpoint_sha256=checkpoint_sha)
+    return receipt_sha
 
 _ATOMIC_PRIVATE=None
 
@@ -234,6 +241,7 @@ def _launch(config,*,ev,provider,projection_api,graph,client,query_backend_facto
     # Actual prerequisite objects and source-bound stage handles remain in this
     # exact concrete runner; a persisted image/config claim alone is insufficient.
     require(sorted(acceptance_runner.prequalified)==qualification.get("qualification_keys") and len(acceptance_runner.prequalified)==4,"LiveQualificationHandlesRequired")
+    acceptance_runner.bind_retirement(output_root,request_journal)
     require(config["knowledge_snapshot"]["head"]==manifest.source_commit and config["knowledge_snapshot"]["tree"]==manifest.source_tree,"KnowledgeBaselineMismatch")
     projections={}
     for identifier,row in public_rows.items():
@@ -262,8 +270,7 @@ def _launch(config,*,ev,provider,projection_api,graph,client,query_backend_facto
             for artifact in row["acceptance"]["artifacts"]:read_bytes=Path(artifact["private_path"]).read_bytes();require(sha(read_bytes)==artifact["sha256"],"AcceptanceArtifactChanged")
             request_journal.append({"event":"acceptance_started","run_id":run.spec.id})
             receipt=acceptance_runner.evaluate(row,replacements,render_acceptance(row,config["executables"]))
-            receipt_sha=save_private(output_root,"acceptance-"+sha(run.spec.id.encode())+".private.json",receipt)
-            request_journal.append({"event":"acceptance_finished","run_id":run.spec.id,"receipt_sha256":receipt_sha})
+            receipt_sha=checkpoint_acceptance(output_root,request_journal,acceptance_runner,run.spec.id,receipt)
             require(receipt.get("status") in ("passed","failed","unavailable"),"InvalidAcceptanceStatus")
             patch_status=receipt["status"] if receipt.get("isolation_verified") is True else "unavailable"
             # No raw stdout/stderr or private acceptance body ever enters solver/scorer messages.

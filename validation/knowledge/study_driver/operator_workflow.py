@@ -401,7 +401,19 @@ class PreparedStudy:
             admission=self.admission,review_gate=self.gate,output_root=self.output,navigation_factory=self.nav,request_journal=self.journal,
             reporting=reporting,document_api=docs)
         result_sha=checkpoints.atomic_private(self.output,"result.safe.json",result,replace=False)
-        self.journal.finish(result["status"],result_sha)
+        terminal_sha=self.journal.finish(result["status"],result_sha)
+        if result["status"]=="complete":
+            try:
+                self.runner.retire_completed_study(result_sha256=result_sha,checkpoint_sha256=terminal_sha)
+            except BaseException as error:
+                # The completed comparison and terminal journal are immutable.
+                # Cleanup failure is separate acceptance evidence, never a retry.
+                try:
+                    checkpoints.atomic_private(self.output,"retirement-failure.safe.json",
+                        {"status":"unavailable","error_class":type(error).__name__,"result_sha256":result_sha,
+                         "terminal_checkpoint_sha256":terminal_sha,"cleanup_proved":False},replace=False)
+                except BaseException as recording_error:raise error from recording_error
+                raise
         return result
 
     def close(self):
