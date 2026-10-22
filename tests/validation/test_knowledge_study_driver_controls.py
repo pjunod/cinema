@@ -45,7 +45,7 @@ class CitationBoundaryTests(unittest.TestCase):
             docs.parse(data,ref,projected,run,NS(DocumentScore=lambda *a:a),"fresh")
 
     def test_equivalent_visible_heading_is_projected_without_hidden_lines(self):
-        ref=reference();visible=view();visible["visibility"]["docs/policy.md"]["line_ranges"]=[[1,4],[5,6]]
+        ref=reference();visible=view();visible["visibility"]["docs/policy.md"]["line_ranges"]=[[1,3],[5,6]]
         projected=docs.project(ref,visible,"Apply docs/policy.md § Alternate policy to isolate source and count assertions.",())
         self.assertTrue(any("Use isolated source and count actual assertions." in row["content"] for row in projected["visible_evidence"]))
         for row in projected["visible_evidence"]:
