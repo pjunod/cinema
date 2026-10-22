@@ -6311,11 +6311,14 @@ fn manual_auto_bootstrap_requires_actual_safe_dispatchable_output_identity() {
     processed.sustainable = true;
     assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed), 720).is_some(),
         "qualified executable processed output can stage within the ceiling");
-    let mut wrong_grade = processed.clone();
-    wrong_grade.grade = plurx_core::transcode::OutputGrade::Sdr;
+    let mut processed_sdr = processed.clone();
+    processed_sdr.grade = plurx_core::transcode::OutputGrade::Sdr;
+    assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&processed_sdr), 720)
+        .is_some_and(|candidate| candidate.grade == plurx_core::transcode::OutputGrade::Sdr),
+        "qualified processed SDR can stage without acquiring an HDR grade");
     let mut wrong_codec = processed.clone();
     wrong_codec.planned_codec = Some("h264".into());
-    for refused in [processed_cold, wrong_grade, wrong_codec] {
+    for refused in [processed_cold, wrong_codec] {
         assert!(auto_bootstrap_encode_fallback(std::slice::from_ref(&refused), 720).is_none());
         let mixed = [refused, ordinary_cold.clone()];
         assert!(auto_bootstrap_encode_fallback(&mixed, 720).is_some_and(|candidate| !candidate.processed_dv),
