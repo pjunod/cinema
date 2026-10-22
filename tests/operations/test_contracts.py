@@ -2331,7 +2331,7 @@ assert.equal(context.ACT_TIMER, null);
         # budget so the full history/contracts can publish their evidence.
         self.assertIn("timeout-minutes: 15", fast_jobs["preflight"])
         self.assertIn("timeout-minutes: 15", effort_jobs["preflight"])
-        self.assertIn("timeout-minutes: 30", effort_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 60", effort_jobs["rust_compile"])
         effort_rust_header = effort_jobs["rust_compile"].split("\n    steps:", 1)[0]
         self.assertIn('    env:\n      CARGO_BUILD_JOBS: "1"', effort_rust_header)
         self.assertEqual(
@@ -2362,8 +2362,8 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("branches: [main]", fast_lane)
         self.assertIn("name: Main promotion gate", fast_lane)
 
-        # Effort compilation is explicitly dispatched and executes none of the
-        # slow release suites.
+        # Effort is explicitly dispatched. compile_only suppresses selected
+        # formal execution; full dispatches still avoid broad release suites.
         self.assertNotIn("\n  pull_request:\n", effort)
         self.assertIn("\n  workflow_dispatch:\n", effort)
         self.assertIn("name: Effort development gate", effort)
@@ -2375,6 +2375,11 @@ assert.equal(context.ACT_TIMER, null);
                 "Install the pinned Rust toolchain",
                 "Restore the effort Rust cache",
                 "Compile every Rust target without executing tests",
+                "Select affected async driver refinement inputs",
+                "Provision the pinned TLC toolchain for async driver refinement",
+                "Build async driver refinement graph and control inputs",
+                "Qualify async driver refinement with pinned TLC",
+                "Preserve async driver refinement evidence",
                 "Enforce persistent Cargo bounds",
                 "Restore persistent runner workspace ownership",
             ],
@@ -2404,6 +2409,11 @@ assert.equal(context.ACT_TIMER, null);
                 "Restore the main fast Rust cache",
                 "Compile every Rust target without executing tests",
                 "Lint the workspace",
+                "Select affected async driver refinement inputs",
+                "Provision the pinned TLC toolchain for async driver refinement",
+                "Build async driver refinement graph and control inputs",
+                "Qualify async driver refinement with pinned TLC",
+                "Preserve async driver refinement evidence",
                 "Enforce persistent Cargo bounds",
                 "Restore persistent runner workspace ownership",
             ],
@@ -2425,13 +2435,12 @@ assert.equal(context.ACT_TIMER, null);
             ),
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
-        # Full-suite execution belongs to manual CI. Exact step/command lists
-        # keep a renamed unit step or an appended broad test command from
-        # silently returning to the blocking PR lane.
+        # Broad Rust suites remain in manual CI. The selected formal lane
+        # delegates its bounded graph/control commands to its dedicated runner.
         self.assertNotIn("make unit", fast_jobs["rust_compile"])
         self.assertNotIn("cargo test", fast_jobs["rust_compile"])
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
-        self.assertIn("timeout-minutes: 60", fast_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 90", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_scalar(
             fast_preflight["Check the shared player input contract"], "run"

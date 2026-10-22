@@ -5857,3 +5857,253 @@ async fn progressive_translation_source_bind_publication_stop_and_read_leases_sh
     })
     .await;
 }
+
+/// Sampled real-backend history, including the existing three-voter bridge
+/// when hiqlite-contract-tests is enabled. Deliberately discarding an applied
+/// reply exercises reconciliation; it is not an injected TimedClient timeout
+/// or an exhaustive relation/consensus proof.
+#[tokio::test]
+async fn async_library_two_node_source_admission_and_applied_reply_reconciliation() {
+    use super::acquired;
+    use plurx_core::store::background_jobs_library::{
+        LibraryTrigger, LibraryWorkInput, LibraryWorkResult,
+    };
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "async-library-backend").await;
+        let file = store.get_file(file_id).await.expect("file").expect("file");
+        let library = store
+            .get_item(file.item_id)
+            .await
+            .expect("item")
+            .expect("item")
+            .library_id;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as i64;
+        let mut jobs = Vec::new();
+        for (index, request_id) in ["async-backend-scan", "async-backend-refresh"]
+            .into_iter()
+            .enumerate()
+        {
+            let EnqueueOutcome::Accepted { job_id, .. } = store
+                .enqueue_library_work(NewLibraryWork {
+                    request_id: request_id.into(),
+                    library_id: library,
+                    now_ms: now,
+                    input: LibraryWorkInput::Full {
+                        refresh: index == 1,
+                        trigger: LibraryTrigger::Manual,
+                    },
+                })
+                .await
+                .expect("paired requests")
+            else {
+                panic!("{backend}: admission");
+            };
+            jobs.push(job_id);
+        }
+        let claim = ClaimJob {
+            job_id: jobs[0].clone(),
+            expected_revision: 0,
+            node_id: "node-a".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::LibraryScan,
+            payload_version: 1,
+            now_ms: now,
+            dispatched_at_ms: now,
+        };
+        // Application is confirmed here, but the remainder of the history
+        // deliberately proceeds without using that returned claim token.
+        assert!(matches!(
+            store.claim_job(claim.clone()).await.expect("applied claim"),
+            ClaimOutcome::Claimed { .. }
+        ));
+        let resolve = ResolveClaim {
+            job_id: jobs[0].clone(),
+            node_id: claim.node_id.clone(),
+            boot_id: claim.boot_id.clone(),
+            claim_id: claim.claim_id.clone(),
+            fence: None,
+            dispatched_at_ms: now,
+            now_ms: now + 1,
+        };
+        let ClaimResolution::Running { token } = store
+            .resolve_claim(resolve.clone())
+            .await
+            .expect("resolve applied claim")
+        else {
+            panic!("{backend}: exact applied identity");
+        };
+        let mut foreign_boot = resolve.clone();
+        foreign_boot.boot_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            !matches!(
+                store
+                    .resolve_claim(foreign_boot)
+                    .await
+                    .expect("foreign boot"),
+                ClaimResolution::Running { .. }
+            ),
+            "{backend}"
+        );
+        let other = ClaimJob {
+            job_id: jobs[1].clone(),
+            node_id: "node-b".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::MetadataRefresh,
+            ..claim.clone()
+        };
+        assert!(
+            matches!(
+                store
+                    .claim_job(other.clone())
+                    .await
+                    .expect("same-root second node"),
+                ClaimOutcome::Contended
+            ),
+            "{backend}"
+        );
+        assert!(
+            store
+                .job_attempts(&jobs[1])
+                .await
+                .expect("refused attempt")
+                .is_empty(),
+            "{backend}"
+        );
+        let lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{library}"),
+                    "node-a",
+                    now,
+                    now + 90_000,
+                )
+                .await
+                .expect("domain"),
+            backend,
+        );
+        assert!(
+            store
+                .bind_library_job(BindLibraryJob {
+                    token: token.clone(),
+                    lease: lease.clone(),
+                    now_ms: now + 1
+                })
+                .await
+                .expect("bind"),
+            "{backend}"
+        );
+        let renewed = store
+            .renew_jobs(RenewJobs {
+                tokens: vec![token.clone()],
+                now_ms: now + 2,
+            })
+            .await
+            .expect("applied renewal");
+        assert!(
+            matches!(renewed.as_slice(), [RenewOutcome::Renewed { .. }]),
+            "{backend}"
+        );
+        let ClaimResolution::Running { token: current } = store
+            .resolve_claim(ResolveClaim {
+                fence: Some(token.fence),
+                now_ms: now + 3,
+                ..resolve
+            })
+            .await
+            .expect("renewal resolution")
+        else {
+            panic!("{backend}: renewed identity");
+        };
+        assert_eq!(current.fence, token.fence, "{backend}");
+        assert_eq!(current.revision, token.revision + 1, "{backend}");
+        let completion = CompleteLibraryWork {
+            token: token.clone(),
+            lease,
+            request_id: "async-backend-scan".into(),
+            now_ms: now + 3,
+            result: LibraryWorkResult::Completed {
+                scan: plurx_core::scan::TargetedScan {
+                    report: plurx_core::scan::ScanReport::default(),
+                    items: vec![],
+                },
+            },
+        };
+        assert!(
+            !store
+                .complete_library_work(completion.clone())
+                .await
+                .expect("stale renewal revision"),
+            "{backend}"
+        );
+        // Discard the applied completion acknowledgement, then use the same
+        // authoritative request query the daemon uses for reconciliation.
+        assert!(
+            store
+                .complete_library_work(CompleteLibraryWork {
+                    token: current.clone(),
+                    ..completion
+                })
+                .await
+                .expect("applied completion"),
+            "{backend}"
+        );
+        let rows = store
+            .library_work_requests(LibraryWorkQuery {
+                request_id: Some("async-backend-scan".into()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("completion reconciliation");
+        assert_eq!(rows.len(), 1, "{backend}");
+        assert!(
+            rows[0].state == "succeeded" && rows[0].result.is_some(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .background_job(&jobs[0])
+                .await
+                .expect("retired job")
+                .expect("job")
+                .state,
+            JobState::Succeeded,
+            "{backend}"
+        );
+        assert!(
+            !store
+                .settle_job(SettleJob {
+                    token: current,
+                    now_ms: now + 4,
+                    settlement: JobSettlement::Yield {
+                        error_code: None,
+                        checkpoint: None,
+                        not_before_ms: now + 4
+                    },
+                })
+                .await
+                .expect("already retired"),
+            "{backend}"
+        );
+        assert!(
+            matches!(
+                store
+                    .claim_job(ClaimJob {
+                        now_ms: now + 4,
+                        dispatched_at_ms: now + 4,
+                        ..other
+                    })
+                    .await
+                    .expect("source reservation retired"),
+                ClaimOutcome::Claimed { .. }
+            ),
+            "{backend}"
+        );
+    })
+    .await;
+}

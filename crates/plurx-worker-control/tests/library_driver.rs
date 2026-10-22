@@ -148,3 +148,57 @@ fn production_executor_consumes_real_environment_replies_in_order() {
         .expect("join");
     assert!(cancel < join);
 }
+
+/// One manual poll is the complete schedule. Every input is Ready or Pending
+/// by construction; reversing work/tick priority fails the named assertion
+/// without a runtime, a clock, a timeout or editing any daemon source.
+#[test]
+fn selector_ready_work_precedes_ready_tick_and_preserves_loss_priority() {
+    use plurx_worker_control::library_driver::{select_work, Selected};
+    use std::future::pending;
+
+    fn poll_once<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("SELECTOR_READY_SOURCE_MUST_COMPLETE_IN_ONE_POLL"),
+        }
+    }
+
+    assert_eq!(
+        poll_once(select_work(ready(()), ready(()), ready(()), ready(()))),
+        Selected::QueueLoss,
+        "SELECTOR_QUEUE_LOSS_PRECEDENCE"
+    );
+    assert_eq!(
+        poll_once(select_work(
+            pending::<()>(),
+            ready(()),
+            ready(()),
+            ready(())
+        )),
+        Selected::DomainLoss,
+        "SELECTOR_DOMAIN_LOSS_PRECEDENCE"
+    );
+    assert_eq!(
+        poll_once(select_work(
+            pending::<()>(),
+            pending::<()>(),
+            ready(()),
+            ready(())
+        )),
+        Selected::Work(()),
+        "SELECTOR_WORK_BEFORE_TICK"
+    );
+    assert_eq!(
+        poll_once(select_work(
+            pending::<()>(),
+            pending::<()>(),
+            pending::<()>(),
+            ready(())
+        )),
+        Selected::Tick,
+        "SELECTOR_PRESSURE_WHEN_WORK_PENDING"
+    );
+}

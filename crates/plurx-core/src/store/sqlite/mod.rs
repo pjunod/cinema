@@ -1935,6 +1935,15 @@ impl SqliteStore {
         Ok(installed == 15)
     }
 
+    /// Test-only transaction controls for the actual-SQL reachable graph.
+    /// Each call uses the same writer connection as production Store methods.
+    /// A failed SAVEPOINT/ROLLBACK is an error, never a skipped graph edge.
+    #[cfg(test)]
+    pub(super) async fn async_refinement_control(&self, sql: String) -> Result<(), StoreError> {
+        self.with_conn(move |connection| connection.execute_batch(&sql).map_err(StoreError::from))
+            .await
+    }
+
     async fn with_conn<T, F>(&self, f: F) -> Result<T, StoreError>
     where
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,

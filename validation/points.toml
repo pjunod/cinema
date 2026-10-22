@@ -445,6 +445,7 @@ title = "Media facts, persistence, and domain rules"
 contract = "The core model classifies media and persists its durable state without corrupting existing libraries, including bounded idempotency, ownership, leases, and routes for live cluster media sessions; replacing an occupied preparation is one atomic abort-and-prepare mutation that never advances the playback pointer and whose exact retry reads back the staged merged route."
 paths = [
   "tests/support/rust_source_inventory.rs",
+  "crates/plurx-core/src/store/async_driver_refinement.rs",
   "crates/plurx-core/src/store/background_jobs/principal_tests.rs",
   "crates/plurx-core/src/store/background_jobs/subtitle_admission_tests.rs",
   "crates/plurx-core/src/store/hiqlite_fragment_index_cluster/tests.rs",
@@ -1436,6 +1437,7 @@ paths = [
   "tests/operations/test_worker_control_runner.py",
   "tests/fixtures/worker-control/**",
   "tests/operations/test_worker_control_ci.py",
+  "tests/operations/test_async_driver_refinement_ci.py",
   "tests/operations/test_formal_runner.py",
   "tests/operations/test_formal_ci.py",
   "tests/operations/test_formal_toolchain.py",

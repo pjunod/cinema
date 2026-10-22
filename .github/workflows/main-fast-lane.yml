@@ -349,13 +349,11 @@ jobs:
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
     container: ubuntu:24.04
-    # Compile all targets and enforce workspace/vendor Clippy here. The full
-    # Rust unit and SQLite suites belong to manual full CI, while each change
-    # carries its named, locally run focused regression through preflight.
-    # A cold run spent 21m36s provisioning before compilation. Budget for
-    # that setup plus all-target checking and both Clippy stages; no tests
-    # are added by this ceiling.
-    timeout-minutes: 60
+    # Compile all targets and enforce workspace/vendor Clippy here, then run
+    # the affected async-driver graph and bounded TLC qualification. A cold
+    # Rust run spent 21m36s provisioning before compilation; leave room for
+    # that setup, the all-target check, and the bounded formal lane.
+    timeout-minutes: 90
     env:
       # Keep compilation within the shared guest's memory budget.
       CARGO_BUILD_JOBS: "1"
@@ -372,6 +370,7 @@ jobs:
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Install the pinned Rust toolchain
         uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
         with:
@@ -392,6 +391,47 @@ jobs:
       - name: Lint the workspace
         run: |
           make lint
+      - name: Select affected async driver refinement inputs
+        id: async-driver-inputs
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          test -n "$PR_BASE_SHA"
+          mkdir -p target
+          python3 scripts/check-async-driver-refinement affected --base "$PR_BASE_SHA" > target/async-driver-affected.json
+          python3 -c 'import json, os; from pathlib import Path; value=json.loads(Path("target/async-driver-affected.json").read_text()); assert type(value.get("affected")) is bool; print("affected=" + str(value["affected"]).lower(), file=open(os.environ["GITHUB_OUTPUT"], "a"))'
+      - name: Provision the pinned TLC toolchain for async driver refinement
+        if: steps.async-driver-inputs.outputs.affected == 'true'
+        run: python3 scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain
+      - name: Build async driver refinement graph and control inputs
+        if: steps.async-driver-inputs.outputs.affected == 'true'
+        env:
+          ASYNC_DRIVER_OUTPUT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/target/verification"
+          test ! -e "$ASYNC_DRIVER_OUTPUT"
+          python3 scripts/check-async-driver-refinement build-inputs --output-dir "$ASYNC_DRIVER_OUTPUT"
+      - name: Qualify async driver refinement with pinned TLC
+        if: steps.async-driver-inputs.outputs.affected == 'true'
+        env:
+          ASYNC_DRIVER_OUTPUT: ${{ github.workspace }}/target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python3 scripts/check-async-driver-refinement qualify
+          --driver-graph "$ASYNC_DRIVER_OUTPUT/driver-graph.json"
+          --store-graph "$ASYNC_DRIVER_OUTPUT/store-graph.json"
+          --provenance "$ASYNC_DRIVER_OUTPUT/provenance.json"
+          --output-dir "$ASYNC_DRIVER_OUTPUT/tlc"
+          --cache-dir target/formal-toolchain
+      - name: Preserve async driver refinement evidence
+        if: always() && steps.async-driver-inputs.outputs.affected == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/verification/async-driver-refinement-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 90
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         continue-on-error: true
