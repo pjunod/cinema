@@ -19,6 +19,15 @@ PACKAGE = ROOT/'verification/async-driver-refinement'
 sys.path.insert(0,str(PACKAGE))
 import checker as c
 
+CLAIM_BOUNDARIES = {
+ 'NoTwoSourceReaders': 'NoTwoSourceReaders counts durable records with state running and queue expiry after the sampled time; it does not bound physical readers while expired work awaits cancellation or join.',
+ 'GuardBeforeRevoke': 'GuardBeforeRevoke is a structural consistency check: the modeled read guard clears at Reply before a later DriverReturn can mark revocation; it is not independent evidence for adapter publication-lock correctness.',
+ 'selected_completion_reply_ambiguity': 'The stable-success model may turn committed WorkSucceeded into WorkFailed after a lost completion acknowledgement; SettleRetry still has an actual refused self-edge after COMPLETE, so that flip alone does not violate the matching-input capacity premise.',
+ 'driver_work_tags': 'The importer accepts only the declared Rust Work Debug strings and maps them to stable model tags; unknown exporter formatting is rejected before model generation.',
+}
+
+CLAIM_BOUNDARIES.update(c.STORE_BOUNDARIES)
+
 PREFIXES = ('crates/plurx-core/src/store/', 'crates/plurx-worker-control/',
  'crates/plurxd/src/library_work/', 'crates/plurxd/src/background_jobs/',
  'verification/async-driver-refinement/', 'crates/plurx-core/tests/store_contract/',
@@ -51,6 +60,12 @@ for short in ('ready_work_precedes_burst_pressure_ticks',
  'domain_loss_joins_before_release_and_admission_drop','queue_loss_joins_before_release_and_retirement',
  'admission_pressure_joins_before_release_and_drop','reconciles_lost_completion_acknowledgement'):
     CASES['daemon-'+short] = DAEMON+['state::library_work::tests::library_worker_'+short,'--','--exact','--nocapture']
+
+for short in ('acknowledged_settlement_leaves_retirement_durably_unchanged',
+ 'retirement_releases_durably_valid_claim_after_local_revocation',
+ 'retirement_resolves_unobserved_renewal_revision',
+ 'retirement_resolves_cancellation_revision_after_child_join'):
+    CASES['daemon-'+short] = DAEMON+['background_jobs::tests::'+short,'--','--exact','--nocapture']
 
 STORE_TESTS = c.read_json(PACKAGE/'store-tests.json')
 for case in STORE_TESTS['core_tests']:
@@ -136,25 +151,88 @@ def assert_scope_closures():
             required.add(crate); todo.extend(dependencies(crate)-required)
         c.require(required <= SCOPE_CRATES[scope],f'{scope} scope omits workspace path dependency closure: {sorted(required-SCOPE_CRATES[scope])}')
 
-def governed_prefixes():
-    return set(PREFIXES) | {crate+'/' for crates in SCOPE_CRATES.values() for crate in crates}
+def patch_path_overrides(root=ROOT):
+    """Resolve every root-manifest [patch.*] path dependency, fail closed."""
+    manifest = tomllib.loads((root/'Cargo.toml').read_text())
+    overrides = {}
+    for table in manifest.get('patch', {}).values():
+        c.require(isinstance(table, dict), 'Unsupported Cargo [patch.*] table')
+        for package, entry in table.items():
+            if not isinstance(entry, dict) or 'path' not in entry:
+                continue
+            relative_path = entry['path']
+            c.require(isinstance(relative_path, str) and relative_path.strip(),
+                      f'Cargo path override has unsupported path value: {package}')
+            path = (root/relative_path).resolve()
+            c.require(path != root.resolve() and root.resolve() in path.parents,
+                      f'Cargo path override escapes repository: {package}')
+            c.require(path.is_dir(), f'Cargo path override is missing/not a directory: {package}')
+            relative = path.relative_to(root.resolve()).as_posix()
+            overrides[relative] = path
+    return overrides
+
+
+def patch_tree_sources(root=ROOT):
+    """Hash every regular file in vendor and local path overrides, including build inputs."""
+    result = {}
+    trees = patch_path_overrides(root)
+    vendor = root/'vendor'
+    c.require(vendor.is_dir() and not vendor.is_symlink(), 'Cargo vendor source tree is missing or symlinked')
+    trees['vendor'] = vendor
+    for relative, directory in trees.items():
+        for path in directory.rglob('*'):
+            if path.is_symlink():
+                c.require(False, f'Unsupported symlink in Cargo path override: {path}')
+            if not path.is_file():
+                continue
+            parts = path.relative_to(directory).parts
+            if any(part in {'.git', 'target', '__pycache__'} for part in parts):
+                continue
+            key = f'{relative}/{path.relative_to(directory).as_posix()}'
+            result[key] = c.sha(path)
+    return result
+
+
+def governed_prefixes(root=ROOT):
+    return (set(PREFIXES) | {crate+'/' for crates in SCOPE_CRATES.values() for crate in crates}
+            | {path+'/' for path in patch_path_overrides(root)} | {'vendor/'})
 
 def source_identity(include_proof=True):
     assert_scope_closures()
     paths = set(FILES)
     prefixes = governed_prefixes()
+    crate_prefixes = {crate+'/' for crates in SCOPE_CRATES.values() for crate in crates}
     for prefix in prefixes:
-        paths.update(p.relative_to(ROOT).as_posix() for p in (ROOT/prefix).rglob('*')
-          if p.is_file() and p.suffix in {'.rs','.sql','.toml','.tla','.cfg','.py','.md','.json'}
-          and '__pycache__' not in p.parts)
+        directory = ROOT/prefix
+        for path in directory.rglob('*'):
+            relative = path.relative_to(directory)
+            if any(part in {'.git','target','__pycache__'} for part in relative.parts):
+                continue
+            if path.is_symlink():
+                if prefix in crate_prefixes:
+                    c.require(False, f'Unsupported symlink in governed Rust crate input: {path}')
+                continue
+            if path.is_file() and (prefix in crate_prefixes or prefix == 'vendor/'
+                                   or path.suffix in {'.rs','.sql','.toml','.tla','.cfg','.py','.md','.json'}):
+                paths.add(path.relative_to(ROOT).as_posix())
+    patches = patch_tree_sources()
+    paths.update(patches)
     if not include_proof:
-        paths = {p for p in paths if p.startswith('crates/') or p in {'Cargo.lock','Cargo.toml','rust-toolchain.toml'}}
-    return {p:c.sha(ROOT/p) for p in sorted(paths) if (ROOT/p).is_file() and not p.endswith('.md')}
+        patch_roots = tuple(path+'/' for path in patch_path_overrides()) + ('vendor/',)
+        paths = {p for p in paths if p.startswith('crates/') or p.startswith(patch_roots)
+                 or p in {'Cargo.lock','Cargo.toml','rust-toolchain.toml'}}
+    crate_roots = tuple(crate+'/' for crates in SCOPE_CRATES.values() for crate in crates)
+    sources = {p:c.sha(ROOT/p) for p in sorted(paths) if (ROOT/p).is_file()
+      and (not p.endswith('.md') or p.startswith(crate_roots))}
+    sources.update(patches)
+    return sources
 
-def case_sources(name, sources):
+def case_sources(name, sources, root=ROOT):
     crates = SCOPE_CRATES[case_scope(name)]
     return {path:digest for path,digest in sources.items() if path in {'Cargo.toml','Cargo.lock','rust-toolchain.toml'}
-      or any(path.startswith(crate+'/') for crate in crates)}
+      or any(path.startswith(crate+'/') for crate in crates)
+      or path.startswith('vendor/')
+      or any(path.startswith(vendor+'/') for vendor in patch_path_overrides(root))}
 
 
 def reusable_case(name, row, out, sources):
@@ -350,7 +428,7 @@ def prepare(args):
         text = c.config(name)
         c.require((PACKAGE/f'{name}.cfg').read_text() == text,f'reviewed configuration drift: {name}')
         (out/f'{name}.cfg').write_text(text)
-    inventory = {'schema_version':1,'result_class':'inventory_only','acceptance':False,
+    inventory = {'schema_version':1,'result_class':'inventory_only','acceptance':False,'claim_boundaries':CLAIM_BOUNDARIES,
       'driver':{'states':len(driver['states']),'edges':len(driver['edges']),'rejected':len(driver['rejected']),
                 'reply_classes':len(c.REPLIES),'dag_rank_max':max(ranks)},'store':facts,
       'graph_sha256':{'driver':c.sha(args.driver_graph),'store':c.sha(args.store_graph)},
@@ -392,7 +470,7 @@ def qualify(args):
     receipt = old if old.get('identities') == identities else {'schema_version':1,'identities':identities,'runs':{}}
     receipt['attestations'] = {'provenance_sha256':c.sha(args.provenance),'source_sha256':current_sources,
       'inventory_sha256':c.sha(out/'inventory.json')}
-    receipt.update({'strict_controls':strict_controls,'complete':False,'result_class':'unqualified','scope':'conditional finite selected episode D',
+    receipt.update({'claim_boundaries':CLAIM_BOUNDARIES,'strict_controls':strict_controls,'complete':False,'result_class':'unqualified','scope':'conditional finite selected episode D',
        'sql_closure':'closed only over declared input domain; not arbitrary production histories',
        'source_transfer':'reviewed driver tag-independence and adapter/environment contracts; no full fair Rust trace theorem'})
     for name in ([args.config] if args.config else list(c.CONFIGS)):

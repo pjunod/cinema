@@ -9,67 +9,67 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b"
       },
       {
         "table": "08 worker acquisition and cleanup",
         "source": "crates/plurxd/src/library_work.rs",
-        "anchor": "pub(super) async fn work_library_queue(",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "anchor": "plurx_worker_control::library_driver::run_driver(&mut environment)",
+        "sha256": "5b7cc7b13a70e103f711f1fe7d80d490373510ef62d4f99ba869789302a00934"
       },
       {
         "table": "09 domain lease acquisition",
-        "source": "crates/plurxd/src/library_work.rs",
-        "anchor": "Effect::AcquireDomain => {",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "source": "crates/plurxd/src/library_work/env.rs",
+        "anchor": "            Request::AcquireDomain => {",
+        "sha256": "1cbc542622a0c81c4dfd05428cb2859b9857e30bcb82fe149e1661949905923d"
       },
       {
         "table": "10 work iteration bound",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "for _ in 0..8 {",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "5b7cc7b13a70e103f711f1fe7d80d490373510ef62d4f99ba869789302a00934"
       },
       {
         "table": "11 lost reply resolution",
         "source": "crates/plurxd/src/library_work.rs",
         "anchor": "// A lost completion acknowledgement must not rerun a published result.",
-        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429"
+        "sha256": "5b7cc7b13a70e103f711f1fe7d80d490373510ef62d4f99ba869789302a00934"
       },
       {
         "table": "12 domain lease ttl heartbeat",
@@ -288,7 +288,7 @@
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
     ],
-    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence."
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed."
   },
   "configs": {
     "progress.cfg": {

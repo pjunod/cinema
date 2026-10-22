@@ -11,19 +11,67 @@ PACKAGE = Path(__file__).resolve().parent
 REPLIES = ('DomainRefused','DomainAcquired','BindRefused','BindAccepted','QueueLoss',
            'DomainLoss','Pressure','WorkFailed','WorkSucceeded','JoinedFailed',
            'JoinedSucceeded','ReleaseReturned','Done')
+WORK_CLASSES = {
+ 'Idle':'idle','Running':'running',
+ 'Completed { ok: false }':'completed_failed','Completed { ok: true }':'completed_succeeded',
+ 'Joined { ok: false }':'joined_failed','Joined { ok: true }':'joined_succeeded',
+}
+
 REQUESTS = {'AcquireDomain','Bind','PollWork','RevokeDomain','CancelWork','JoinWork',
             'DropPublisher','ReleaseRefused','ReleaseRetry','ReleaseNone',
             'ReleaseInterrupted','SettleYield','SettleRetry','RetireQueue','DropAdmission'}
 ACTIONS = {'claim': {'job','node'}, 'renew': {'job','token'},
  'settle': {'job','token','disposition'}, 'bind': {'job','token','lease'},
  'complete': {'job','token','lease'}, 'acquire_domain': {'node'},
- 'release_domain': {'lease'}, 'remove_owner': {'node'}, 'clock_advance': {'now'}}
+ 'release_domain': {'lease'}, 'remove_owner': {'node'}, 'clock_advance': {'now'},
+ 'resolve': {'job','token'}}
 RESULTS = {'claimed','refused','cancelled','expired_or_pruned','renewed','accepted',
-           'acquired','held','removed','advanced'}
+           'acquired','held','removed','advanced','running','cancel_requested','settled','lost_ownership'}
 RESULTS_BY_OP = {'claim': {'claimed','refused','cancelled','expired_or_pruned'}, 'renew': {'renewed','refused'},
  'settle': {'accepted','refused'}, 'bind': {'accepted','refused'}, 'complete': {'accepted','refused'},
  'acquire_domain': {'acquired','held'}, 'release_domain': {'accepted','refused'},
- 'remove_owner': {'removed'}, 'clock_advance': {'advanced'}}
+ 'remove_owner': {'removed'}, 'clock_advance': {'advanced'},
+ 'resolve': {'running','cancel_requested','settled','lost_ownership','expired_or_pruned'}}
+STORE_BOUNDARIES = {'retirement_inputs': 'disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current '
+                      'episode.now for every captured original token; ordinary dispositions 0/1/2 retain '
+                      'latest-revision inputs',
+ 'resolution_read_boundary': 'resolve_claim is one logical actual-API pure-read action; its two '
+                             'authoritative QueueSql awaits and internal interleavings are a named '
+                             'conformance boundary, not closed read-interleaving coverage',
+ 'primitive_clock_boundary': "each generated primitive request uses current episode.now; the daemon's three "
+                             'retirement wall samples and dispatch/application races are reviewed '
+                             'adapter/conformance boundaries, not source-derived clock-race coverage',
+ 'reservation_conservation_boundary': 'conservation is checked for unexpired queue authority only; expired '
+                                      'Running rows and residue remain represented, with no independent '
+                                      'complete-residue conservation guarantee until reclaim/prune',
+ 'domain_reacquisition_boundary': 'each owner can acquire at most once; release or expiry does not reset its '
+                                  'budget, so same-owner release-to-reacquire cycles are excluded',
+ 'foreign_holder_boundary': 'foreign-holder is a third adversarial domain-lease owner, not either worker '
+                            'node, with one independent acquisition budget',
+ 'retirement_sequence_boundary': 'the graph supplies separate actual settle and logical resolve primitives; '
+                                 'daemon drain/local-token/first-settle/resolve/optional-second-settle '
+                                 'sequencing is a reviewed source and daemon-conformance boundary composed '
+                                 'by the temporal model',
+ 'cleanup_boundary': 'local cleanup needs bounded retirement calls to return, not eventual successful '
+                     'acknowledgement; errors are logged and finish returns while durable authority may '
+                     'remain',
+ 'dispatch_time_noninterference': 'for retirement fence Some(F), resolve_claim reads dispatched_at_ms only '
+                                  'in its skipped fence-is-none window branch; neither SQL query nor later '
+                                  'classification reads it, so a representative dispatch sample preserves '
+                                  'results at fixed now/read outcomes; this is a reviewed source lemma, not '
+                                  'a machine proof',
+ 'queue_sql_boundary': 'all generated queue primitives use QueueSql::queue_sql, not queue_transaction; '
+                       'ReplyBoundary passes queue_transaction through without fault injection, so '
+                       'multi-statement transaction faults are outside this slice',
+ 'schema_snapshot_boundary': 'canonical durable rows cover exactly the nine snapshot_tables; all installed '
+                             'schema objects are hash-bound for identity, not complete row snapshots or '
+                             'proofs of unrelated tables',
+ 'savepoint_boundary': 'no closure transition invokes queue_transaction or nested explicit transactions; '
+                       'test savepoints bracket sequential primitives on the production writer and any '
+                       'savepoint/SQL failure aborts closure',
+ 'refusal_observation': 'the existing BFS full-canonical equality guard already rejects every refused edge '
+                        "mutation; direct non-graph conformance can additionally enable apply's durable "
+                        'snapshot observer; no pre-existing closure gap is claimed'}
 DRIVER_SOURCES = ('crates/plurx-worker-control/src/library_driver.rs',
  'crates/plurx-worker-control/src/library_lifecycle.rs',
  'crates/plurx-worker-control/examples/library_driver_graph.rs',
@@ -105,6 +153,11 @@ def graph_structure(graph, cap):
     require(len(reachable) == len(states), 'unreachable declared graph state')
     return adjacency
 
+def driver_work_class(value):
+    require(isinstance(value,str) and value in WORK_CLASSES,
+            'unknown driver Work Debug class; exporter/importer contract must be reviewed')
+    return WORK_CLASSES[value]
+
 def validate_driver(g):
     exact_keys(g, {'schema_version','scope','initial','domain','states','edges','rejected'}, 'driver root')
     adj = graph_structure(g, 1000)
@@ -114,6 +167,7 @@ def validate_driver(g):
         exact_keys(s, {'id','phase','held','work','revoked','cancelled','pending','remaining','terminal'}, 'driver state')
         exact_keys(s['held'], {'admission','queue','domain','publisher'}, 'driver held')
         require(all(type(v) is bool for v in s['held'].values()), 'nonboolean held field')
+        driver_work_class(s['work'])
         require(s['pending'] is None or s['pending'] in REQUESTS, 'unknown pending request')
         require(isinstance(s['remaining'],list) and all(x in REQUESTS for x in s['remaining']), 'unknown effect tail')
         require(type(s['terminal']) is bool and s['terminal'] == (s['pending'] is None), 'terminal inventory mismatch')
@@ -156,6 +210,8 @@ def expected_actions(s):
         if s['budgets']['claims'][j] < 2:
             for n in range(2): add('claim',job=j,node=n)
         for i,t in enumerate(tokens):
+            add('settle',job=j,token=i,disposition=3)
+            add('resolve',job=j,token=i)
             if any(later['claim_id'] == t['claim_id'] for later in tokens[i+1:]): continue
             if t['claim_id'] not in s['budgets']['renewed_claims']: add('renew',job=j,token=i)
             for d in range(3): add('settle',job=j,token=i,disposition=d)
@@ -176,6 +232,46 @@ def expected_actions(s):
     if later: add('clock_advance',now=min(later))
     return set(out)
 
+def validate_job_projection(s):
+    """Independent arithmetic/atomicity checks of exported durable fields."""
+    for job in s['jobs']:
+        expiry = job['expiry']
+        require(expiry is None or integer(expiry,-(2**63),2**63-1), 'non-i64 queue expiry')
+        active = job['state'] == 'running' and expiry is not None and expiry > s['now']
+        require(job['active'] is active, 'activity projection disagrees with concrete queue expiry')
+        require(not job['request_done'] or
+                (job['request_state'] == 'succeeded' and job['state'] == 'succeeded' and
+                 job['owner'] is None and job['reservation_count'] == 0),
+                'LastRequestAtomicRetirement: malformed completed request projection')
+        require(job['owner'] is not None or job['reservation_count'] == 0,
+                'ReservationConservation: ownerless reservation projection')
+        require(not active or job['reservation_count'] == 3,
+                'ReservationConservation: unexpired owner lacks all three reservations')
+    require(sum(job['active'] for job in s['jobs']) <= 1, 'NoTwoSourceReaders: multiple unexpired authorities')
+
+def validate_resolution(e, before, after):
+    """Validate returned identity and read-only projections, not resolve guards."""
+    if e['action']['op'] != 'resolve':
+        require(e['resolved_token'] is None, 'non-resolve returned a resolution token')
+        return
+    for field in ('now','jobs','domain','captured_leases','budgets'):
+        require(before[field] == after[field], f'resolve changed read-only projection: {field}')
+    j = e['action']['job']
+    returned = e['resolved_token']
+    if e['result'] in {'running','cancel_requested'}:
+        require(integer(returned,0,len(after['captured_tokens'][j])-1), 'missing resolved token index')
+        original = before['captured_tokens'][j][e['action']['token']]
+        token = after['captured_tokens'][j][returned]
+        require(all(original[k] == token[k] for k in ('job_id','node_id','boot_id','claim_id','fence')),
+                'resolve returned another immutable attempt identity')
+        for k in range(2):
+            old, new = before['captured_tokens'][k], after['captured_tokens'][k]
+            expected = old + ([token] if k == j and token not in old else [])
+            require(new == expected, 'resolve appended an unrelated token')
+    else:
+        require(returned is None, 'non-running resolution returned a token')
+        require(before['captured_tokens'] == after['captured_tokens'], 'non-running resolve captured a token')
+
 def validate_store(g, verify_sources=True):
     exact_keys(g, {'schema_version','scope','initial','source_bindings','schema_bindings','domain','coverage','states','edges'}, 'Store root')
     graph_structure(g, 20000)
@@ -189,10 +285,12 @@ def validate_store(g, verify_sources=True):
             'physical/domain acquisition budget drift')
     require(domain.get('domain_owners') == ['node-a','node-b','foreign-holder'] and
       domain.get('selected_attempt_ids') == 4 and domain.get('reserved_boundary_ids') == 2, 'identity-domain drift')
-    require(domain.get('settlement_dispositions') == ['yield','retry','cancel'], 'settlement input domain drift')
+    require(domain.get('settlement_dispositions') == ['yield','retry','cancel','retirement_yield'], 'settlement input domain drift')
     require(domain.get('ordinary_token_inputs') == 'latest captured revision per claim; queue-token Mutex adapter contract; historical revisions remain captured and conformance-tested', 'ordinary token input-domain drift')
     require(domain.get('binding_completion_inputs') == 'captured domain lease owner equals captured queue-token node; wrong-owner inputs are separate conformance', 'lease-owner input-domain drift')
     require(domain.get('node_domain_acquisition_inputs') == 'node has selected running durable queue ownership, including expired retained ownership for dispatch/application races; foreign holder is independent', 'node-domain input-domain drift')
+    for key, value in STORE_BOUNDARIES.items():
+        require(domain.get(key) == value, f'Store boundary drift: {key}')
     bindings = g['source_bindings']
     expected_sources = {'store/'+p for p in ('background_jobs.rs','background_jobs_domain.rs',
       'background_jobs_library.rs','background_jobs_schema.sql','background_jobs_resources.sql',
@@ -231,7 +329,7 @@ def validate_store(g, verify_sources=True):
         require(isinstance(s.get('captured_leases'),list), 'missing captured lease inventory')
         require(isinstance(s.get('cutoffs'),list), 'missing visible input cutoffs')
         for cutoff in s['cutoffs']:
-            require(re.fullmatch(r'attempt_budget_j[01]|renewal_budget_.+|domain_acquire_budget|no_future_boundary',cutoff) is not None,
+            require(re.fullmatch(r'attempt_budget_j[01]|renewal_budget_.+|domain_acquire_budget(?:_node-a|_node-b|_foreign-holder)?|no_future_boundary',cutoff) is not None,
                     f'unknown cutoff class: {cutoff}')
             cutoffs[cutoff] += 1
         exact_keys(s['budgets'], {'claims','renewed_claims','domain_acquired','removed'}, 'episode budgets')
@@ -250,13 +348,14 @@ def validate_store(g, verify_sources=True):
                 exact_keys(token, {'job_id','node_id','boot_id','claim_id','fence','revision','lease_expires_ms'}, 'captured JobToken')
                 for f in ('fence','revision','lease_expires_ms'):
                     require(integer(token[f],-(2**63),2**63-1), 'non-i64 token payload')
+        validate_job_projection(s)
         for lease in s['captured_leases']:
             require(lease.get('owner_node_id') in {'node-a','node-b','foreign-holder'}, 'unknown opaque lease owner')
             for field in ('fence','revision'): require(integer(lease.get(field),0,2**64-1), 'invalid u64 domain field')
             require(integer(lease.get('expires_at_unix_ms'),-(2**63),2**63-1), 'invalid i64 domain expiry')
             exact_keys(lease, {'resource','owner_node_id','fence','revision','expires_at_unix_ms'}, 'captured lease')
     for e in g['edges']:
-        exact_keys(e, {'from','to','action','result'}, 'Store edge')
+        exact_keys(e, {'from','to','action','result','resolved_token'}, 'Store edge')
         a = e['action']; op = a.get('op')
         encoded = canonical(a)
         require(encoded not in outgoing[e['from']], 'duplicate/nondeterministic Store input')
@@ -274,7 +373,8 @@ def validate_store(g, verify_sources=True):
         if 'node' in a: require(a['node'] in ((0,1,2) if op == 'acquire_domain' else (0,1)), 'invalid node index')
         if 'token' in a: require(0 <= a['token'] < len(before['captured_tokens'][a['job']]), 'missing token target')
         if 'lease' in a: require(0 <= a['lease'] < len(before['captured_leases']), 'missing lease target')
-        if 'disposition' in a: require(a['disposition'] in range(3), 'unknown disposition')
+        if 'disposition' in a: require(a['disposition'] in range(4), 'unknown disposition')
+        validate_resolution(e,before,after)
         for j in range(2):
             old, new = before['captured_tokens'][j], after['captured_tokens'][j]
             require(new[:len(old)] == old, 'captured token identity is not append-only')
@@ -299,10 +399,14 @@ def rejection_controls(driver,store):
     mutations = []
     broken = copy.deepcopy(driver); broken['edges'][0]['to'] = len(driver['states'])
     mutations.append(('missing-driver-target',lambda: validate_driver(broken),'missing/outside edge target'))
+    require(isinstance(store.get('source_bindings'),dict) and store['source_bindings'],
+            'source-hash-drift control requires nonempty source bindings')
     bad_store = copy.deepcopy(store); first = next(iter(bad_store['source_bindings']))
     bad_store['source_bindings'][first] = '0'*64
     mutations.append(('source-hash-drift',lambda: validate_store(bad_store),'Store source hash mismatch'))
     missing = copy.deepcopy(store)
+    require(any(e['from'] == e['to'] for e in missing['edges']),
+            'missing-store-input control requires a self edge')
     index = next(i for i,e in enumerate(missing['edges']) if e['from'] == e['to'])
     missing['edges'].pop(index)
     mutations.append(('missing-store-input',lambda: validate_store(missing),'Store input-domain closure incomplete'))
@@ -352,17 +456,18 @@ def tables(driver,store):
     ranks = validate_driver(driver)
     ds = []
     for s,r in zip(driver['states'],ranks):
-        ds.append({'pending':s['pending'],'terminal':s['terminal'],'work':s['work'],
+        ds.append({'pending':s['pending'],'terminal':s['terminal'],'work':driver_work_class(s['work']),
           **s['held'],'revoked':s['revoked'],'cancelled':s['cancelled'],'rank':r})
     de = [{'src':e['from'],'dst':e['to'],'reply':e['reply']} for e in driver['edges']]
     ss = []
     owners = {None:-1,'node-a':0,'node-b':1,'foreign':2,'foreign-holder':2}
     for s in store['states']:
-        ss.append({'jobs':[{'state':j['state'],'active':j['active'],'done':j['request_done'],
+        ss.append({'now':s['now'],'jobs':[{'state':j['state'],'active':j['active'],'done':j['request_done'],
             'owner':owners[j['owner']],'reservations':j['reservation_count']} for j in s['jobs']],
            'tokens':s['captured_tokens'],
            'leases':[{'owner':owners[l['owner_node_id']]} for l in s['captured_leases']]})
     se = [{'fresh':edge_fresh(e,store), 'monotone':edge_monotone(e,store), 'src':e['from'],'dst':e['to'],'op':e['action']['op'],'result':e['result'],
+       'resolved':e['resolved_token'] if e['resolved_token'] is not None else -1,
        **{key:e['action'].get(key,-1) for key in ('job','node','token','lease','disposition')}} for e in store['edges']]
     # Tokens' concrete payloads are opaque to the product. Length and identity
     # are checked above, and SQL membership comes solely from the source graph.
@@ -395,7 +500,13 @@ def verdict(output, code, expected):
     temporal = 'Temporal properties were violated.' in output
     if expected:
         require(code in (12,13) and ('State 1:' in output or 'State 1: <' in output), 'missing semantic counterexample/exit')
-        require(safety == [expected] or (not safety and temporal and 'Back to state' in output), 'wrong named counterexample')
+        kinds = {'temporal' if expected in cfg['properties'] else 'invariant'
+                 for cfg in CONFIGS.values() if cfg['expected'] == expected}
+        require(len(kinds) == 1, 'unregistered or ambiguous expected counterexample kind')
+        if kinds == {'invariant'}:
+            require(code == 12 and safety == [expected] and not temporal, 'wrong named invariant counterexample')
+        else:
+            require(code == 13 and not safety and temporal and 'Back to state' in output, 'wrong temporal counterexample')
         return {'result_class':'reachability_witness' if expected == 'NonvacuityWitness' else 'semantic_control',
                 'expected_property':expected,'states':counts,'complete':False,'counterexample':True}
     require(code == 0 and not safety and not temporal and counts[2] == 0, 'incomplete/failed positive TLC run')

@@ -3243,6 +3243,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledged_settlement_leaves_retirement_durably_unchanged() {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        let not_before_ms = unix_ms().expect("clock") + 60_000;
+        assert!(fence
+            .settle(JobSettlement::Yield {
+                error_code: Some("conformance_yield".into()),
+                checkpoint: Some(serde_json::json!({ "progress": 7 })),
+                not_before_ms,
+            })
+            .await
+            .expect("acknowledged settlement"));
+        assert!(fence.0.state.lock().await.token.is_none());
+        let settled = store.background_job(&id).await.expect("read").expect("job");
+        assert_eq!(settled.state, JobState::Queued);
+        assert!(settled.token.is_none());
+        let attempts = store.job_attempts(&id).await.expect("attempts");
+
+        active.finish().await;
+
+        let retired = store.background_job(&id).await.expect("read").expect("job");
+        assert_eq!(
+            serde_json::to_value(&retired).expect("retired row"),
+            serde_json::to_value(&settled).expect("settled row"),
+            "retirement with no local token preserves the settled durable row"
+        );
+        assert_eq!(
+            serde_json::to_value(store.job_attempts(&id).await.expect("attempts"))
+                .expect("retired attempts"),
+            serde_json::to_value(attempts).expect("settled attempts")
+        );
+        assert!(fence.0.state.lock().await.token.is_none());
+        assert!(fence.loss_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn retirement_releases_durably_valid_claim_after_local_revocation() {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        let running = store.background_job(&id).await.expect("read").expect("job");
+        assert_eq!(running.state, JobState::Running);
+        assert!(running.token.is_some());
+        fence.0.lost.cancel();
+        fence.0.deadline.send_replace(Instant::now());
+        assert!(fence.snapshot().await.is_none());
+        assert_eq!(fence.0.state.lock().await.token, running.token);
+
+        active.finish().await;
+
+        let retired = store.background_job(&id).await.expect("read").expect("job");
+        assert_eq!(retired.state, JobState::Queued);
+        assert!(retired.token.is_none());
+        assert_eq!(retired.fence, running.fence);
+        assert_eq!(retired.revision, running.revision + 1);
+        assert_eq!(retired.failed_attempts, running.failed_attempts);
+        assert_eq!(retired.last_error_code.as_deref(), Some("worker_retired"));
+        assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 1);
+        assert!(fence.0.state.lock().await.token.is_none());
+        assert!(fence.loss_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn retirement_resolves_unobserved_renewal_revision() {
+        let (store, id, active) = active().await;
+        let fence = active.fence();
+        // Advance the real durable claim while retaining the prior local token,
+        // as when a renewal commits without its caller observing the new revision.
+        let state = fence.0.state.lock().await;
+        let original = state.token.clone().expect("local token");
+        let outcomes = store
+            .renew_jobs(RenewJobs {
+                tokens: vec![original.clone()],
+                now_ms: unix_ms().expect("clock"),
+            })
+            .await
+            .expect("durable renewal");
+        let [RenewOutcome::Renewed { token: renewed }] = outcomes.as_slice() else {
+            panic!("renewal must retain ownership");
+        };
+        assert_eq!(renewed.revision, original.revision + 1);
+        assert_eq!(renewed.fence, original.fence);
+        assert_eq!(state.token.as_ref(), Some(&original));
+        drop(state);
+
+        active.finish().await;
+
+        let retired = store.background_job(&id).await.expect("read").expect("job");
+        assert_eq!(retired.state, JobState::Queued);
+        assert!(retired.token.is_none());
+        assert_eq!(retired.fence, original.fence);
+        assert_eq!(retired.revision, renewed.revision + 1);
+        assert_eq!(retired.failed_attempts, 0);
+        assert_eq!(retired.last_error_code.as_deref(), Some("worker_retired"));
+        assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 1);
+        assert!(fence.0.state.lock().await.token.is_none());
+        assert!(fence.loss_token().is_cancelled());
+    }
+
+    #[tokio::test]
     async fn retirement_resolves_cancellation_revision_after_child_join() {
         let (store, id, active) = active().await;
         let fence = active.fence();

@@ -191,21 +191,23 @@ async fn sql<T: QueueSql>(store: &T, statement: &str, parameters: Value) -> Vec<
 // Compare every column of every durable table in this slice after a failed
 // CAS. Column discovery comes from the installed production schema, so a new
 // column cannot silently evade the no-mutation observation.
+const SNAPSHOT_TABLES: [&str; 9] = [
+    "background_jobs",
+    "background_job_waiters",
+    "background_job_attempts",
+    "background_job_reservations",
+    "background_job_domain_leases",
+    "background_library_requests",
+    "background_job_commands",
+    "job_leases",
+    "settings",
+];
+
 async fn snapshot<T: QueueSql>(store: &T) -> Value {
     static SNAPSHOT_SQL: OnceLock<String> = OnceLock::new();
     if SNAPSHOT_SQL.get().is_none() {
         let mut pairs = Vec::new();
-        for table in [
-            "background_jobs",
-            "background_job_waiters",
-            "background_job_attempts",
-            "background_job_reservations",
-            "background_job_domain_leases",
-            "background_library_requests",
-            "background_job_commands",
-            "job_leases",
-            "settings",
-        ] {
+        for table in SNAPSHOT_TABLES {
             let rows = store.queue_sql(format!("SELECT json_group_array(name) FROM pragma_table_info('{table}') WHERE json_valid($1)"),
                 "null".into(), false, true).await.expect("schema columns");
             let columns: Vec<String> = serde_json::from_str(&rows[0]).expect("column names");
@@ -642,6 +644,10 @@ enum Action {
         token: usize,
         disposition: usize,
     },
+    Resolve {
+        job: usize,
+        token: usize,
+    },
     Bind {
         job: usize,
         token: usize,
@@ -724,6 +730,14 @@ async fn actions(fixture: &Fixture, episode: &Episode) -> Vec<Action> {
         // revision of each claim. Historical tokens stay in the state;
         // stale-revision API inputs are tested separately as conformance.
         for (token, captured) in episode.tokens[job].iter().enumerate() {
+            // Retirement carries its original token even when a renewal's
+            // application/observation changed which revision is current.
+            result.push(Action::Settle {
+                job,
+                token,
+                disposition: 3,
+            });
+            result.push(Action::Resolve { job, token });
             if episode.tokens[job][token + 1..]
                 .iter()
                 .any(|later| later.claim_id == captured.claim_id)
@@ -771,10 +785,13 @@ async fn actions(fixture: &Fixture, episode: &Episode) -> Vec<Action> {
     result
 }
 
-fn remember(tokens: &mut Vec<JobToken>, token: JobToken) {
-    if !tokens.contains(&token) {
-        tokens.push(token);
+fn remember(tokens: &mut Vec<JobToken>, token: JobToken) -> usize {
+    if let Some(index) = tokens.iter().position(|captured| *captured == token) {
+        return index;
     }
+    let index = tokens.len();
+    tokens.push(token);
+    index
 }
 
 fn domain_matches(row: Option<&Value>, lease: &Lease, now: i64) -> bool {
@@ -788,12 +805,35 @@ fn domain_matches(row: Option<&Value>, lease: &Lease, now: i64) -> bool {
     })
 }
 
+async fn apply_graph(
+    fixture: &Fixture,
+    episode: &mut Episode,
+    action: &Action,
+) -> Result<(String, Option<usize>), String> {
+    apply(fixture, episode, action, false).await
+}
+
 async fn apply(
     fixture: &Fixture,
     episode: &mut Episode,
     action: &Action,
-) -> Result<String, String> {
+    observe_refusals: bool,
+) -> Result<(String, Option<usize>), String> {
     let now = episode.now;
+    // The BFS already compares every refused edge's full canonical state.
+    // Direct conformance callers can enable the same observation here;
+    // logical resolution always checks durable rows independently of captures.
+    let before_rows = if matches!(action, Action::Resolve { .. })
+        || (observe_refusals
+            && !matches!(
+                action,
+                Action::RemoveOwner { .. } | Action::ClockAdvance { .. }
+            )) {
+        Some(snapshot(&fixture.store).await)
+    } else {
+        None
+    };
+    let mut resolved_token = None;
     let result = match *action {
         Action::Claim { job, node } => {
             let before = fixture
@@ -887,6 +927,11 @@ async fn apply(
                     not_before_ms: now,
                 },
                 2 => JobSettlement::Cancel,
+                3 => JobSettlement::Yield {
+                    error_code: Some("worker_retired".into()),
+                    checkpoint: None,
+                    not_before_ms: now,
+                },
                 _ => return Err("ProtocolInputDomain: unknown library settlement tag".into()),
             };
             if fixture
@@ -911,6 +956,58 @@ async fn apply(
                 "accepted"
             } else {
                 "refused"
+            }
+        }
+        Action::Resolve { job, token } => {
+            let original = episode.tokens[job][token].clone();
+            // This is the real logical API. Its two internal authoritative
+            // awaits are an explicit read-conformance boundary, not atomic
+            // SQL or a claim to closed internal read-interleaving coverage.
+            let outcome = fixture
+                .store
+                .resolve_claim(ResolveClaim {
+                    job_id: original.job_id.clone(),
+                    node_id: original.node_id.clone(),
+                    boot_id: original.boot_id.clone(),
+                    claim_id: original.claim_id.clone(),
+                    fence: Some(original.fence),
+                    dispatched_at_ms: now,
+                    now_ms: now,
+                })
+                .await
+                .expect("actual logical resolve_claim API");
+            match outcome {
+                ClaimResolution::Running { token } => {
+                    if token.job_id != original.job_id
+                        || token.node_id != original.node_id
+                        || token.boot_id != original.boot_id
+                        || token.claim_id != original.claim_id
+                        || token.fence != original.fence
+                    {
+                        return Err(
+                            "ExactIdentityResolution: resolver adopted another attempt".into()
+                        );
+                    }
+                    resolved_token = Some(remember(&mut episode.tokens[job], token));
+                    "running"
+                }
+                ClaimResolution::CancelRequested {
+                    cleanup_token: token,
+                } => {
+                    if token.job_id != original.job_id
+                        || token.node_id != original.node_id
+                        || token.boot_id != original.boot_id
+                        || token.claim_id != original.claim_id
+                        || token.fence != original.fence
+                    {
+                        return Err("ExactIdentityResolution: resolver adopted another cancellation attempt".into());
+                    }
+                    resolved_token = Some(remember(&mut episode.tokens[job], token));
+                    "cancel_requested"
+                }
+                ClaimResolution::Settled { .. } => "settled",
+                ClaimResolution::LostOwnership => "lost_ownership",
+                ClaimResolution::ExpiredOrPruned => "expired_or_pruned",
             }
         }
         Action::Bind { job, token, lease } => {
@@ -1027,7 +1124,25 @@ async fn apply(
             "advanced"
         }
     };
-    Ok(result.into())
+    // Observe durable no-apply behavior here, not merely when BFS discovers
+    // a new state or reaches its cap. Resolution may append a local capture,
+    // but every actual API read must leave all durable snapshot rows equal.
+    let read_only = matches!(action, Action::Resolve { .. });
+    let refused = matches!(
+        result,
+        "refused" | "cancelled" | "expired_or_pruned" | "held"
+    );
+    if read_only || (observe_refusals && refused) {
+        let before = before_rows.as_ref().expect("guarded primitive preimage");
+        if snapshot(&fixture.store).await != *before {
+            return Err(if read_only {
+                "ResolutionReadOnly: logical resolution changed durable rows".into()
+            } else {
+                "FailedCasAtomicity: refused primitive changed durable rows".into()
+            });
+        }
+    }
+    Ok((result.into(), resolved_token))
 }
 
 async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> {
@@ -1139,6 +1254,11 @@ async fn projection(fixture: &Fixture, episode: &Episode, id: usize, key: &str) 
             "reservation_count": reservations(&fixture.store, &fixture.jobs[job]).await.as_array().expect("array in typed JSON projection").len()}));
         if episode.claims[job] == ATTEMPTS_PER_JOB {
             cutoffs.push(format!("attempt_budget_j{job}"));
+        }
+    }
+    for (owner, acquired) in DOMAIN_OWNERS.iter().zip(episode.domain_acquired) {
+        if acquired {
+            cutoffs.push(format!("domain_acquire_budget_{owner}"));
         }
     }
     if episode.domain_acquired.iter().all(|used| *used) {
@@ -1288,7 +1408,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
             .expect("materialization savepoint");
         let mut episode = initial.clone();
         for action in &trace {
-            apply(&fixture, &mut episode, action).await?;
+            apply_graph(&fixture, &mut episode, action).await?;
         }
         let key = canonical(&fixture, &episode).await;
         if index.get(&key) != Some(&from) {
@@ -1304,7 +1424,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
                 .await
                 .expect("edge savepoint");
             let mut successor = episode.clone();
-            let result = apply(&fixture, &mut successor, &action).await?;
+            let (result, resolved_token) = apply_graph(&fixture, &mut successor, &action).await?;
             let next = canonical(&fixture, &successor).await;
             // Source-specific no-apply results only: claim's cancelled/
             // pruned cases return from its read-only precheck; other refused
@@ -1365,7 +1485,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
                 .to_owned();
             *by_op.entry(op).or_default() += 1;
             *by_result.entry(result.clone()).or_default() += 1;
-            edges.push(json!({"from": from, "to": to, "action": action_json, "result": result}));
+            edges.push(json!({"from": from, "to": to, "action": action_json, "result": result, "resolved_token": resolved_token}));
             fixture
                 .store
                 .async_refinement_control(
@@ -1393,6 +1513,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
         "claim",
         "renew",
         "settle",
+        "resolve",
         "bind",
         "complete",
         "acquire_domain",
@@ -1420,13 +1541,11 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
                 .or_default() += 1;
         }
     }
-    let graph = json!({"schema_version": 1, "scope": "closed bounded selected-protocol actual-SQL relation, not arbitrary production histories",
-        "initial": 0, "source_bindings": source_bindings(), "schema_bindings": schema_bindings(&fixture).await,
-        "domain": {"jobs": 2, "nodes": NODES, "physical_capacity_per_node": 1,
+    let mut domain = json!({"jobs": 2, "nodes": NODES, "physical_capacity_per_node": 1,
             "attempts_per_job": ATTEMPTS_PER_JOB, "renewals_per_attempt": 1, "rearrival": false,
             "ordinary_token_inputs": "latest captured revision per claim; queue-token Mutex adapter contract; historical revisions remain captured and conformance-tested",
             "binding_completion_inputs": "captured domain lease owner equals captured queue-token node; wrong-owner inputs are separate conformance",
-            "settlement_dispositions": ["yield", "retry", "cancel"],
+            "settlement_dispositions": ["yield", "retry", "cancel", "retirement_yield"],
             "node_domain_acquisition_inputs": "node has selected running durable queue ownership, including expired retained ownership for dispatch/application races; foreign holder is independent",
             "domain_acquisitions_per_owner": 1, "domain_owners": DOMAIN_OWNERS,
             "selected_attempt_ids": 4, "reserved_boundary_ids": 2,
@@ -1437,7 +1556,35 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
             "reply_faults": "split application/reply/reconciliation in temporal composition; separate bridge-boundary conformance histories",
             "cap": STATE_CAP,
             "premises": ["completion opportunity before attempt/domain/fault budget exhaustion", "two fixed selected requests; no infinite fresh-progress conclusion"],
-            "savepoints": "same production writer connection, sequential harness; transaction/commit visibility and SQLite internals remain assumptions; any SQL/ABORT/ROLLBACK error aborts closure"},
+            "savepoints": "same production writer connection, sequential harness; transaction/commit visibility and SQLite internals remain assumptions; any SQL/ABORT/ROLLBACK error aborts closure"});
+    let boundary_metadata = json!({
+        "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; ordinary dispositions 0/1/2 retain latest-revision inputs",
+        "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
+        "primitive_clock_boundary": "each generated primitive request uses current episode.now; the daemon's three retirement wall samples and dispatch/application races are reviewed adapter/conformance boundaries, not source-derived clock-race coverage",
+        "reservation_conservation_boundary": "conservation is checked for unexpired queue authority only; expired Running rows and residue remain represented, with no independent complete-residue conservation guarantee until reclaim/prune",
+        "domain_reacquisition_boundary": "each owner can acquire at most once; release or expiry does not reset its budget, so same-owner release-to-reacquire cycles are excluded",
+        "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
+        "retirement_sequence_boundary": "the graph supplies separate actual settle and logical resolve primitives; daemon drain/local-token/first-settle/resolve/optional-second-settle sequencing is a reviewed source and daemon-conformance boundary composed by the temporal model",
+        "cleanup_boundary": "local cleanup needs bounded retirement calls to return, not eventual successful acknowledgement; errors are logged and finish returns while durable authority may remain",
+        "snapshot_tables": SNAPSHOT_TABLES,
+        "dispatch_time_noninterference": "for retirement fence Some(F), resolve_claim reads dispatched_at_ms only in its skipped fence-is-none window branch; neither SQL query nor later classification reads it, so a representative dispatch sample preserves results at fixed now/read outcomes; this is a reviewed source lemma, not a machine proof",
+        "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
+        "schema_snapshot_boundary": "canonical durable rows cover exactly the nine snapshot_tables; all installed schema objects are hash-bound for identity, not complete row snapshots or proofs of unrelated tables",
+        "savepoint_boundary": "no closure transition invokes queue_transaction or nested explicit transactions; test savepoints bracket sequential primitives on the production writer and any savepoint/SQL failure aborts closure",
+        "refusal_observation": "the existing BFS full-canonical equality guard already rejects every refused edge mutation; direct non-graph conformance can additionally enable apply's durable snapshot observer; no pre-existing closure gap is claimed",
+    });
+    domain
+        .as_object_mut()
+        .expect("domain metadata object")
+        .extend(
+            boundary_metadata
+                .as_object()
+                .expect("boundary metadata object")
+                .clone(),
+        );
+    let graph = json!({"schema_version": 1, "scope": "closed bounded selected-protocol actual-SQL relation, not arbitrary production histories",
+        "initial": 0, "source_bindings": source_bindings(), "schema_bindings": schema_bindings(&fixture).await,
+        "domain": domain,
         "coverage": {"closed": true, "no_skipped_edges": true, "state_count": states.len(), "edge_count": edges.len(),
             "by_op": by_op, "by_result": by_result, "cutoff_counts": cutoff_counts},
         "states": states, "edges": edges});
@@ -1806,4 +1953,272 @@ async fn protocol_excluded_domain_owner_and_terminal_settlements_are_conformance
             .expect("terminal stale settlement"));
         assert_eq!(snapshot(&fixture.store).await, before);
     }
+}
+
+#[test]
+fn snapshot_table_registry_matches_producer() {
+    let registry: Value = serde_json::from_str(include_str!(
+        "../../../../verification/async-driver-refinement/store-schema.json"
+    ))
+    .expect("Store schema registry JSON");
+    assert_eq!(
+        registry["snapshot_tables"],
+        json!(SNAPSHOT_TABLES),
+        "the source snapshot table list and closed registry must change together"
+    );
+}
+
+/// These three histories execute real Store primitives. The daemon's mutex,
+/// heartbeat drain and first/resolve/second call sequence remain separately
+/// reviewed daemon conformance; this is not a second retirement interpreter.
+#[tokio::test]
+async fn retirement_settle_and_resolution_primitives_preserve_identity_and_rows() {
+    let fixture = Fixture::new().await;
+    let token = fixture.claimed(0).await;
+    let mut episode = Episode::initial();
+    episode.claims[0] = 1;
+    remember(&mut episode.tokens[0], token.clone());
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Resolve { job: 0, token: 0 }
+        )
+        .await
+        .expect("initial exact resolution"),
+        ("running".into(), Some(0))
+    );
+    assert_eq!(
+        apply_graph(&fixture, &mut episode, &Action::Renew { job: 0, token: 0 })
+            .await
+            .expect("actual renewal")
+            .0,
+        "renewed"
+    );
+    assert_eq!(episode.tokens[0].len(), 2);
+    let before_stale = snapshot(&fixture.store).await;
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Settle {
+                job: 0,
+                token: 0,
+                disposition: 3
+            }
+        )
+        .await
+        .expect("stale first retirement primitive")
+        .0,
+        "refused"
+    );
+    assert_eq!(snapshot(&fixture.store).await, before_stale);
+    let (result, current) = apply_graph(
+        &fixture,
+        &mut episode,
+        &Action::Resolve { job: 0, token: 0 },
+    )
+    .await
+    .expect("exact original identity resolves newer revision");
+    assert_eq!(result, "running");
+    assert_eq!(current, Some(1));
+    assert_eq!(
+        episode.tokens[0][0], token,
+        "capture prefixes remain stable"
+    );
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Settle {
+                job: 0,
+                token: 1,
+                disposition: 3
+            }
+        )
+        .await
+        .expect("current retirement Yield primitive")
+        .0,
+        "accepted"
+    );
+    let rows = fixture.store.queue_sql(
+        "SELECT json_object('state',state,'error',last_error_code) FROM background_jobs WHERE id=json_extract($1,'$.job')".into(),
+        json!({"job": fixture.jobs[0]}).to_string(), false, true).await.expect("retirement payload");
+    assert_eq!(
+        serde_json::from_str::<Value>(&rows[0]).expect("retirement row"),
+        json!({"state": "queued", "error": "worker_retired"})
+    );
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Resolve { job: 0, token: 0 }
+        )
+        .await
+        .expect("settled exact identity"),
+        ("settled".into(), None)
+    );
+
+    let fixture = Fixture::new().await;
+    let (token, lease) = fixture.bound().await;
+    let mut episode = Episode::initial();
+    episode.claims[0] = 1;
+    episode.domain_acquired[0] = true;
+    remember(&mut episode.tokens[0], token);
+    episode.leases.push(lease);
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Complete {
+                job: 0,
+                token: 0,
+                lease: 0
+            }
+        )
+        .await
+        .expect("last request COMPLETE primitive")
+        .0,
+        "accepted"
+    );
+    let before = snapshot(&fixture.store).await;
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Settle {
+                job: 0,
+                token: 0,
+                disposition: 3
+            }
+        )
+        .await
+        .expect("post-COMPLETE retirement refusal")
+        .0,
+        "refused"
+    );
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Resolve { job: 0, token: 0 }
+        )
+        .await
+        .expect("post-COMPLETE resolution"),
+        ("settled".into(), None)
+    );
+    assert_eq!(snapshot(&fixture.store).await, before);
+    assert_eq!(
+        episode.tokens[0].len(),
+        1,
+        "COMPLETE does not erase local captures"
+    );
+
+    // Queue cancellation is deliberately outside selected D. Exercise the
+    // actual CancelRequested API and Cancel primitive as conformance only.
+    let fixture = Fixture::new().await;
+    let token = fixture.claimed(0).await;
+    let mut episode = Episode::initial();
+    episode.claims[0] = 1;
+    remember(&mut episode.tokens[0], token);
+    fixture
+        .store
+        .cancel_job(super::background_jobs::CancelJob {
+            job_id: fixture.jobs[0].clone(),
+            now_ms: NOW,
+        })
+        .await
+        .expect("outside-D cancellation conformance");
+    let (result, current) = apply_graph(
+        &fixture,
+        &mut episode,
+        &Action::Resolve { job: 0, token: 0 },
+    )
+    .await
+    .expect("exact cancellation resolution");
+    assert_eq!(result, "cancel_requested");
+    let current = current.expect("actual cleanup token index");
+    assert_eq!(
+        apply_graph(
+            &fixture,
+            &mut episode,
+            &Action::Settle {
+                job: 0,
+                token: current,
+                disposition: 2
+            }
+        )
+        .await
+        .expect("actual cancellation settlement")
+        .0,
+        "accepted"
+    );
+    let cancelled = fixture
+        .store
+        .background_job(&fixture.jobs[0])
+        .await
+        .expect("cancelled job")
+        .expect("job");
+    assert_eq!(cancelled.state, JobState::Cancelled);
+    assert!(cancelled.token.is_none());
+    assert_eq!(
+        reservations(&fixture.store, &fixture.jobs[0]).await,
+        json!([])
+    );
+    eprintln!(
+        "async_store_retirement_primitives={}",
+        json!({
+            "histories": 3, "scope": "actual primitive conformance; daemon sequence is a separate boundary",
+            "logical_resolution_internal_reads": "conformance boundary",
+            "cancellation": "outside selected D"
+        })
+    );
+}
+
+#[tokio::test]
+async fn refusal_snapshot_guard_detects_mutation_in_apply() {
+    let fixture = Fixture::new().await;
+    let token = fixture.claimed(0).await;
+    assert!(fixture
+        .store
+        .settle_job(yielding(token.clone(), NOW))
+        .await
+        .expect("retired claim"));
+    let schema = super::background_jobs::SCHEMA;
+    let trigger = schema
+        .split("-- next statement")
+        .find(|statement| {
+            statement.contains("CREATE TRIGGER IF NOT EXISTS background_job_renew_command")
+        })
+        .expect("production renewal trigger");
+    let removal = "    DELETE FROM background_job_commands WHERE id = NEW.id;";
+    assert!(trigger.contains(removal), "mutation source anchor");
+    let mutated = trigger.replace(removal,
+        "    UPDATE background_jobs SET yield_count=yield_count+1 WHERE id=json_extract(NEW.request_json,'$.tokens[0].job_id');\n    DELETE FROM background_job_commands WHERE id = NEW.id;");
+    fixture
+        .store
+        .async_refinement_control(format!(
+            "DROP TRIGGER background_job_renew_command;\n{mutated}"
+        ))
+        .await
+        .expect("install actual source-derived refusal mutant");
+    let mut episode = Episode::initial();
+    episode.claims[0] = 1;
+    remember(&mut episode.tokens[0], token);
+    let failure = apply(
+        &fixture,
+        &mut episode,
+        &Action::Renew { job: 0, token: 0 },
+        true,
+    )
+    .await
+    .expect_err("apply itself must reject durable mutation on refusal");
+    assert!(
+        failure.starts_with("FailedCasAtomicity"),
+        "observed {failure}"
+    );
+    eprintln!(
+        "async_store_refusal_guard={}",
+        json!({"named_failure": failure, "detected_in": "apply"})
+    );
 }

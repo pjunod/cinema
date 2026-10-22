@@ -13,7 +13,7 @@ Apply == /\ phase = "ready"
     /\ e.src = sql /\ sql' = e.dst /\ prior' = sql /\ phase' = "applied"
     /\ completed' = completed \cup Done(e.dst)
     /\ acceptedAfterRevoke' = acceptedAfterRevoke \/
-       revoked /\ e.op = "complete" /\ e.result = "accepted"
+       (revoked /\ e.op = "complete" /\ e.result = "accepted")
  /\ UNCHANGED revoked
 Reply == /\ phase = "applied" /\ phase' = "ready"
  /\ sql' = IF Mutation = "unknown-as-rollback" /\ Done(sql) # Done(prior) THEN prior ELSE sql

@@ -1,5 +1,5 @@
 {
-  "status": "final exact source compile-checked and Clippy -Dwarnings passed; all execution intentionally deferred until final review",
+  "status": "R1 primitive definitions and reviewed source boundaries; runtime execution deferred until final review; compiler results are recorded separately",
   "core_lib_feature": "hiqlite-contract-tests",
   "core_tests": [
     "store::async_driver_refinement::two_node_same_root_claim_refusal_and_atomic_last_request_retirement",
@@ -13,7 +13,10 @@
     "store::async_driver_refinement::queue_identity_and_expiry_predicate_partitions_are_atomic",
     "store::async_driver_refinement::domain_expiry_missing_resources_and_overflow_are_separate_partitions",
     "store::async_driver_refinement::claim_guard_predicate_partitions_refuse_without_mutation",
-    "store::async_driver_refinement::protocol_excluded_domain_owner_and_terminal_settlements_are_conformance_only"
+    "store::async_driver_refinement::protocol_excluded_domain_owner_and_terminal_settlements_are_conformance_only",
+    "store::async_driver_refinement::snapshot_table_registry_matches_producer",
+    "store::async_driver_refinement::retirement_settle_and_resolution_primitives_preserve_identity_and_rows",
+    "store::async_driver_refinement::refusal_snapshot_guard_detects_mutation_in_apply"
   ],
   "graph_export_test": "store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed",
   "graph_export_env": "PLURX_ASYNC_STORE_GRAPH",
@@ -57,5 +60,50 @@
       "relation_coverage": false
     },
     "scope": "only the96queueidentity/expiry rows; all124rows require passed exact test cases and source-bound registry, not this marker alone"
+  },
+  "boundaries": {
+    "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; ordinary dispositions 0/1/2 retain latest-revision inputs",
+    "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
+    "primitive_clock_boundary": "each generated primitive request uses current episode.now; the daemon's three retirement wall samples and dispatch/application races are reviewed adapter/conformance boundaries, not source-derived clock-race coverage",
+    "reservation_conservation_boundary": "conservation is checked for unexpired queue authority only; expired Running rows and residue remain represented, with no independent complete-residue conservation guarantee until reclaim/prune",
+    "domain_reacquisition_boundary": "each owner can acquire at most once; release or expiry does not reset its budget, so same-owner release-to-reacquire cycles are excluded",
+    "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
+    "retirement_sequence_boundary": "the graph supplies separate actual settle and logical resolve primitives; daemon drain/local-token/first-settle/resolve/optional-second-settle sequencing is a reviewed source and daemon-conformance boundary composed by the temporal model",
+    "cleanup_boundary": "local cleanup needs bounded retirement calls to return, not eventual successful acknowledgement; errors are logged and finish returns while durable authority may remain",
+    "dispatch_time_noninterference": "for retirement fence Some(F), resolve_claim reads dispatched_at_ms only in its skipped fence-is-none window branch; neither SQL query nor later classification reads it, so a representative dispatch sample preserves results at fixed now/read outcomes; this is a reviewed source lemma, not a machine proof",
+    "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
+    "schema_snapshot_boundary": "canonical durable rows cover exactly the nine snapshot_tables; all installed schema objects are hash-bound for identity, not complete row snapshots or proofs of unrelated tables",
+    "savepoint_boundary": "no closure transition invokes queue_transaction or nested explicit transactions; test savepoints bracket sequential primitives on the production writer and any savepoint/SQL failure aborts closure",
+    "refusal_observation": "the existing BFS full-canonical equality guard already rejects every refused edge mutation; direct non-graph conformance can additionally enable apply's durable snapshot observer; no pre-existing closure gap is claimed"
+  },
+  "snapshot_registry_test": "store::async_driver_refinement::snapshot_table_registry_matches_producer",
+  "retirement_primitive_test": "store::async_driver_refinement::retirement_settle_and_resolution_primitives_preserve_identity_and_rows",
+  "retirement_primitive_marker": {
+    "prefix": "async_store_retirement_primitives=",
+    "fields": {
+      "histories": 3,
+      "scope": "actual primitive conformance; daemon sequence is a separate boundary",
+      "logical_resolution_internal_reads": "conformance boundary",
+      "cancellation": "outside selected D"
+    },
+    "not_evidence_until_executed": true
+  },
+  "refusal_guard_test": "store::async_driver_refinement::refusal_snapshot_guard_detects_mutation_in_apply",
+  "refusal_guard_marker": {
+    "prefix": "async_store_refusal_guard=",
+    "fields": {
+      "named_failure": "FailedCasAtomicity: refused primitive changed durable rows",
+      "detected_in": "apply"
+    },
+    "not_evidence_until_executed": true
+  },
+  "daemon_retirement_boundary": {
+    "implementation": "crates/plurxd/src/background_jobs.rs:ActiveBackgroundJob::finish and JobFence::retire",
+    "existing_source_case": "retirement_resolves_cancellation_revision_after_child_join",
+    "claim": "reviewed source and separately defined daemon conformance, not exercised by core primitive tests; no execution or whole-Rust refinement claimed"
+  },
+  "review_corrections": {
+    "S2": "original BFS and checker already checked full-canonical refused self-edges; the direct observer serves non-graph conformance and no pre-existing closure gap is claimed",
+    "R1-C2": "Some(fence) dispatch-time noninterference is reviewed from actual resolve_claim source; first retirement sample may differ from resolve sample, while request.now_ms/application-time scope remains explicitly bounded"
   }
 }
