@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- An abandoned internal transaction reply no longer terminates the SQLite
+  writer when a late commit or rollback reply is delivered. Later writes keep
+  working; the original caller still treats a timeout as an unknown outcome.
+
 - Web playback automatically captures bounded frame-drop incidents with recent
   frame, buffer, lifecycle and request evidence, respecting diagnostic-history
   controls and retaining account-scoped local copies for investigation.

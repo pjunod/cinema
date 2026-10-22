@@ -435,9 +435,8 @@ CREATE TABLE IF NOT EXISTS _metadata
                             Ok(txn) => txn,
                             Err(err) => {
                                 error!("Opening database transaction: {err:?}");
-                                req.tx
-                                    .send(Err(Error::Transaction(err.to_string().into())))
-                                    .expect("oneshot tx to never be dropped");
+                                let _ =
+                                    req.tx.send(Err(Error::Transaction(err.to_string().into())));
                                 continue;
                             }
                         };
@@ -574,9 +573,9 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 layout_guard_failed,
                                 rollback_succeeded,
                             );
-                            req.tx
-                                .send(Err(err))
-                                .expect("oneshot tx to never be dropped");
+                            // State-machine application may have been cancelled.
+                            // Rollback is definitive even without its observer.
+                            let _ = req.tx.send(Err(err));
                         } else {
                             #[cfg(feature = "validation-test-helpers")]
                             if matches_hold && let Some(hold) = precommit_hold.take() {
@@ -590,14 +589,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                             }
                             match txn.commit() {
                                 Ok(()) => {
-                                    req.tx
-                                        .send(Ok(results))
-                                        .expect("oneshot tx to never be dropped");
+                                    // A lost reply cannot undo the committed write
+                                    // or terminate the writer for later requests.
+                                    let _ = req.tx.send(Ok(results));
                                 }
                                 Err(err) => {
-                                    req.tx
-                                        .send(Err(Error::Transaction(err.to_string().into())))
-                                        .expect("oneshot tx to never be dropped");
+                                    let _ = req
+                                        .tx
+                                        .send(Err(Error::Transaction(err.to_string().into())));
                                 }
                             }
                         }
@@ -1326,6 +1325,77 @@ mod snapshot_cut_tests {
         rx.await.unwrap();
         drop(writer);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn abandoned_transaction_reply(rollback: bool) {
+        let (root, writer) = fixture().await;
+        let (tx, abandoned) = oneshot::channel();
+        drop(abandoned);
+        let mut queries = vec![state_machine::Query {
+            sql: "INSERT INTO rows_at_cut VALUES (2, zeroblob(16))".into(),
+            params: vec![],
+        }];
+        if rollback {
+            queries.push(state_machine::Query {
+                sql: "INSERT INTO rows_at_cut VALUES (1, zeroblob(16))".into(),
+                params: vec![],
+            });
+        }
+        writer
+            .send_async(WriterRequest::Query(Query::Transaction(SqlTransaction {
+                queries,
+                last_applied_log_id: log(3),
+                tx,
+            })))
+            .await
+            .unwrap();
+        // FIFO processing makes this a real writer barrier after the dropped
+        // transaction reply, without sleeps or retrying the abandoned write.
+        let state = tokio::time::timeout(Duration::from_secs(5), metadata(&writer))
+            .await
+            .expect("writer remains responsive after a dropped transaction reply");
+        assert_eq!(state.last_applied_log_id, log(3));
+        execute(
+            &writer,
+            "INSERT INTO rows_at_cut VALUES (3, zeroblob(16))".into(),
+            4,
+        )
+        .await;
+        let (ack, stopped) = oneshot::channel();
+        writer
+            .send_async(WriterRequest::Shutdown(ack))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .expect("writer shutdown remains bounded after cancellation")
+            .expect("writer persists metadata before acknowledging shutdown");
+        drop(writer);
+        // Reopen the actual database after shutdown. A cancelled observer
+        // neither undoes a commit nor admits partial work, and must not
+        // prevent the applied-log metadata from becoming durable.
+        let connection = rusqlite::Connection::open(root.join("live.db")).unwrap();
+        let ids = connection
+            .prepare("SELECT id FROM rows_at_cut ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(ids, if rollback { vec![1, 3] } else { vec![1, 2, 3] });
+        assert_eq!(image_metadata(&connection).last_applied_log_id, log(4));
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_transaction_success_reply_preserves_commit_and_writer() {
+        abandoned_transaction_reply(false).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_transaction_error_reply_preserves_rollback_and_writer() {
+        abandoned_transaction_reply(true).await;
     }
 
     async fn paused_copy(

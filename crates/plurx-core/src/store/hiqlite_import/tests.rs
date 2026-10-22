@@ -442,7 +442,19 @@ fn replicated_tables_exclude_node_local_and_derived_state() {
     assert!(names.contains(&"jellyfin_login_tokens"));
     assert!(names.contains(&"jellyfin_entity_ids"));
     assert!(names.contains(&"jellyfin_plays"));
-    assert_eq!(names.len(), 92, "review every imported durable table");
+    // Memberships and the provider refresh snapshot follow the catalogue's
+    // items/users. The extension marker belongs to the target's verified
+    // schema install, not to the imported source's data.
+    for name in [
+        "library_annotations_lists",
+        "library_annotations_ratings",
+        "library_annotations_rating_fetches",
+    ] {
+        let plan = TABLES.iter().find(|plan| plan.name == name).expect(name);
+        assert_eq!(plan.minimum_schema, 113, "v113 annotations data: {name}");
+    }
+    assert!(!names.contains(&"library_annotations_schema"));
+    assert_eq!(names.len(), 95, "review every imported durable table");
 }
 
 /// A source from before the pointer fence has no revision to attribute its

@@ -133,8 +133,10 @@ fn sharing_sqlite_main103_upgrade_appends104_105_and_private92_93_refuse() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("marker"),
-        112 // Cinema and managed subtitles are followed by progressive translation.
+        113 // Progressive translation is followed by item ratings and personal lists.
     );
+    super::super::library_annotations_schema::verify_sqlite(&conn)
+        .expect("complete v113 annotations extension after the sharing upgrade");
     assert!(conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sharing_ingress_custody')",
@@ -159,6 +161,56 @@ fn sharing_sqlite_main103_upgrade_appends104_105_and_private92_93_refuse() {
             marker
         );
     }
+}
+
+#[test]
+fn v113_annotations_upgrade_preserves_catalogue_and_reopens_ratings_and_lists() {
+    let conn = Connection::open_in_memory().expect("database");
+    SqliteStore::apply_migrations_for_test(&conn, 112).expect("pre-annotations schema");
+    conn.execute_batch(
+        "INSERT INTO users(id,username,password_hash) VALUES(600001,'annotation-upgrade','hash');
+         INSERT INTO libraries(id,name,kind,paths) VALUES(600001,'annotation-upgrade','movies','[]');
+         INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(600001,600001,'movie','Retained movie','retained movie');",
+    ).expect("existing catalogue and owner");
+    SqliteStore::migrate(&conn).expect("append annotations extension");
+    assert_eq!(
+        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .expect("upgraded version"),
+        113
+    );
+    super::super::library_annotations_schema::verify_sqlite(&conn)
+        .expect("exact annotations shape and marker");
+    conn.execute_batch(
+        "INSERT INTO library_annotations_lists VALUES(600001,'favorite',600001,123);
+         INSERT INTO library_annotations_ratings VALUES(600001,'imdb',8.1,10,100);
+         INSERT INTO library_annotations_rating_fetches VALUES(600001,456,1);",
+    )
+    .expect("post-upgrade annotation data");
+    SqliteStore::migrate(&conn).expect("idempotent current-schema reopen");
+    let retained = conn.query_row(
+        "SELECT users.username,items.title,lists.list,lists.added_at_ms,ratings.source,ratings.value,ratings.scale,ratings.votes,fetches.fetched_at_ms,fetches.omdb_consulted
+         FROM library_annotations_lists AS lists
+         JOIN users ON users.id=lists.user_id JOIN items ON items.id=lists.item_id
+         JOIN library_annotations_ratings AS ratings ON ratings.item_id=items.id
+         JOIN library_annotations_rating_fetches AS fetches ON fetches.item_id=items.id",
+        [],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,row.get::<_,String>(4)?,row.get::<_,f64>(5)?,row.get::<_,i64>(6)?,row.get::<_,Option<i64>>(7)?,row.get::<_,i64>(8)?,row.get::<_,i64>(9)?)),
+    ).expect("catalogue-linked annotations survive reopening");
+    assert_eq!(
+        retained,
+        (
+            "annotation-upgrade".into(),
+            "Retained movie".into(),
+            "favorite".into(),
+            123,
+            "imdb".into(),
+            8.1,
+            10,
+            Some(100),
+            456,
+            1
+        )
+    );
 }
 
 #[test]
@@ -855,12 +907,15 @@ async fn v6_rebuild_preserves_everything() {
     // cancellation and v103 continuous dependencies; v104–v105 add sharing
     // authority and outer-ingress custody; v106-v110 append Cinema receiver
     // credentials, consent, revision fencing, login rebind and cleanup guards.
-    // v111 appends managed subtitles; v112 appends progressive translation.
+    // v111 appends managed subtitles; v112 appends progressive translation;
+    // v113 appends ratings and per-user lists without rebuilding the catalogue.
     assert_eq!(
-        version, 112,
+        version, 113,
         "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
     );
+    super::super::library_annotations_schema::verify_sqlite(&conn)
+        .expect("complete v113 annotations extension after the v6 rebuild");
     let files: String = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",

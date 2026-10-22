@@ -7,6 +7,15 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Use TLS for pinned snapshot sources in retained containers
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Keep the image's exact snapshot and trust settings. Host jobs do
+        # not acquire a persistent APT configuration change from this action.
+        if [ -f /.dockerenv ]; then
+          python3 -m validation.apt_snapshot --https-sources-only
+        fi
     - name: Verify native OpenSSL build support
       shell: bash
       run: |

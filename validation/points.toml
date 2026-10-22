@@ -1500,6 +1500,7 @@ paths = [
   "scripts/ci-failures.fleet.example.json",
   "swarm/*.txt",
   "scripts/ci-flake-report",
+  "scripts/audit-test-inventory",
   "scripts/publish-badge",
   "scripts/ripwire",
   "scripts/ripwire.lock.json",

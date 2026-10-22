@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Read only committed Git blobs; estimate source declarations, never execute tests."""
+import argparse
+import ast
+import collections
+import io
+import json
+import pathlib
+import re
+import subprocess
+
+RUST = re.compile(r'^\s*#\[(?:test|(?:tokio|actix_rt|async_std)::test)(?:\s*\([^\n]*\))?\]\s*$', re.M)
+SWIFT = re.compile(r'\bfunc\s+test\w*\s*\(')
+ANDROID = re.compile(r'@Test\b')
+JS = re.compile(r'(?m)^\s*(?:test|it)(?:\.(?:skip|todo|only))?\s*\(')
+
+def selectors(name):
+    path = pathlib.PurePosixPath(name)
+    groups = []
+    if name.startswith('crates/') and name.endswith('.rs'):
+        groups.append(('Rust test attributes', 'rust'))
+    if name.endswith('.py') and path.name.startswith('test_') and not name.startswith(('vendor/', 'docs/', 'spikes/')):
+        group = '/'.join(name.split('/')[:2]) if name.startswith('tests/') else str(path.parent)
+        groups.append(('Python ' + group, 'python'))
+    if name.endswith('.swift') and name.startswith(('clients/apple/', 'clients/server-tray/')) and ('Tests/' in name or 'Tests.swift' in name):
+        groups.append(('Swift ' + ('tray' if 'server-tray/' in name else 'Apple mobile'), 'swift'))
+    if name.startswith('clients/android/') and name.endswith(('.kt', '.java')) and ('/src/test/' in name or '/src/androidTest/' in name):
+        groups.append(('Android ' + ('instrumentation' if '/src/androidTest/' in name else 'JVM'), 'android'))
+    if name.endswith(('.js', '.mjs', '.cjs')) and name.startswith(('tests/web/', 'tests/playback/', 'clients/desktop-remote/tests/')):
+        group = '/'.join(name.split('/')[:2]) if name.startswith('tests/') else 'desktop-remote'
+        groups.append(('JS ' + group, 'js'))
+    return groups
+
+def inventory(repository, ref):
+    def git(*args, **kwargs):
+        return subprocess.check_output(['git', '-C', str(repository), *args], **kwargs)
+    commit = git('rev-parse', '--verify', ref + '^{commit}').decode().strip()
+    selected = []
+    for record in git('ls-tree', '-r', '-z', commit).split(b'\0'):
+        if not record:
+            continue
+        metadata, raw_name = record.split(b'\t', 1)
+        mode, kind, oid = metadata.split()
+        name = raw_name.decode()
+        groups = selectors(name)
+        if kind == b'blob' and mode != b'120000' and groups:
+            selected.append((name, oid, groups))
+    content = subprocess.check_output(['git', '-C', str(repository), 'cat-file', '--batch'], input=b''.join(oid+b'\n' for _, oid, _ in selected))
+    stream = io.BytesIO(content)
+    counts = collections.Counter()
+    contributing_files = collections.Counter()
+    scanned_files = collections.Counter()
+    parse_errors = []
+    for name, oid, groups in selected:
+        header = stream.readline().split()
+        assert len(header) == 3 and header[0] == oid and header[1] == b'blob'
+        source = stream.read(int(header[2])).decode('utf-8')
+        assert stream.read(1) == b'\n'
+        for group, language in groups:
+            scanned_files[group] += 1
+            if language == 'python':
+                try:
+                    nodes = ast.walk(ast.parse(source, filename=name))
+                    number = sum(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('test') for node in nodes)
+                except SyntaxError as error:
+                    parse_errors.append({'path': name, 'error': str(error)})
+                    number = 0
+            else:
+                number = len({'rust': RUST, 'swift': SWIFT, 'android': ANDROID, 'js': JS}[language].findall(source))
+            counts[group] += number
+            if number:
+                contributing_files[group] += 1
+    assert not stream.read()
+    principal = ['Rust test attributes', 'Python tests/operations', 'Python tests/validation', 'Python tests/benchmark', 'Swift Apple mobile', 'Swift tray', 'Android JVM', 'Android instrumentation']
+    return {
+        'commit': commit,
+        'method': 'Static committed-source declarations; not runtime-discovered or executed test cases. Regex may match source literals; macros, inherited and generated tests are not expanded. cfg/features/platform/ignore do not filter counts. JS misses plain-assert scripts, nested/multiline cases and loop expansion.',
+        'groups': {group: {'declarations': counts[group], 'files_with_declarations': contributing_files[group], 'files_scanned': scanned_files[group]} for group in sorted(counts)},
+        'principal_non_js_declarations': sum(counts[group] for group in principal),
+        'all_non_js_declarations': sum(number for group, number in counts.items() if not group.startswith('JS ')),
+        'js_lexical_callsites': sum(number for group, number in counts.items() if group.startswith('JS ')),
+        'parse_errors': parse_errors,
+    }
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repo', type=pathlib.Path, default=pathlib.Path.cwd())
+    parser.add_argument('refs', nargs='+')
+    args = parser.parse_args()
+    print(json.dumps({'schema': 1, 'inventories': [inventory(args.repo, ref) for ref in args.refs]}, indent=2, sort_keys=True))

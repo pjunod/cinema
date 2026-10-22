@@ -7,6 +7,13 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+// Failure-only receipts survive focused tests without a tracing subscriber.
+fn record_source_start_refusal(stage: &str, error: &impl std::fmt::Debug) {
+    tracing::warn!(target: "plurx::sharing", stage, error = ?error, "Source Start operation failed");
+    #[cfg(test)]
+    eprintln!("Source HTTP refusal: stage={stage} error={error:?}");
+}
+
 #[path = "shared_source_forwarding.rs"]
 pub(crate) mod forwarding;
 use forwarding::{AuthenticationHeaders, SourceHeaders};
@@ -209,6 +216,8 @@ impl SourceStartEntry {
                     SourceStartTaskStage::FactoryRefused(_) => "factory_refused",
                 };
                 tracing::warn!(target: "plurx::sharing", stage, error_class = ?error, "Source initial Start failed");
+                #[cfg(test)]
+                eprintln!("Source HTTP Start refused: stage={stage} error={error:?}");
             }
             if let Ok(owned) = &result {
                 debug_assert_eq!(
@@ -1806,7 +1815,10 @@ async fn own_start(
             &state.sharing.key,
         )
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?;
+        .map_err(|error| {
+            record_source_start_refusal("source_start.intent", &error);
+            SourceStartFailure::Unresolved
+        })?;
     let intent = match intent {
         SourceIntentRead::Ready(value) => value,
         SourceIntentRead::Unavailable => return Err(SourceStartFailure::Unavailable),
@@ -1820,7 +1832,10 @@ async fn own_start(
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
+        .map_err(|error| {
+            record_source_start_refusal("source_start.claim_members", &error);
+            SourceStartFailure::Unresolved
+        })?
         .ok_or(SourceStartFailure::Unavailable)?;
     entry.retain_stage(SourceStartTaskStage::Claiming {
         planned_incarnation,
@@ -1830,8 +1845,10 @@ async fn own_start(
         .store
         .claim_source_media_session(&intent, &members)
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
-    {
+        .map_err(|error| {
+            record_source_start_refusal("source_start.claim", &error);
+            SourceStartFailure::Unresolved
+        })? {
         SourceClaimOutcome::Acquired(binding) => binding,
         // A committed old claim/replay without this retained HTTP owner is an
         // unresolved restart outcome, never evidence of no physical activation.
@@ -1861,28 +1878,37 @@ async fn own_start(
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
+        .map_err(|error| {
+            record_source_start_refusal("source_start.assignment_members", &error);
+            SourceStartFailure::Unresolved
+        })?
         .ok_or(SourceStartFailure::Unresolved)?;
     entry.retain_stage(SourceStartTaskStage::Assigning(binding.clone()));
     let assignment = state
         .store
         .assign_source_dispatch(&binding, &state.sharing.key, &members)
         .await
-        .map_err(|_| SourceStartFailure::Unresolved)?
+        .map_err(|error| {
+            record_source_start_refusal("source_start.assignment", &error);
+            SourceStartFailure::Unresolved
+        })?
         .ok_or(SourceStartFailure::Unresolved)?;
     entry.retain_stage(SourceStartTaskStage::Assigned(assignment.clone()));
     state
         .store
         .initialize_source_ingress_custody(&assignment)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_initialize", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
+        .map_err(|error| {
+            record_source_start_refusal("source_start.ledger_initialize", &error);
+            SourceStartFailure::Unresolved
+        })?;
     loop {
         let changed = entry.changed.notified();
         let ledger = state
             .store
             .source_ingress_custody(&assignment)
             .await
-            .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_read", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+            .map_err(|error| { record_source_start_refusal("source_start.ledger_read", &error); SourceStartFailure::Unresolved })?
             .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
         if ledger.state.is_sealed() {
             tracing::warn!(target: "plurx::sharing", stage = "source_start.ledger_sealed", "Source initial admission refused");
@@ -1900,7 +1926,7 @@ async fn own_start(
         .membership
         .observe_source_admission_members()
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.members", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+        .map_err(|error| { record_source_start_refusal("source_start.members", &error); SourceStartFailure::Unresolved })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_members_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     let ingress_permission = state
         .store
@@ -1910,18 +1936,26 @@ async fn own_start(
             &members,
         )
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_permission", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
+        .map_err(|error| { record_source_start_refusal("source_start.ingress_permission", &error); SourceStartFailure::Unresolved })?
         .ok_or_else(|| { tracing::warn!(target: "plurx::sharing", stage = "source_start.ingress_permission_absent", error_class = "absent", "Source initial admission refused"); SourceStartFailure::Unresolved })?;
     entry.retain_stage(SourceStartTaskStage::Activating(assignment.clone()));
     let activation = match state
         .store
         .prepare_source_activation_authority(&assignment, &state.sharing.key, &members)
         .await
-        .map_err(|_| { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "store", "Source initial admission refused"); SourceStartFailure::Unresolved })?
-    {
+        .map_err(|error| {
+            record_source_start_refusal("source_start.activation_authority", &error);
+            SourceStartFailure::Unresolved
+        })? {
         SourceWriteAuthorityRead::Ready(value) => *value,
-        SourceWriteAuthorityRead::Unavailable => { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "refused", "Source initial admission refused"); return Err(SourceStartFailure::Unresolved); },
-        SourceWriteAuthorityRead::Capacity => { tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "capacity", "Source initial admission refused"); return Err(SourceStartFailure::Capacity); },
+        SourceWriteAuthorityRead::Unavailable => {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "refused", "Source initial admission refused");
+            return Err(SourceStartFailure::Unresolved);
+        }
+        SourceWriteAuthorityRead::Capacity => {
+            tracing::warn!(target: "plurx::sharing", stage = "source_start.activation_authority", error_class = "capacity", "Source initial admission refused");
+            return Err(SourceStartFailure::Capacity);
+        }
     };
     entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
     let actor = match direct::start_prepared_worker(
@@ -1955,12 +1989,17 @@ async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
         sharing::SharingIdentity, sharing_catalogue_details::CatalogueRevisionKey,
         store::sharing_catalogue_details::SourceDetailsRead,
     };
-    let (hash, grant) = super::shared_library::authority(state, headers).await?;
+    let (hash, grant) = super::shared_library::authority(state, headers)
+        .await
+        .inspect_err(|error| record_source_start_refusal("source_reference.authority", error))?;
     let SourceDetailsRead::Authorized(witness) = state
         .store
         .source_item_file_witness(&hash, grant, target.item_id.clone(), target.file_id.clone())
         .await
-        .map_err(|_| unavailable())?
+        .map_err(|error| {
+            record_source_start_refusal("source_reference.witness", &error);
+            unavailable()
+        })?
     else {
         return Err(unavailable());
     };
@@ -1977,7 +2016,10 @@ async fn current_reference<H: AuthenticationHeaders + Send + Sync + ?Sized>(
         .store
         .source_catalogue_revision_key(target.server_id, target.catalogue_epoch)
         .await
-        .map_err(|_| unavailable())?
+        .map_err(|error| {
+            record_source_start_refusal("source_reference.catalogue_key", &error);
+            unavailable()
+        })?
         .ok_or_else(unavailable)?;
     let key = CatalogueRevisionKey::open(
         &state.sharing.key,
@@ -2807,6 +2849,7 @@ async fn build_real_source_start_fixture(
         // grade from the player's caps.
         .with_hdr10_passthrough(matches!(mode, SourceFixtureMode::Hdr10)),
     );
+    state.transcode.test_hooks();
     let mut headers = HeaderMap::new();
     headers.insert(
         "authorization",

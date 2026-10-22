@@ -1,0 +1,1409 @@
+{
+  "baseline": "c1c344132463f0f4b7e9b98be82d23cad14aea24",
+  "captured_utc": "2026-10-20 14:21:12",
+  "inventory": {
+    "inventories": [
+      {
+        "all_non_js_declarations": 11934,
+        "commit": "2ae66759b2ecb1065d1c18f3c5827fc6d50d8f3c",
+        "groups": {
+          "Android JVM": {
+            "declarations": 1171,
+            "files_scanned": 143,
+            "files_with_declarations": 141
+          },
+          "Android instrumentation": {
+            "declarations": 85,
+            "files_scanned": 37,
+            "files_with_declarations": 36
+          },
+          "JS desktop-remote": {
+            "declarations": 16,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "JS tests/playback": {
+            "declarations": 538,
+            "files_scanned": 20,
+            "files_with_declarations": 17
+          },
+          "JS tests/web": {
+            "declarations": 855,
+            "files_scanned": 88,
+            "files_with_declarations": 65
+          },
+          "Python clients/desktop-remote/tests": {
+            "declarations": 16,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tests/benchmark": {
+            "declarations": 52,
+            "files_scanned": 6,
+            "files_with_declarations": 6
+          },
+          "Python tests/desktop": {
+            "declarations": 11,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tests/operations": {
+            "declarations": 1304,
+            "files_scanned": 118,
+            "files_with_declarations": 118
+          },
+          "Python tests/sharing": {
+            "declarations": 14,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "Python tests/validation": {
+            "declarations": 502,
+            "files_scanned": 35,
+            "files_with_declarations": 35
+          },
+          "Python tests/web": {
+            "declarations": 1,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_processing": {
+            "declarations": 4,
+            "files_scanned": 3,
+            "files_with_declarations": 3
+          },
+          "Python tools/dv_processing/controls": {
+            "declarations": 3,
+            "files_scanned": 3,
+            "files_with_declarations": 3
+          },
+          "Python tools/dv_quality/backends/combined": {
+            "declarations": 17,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_quality/backends/decoded-layers": {
+            "declarations": 41,
+            "files_scanned": 3,
+            "files_with_declarations": 3
+          },
+          "Python tools/dv_quality/backends/libplacebo": {
+            "declarations": 11,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_quality/backends/nonidentity-authoring": {
+            "declarations": 32,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "Python tools/dv_quality/backends/p81-authoring": {
+            "declarations": 10,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_quality/backends/parsed-rpu": {
+            "declarations": 20,
+            "files_scanned": 4,
+            "files_with_declarations": 4
+          },
+          "Python tools/dv_quality/backends/rpu-reuse": {
+            "declarations": 37,
+            "files_scanned": 3,
+            "files_with_declarations": 2
+          },
+          "Python tools/dv_quality/backends/timeline": {
+            "declarations": 30,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "Python validation": {
+            "declarations": 0,
+            "files_scanned": 1,
+            "files_with_declarations": 0
+          },
+          "Rust test attributes": {
+            "declarations": 7252,
+            "files_scanned": 832,
+            "files_with_declarations": 506
+          },
+          "Swift Apple mobile": {
+            "declarations": 1246,
+            "files_scanned": 72,
+            "files_with_declarations": 68
+          },
+          "Swift tray": {
+            "declarations": 75,
+            "files_scanned": 6,
+            "files_with_declarations": 6
+          }
+        },
+        "js_lexical_callsites": 1409,
+        "method": "Static committed-source declarations; not runtime-discovered or executed test cases. Regex may match source literals; macros, inherited and generated tests are not expanded. cfg/features/platform/ignore do not filter counts. JS misses plain-assert scripts, nested/multiline cases and loop expansion.",
+        "parse_errors": [],
+        "principal_non_js_declarations": 11687
+      },
+      {
+        "all_non_js_declarations": 11934,
+        "commit": "c1c344132463f0f4b7e9b98be82d23cad14aea24",
+        "groups": {
+          "Android JVM": {
+            "declarations": 1171,
+            "files_scanned": 143,
+            "files_with_declarations": 141
+          },
+          "Android instrumentation": {
+            "declarations": 85,
+            "files_scanned": 37,
+            "files_with_declarations": 36
+          },
+          "JS desktop-remote": {
+            "declarations": 16,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "JS tests/playback": {
+            "declarations": 548,
+            "files_scanned": 20,
+            "files_with_declarations": 17
+          },
+          "JS tests/web": {
+            "declarations": 855,
+            "files_scanned": 88,
+            "files_with_declarations": 65
+          },
+          "Python clients/desktop-remote/tests": {
+            "declarations": 16,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tests/benchmark": {
+            "declarations": 52,
+            "files_scanned": 6,
+            "files_with_declarations": 6
+          },
+          "Python tests/desktop": {
+            "declarations": 11,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tests/operations": {
+            "declarations": 1304,
+            "files_scanned": 118,
+            "files_with_declarations": 118
+          },
+          "Python tests/sharing": {
+            "declarations": 14,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "Python tests/validation": {
+            "declarations": 502,
+            "files_scanned": 35,
+            "files_with_declarations": 35
+          },
+          "Python tests/web": {
+            "declarations": 1,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_processing": {
+            "declarations": 4,
+            "files_scanned": 3,
+            "files_with_declarations": 3
+          },
+          "Python tools/dv_processing/controls": {
+            "declarations": 3,
+            "files_scanned": 3,
+            "files_with_declarations": 3
+          },
+          "Python tools/dv_quality/backends/combined": {
+            "declarations": 17,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_quality/backends/decoded-layers": {
+            "declarations": 41,
+            "files_scanned": 3,
+            "files_with_declarations": 3
+          },
+          "Python tools/dv_quality/backends/libplacebo": {
+            "declarations": 11,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_quality/backends/nonidentity-authoring": {
+            "declarations": 32,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "Python tools/dv_quality/backends/p81-authoring": {
+            "declarations": 10,
+            "files_scanned": 1,
+            "files_with_declarations": 1
+          },
+          "Python tools/dv_quality/backends/parsed-rpu": {
+            "declarations": 20,
+            "files_scanned": 4,
+            "files_with_declarations": 4
+          },
+          "Python tools/dv_quality/backends/rpu-reuse": {
+            "declarations": 37,
+            "files_scanned": 3,
+            "files_with_declarations": 2
+          },
+          "Python tools/dv_quality/backends/timeline": {
+            "declarations": 30,
+            "files_scanned": 2,
+            "files_with_declarations": 2
+          },
+          "Python validation": {
+            "declarations": 0,
+            "files_scanned": 1,
+            "files_with_declarations": 0
+          },
+          "Rust test attributes": {
+            "declarations": 7252,
+            "files_scanned": 832,
+            "files_with_declarations": 506
+          },
+          "Swift Apple mobile": {
+            "declarations": 1246,
+            "files_scanned": 72,
+            "files_with_declarations": 68
+          },
+          "Swift tray": {
+            "declarations": 75,
+            "files_scanned": 6,
+            "files_with_declarations": 6
+          }
+        },
+        "js_lexical_callsites": 1419,
+        "method": "Static committed-source declarations; not runtime-discovered or executed test cases. Regex may match source literals; macros, inherited and generated tests are not expanded. cfg/features/platform/ignore do not filter counts. JS misses plain-assert scripts, nested/multiline cases and loop expansion.",
+        "parse_errors": [],
+        "principal_non_js_declarations": 11687
+      }
+    ],
+    "schema": 1
+  },
+  "job_summaries": [
+    {
+      "key": "android_device",
+      "name": "Android instrumented UI tests",
+      "statuses": {
+        "cancelled": 5,
+        "failure": 10,
+        "skipped": 24,
+        "success": 7
+      },
+      "success_max_minutes": 17.7,
+      "success_median_minutes": 10.88,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "android_jvm",
+      "name": "Android JVM tests and lint",
+      "statuses": {
+        "cancelled": 5,
+        "failure": 3,
+        "skipped": 22,
+        "success": 16
+      },
+      "success_max_minutes": 14.57,
+      "success_median_minutes": 6.92,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "apple",
+      "name": "Apple iOS + tvOS tests",
+      "statuses": {
+        "cancelled": 8,
+        "failure": 11,
+        "skipped": 25,
+        "success": 2
+      },
+      "success_max_minutes": 17.22,
+      "success_median_minutes": 17.02,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "check",
+      "name": "Rust unit and SQLite contracts",
+      "statuses": {
+        "cancelled": 8,
+        "failure": 13,
+        "skipped": 25
+      },
+      "success_max_minutes": null,
+      "success_median_minutes": null,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "cluster_daemon",
+      "name": "cluster daemon contracts",
+      "statuses": {
+        "cancelled": 7,
+        "failure": 7,
+        "skipped": 22,
+        "success": 10
+      },
+      "success_max_minutes": 23.88,
+      "success_median_minutes": 19.62,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "cluster_store_legacy",
+      "name": "replicated Store contracts (legacy)",
+      "statuses": {
+        "cancelled": 10,
+        "failure": 8,
+        "skipped": 22,
+        "success": 6
+      },
+      "success_max_minutes": 84.9,
+      "success_median_minutes": 40.94,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "cluster_topology",
+      "name": "replicated topology contracts",
+      "statuses": {
+        "cancelled": 8,
+        "failure": 11,
+        "skipped": 22,
+        "success": 5
+      },
+      "success_max_minutes": 21.53,
+      "success_median_minutes": 16.42,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "cluster_transport_recovery",
+      "name": "cluster transport recovery campaign",
+      "statuses": {
+        "cancelled": 13,
+        "failure": 24,
+        "skipped": 4,
+        "success": 5
+      },
+      "success_max_minutes": 6.72,
+      "success_median_minutes": 4.73,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "cluster_wal",
+      "name": "replicated WAL recovery contracts",
+      "statuses": {
+        "cancelled": 10,
+        "failure": 14,
+        "skipped": 22
+      },
+      "success_max_minutes": null,
+      "success_median_minutes": null,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "preflight",
+      "name": "fast policy and contract preflight",
+      "statuses": {
+        "cancelled": 3,
+        "failure": 19,
+        "skipped": 4,
+        "success": 20
+      },
+      "success_max_minutes": 8.23,
+      "success_median_minutes": 5.27,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "rust_compile",
+      "name": "fast Rust gate",
+      "statuses": {
+        "cancelled": 5,
+        "failure": 8,
+        "skipped": 22,
+        "success": 11
+      },
+      "success_max_minutes": 13.32,
+      "success_median_minutes": 9.68,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "vod_web",
+      "name": "film-addressed VOD browser acceptance",
+      "statuses": {
+        "cancelled": 8,
+        "failure": 1,
+        "skipped": 37
+      },
+      "success_max_minutes": null,
+      "success_median_minutes": null,
+      "workflow": "ci.yml"
+    },
+    {
+      "key": "web_layout",
+      "name": "web layout and accessibility",
+      "statuses": {
+        "cancelled": 8,
+        "failure": 16,
+        "skipped": 22
+      },
+      "success_max_minutes": null,
+      "success_median_minutes": null,
+      "workflow": "ci.yml"
+    }
+  ],
+  "last_successful_coverage": {
+    "job_seconds": 1715,
+    "run": 4211,
+    "sha": "cca4a09b997171ba91136b396f7d484097305fd0",
+    "started_utc": "2026-10-07T01:45:22Z",
+    "stopped_utc": "2026-10-07T02:13:57Z",
+    "task": 16387
+  },
+  "log_samples": [
+    {
+      "compilation": [
+        "Finished `dev` profile [unoptimized + debuginfo] target(s) in 24m 05s"
+      ],
+      "failed": 0,
+      "failure_tests": [],
+      "ignored": 0,
+      "job_minutes": 30.55,
+      "log_sha256": "d8b9c4c097c0646839b5ae675b46be5127edb92383dbca486b0f804222878581",
+      "long_running_warnings": 0,
+      "notes": "Failed historical gate; incomplete binaries may be absent from result totals.",
+      "passed": 0,
+      "reported_test_seconds": 0,
+      "results": [],
+      "run": 4928,
+      "sha": "59440187d0ad16ceec7632f2461493112f3dfc60",
+      "status": "failure",
+      "task": 18690,
+      "workflow": "ci.yml"
+    },
+    {
+      "compilation": [
+        "Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 11s",
+        "Finished `test` profile [unoptimized] target(s) in 9m 35s"
+      ],
+      "failed": 0,
+      "failure_tests": [
+        "store::consistent_read_census::consistent_read_census_admits_a_raised_entry_with_an_authority_reason",
+        "store::consistent_read_census::consistent_read_census_matches_the_checked_in_table",
+        "store::consistent_read_census::consistent_read_census_refuses_a_new_authority_read_through_a_dispatch_helper",
+        "store::consistent_read_census::consistent_read_census_refuses_a_synthetic_extra_read_in_a_fixture_copy",
+        "store::replicated::tests::every_sqlite_transaction_site_is_classified",
+        "store::placeholder_census::every_replicated_placeholder_is_introduced_in_order",
+        "store::placeholder_census::every_sqlite_placeholder_and_local_binding_arity_is_valid",
+        "store::sharing_source_sessions::tests::sharing_source_sqlite_first_activation_current_authority_and_lineage"
+      ],
+      "ignored": 0,
+      "job_minutes": 30.03,
+      "log_sha256": "44f195bea98871dd4337f9f731b92961b9e1eb81d0edd89579a0fe2f6e8d567c",
+      "long_running_warnings": 72,
+      "notes": "Failed historical gate; incomplete binaries may be absent from result totals.",
+      "passed": 47,
+      "reported_test_seconds": 0.0,
+      "results": [
+        {
+          "binary": "plurx_compat_jellyfin",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 31,
+          "result_timestamp": "2026-10-15T20:49:27.5567511Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_compat_plex",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 14,
+          "result_timestamp": "2026-10-15T20:49:27.5651661Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cluster_discovery",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-15T20:49:27.5686970Z",
+          "seconds": 0.0
+        }
+      ],
+      "run": 5202,
+      "sha": "a0a487c846538e1f04d8ae4b857ca5eba4515a66",
+      "status": "failure",
+      "task": 19919,
+      "workflow": "ci.yml"
+    },
+    {
+      "compilation": [
+        "Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 58s",
+        "Finished `test` profile [unoptimized] target(s) in 6m 35s"
+      ],
+      "failed": 0,
+      "failure_tests": [
+        "http::hls::tests::cached_owner_delivery_tests::cached_caption_revision_reaches_real_remote_owner_without_ingress_cache",
+        "http::remote::tests::remote_poll_byte_budget_retains_oversized_command_overflow",
+        "http::shared_source_playback::actor_adapter_tests::sharing_source_actor_adapters_actual_h1_h2_control_and_private_metrics",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_body_stops_on_revocation",
+        "http::shared_source_playback::actor_adapter_tests::sharing_source_actor_adapters_actual_encoded_h1_h2_control_and_private_metrics",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_counts_grant_and_source_slots",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_if_range_ignores_range_like_local",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_range_matches_local_serve_file_range",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_read_join_before_end_receipt",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_start_requires_actual_direct_decision",
+        "http::shared_source_playback::tests::sharing_source_http_burned_bitmap_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_symlink_or_resized_file_refuses",
+        "http::shared_source_playback::tests::sharing_source_http_burned_text_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::actual_forwarding_tests::sharing_source_nonowner_http_cold_probe_and_same_driver_end_require_actual_closure",
+        "http::shared_source_playback::tests::sharing_source_http_end_retains_actual_owner_after_disconnect_and_revoke",
+        "http::shared_source_playback::tests::sharing_source_http_incomplete_h2_and_owned_read_join_before_end_receipt",
+        "http::shared_source_playback::tests::sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::tests::sharing_source_http_hdr10_to_sdr_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::tests::sharing_source_http_real_encoded_h1_h2_playlist_init_and_segment",
+        "http::shared_source_playback::tests::sharing_source_http_native_encoded_h1_h2_vtt_and_held_body_end",
+        "http::shared_source_playback::tests::sharing_source_http_start_disconnect_joins_actual_actor_and_fresh_exact_replay",
+        "http::shared_source_playback::tests::sharing_source_http_failed_claim_and_assignment_retain_joined_exact_task_stages"
+      ],
+      "ignored": 5,
+      "job_minutes": 60.05,
+      "log_sha256": "411be686232a1a9639e96919803a22978688b80099caebdfe929ab0e280535fc",
+      "long_running_warnings": 202,
+      "notes": "Failed historical gate; incomplete binaries may be absent from result totals.",
+      "passed": 2376,
+      "reported_test_seconds": 2156.45,
+      "results": [
+        {
+          "binary": "plurx_compat_jellyfin",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 31,
+          "result_timestamp": "2026-10-16T06:23:51.5682437Z",
+          "seconds": 0.01
+        },
+        {
+          "binary": "plurx_compat_plex",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 14,
+          "result_timestamp": "2026-10-16T06:23:51.5724459Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cluster_discovery",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-16T06:23:51.5760769Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_core",
+          "failed": 0,
+          "ignored": 5,
+          "passed": 1900,
+          "result_timestamp": "2026-10-16T06:45:51.3920723Z",
+          "seconds": 1319.8
+        },
+        {
+          "binary": "audiobook_artwork",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-16T06:45:51.9741232Z",
+          "seconds": 0.48
+        },
+        {
+          "binary": "decoder_selection",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 101,
+          "result_timestamp": "2026-10-16T06:45:51.9968430Z",
+          "seconds": 0.01
+        },
+        {
+          "binary": "hiqlite_encoded_bootstrap",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-16T06:45:56.6408934Z",
+          "seconds": 4.64
+        },
+        {
+          "binary": "hiqlite_tls_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-16T06:45:56.7061326Z",
+          "seconds": 0.05
+        },
+        {
+          "binary": "rustls_single_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-16T06:45:56.7185358Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "store_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-16T06:45:56.7210398Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "store_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 268,
+          "result_timestamp": "2026-10-16T06:59:42.0658502Z",
+          "seconds": 825.33
+        },
+        {
+          "binary": "plurx_notification_broker",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 26,
+          "result_timestamp": "2026-10-16T06:59:47.4640039Z",
+          "seconds": 5.38
+        },
+        {
+          "binary": "cli",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-16T06:59:47.4743746Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cli",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-16T06:59:47.5890204Z",
+          "seconds": 0.11
+        },
+        {
+          "binary": "plurx_pgs",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 21,
+          "result_timestamp": "2026-10-16T06:59:47.6249261Z",
+          "seconds": 0.03
+        },
+        {
+          "binary": "pgs_feasibility",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-16T06:59:47.6282179Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "parser_prerequisites",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-16T06:59:47.6327275Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "stable_input_identity",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-16T06:59:47.6370159Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_support",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 5,
+          "result_timestamp": "2026-10-16T06:59:48.2527969Z",
+          "seconds": 0.61
+        }
+      ],
+      "run": 5299,
+      "sha": "6c280ab4ab62c404e7bace35ebdf803187b169c8",
+      "status": "failure",
+      "task": 20545,
+      "workflow": "ci.yml"
+    },
+    {
+      "compilation": [
+        "Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 54s",
+        "Finished `test` profile [unoptimized] target(s) in 8m 48s"
+      ],
+      "failed": 1,
+      "failure_tests": [
+        "store::sharing_source_sessions::tests::sharing_source_sqlite_first_activation_current_authority_and_lineage"
+      ],
+      "ignored": 5,
+      "job_minutes": 60.03,
+      "log_sha256": "29b5737fb27c81e68778f97640383ea668babde49b409bde66789add72e100d4",
+      "long_running_warnings": 176,
+      "notes": "Failed historical gate; incomplete binaries may be absent from result totals.",
+      "passed": 2381,
+      "reported_test_seconds": 2496.53,
+      "results": [
+        {
+          "binary": "plurx_compat_jellyfin",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 31,
+          "result_timestamp": "2026-10-17T20:41:00.0389807Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_compat_plex",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 14,
+          "result_timestamp": "2026-10-17T20:41:00.0433888Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cluster_discovery",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-17T20:41:00.0476968Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_core",
+          "failed": 1,
+          "ignored": 5,
+          "passed": 1905,
+          "result_timestamp": "2026-10-17T21:07:57.9114828Z",
+          "seconds": 1617.85
+        },
+        {
+          "binary": "audiobook_artwork",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-17T21:07:58.6969993Z",
+          "seconds": 0.66
+        },
+        {
+          "binary": "decoder_selection",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 101,
+          "result_timestamp": "2026-10-17T21:07:58.7133672Z",
+          "seconds": 0.01
+        },
+        {
+          "binary": "hiqlite_encoded_bootstrap",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-17T21:08:03.4947680Z",
+          "seconds": 4.77
+        },
+        {
+          "binary": "rustls_single_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-17T21:08:03.5438207Z",
+          "seconds": 0.04
+        },
+        {
+          "binary": "rustls_single_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-17T21:08:03.5540030Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "schema_lineage_upgrade",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-17T21:08:03.5570373Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "store_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 268,
+          "result_timestamp": "2026-10-17T21:22:30.6543103Z",
+          "seconds": 867.09
+        },
+        {
+          "binary": "plurx_notification_broker",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 26,
+          "result_timestamp": "2026-10-17T21:22:36.0652970Z",
+          "seconds": 5.39
+        },
+        {
+          "binary": "plurx_notification_broker",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-17T21:22:36.0734622Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cli",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-17T21:22:36.1924530Z",
+          "seconds": 0.11
+        },
+        {
+          "binary": "plurx_pgs",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 21,
+          "result_timestamp": "2026-10-17T21:22:36.2208195Z",
+          "seconds": 0.03
+        },
+        {
+          "binary": "pgs_feasibility",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-17T21:22:36.2236247Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "parser_prerequisites",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-17T21:22:36.2274583Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "stable_input_identity",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-17T21:22:36.2314849Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_support",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 5,
+          "result_timestamp": "2026-10-17T21:22:36.8218359Z",
+          "seconds": 0.58
+        }
+      ],
+      "run": 5314,
+      "sha": "75b055fafce81e0c27732d7def2f351a8ad97ebb",
+      "status": "failure",
+      "task": 20673,
+      "workflow": "ci.yml"
+    },
+    {
+      "compilation": [
+        "Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 41s",
+        "Finished `test` profile [unoptimized] target(s) in 7m 20s"
+      ],
+      "failed": 48,
+      "failure_tests": [
+        "cluster::migration::tests::restore_archive_with_retired_purpose_keys_admits_new_node_before_key_census",
+        "provider::tests::durable_revoke_in_oauth_other_connection_fences_provider_effect",
+        "http::hls::tests::cached_owner_delivery_tests::cached_caption_revision_reaches_real_remote_owner_without_ingress_cache",
+        "http::remote::tests::remote_poll_byte_budget_retains_oversized_command_overflow",
+        "http::shared_source_playback::actor_adapter_tests::sharing_source_actor_adapters_actual_encoded_h1_h2_control_and_private_metrics",
+        "http::shared_source_playback::actor_adapter_tests::sharing_source_actor_adapters_actual_h1_h2_control_and_private_metrics",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_symlink_or_resized_file_refuses",
+        "http::shared_source_playback::tests::sharing_source_http_burned_bitmap_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::direct::tests::sharing_source_direct_start_requires_actual_direct_decision",
+        "http::shared_source_playback::actual_forwarding_tests::sharing_source_nonowner_http_cold_probe_and_same_driver_end_require_actual_closure",
+        "http::shared_source_playback::tests::sharing_source_http_hdr10_preserved_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::tests::sharing_source_http_hdr10_to_sdr_h1_h2_and_confirmed_end",
+        "http::shared_source_playback::tests::sharing_source_http_live_media_body_stops_on_revocation",
+        "http::shared_source_playback::tests::sharing_source_http_incomplete_h2_and_owned_read_join_before_end_receipt",
+        "http::shared_source_playback::tests::sharing_source_http_start_disconnect_joins_actual_actor_and_fresh_exact_replay",
+        "http::shared_source_playback::tests::sharing_source_http_queued_h1_h2_writer_closes_before_actual_settlement",
+        "http::tests::every_registered_literal_route_has_an_explicit_group",
+        "startup_tests::the_assembled_state_carries_the_configured_identity_and_directories",
+        "store_result::tests::production_store_results_never_use_bare_let_underscore",
+        "subtitle_translation::runtime::tests::actual_timeout_and_cancellation_reap_owned_child_group_before_return",
+        "telemetry::tests::a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink",
+        "transcode::source_actor::tests::source_assigned_owner_cached_caption_revision_reads_retained_bytes_and_refuses_stale_identity",
+        "transcode::source_actor::tests::source_control_ack_refused_without_slot",
+        "transcode::source_actor::tests::source_control_changed_selection_declines_preparation",
+        "transcode::source_actor::tests::source_control_legacy_copy_seek_replay_pause_and_counted_body",
+        "transcode::source_actor::tests::source_control_refuses_changed_held_file_without_activity",
+        "transcode::source_actor::tests::source_control_legacy_encoded_seek_replay_pause_and_counted_body",
+        "transcode::source_actor::tests::source_control_refuses_expired_original_clock_without_activity",
+        "transcode::source_actor::tests::source_control_refuses_same_write_purpose_floor_loss_without_activity",
+        "transcode::source_actor::tests::source_control_refuses_same_write_saved_switch_loss_without_activity",
+        "transcode::source_actor::tests::source_copy_actor_builds_cold_index_under_actual_owned_admission",
+        "transcode::source_actor::tests::source_copy_actor_survives_waiter_cancellation_and_holds_capacity_through_body_retirement",
+        "transcode::source_actor::tests::source_copy_actor_stops_owned_renewal_after_actual_viewer_idle_reap",
+        "transcode::source_actor::tests::source_copy_attachment_registers_current_producer_and_reaps_owned_permit",
+        "transcode::source_actor::tests::source_encoded_actor_real_probe_recipe_media_and_body_retirement",
+        "transcode::source_actor::tests::source_preparation_closes_actual_parent_descriptors_before_settlement",
+        "transcode::source_actor::tests::source_resource_expired_waiter_joins_actual_job_without_late_viewer_activity",
+        "transcode::source_actor::tests::source_resource_init_open_job_retains_actual_fd_and_guard_after_waiter_cancellation",
+        "transcode::source_actor::tests::source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation",
+        "transcode::source_actor::tests::source_retained_permission_survives_zero_open_connections_and_reconnect",
+        "transcode::source_actor::tests::source_status_actual_metrics_are_private_activity_free_and_counted",
+        "transcode::source_actor::tests::source_status_original_observation_expiry_refuses_without_activity",
+        "transcode::source_actor::tests::source_retired_predecessor_cannot_invalidate_surviving_owner_generation_permission",
+        "transcode::source_actor::tests::source_status_parked_read_reobserves_fresh_authority",
+        "transcode::source_actor::tests::source_status_purpose_floor_race_refuses_without_activity",
+        "transcode::source_actor::tests::source_status_saved_switch_race_refuses_without_activity",
+        "transcode::source_actor::tests::source_status_survives_a_concurrent_same_owner_lease_renewal",
+        "transcode::source_actor::tests::source_status_waiter_cancellation_retains_owned_observation"
+      ],
+      "ignored": 46,
+      "job_minutes": 88.85,
+      "log_sha256": "722541b34691e40f2ed16eece9a2390445c896c9b8ab7325403551cff1509014",
+      "long_running_warnings": 315,
+      "notes": "Failed historical gate; incomplete binaries may be absent from result totals.",
+      "passed": 6673,
+      "reported_test_seconds": 4541.55,
+      "results": [
+        {
+          "binary": "plurx_compat_jellyfin",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 31,
+          "result_timestamp": "2026-10-18T10:01:20.5463559Z",
+          "seconds": 0.01
+        },
+        {
+          "binary": "plurx_compat_plex",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 14,
+          "result_timestamp": "2026-10-18T10:01:20.5514118Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cluster_discovery",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-18T10:01:20.5547000Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_core",
+          "failed": 1,
+          "ignored": 5,
+          "passed": 1913,
+          "result_timestamp": "2026-10-18T10:24:16.1121554Z",
+          "seconds": 1375.54
+        },
+        {
+          "binary": "audiobook_artwork",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T10:24:16.7137716Z",
+          "seconds": 0.49
+        },
+        {
+          "binary": "decoder_selection",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 101,
+          "result_timestamp": "2026-10-18T10:24:16.7280018Z",
+          "seconds": 0.01
+        },
+        {
+          "binary": "hiqlite_encoded_bootstrap",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T10:24:21.3186768Z",
+          "seconds": 4.58
+        },
+        {
+          "binary": "hiqlite_tls_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T10:24:21.3770953Z",
+          "seconds": 0.04
+        },
+        {
+          "binary": "rustls_single_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T10:24:21.3896127Z",
+          "seconds": 0.01
+        },
+        {
+          "binary": "store_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T10:24:21.3919928Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "store_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 269,
+          "result_timestamp": "2026-10-18T10:38:49.4029397Z",
+          "seconds": 868.0
+        },
+        {
+          "binary": "subtitle_translation_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 13,
+          "result_timestamp": "2026-10-18T10:39:08.9793676Z",
+          "seconds": 19.56
+        },
+        {
+          "binary": "plurx_notification_broker",
+          "failed": 1,
+          "ignored": 0,
+          "passed": 25,
+          "result_timestamp": "2026-10-18T10:39:14.3672063Z",
+          "seconds": 5.37
+        },
+        {
+          "binary": "plurx_notification_broker",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T10:39:14.3707114Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cli",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T10:39:14.4727230Z",
+          "seconds": 0.1
+        },
+        {
+          "binary": "plurx_pgs",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 21,
+          "result_timestamp": "2026-10-18T10:39:14.5067888Z",
+          "seconds": 0.03
+        },
+        {
+          "binary": "pgs_feasibility",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T10:39:14.5109909Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "parser_prerequisites",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-18T10:39:14.5156265Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "stable_input_identity",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T10:39:14.5200881Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_support",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 5,
+          "result_timestamp": "2026-10-18T10:39:15.1366127Z",
+          "seconds": 0.61
+        },
+        {
+          "binary": "plurxd",
+          "failed": 46,
+          "ignored": 40,
+          "passed": 4270,
+          "result_timestamp": "2026-10-18T11:17:02.2440109Z",
+          "seconds": 2267.08
+        },
+        {
+          "binary": "sharing_daemon_restart",
+          "failed": 0,
+          "ignored": 1,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T11:17:02.4930112Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "sharing_daemon_restart",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T11:17:02.6722567Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "sharing_daemon_restart",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T11:17:02.8035270Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "sharing_daemon_restart",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-18T11:17:07.1109665Z",
+          "seconds": 0.12
+        },
+        {
+          "binary": "sharing_daemon_restart",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T11:17:07.1821380Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "sharing_daemon_restart",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-18T11:17:07.2174688Z",
+          "seconds": 0.0
+        }
+      ],
+      "run": 5447,
+      "sha": "4659625e8bbeb400f0d0e3934af3b764bcc7420a",
+      "status": "failure",
+      "task": 21274,
+      "workflow": "ci.yml"
+    },
+    {
+      "compilation": [
+        "Finished `test` profile [unoptimized] target(s) in 5m 19s"
+      ],
+      "failed": 0,
+      "failure_tests": [],
+      "ignored": 21,
+      "job_minutes": 28.58,
+      "log_sha256": "ac15156eb0fb539fd548f41178a29cd137977532ab403980f6c31280c474006c",
+      "long_running_warnings": 5,
+      "notes": "Successful historical coverage; no Clippy stage; not a current baseline.",
+      "passed": 5458,
+      "reported_test_seconds": 1244.05,
+      "results": [
+        {
+          "binary": "plurx_compat_jellyfin",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 31,
+          "result_timestamp": "2026-10-07T01:52:59.3178959Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_compat_plex",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 14,
+          "result_timestamp": "2026-10-07T01:52:59.3204671Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "cluster_discovery",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-07T01:52:59.3229981Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurx_core",
+          "failed": 0,
+          "ignored": 3,
+          "passed": 1558,
+          "result_timestamp": "2026-10-07T02:01:46.4575663Z",
+          "seconds": 527.13
+        },
+        {
+          "binary": "audiobook_artwork",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-07T02:01:47.0955541Z",
+          "seconds": 0.59
+        },
+        {
+          "binary": "decoder_selection",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 64,
+          "result_timestamp": "2026-10-07T02:01:47.1045505Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "hiqlite_encoded_bootstrap",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-07T02:01:51.4409373Z",
+          "seconds": 4.33
+        },
+        {
+          "binary": "hiqlite_tls_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-07T02:01:51.4767220Z",
+          "seconds": 0.03
+        },
+        {
+          "binary": "rustls_single_provider",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-07T02:01:51.4792076Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "schema_lineage_upgrade",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-07T02:01:51.4810814Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "store_contract",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 234,
+          "result_timestamp": "2026-10-07T02:06:07.5828441Z",
+          "seconds": 256.1
+        },
+        {
+          "binary": "plurx_pgs",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 21,
+          "result_timestamp": "2026-10-07T02:06:07.6355719Z",
+          "seconds": 0.04
+        },
+        {
+          "binary": "pgs_feasibility",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0,
+          "result_timestamp": "2026-10-07T02:06:07.6380497Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "parser_prerequisites",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2,
+          "result_timestamp": "2026-10-07T02:06:07.6395574Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "stable_input_identity",
+          "failed": 0,
+          "ignored": 0,
+          "passed": 1,
+          "result_timestamp": "2026-10-07T02:06:07.6417299Z",
+          "seconds": 0.0
+        },
+        {
+          "binary": "plurxd",
+          "failed": 0,
+          "ignored": 18,
+          "passed": 3527,
+          "result_timestamp": "2026-10-07T02:13:43.4848589Z",
+          "seconds": 455.83
+        }
+      ],
+      "run": 4211,
+      "sha": "cca4a09b997171ba91136b396f7d484097305fd0",
+      "status": "success",
+      "task": 16387,
+      "workflow": "coverage.yml"
+    }
+  ],
+  "merged_main_prs": 170,
+  "metadata_extract": {
+    "path": "FULL-SUITE-AUDIT-2026-10-20-EXTRACT.json",
+    "sha256": "5368d1d5898e44cbf9db5258ae49a4ee09922e527cdb660594828cf049ec207f",
+    "tables": {
+      "jobs": 1892,
+      "merges": 170,
+      "runs": 1271
+    }
+  },
+  "method": {
+    "declarations": "Static committed-source estimates, not runtime or platform-expanded case counts. See scripts/audit-test-inventory.",
+    "limits": [
+      "No controlled fresh full suite or profiler run in this audit.",
+      "No live CPU/RSS/IO or fixture-phase measurements. Runner/host contention attribution remains unproven.",
+      "Successful job timing samples pool differing sources/environments; medians describe this sample only.",
+      "Historical coverage and failing Rust runs used different source trees, environments and runners.",
+      "Audit source references were rechecked at c1c344132; audited CI and heavyweight fixture files were unchanged from 2ae66759b."
+    ],
+    "log_sampling": "Latest failed ci.yml check taking over 10 minutes per day, latest six qualifying days; successful coverage 4211 added for historical comparison. Five failed days existed. These are diagnostic samples, not an unbiased performance distribution.",
+    "metadata": "Read-only Forgejo SQLite SELECTs over action_run, action_run_job, pull_request. Repository id 1. No CI dispatched or service configuration changed.",
+    "test_seconds": "Sum completed libtest binary result durations. Incomplete/time-limited binaries have no completed result and are excluded; not a whole-run duration.",
+    "window": "Run creation and main PR merge after 2026-10-07T19:29:34Z; snapshot captured_utc. Workflow/job counts are attempt counts, not distinct PR coverage."
+  },
+  "schema": 1,
+  "window_start_utc": "2026-10-07 19:29:34",
+  "workflow_runs": {
+    "ci.yml": {
+      "statuses": {
+        "cancelled": 18,
+        "failure": 28
+      },
+      "total": 46
+    },
+    "coverage.yml": {
+      "statuses": {
+        "cancelled": 16,
+        "failure": 50
+      },
+      "total": 66
+    },
+    "effort-ci.yml": {
+      "statuses": {
+        "cancelled": 40,
+        "failure": 118,
+        "success": 97
+      },
+      "total": 255
+    },
+    "main-fast-lane.yml": {
+      "statuses": {
+        "cancelled": 69,
+        "failure": 342,
+        "skipped": 324,
+        "success": 169
+      },
+      "total": 904
+    }
+  }
+}

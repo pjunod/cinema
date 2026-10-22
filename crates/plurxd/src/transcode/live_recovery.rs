@@ -148,6 +148,9 @@ pub(crate) const VOD_REFUSAL_CODES: &[(&str, VodRefusalClass)] = {
         ("vod_passive_route_expired", Refuse),
         ("vod_output_budget_refused", Refuse),
         ("vod_continuous_recipe_invalid", Refuse),
+        // A malformed retained processing contract cannot be repaired by a
+        // different engine; rolling must not bypass its destination proof.
+        ("vod_processed_contract_invalid", Refuse),
         ("vod_continuous_audio_invalid", Refuse),
         ("vod_family_invalid", Refuse),
         ("vod_family_capacity", Refuse),

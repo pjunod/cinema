@@ -703,3 +703,26 @@ fn clippy_refuses_every_spawning_method_outside_tests() {
         );
     }
 }
+
+#[test]
+fn an_explicit_test_child_path_does_not_hide_production_spawns() {
+    let source = r#"
+fn production_before() { tokio::process::Command::new("a").spawn(); }
+#[cfg(all(test, target_os = "linux"))]
+#[path = "processed_reuse_tests.rs"]
+mod processed_reuse_tests;
+fn production_after() { std::process::Command::new("b").output(); }
+"#;
+    let (production, test_children) = production_code(source);
+    assert_eq!(
+        test_children,
+        vec![(
+            "processed_reuse_tests".to_owned(),
+            Some("processed_reuse_tests.rs".to_owned())
+        )]
+    );
+    assert_eq!(
+        bypasses(&production),
+        vec![(2, SPAWN), (6, "`.output()` on a command")]
+    );
+}

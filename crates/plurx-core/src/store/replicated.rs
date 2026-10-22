@@ -158,6 +158,15 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Replace provider scores and their fetch marker in one boundary, so a
+    // failed refresh cannot publish only part of the replacement snapshot.
+    SqliteTransactionSite {
+        module: "annotations.rs",
+        method: "put_item_ratings",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
     // Compare the configured root set, delete only admitted files and prune
     // emptied items within the same authority boundary.
     SqliteTransactionSite {
@@ -1150,6 +1159,7 @@ mod tests {
     use super::*;
 
     const SQLITE_MODULES: &[(&str, &str)] = &[
+        ("annotations.rs", include_str!("sqlite/annotations.rs")),
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
         (
@@ -1405,7 +1415,8 @@ mod tests {
         // guarded transaction, each measured in sqlite/sharing.rs.
         // Cinema adds one paired receiver/grant revoke and four guarded
         // invitation admission/cleanup boundaries, registered above.
-        assert_eq!(methods.len(), 114);
+        // v113 replaces ratings and their refresh marker atomically.
+        assert_eq!(methods.len(), 115);
     }
 
     mod source_inventory {

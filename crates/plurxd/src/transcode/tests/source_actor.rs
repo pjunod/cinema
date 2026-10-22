@@ -586,6 +586,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
+    manager.test_hooks();
     if let Some(mut second_prepared) = second_prepared {
         let now = crate::fragment_index_cluster::unix_ms();
         let SourceIntentRead::Ready(second_intent) = store

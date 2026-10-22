@@ -1,0 +1,267 @@
+name: diagnostic privileged baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact frozen candidate commit (40 lowercase hexadecimal characters)
+        required: true
+        type: string
+
+jobs:
+  privileged:
+    name: disposable private mount namespace tests
+    runs-on: [self-hosted, Linux, X64, lab, baremetal, general, high-cpu]
+    timeout-minutes: 60
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
+      options: --user 0 --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          # Forgejo v13.1.0 provisions paired random job volumes and deletes
+          # both on cleanup (BindWorkdir=false, ReuseContainers=false).
+          # Persistent host binds still require their actual non-root owner.
+          ephemeral="$(python3 - "$GITHUB_WORKSPACE" <<'PYTHON'
+          import os
+          import re
+          import sys
+
+          def ephemeral_workspace(workspace, act_path, mountinfo, env):
+              if env.get("ACT") != "true" or env.get("FORGEJO_ACTIONS") != "true":
+                  return False
+              records = [line.split() for line in mountinfo.splitlines()]
+              def direct(path):
+                  rows = [r for r in records if len(r) >= 10 and r[4] == path]
+                  return rows[0] if len(rows) == 1 else None
+              work, act = direct(workspace), direct(act_path)
+              if work is None or act is None or work[0] == act[0]:
+                  return False
+              match = re.fullmatch(r"/var/lib/docker/volumes/([0-9a-f]{32})/_data", work[3])
+              if match is None or act[3] != "/var/lib/docker/volumes/" + match[1] + "-env/_data":
+                  return False
+              try:
+                  wi, ai = work.index("-"), act.index("-")
+                  return (wi >= 6 and ai >= 6 and wi + 3 < len(work) and ai + 3 < len(act)
+                          and work[0].isdigit() and act[0].isdigit() and work[2] == act[2]
+                          and work[wi + 1:wi + 3] == act[ai + 1:ai + 3]
+                          and "rw" in work[5].split(",") and "rw" in act[5].split(","))
+              except (ValueError, IndexError):
+                  return False
+
+          with open("/proc/self/mountinfo", encoding="utf-8") as mounted:
+              ephemeral = ephemeral_workspace(os.path.realpath(sys.argv[1]),
+                  os.path.realpath("/var/run/act"), mounted.read(), os.environ)
+          print("yes" if ephemeral else "no")
+          PYTHON
+          )"
+          if [ "$ephemeral" = yes ]; then
+            echo 'PLURX_WORKSPACE_MODE=forgejo-ephemeral' >> "$GITHUB_ENV"
+            echo 'HOST_WORKSPACE_OWNER=' >> "$GITHUB_ENV"
+            echo 'Paired Forgejo job volumes are removed by the provisioner; no host bind to restore'
+            exit 0
+          fi
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
+          echo 'PLURX_WORKSPACE_MODE=persistent-bind' >> "$GITHUB_ENV"
+      - name: Establish artifact directory and validate confinement
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          baseline_dir="$RUNNER_TEMP/privileged-baseline"
+          mkdir -p "$baseline_dir"
+          echo "PLURX_PRIVILEGED_DIR=$baseline_dir" >> "$GITHUB_ENV"
+          python3 - <<'PYCONFINEMENT'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          reasons = []
+          def read_kernel(path):
+              try:
+                  return Path(path).read_text().strip()
+              except OSError:
+                  return None
+          status = {}
+          for line in (read_kernel("/proc/self/status") or "").splitlines():
+              if ":" in line:
+                  key, value = line.split(":", 1)
+                  if key in ("CapEff", "CapBnd", "Seccomp", "NoNewPrivs"):
+                      status[key] = value.strip()
+          kernel = {key: status.get(key) for key in ("CapEff", "CapBnd", "Seccomp", "NoNewPrivs")}
+          kernel["lsm_current"] = read_kernel("/proc/self/attr/current")
+          try:
+              has_sys_admin = bool(int(status["CapEff"], 16) & (1 << 21))
+          except (KeyError, ValueError):
+              has_sys_admin = False
+          if not has_sys_admin:
+              reasons.append("CAP_SYS_ADMIN is absent from CapEff or its status is unavailable")
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ.get("EXPECTED_SHA", "")):
+              reasons.append("expected_sha is not an exact lowercase 40-character commit identity")
+          if os.geteuid() != 0:
+              reasons.append("root container unavailable")
+          if any(Path(path).exists() for path in ("/var/run/docker.sock", "/run/docker.sock")):
+              reasons.append("Docker daemon socket exposed to capability-bearing job")
+          if os.environ.get("DOCKER_HOST"):
+              reasons.append("Docker daemon endpoint exposed to capability-bearing job")
+          receipt = dict(qualified=not reasons, reasons=reasons, kernel=kernel,
+                         cap_sys_admin_effective=has_sys_admin,
+                         isolation="disposable job container; private child mount namespaces")
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "privileged-baseline"
+          (evidence / "confinement.json").write_text(json.dumps(receipt, indent=2))
+          (evidence / "capability.json").write_text(json.dumps(dict(
+              qualified=False, kernel=kernel, cap_sys_admin_effective=has_sys_admin,
+              status="unqualified; " + "; ".join(reasons) if reasons else "unqualified; private namespace probe pending"), indent=2))
+          if reasons:
+              raise SystemExit("unqualified: " + "; ".join(reasons))
+          PYCONFINEMENT
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+          clean: true
+          persist-credentials: false
+      - name: Verify exact clean candidate and begin resource recording
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          python3 - <<'PYCONTEXT'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          root = Path(os.environ["PLURX_PRIVILEGED_DIR"])
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+          context = dict(candidate_sha=git("rev-parse", "HEAD"), candidate_tree=git("rev-parse", "HEAD^{tree}"),
+                         workflow_sha=os.environ["WORKFLOW_SHA"], cell_id="linux-privileged",
+                         profile="diagnostic", capability="CAP_SYS_ADMIN", namespace="private mount")
+          (root / "source-context.json").write_text(json.dumps(context, indent=2))
+          PYCONTEXT
+          python3 -m validation.baseline_resources start --output "$PLURX_PRIVILEGED_DIR/resources" --cell linux-privileged
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+        with:
+          components: rustfmt, clippy
+      - uses: ./.github/actions/rust-native-deps
+        with:
+          desktop: "true"
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: rust-gate
+      - name: Prepare private namespace wrapper and independent command manifest
+        run: |
+          set -euo pipefail
+          cat > "$PLURX_PRIVILEGED_DIR/private-cell.sh" <<'PRIVATECELL'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test "$(id -u)" -eq 0
+          private_tmp="$(mktemp -d "$RUNNER_TEMP/plurx-private-cell.XXXXXX")"
+          export TMPDIR="$private_tmp"
+          probe="$private_tmp/capability-probe"
+          mkdir "$probe"
+          cleanup() {
+            result=$?
+            if mountpoint -q "$probe"; then
+              umount "$probe" || result=1
+            fi
+            rm -rf "$private_tmp"
+            exit "$result"
+          }
+          trap cleanup EXIT
+          # The parent unshare also sets propagation before any child runs.
+          mount --make-rprivate /
+          mount -t tmpfs -o size=64k,nodev,nosuid tmpfs "$probe"
+          umount "$probe"
+          if [ "${1:-}" = --probe-only ]; then
+            exit 0
+          fi
+          "$@"
+          PRIVATECELL
+          python3 - <<'PYMANIFEST'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["PLURX_PRIVILEGED_DIR"])
+          context = json.loads((root / "source-context.json").read_text())
+          prefix = ["unshare", "--mount", "--propagation", "private", "bash", str(root / "private-cell.sh")]
+          cells = [dict(id=name, argv=prefix + ["make", target], timeout_seconds=1200)
+                   for name, target in (("bind-mount", "bind-mount-check"), ("storage-pressure", "storage-pressure-check"))]
+          manifest = dict(candidate_sha=context["candidate_sha"], candidate_tree=context["candidate_tree"], cells=cells)
+          (root / "manifest.json").write_text(json.dumps(manifest, indent=2))
+          PYMANIFEST
+      - name: Qualify private mount capability
+        run: |
+          set +e
+          timeout 30s unshare --mount --propagation private bash "$PLURX_PRIVILEGED_DIR/private-cell.sh" --probe-only > "$PLURX_PRIVILEGED_DIR/capability.log" 2>&1
+          capability_result=$?
+          set -e
+          export CAPABILITY_RESULT="$capability_result"
+          python3 - <<'PYCAPABILITY'
+          import json
+          import os
+          from pathlib import Path
+          result = int(os.environ["CAPABILITY_RESULT"])
+          evidence = Path(os.environ["PLURX_PRIVILEGED_DIR"])
+          confinement = json.loads((evidence / "confinement.json").read_text())
+          (evidence / "capability.json").write_text(json.dumps(dict(
+              qualified=result == 0, returncode=result,
+              kernel=confinement["kernel"], cap_sys_admin_effective=confinement["cap_sys_admin_effective"],
+              probe="private mount namespace, private TMPDIR, 64k tmpfs mount and unmount",
+              status="qualified" if result == 0 else "unqualified; privileged test cells not executed"), indent=2))
+          PYCAPABILITY
+          if [ "$capability_result" -ne 0 ]; then
+            cat "$PLURX_PRIVILEGED_DIR/capability.log"
+            exit "$capability_result"
+          fi
+      - name: Execute independent privileged test cells
+        run: >-
+          python3 -m validation.baseline_commands
+          --manifest "$PLURX_PRIVILEGED_DIR/manifest.json"
+          --output "$PLURX_PRIVILEGED_DIR/commands"
+      - name: Finish resource recording
+        if: always()
+        continue-on-error: true
+        run: python3 -m validation.baseline_resources finish --output "${PLURX_PRIVILEGED_DIR:-$RUNNER_TEMP/privileged-baseline}/resources"
+      - name: Preserve privileged diagnostic evidence
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: privileged-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/privileged-baseline
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ "${PLURX_WORKSPACE_MODE:-}" = persistent-bind ] && [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi

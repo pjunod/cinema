@@ -4,11 +4,14 @@ pub(super) fn spawn_driver(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
 ) -> tokio::task::JoinHandle<()> {
-    #[cfg(test)]
-    if let Some(driver) = controlled_driver::spawn(&rendition) {
-        return driver;
-    }
-    tokio::spawn(async move {
+    // Capture the exact instance ordering scope before spawning. Teardown
+    // cannot turn an already-controlled task into an uncontrolled turn.
+    let hooks = shared
+        .hooks
+        .get()
+        .driver_hooks(rendition.recipe.encoding.as_ref());
+    let task_hooks = Arc::clone(&hooks);
+    let task = tokio::spawn(async move {
         loop {
             let encoded_waiting = rendition
                 .recipe
@@ -38,6 +41,7 @@ pub(super) fn spawn_driver(
             } else {
                 rendition.wake.notified().await;
             }
+            task_hooks.before_turn().await;
             if rendition.closed.load(Relaxed) {
                 if let Some(encoding) = &rendition.recipe.encoding {
                     encoding.cancel_wait();
@@ -55,7 +59,9 @@ pub(super) fn spawn_driver(
             }
             driver_pass(&shared, &rendition).await;
         }
-    })
+    });
+    hooks.spawned(task.abort_handle());
+    task
 }
 
 /// Reclaim what a rendition that has already failed is still holding.
@@ -1177,15 +1183,22 @@ pub(super) fn continuous_dependency_windows(
 // Custody-only fixtures hold a real exclusive worker outside the producer slot.
 // Coordinate their driver scheduling explicitly rather than making a second
 // launch fail and poisoning the real attachment validators. None of this state
-// or control flow exists in production. These controls do not qualify normal
-// driver scheduling, process execution or reap behavior.
+// exists in production. The normal typed instance hook parks the real driver
+// before its first turn; these controls do not qualify producer execution or reap.
 #[cfg(test)]
-mod controlled_driver {
+pub(super) mod controlled_driver {
     use super::*;
 
     #[derive(Default)]
+    struct Tasks {
+        closed: bool,
+        handles: Vec<tokio::task::AbortHandle>,
+    }
+
+    #[derive(Default)]
     struct State {
-        stop: tokio_util::sync::CancellationToken,
+        tasks: StdMutex<Tasks>,
+        close_before_next_registration: AtomicBool,
         registered: std::sync::atomic::AtomicUsize,
         held: std::sync::atomic::AtomicUsize,
         exited: std::sync::atomic::AtomicUsize,
@@ -1197,26 +1210,16 @@ mod controlled_driver {
     static CONTROLS: std::sync::OnceLock<StdMutex<Controls>> = std::sync::OnceLock::new();
 
     struct Guard {
-        encoding: Arc<crate::vodencode::Encoding>,
+        _encoding: Arc<crate::vodencode::Encoding>,
         state: Arc<State>,
     }
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            // Captured tasks exit on cancellation; they NEVER continue into
-            // driver_pass, including on panic or drop before their first poll.
-            self.state.stop.cancel();
-            let mut controls = CONTROLS
-                .get_or_init(Default::default)
-                .lock()
-                .expect("controls");
-            let key = Arc::as_ptr(&self.encoding) as usize;
-            if controls
-                .get(&key)
-                .is_some_and(|(_, state)| Arc::ptr_eq(state, &self.state))
-            {
-                controls.remove(&key);
-            }
+            close(&self.state);
+            // Keep a weak-key tombstone while this exact encoding is alive.
+            // A late real spawn must inherit the closed scope, never Noop.
+            // Dead weak keys are pruned when the next control is installed.
         }
     }
 
@@ -1234,26 +1237,81 @@ mod controlled_driver {
             .map(|(_, state)| Arc::clone(state))
     }
 
-    struct Ticket(Arc<State>);
-    impl Drop for Ticket {
-        fn drop(&mut self) {
-            self.0.exited.fetch_add(1, AcqRel);
-            self.0.changed.notify_waiters();
+    fn close(state: &State) {
+        let mut tasks = state.tasks.lock().expect("real driver tasks");
+        tasks.closed = true;
+        for task in &tasks.handles {
+            task.abort();
         }
     }
 
-    pub(super) fn spawn(rendition: &Rendition) -> Option<tokio::task::JoinHandle<()>> {
-        let state = state(rendition.recipe.encoding.as_ref()?)?;
-        state.registered.fetch_add(1, AcqRel);
-        // Capture synchronously before spawn_driver returns or a first wake can
-        // race guard teardown. Ticket drops even if aborted before first poll.
-        let ticket = Ticket(state);
-        Some(tokio::spawn(async move {
-            ticket.0.held.fetch_add(1, AcqRel);
-            ticket.0.changed.notify_waiters();
-            ticket.0.stop.cancelled().await;
-            drop(ticket);
-        }))
+    async fn wait_finished(state: Arc<State>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let finished = state
+                    .tasks
+                    .lock()
+                    .expect("real driver tasks")
+                    .handles
+                    .iter()
+                    .all(tokio::task::AbortHandle::is_finished);
+                if finished && state.exited.load(Acquire) == state.held.load(Acquire) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual driver tasks finish cancellation before capacity assertions");
+        assert!(
+            state.registered.load(Acquire) > 0,
+            "actual driver task was registered"
+        );
+    }
+
+    pub(crate) fn hooks(
+        encoding: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Arc<dyn VodDriverHooks> {
+        match encoding.and_then(state) {
+            Some(state) => state,
+            None => Arc::new(NoopVodDriverHooks),
+        }
+    }
+
+    impl VodDriverHooks for State {
+        fn spawned(&self, task: tokio::task::AbortHandle) {
+            // The negative control closes at the real registration boundary,
+            // after scope capture/spawn but before this handle is published.
+            if self.close_before_next_registration.swap(false, AcqRel) {
+                close(self);
+            }
+            let mut tasks = self.tasks.lock().expect("real driver tasks");
+            if tasks.closed {
+                task.abort();
+            }
+            tasks.handles.push(task);
+            self.registered.fetch_add(1, AcqRel);
+            self.changed.notify_waiters();
+        }
+
+        fn before_turn(&self) -> crate::seam_hooks::HookFuture<'_> {
+            Box::pin(async move {
+                struct Turn<'a>(&'a State);
+                impl Drop for Turn<'_> {
+                    fn drop(&mut self) {
+                        self.0.exited.fetch_add(1, AcqRel);
+                        self.0.changed.notify_waiters();
+                    }
+                }
+                let ticket = Turn(self);
+                self.held.fetch_add(1, AcqRel);
+                self.changed.notify_waiters();
+                // This is the actual normal task. A closed scope is never
+                // released into a duplicate producer; registration aborts it.
+                std::future::pending::<()>().await;
+                drop(ticket);
+            })
+        }
     }
 
     impl VodServe {
@@ -1261,12 +1319,14 @@ mod controlled_driver {
             &self,
             encoding: &Arc<crate::vodencode::Encoding>,
         ) -> Box<dyn Send + Sync> {
+            let _ = self.shared.test_hooks();
             let state = Arc::new(State::default());
             let inserted = {
                 let mut controls = CONTROLS
                     .get_or_init(Default::default)
                     .lock()
                     .expect("controls");
+                controls.retain(|_, (owner, _)| owner.strong_count() > 0);
                 match controls.entry(Arc::as_ptr(encoding) as usize) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert((Arc::downgrade(encoding), Arc::clone(&state)));
@@ -1277,7 +1337,7 @@ mod controlled_driver {
             };
             assert!(inserted, "one scheduling owner per physical encoding");
             Box::new(Guard {
-                encoding: Arc::clone(encoding),
+                _encoding: Arc::clone(encoding),
                 state,
             })
         }
@@ -1300,6 +1360,16 @@ mod controlled_driver {
             .await
             .expect("controlled driver reached its hold");
             assert_eq!(state.exited.load(Acquire), 0);
+            assert!(
+                state
+                    .tasks
+                    .lock()
+                    .expect("real driver tasks")
+                    .handles
+                    .iter()
+                    .all(|task| !task.is_finished()),
+                "the actual normal driver tasks are parked"
+            );
             let renditions: Vec<_> = self
                 .shared
                 .renditions
@@ -1339,23 +1409,67 @@ mod controlled_driver {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        pub(crate) async fn assert_driver_registration_teardown_for_test(
+            &self,
+            encoding: &Arc<crate::vodencode::Encoding>,
+        ) {
+            let state = state(encoding).expect("registered physical encoding");
+            let rendition = self
+                .shared
+                .renditions
+                .lock()
+                .await
+                .values()
+                .find(|rendition| {
+                    rendition
+                        .recipe
+                        .encoding
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(owner, encoding))
+                })
+                .cloned()
+                .expect("actual installed rendition");
+            let before = state.registered.load(Acquire);
+            state.close_before_next_registration.store(true, Release);
+            let late = spawn_driver(Arc::clone(&self.shared), Arc::clone(&rendition));
+            let cancelled = tokio::time::timeout(Duration::from_secs(5), late)
+                .await
+                .expect("late real driver cancellation join");
+            assert!(cancelled
+                .expect_err("closed registration must cancel the real task")
+                .is_cancelled());
+            wait_finished(Arc::clone(&state)).await;
+            assert_eq!(state.registered.load(Acquire), before + 1);
+            assert!(matches!(
+                rendition.slot.belief().await,
+                Producer::Absent { .. }
+            ));
+            assert_eq!(
+                rendition.gen_epoch.load(Acquire),
+                0,
+                "late registration must not enter driver_pass or advance generation"
+            );
+            assert_eq!(rendition.last_child_pid.load(Acquire), 0);
+            assert!(rendition.failure().is_none());
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn controlled_driver_cleanup_probe_for_test(
+            &self,
+            encoding: &Arc<crate::vodencode::Encoding>,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            let state = state(encoding).expect("registered physical encoding");
+            async move { wait_finished(state).await }
+        }
+
         pub(crate) async fn finish_controlled_driver_for_test(
             &self,
             encoding: &Arc<crate::vodencode::Encoding>,
         ) {
             let state = state(encoding).expect("registered physical encoding");
-            state.stop.cancel();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let changed = state.changed.notified();
-                    if state.exited.load(Acquire) == state.registered.load(Acquire) {
-                        break;
-                    }
-                    changed.await;
-                }
-            })
-            .await
-            .expect("all controlled tasks exited before capacity assertions");
+            close(&state);
+            wait_finished(state).await;
         }
     }
 }

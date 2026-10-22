@@ -2368,8 +2368,12 @@ async fn aged_committed_learner_clock_response_fixture() {
         api_address: learner_ports[2].to_string(),
     };
     let policy = Arc::new(StartupMembershipAdmission::default());
-    let learner_client = Box::pin(tokio::time::timeout(
-        Duration::from_secs(45),
+    // Startup returning does not imply its passive local watch has published
+    // the committed learner entry yet. Keep startup and that readiness wait
+    // inside the same original budget rather than retrying manager creation.
+    let learner_deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let learner_client = Box::pin(tokio::time::timeout_at(
+        learner_deadline,
         Box::pin(hiqlite::start_node_for_clock_observation(
             hiqlite::NodeConfig {
                 node_id: token.raft_id,
@@ -2392,6 +2396,45 @@ async fn aged_committed_learner_clock_response_fixture() {
     .await
     .expect("bounded learner startup")
     .expect("actual learner");
+    let learner_metrics = learner_client
+        .local_db_raft_metrics()
+        .expect("actual learner local watch");
+    let leader_metrics = leader
+        .client
+        .local_db_raft_metrics()
+        .expect("actual leader local watch");
+    let ready = tokio::time::timeout_at(learner_deadline, async {
+        loop {
+            // Use the production guard's exact applied-watch conversion:
+            // running, committed, a real log identity and local membership.
+            // Both actual nodes must agree before the single constructor and
+            // subsequent leader-side clock authorization use that identity.
+            if let (Some(learner_applied), Some(leader_applied)) =
+                (learner_metrics.current(), leader_metrics.current())
+            {
+                if learner_applied.local_node == token.raft_id
+                    && leader_applied.local_node == leader.local.raft_id
+                    && learner_applied.members.contains(&token.raft_id)
+                    && learner_applied.members.contains(&leader.local.raft_id)
+                    && !learner_applied.voters.contains(&token.raft_id)
+                    && learner_applied.voters.contains(&leader.local.raft_id)
+                    && learner_applied.log == leader_applied.log
+                    && learner_applied.members == leader_applied.members
+                    && learner_applied.voters == leader_applied.voters
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        ready.is_ok(),
+        "committed learner readiness exceeded original startup deadline: leader={:?}, learner={:?}",
+        leader_metrics.membership_snapshot(),
+        learner_metrics.membership_snapshot()
+    );
     let mut identity = selected.identity.clone();
     identity.node_id.clone_from(&learner_id);
     identity.raft_id = token.raft_id;

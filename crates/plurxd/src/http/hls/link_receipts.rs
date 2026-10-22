@@ -3435,7 +3435,8 @@ mod tests {
             .expect("source");
         let caps = serde_json::from_value(serde_json::json!({"v":2,
             "video":[{"codec":"hevc","profiles":["main10"],"present":["hdr10"]}],
-            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"]
+            "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
+            "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
         }))
         .expect("caps");
         let query = crate::media_pool::QualityCatalogRequest {
@@ -3460,7 +3461,7 @@ mod tests {
         context.selected_candidate.planned_codec = Some("hevc".into());
         context.selected_candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
         context.catalog_query = Some(query.clone());
-        context.planning_snapshot = Some(Arc::new(snapshot));
+        context.planning_snapshot = Some(Arc::new(snapshot.clone()));
         let selected = context.selected_candidate.id;
         let mut request: crate::transcode::SessionRequest =
             serde_json::from_value(serde_json::json!({
@@ -3470,7 +3471,73 @@ mod tests {
             }))
             .expect("request");
         request.candidate_context = Some(Box::new(context));
+        // A claimed HDR descriptor cannot turn the ordinary H264 fixture into
+        // an eligible processed source. Keep this negative before seeding the
+        // actual planning facts required by the description-only regression.
         state.transcode.remember_processed_candidate(&request);
+        assert!(
+            state
+                .transcode
+                .processed_quality_descriptions(&snapshot, &query)
+                .is_empty(),
+            "ordinary SDR is not a processed DV description"
+        );
+        state
+            .store
+            .upsert_file(
+                snapshot.file.item_id,
+                file.path.to_str().expect("fixture path is UTF-8"),
+                file.size,
+                file.mtime,
+                &plurx_core::domain::ProbeResult {
+                    container: Some("mp4".into()),
+                    video_codec: Some("hevc".into()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    bit_depth: Some(10),
+                    duration_ms: Some(12000),
+                    hdr_format: Some("dolby_vision".into()),
+                    dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                        profile: Some(5),
+                        level: Some(6),
+                        bl_compat_id: Some(0),
+                        el_present: Some(false),
+                        rpu_present: Some(true),
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("eligible DV planning fixture");
+        let snapshot = state
+            .store
+            .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+            .await
+            .expect("updated snapshot")
+            .expect("source");
+        request
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .planning_snapshot = Some(Arc::new(snapshot.clone()));
+        state.transcode.remember_processed_candidate(&request);
+        assert_eq!(
+            state
+                .transcode
+                .processed_quality_descriptions(&snapshot, &query)
+                .len(),
+            1,
+            "eligible source and explicit audio claim retain the known descriptor"
+        );
+        let mut claimless = query.clone();
+        claimless.caps.audio_sinks.clear();
+        assert!(
+            state
+                .transcode
+                .processed_quality_descriptions(&snapshot, &claimless)
+                .is_empty(),
+            "a missing current audio claim cannot retrieve a processed descriptor"
+        );
         let pause = state
             .transcode
             .test_hooks()

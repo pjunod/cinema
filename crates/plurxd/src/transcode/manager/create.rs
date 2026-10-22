@@ -4121,8 +4121,10 @@ impl TranscodeManager {
                             .map(|facts| facts.response_owner.clone()),
                     )),
                 };
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "replay-owner").await;
+                self.hooks
+                    .get()
+                    .before_processed_preparation(session_id, "replay-owner")
+                    .await;
                 // A retry after an interrupted first attempt seals the existing actual
                 // attachment, including None; it never upgrades/replaces that choice.
                 if existing_facts.is_none()
@@ -4157,8 +4159,10 @@ impl TranscodeManager {
                 }) else {
                     return false;
                 };
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "facts").await;
+                self.hooks
+                    .get()
+                    .before_processed_preparation(session_id, "facts")
+                    .await;
                 // Replay retains the initially checked owner; a new attachment
                 // installs its exact owner synchronously at registry commit.
                 // Never acquire cleanup authority from a later by-id lookup.
@@ -4190,8 +4194,10 @@ impl TranscodeManager {
                     return false;
                 }
                 let output = preparation_owner.retained_output_facts();
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "before-seal").await;
+                self.hooks
+                    .get()
+                    .before_processed_preparation(session_id, "before-seal")
+                    .await;
                 let seal = plurx_core::store::PreparedOutputSeal {
                     incarnation_id: route.incarnation_id,
                     session_id: session_id.to_owned(),
@@ -4222,8 +4228,10 @@ impl TranscodeManager {
                     return false;
                 }
                 trace_prepared_capture(&seal, Some(true), true);
-                #[cfg(all(test, target_os = "linux"))]
-                Self::processed_preparation_test_boundary(session_id, "sealed").await;
+                self.hooks
+                    .get()
+                    .before_processed_preparation(session_id, "sealed")
+                    .await;
                 cleanup
                     .owner
                     .lock()
@@ -4517,8 +4525,10 @@ impl TranscodeManager {
                 .await
             {
                 Ok(_) => {
-                    #[cfg(all(test, target_os = "linux"))]
-                    Self::processed_preparation_test_boundary(session_id, "attached").await;
+                    self.hooks
+                        .get()
+                        .before_processed_preparation(session_id, "attached")
+                        .await;
                     let Some(captured_owner) = attachment_owner
                         .lock()
                         .expect("first preparation owner")
@@ -5058,4 +5068,5 @@ pub(super) fn constrain_finite_vod_rate(
 mod retained_recovery_tests;
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "processed_reuse_tests.rs"]
 mod processed_reuse_tests;
