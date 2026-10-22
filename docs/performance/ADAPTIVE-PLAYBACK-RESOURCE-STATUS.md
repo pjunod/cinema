@@ -28,20 +28,22 @@ SHA-256 respectively:
 readiness, output and diagnostics stay in the slot-owned task. Completion signals
 carry no sink; slot/observer share the retained terminal and parent audio source.
 Superseded slots join the exact old registration before terminal consumption.
+`1ea9f98f1` retains actual blocking directory write/rename jobs, including after
+waiter cancellation; the concrete VOD owner joins them before producer retirement.
 `80eb89262` writes typed v2 prepare/arm/acquired/seal/hold/unarmed-cancel through
 the existing retained journal queue. `511989003` permits only monotonic observed
 source-copy enrichment. Frozen v1 history/DDL/codecs and full startup accounting
 from `b63cb217c` remain; no serialized fact remints physical/transfer authority.
 
-Pinned1.97.1 combined core+daemon all-target Hiqlite-contract PASS110.129s;
-only later private core/copy changes recompiled47.617s. Ten new bodies COMPILED
-NOT RUN; warnings remain, NOT strict Clippy. Earlier unchanged passes retained.
-Windows v2 prior8f8 check PASS58.617s; current80eb core+daemon check is separate.
-Admission remains LEGACY. Actual sink IO/reader/native-source custody, core typed
-adoption and atomic producer→assets R→S swap remain. Scratch plan==observed cannot
-yet model output growth; exact write-ahead/reserved-budget shape is requested from
-the existing coordinator. Trusted fixed-software normal graph, not a broker;
-positive exact old-domain restart evidence remains missing. Behavior NOT RUN.
+Pinned1.97.1 combined core+daemon PASS110.129s; only changed core/copy47.617s,
+then changed daemon/IO135.483s. Thirteen new bodies COMPILED NOT RUN; warnings,
+NOT strict Clippy. Windows80eb core+daemon PASS163.590s, later deltas unclaimed.
+Admission STILL LEGACY. Reader/native-source custody, typed core adoption and
+atomic R→S settlement remain. Astra selects a new scratch_assets_v2 immutable
+reservation/name-range plan plus bounded write-ahead operation records; old v1
+equality stays. No full-film file list/false native IDs. Exact follow-up report
+owns the remaining shape; no blanket design gate/broker. Positive exact old-domain
+restart evidence remains missing. No physical receipt/refund or behavior pass.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
