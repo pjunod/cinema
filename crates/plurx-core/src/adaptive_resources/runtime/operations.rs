@@ -8,6 +8,7 @@ use crate::adaptive_resources::physical_graph::{
 use crate::adaptive_resources::{
     CleanupAuthority, FamilyDemand, FamilyIdentity, FamilyRole, PhysicalCloseReceipt,
 };
+use crate::resource_custody::{codec_v2 as v2, TypedNewObligation, TypedPrepareBatch};
 use crate::resource_custody::{
     Adapter, CommitCertainty, FamilyHandle, FamilyRequest, Manifest, Mutation, NewObligation,
     ObligationHandle, ObservedIdentity, OperationResult, PendingOperation, PhysicalSettlement,
@@ -18,6 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 mod live_settlement;
 mod pipe_drains;
+mod scratch;
 
 #[derive(Default)]
 pub(super) struct Operations {
@@ -35,6 +37,18 @@ pub(super) struct Operations {
 pub(crate) struct GraphPlan {
     pub attempt_id: Option<Uuid>,
     pub members: Vec<PlannedMember>,
+}
+
+/// The runtime supplies actual owner/graph identities, not a disk manifest.
+pub(crate) struct TypedGraphPlan {
+    pub attempt_id: Option<Uuid>,
+    pub members: Vec<v2::MemberPlan>,
+}
+
+struct PreparationPlan {
+    attempt_id: Option<Uuid>,
+    legacy: Vec<PlannedMember>,
+    typed: Option<Vec<v2::MemberPlan>>,
 }
 
 /// Private process-local selection of runtime-owned state. Not a wire token or
@@ -58,6 +72,8 @@ struct Bundle {
 struct OwnedRole {
     binding: ReservationBinding,
     members: Vec<PlannedMember>,
+    typed_members: Option<Vec<v2::MemberPlan>>,
+    scratch: BTreeMap<Uuid, scratch::ScratchMember>,
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
@@ -82,6 +98,7 @@ struct Transition {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Effect {
     Arm(Uuid),
+    Scratch(Uuid),
     Enrich,
     Seal,
     Hold,
@@ -219,6 +236,57 @@ impl NodeResourceRuntime {
         plans: Vec<GraphPlan>,
         deadline: Instant,
     ) -> Result<OwnedPreparation, OperationError> {
+        self.prepare_plan_families(
+            families,
+            plans
+                .into_iter()
+                .map(|plan| PreparationPlan {
+                    attempt_id: plan.attempt_id,
+                    legacy: plan.members,
+                    typed: None,
+                })
+                .collect(),
+            false,
+            deadline,
+        )
+    }
+
+    pub(crate) fn prepare_typed_families(
+        &self,
+        families: &[FamilyDemand<'_>],
+        plans: Vec<TypedGraphPlan>,
+        deadline: Instant,
+    ) -> Result<OwnedPreparation, OperationError> {
+        self.prepare_plan_families(
+            families,
+            plans
+                .into_iter()
+                .map(|plan| PreparationPlan {
+                    attempt_id: plan.attempt_id,
+                    legacy: plan
+                        .members
+                        .iter()
+                        .filter_map(|member| match member {
+                            v2::MemberPlan::LegacyV1 { planned } => Some(planned.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    typed: Some(plan.members),
+                })
+                .collect(),
+            true,
+            deadline,
+        )
+    }
+
+    // Same reservation/family/cancellation/refund owner for both codec versions.
+    fn prepare_plan_families(
+        &self,
+        families: &[FamilyDemand<'_>],
+        plans: Vec<PreparationPlan>,
+        typed: bool,
+        deadline: Instant,
+    ) -> Result<OwnedPreparation, OperationError> {
         if families.is_empty()
             || families.len() > 2
             || plans.is_empty()
@@ -284,6 +352,7 @@ impl NodeResourceRuntime {
         let owned = self.ledger.reserve_families(families)?;
         let id = Uuid::new_v4();
         let mut obligations = Vec::new();
+        let mut typed_obligations = Vec::new();
         let mut roles = Vec::new();
         for ((reservation, cleanup), plan) in owned.into_iter().zip(plans) {
             let binding = reservation.custody_binding();
@@ -303,21 +372,38 @@ impl NodeResourceRuntime {
                 .get(&binding.reservation)
                 .ok_or(OperationError::State)?
                 .resources;
-            obligations.push(NewObligation {
-                runtime_binding: binding,
-                allocation_epoch: binding.allocation_epoch,
-                resources,
-                manifest: Manifest {
-                    version: 1,
-                    owner_id: identity.process_instance,
-                    graph_id: identity.generation,
-                    attempt_id: plan.attempt_id,
-                    members: plan.members.clone(),
-                },
-            });
+            if let Some(members) = &plan.typed {
+                typed_obligations.push(TypedNewObligation {
+                    runtime_binding: binding,
+                    allocation_epoch: binding.allocation_epoch,
+                    resources,
+                    manifest: v2::Manifest {
+                        version: 2,
+                        owner_id: v2::Id::new(identity.process_instance)?,
+                        graph_id: v2::Id::new(identity.generation)?,
+                        attempt_id: plan.attempt_id.map(v2::Id::new).transpose()?,
+                        members: members.clone(),
+                    },
+                });
+            } else {
+                obligations.push(NewObligation {
+                    runtime_binding: binding,
+                    allocation_epoch: binding.allocation_epoch,
+                    resources,
+                    manifest: Manifest {
+                        version: 1,
+                        owner_id: identity.process_instance,
+                        graph_id: identity.generation,
+                        attempt_id: plan.attempt_id,
+                        members: plan.legacy.clone(),
+                    },
+                });
+            }
             roles.push(OwnedRole {
                 binding,
-                members: plan.members,
+                members: plan.legacy,
+                typed_members: plan.typed,
+                scratch: BTreeMap::new(),
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),
@@ -364,15 +450,28 @@ impl NodeResourceRuntime {
         }
         // Queue acceptance transfers the command to the DB owner. Even a
         // prepare timeout after acceptance cannot make these charges disappear.
-        let pending = match self.journal.prepare(
-            id,
-            PrepareBatch {
-                obligations,
-                families: requests,
-                trial: trial.unwrap_or(false),
-            },
-            deadline,
-        ) {
+        let queued = if typed {
+            self.journal.prepare_typed(
+                id,
+                TypedPrepareBatch {
+                    obligations: typed_obligations,
+                    families: requests,
+                    trial: trial.unwrap_or(false),
+                },
+                deadline,
+            )
+        } else {
+            self.journal.prepare(
+                id,
+                PrepareBatch {
+                    obligations,
+                    families: requests,
+                    trial: trial.unwrap_or(false),
+                },
+                deadline,
+            )
+        };
+        let pending = match queued {
             Ok(pending) => pending,
             Err(error) => {
                 // enqueue failure is definite NOT accepted, before acquisition.
@@ -659,13 +758,8 @@ impl NodeResourceRuntime {
                 domain: plan.domain,
             }),
         };
-        start_transition(
-            &self.journal,
-            role,
-            Mutation::RecordAcquired { identity },
-            Effect::Enrich,
-            deadline,
-        )?;
+        let mutation = acquired_mutation(role, identity)?;
+        start_transition(&self.journal, role, mutation, Effect::Enrich, deadline)?;
         if let Err(error) = self.finish_transition(id, role).await {
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
@@ -868,7 +962,7 @@ impl NodeResourceRuntime {
         let OperationResult::Changed(ack) = transition.operation.resolve().await? else {
             return Err(OperationError::State);
         };
-        let handle = role.handle.as_ref().ok_or(OperationError::State)?;
+        let handle = role.handle.clone().ok_or(OperationError::State)?;
         if ack.operation_id != transition.operation.id
             || ack.obligation_id != handle.obligation_id()
             || ack.graph_id != handle.graph_id()
@@ -876,6 +970,10 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        if let Effect::Scratch(member) = transition.effect {
+            scratch::apply_committed(role, member, ack.operation_id)?;
+        }
+        let transition = role.transition.as_mut().ok_or(OperationError::State)?;
         if matches!(transition.effect, Effect::Cancel | Effect::Settle) {
             if ack.phase != Phase::Settled {
                 return Err(OperationError::State);
@@ -883,7 +981,7 @@ impl NodeResourceRuntime {
             if transition.effect == Effect::Settle && !role.refunded && role.receipt.is_none() {
                 role.receipt = Some(
                     self.journal
-                        .take_settled_receipt(transition.operation.id, handle)?,
+                        .take_settled_receipt(transition.operation.id, &handle)?,
                 );
             }
             // Durable acknowledgement from THIS retained operation (never a
@@ -896,6 +994,9 @@ impl NodeResourceRuntime {
         }
         if let Effect::Arm(member) = transition.effect {
             role.armed.insert(member);
+        }
+        if let Effect::Scratch(member) = transition.effect {
+            scratch::acknowledge(role, member)?;
         }
         role.sequence = ack.sequence;
         role.phase = ack.phase;
@@ -993,9 +1094,42 @@ impl NodeResourceRuntime {
     }
 }
 
+/// Only an actual legacy adapter can enrich its matching slot inside a typed
+/// envelope. Source/output/scratch observations need their concrete adapters;
+/// this helper cannot coerce a legacy observation into one of those variants.
+fn acquired_mutation(
+    role: &OwnedRole,
+    identity: ObservedIdentity,
+) -> Result<Mutation, OperationError> {
+    let Some(members) = &role.typed_members else {
+        return Ok(Mutation::RecordAcquired { identity });
+    };
+    let planned = members.iter().find(|member| {
+        matches!(member, v2::MemberPlan::LegacyV1 { planned } if planned.member_id == identity.member_id)
+    }).cloned().ok_or(OperationError::State)?;
+    Ok(Mutation::RecordTypedAcquired {
+        envelope: v2::Envelope {
+            version: 2,
+            planned,
+            observed: Some(v2::Observed::LegacyV1 { identity }),
+        },
+    })
+}
+
 fn start_transition(
     journal: &CustodyJournal,
     role: &mut OwnedRole,
+    mutation: Mutation,
+    effect: Effect,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    start_named_transition(journal, role, Uuid::new_v4(), mutation, effect, deadline)
+}
+
+fn start_named_transition(
+    journal: &CustodyJournal,
+    role: &mut OwnedRole,
+    operation_id: Uuid,
     mutation: Mutation,
     effect: Effect,
     deadline: Instant,
@@ -1006,7 +1140,7 @@ fn start_transition(
     let handle = role.handle.clone().ok_or(OperationError::State)?;
     let key = TransitionKey {
         handle,
-        operation_id: Uuid::new_v4(),
+        operation_id,
         expected_sequence: role.sequence,
     };
     role.transition = Some(Transition {

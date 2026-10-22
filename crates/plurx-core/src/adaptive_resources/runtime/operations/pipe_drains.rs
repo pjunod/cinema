@@ -92,23 +92,19 @@ impl NodeResourceRuntime {
             }
         };
         role.drains.insert(member, task);
-        start_transition(
-            &self.journal,
+        let mutation = acquired_mutation(
             role,
-            Mutation::RecordAcquired {
-                identity: ObservedIdentity {
-                    version: 1,
-                    member_id: member,
-                    adapter: Adapter::RootPipeTask,
-                    adapter_version: 1,
-                    domain: plan.domain,
-                    object_identity: task.object_identity(),
-                    process: None,
-                },
+            ObservedIdentity {
+                version: 1,
+                member_id: member,
+                adapter: Adapter::RootPipeTask,
+                adapter_version: 1,
+                domain: plan.domain,
+                object_identity: task.object_identity(),
+                process: None,
             },
-            Effect::Enrich,
-            deadline,
         )?;
+        start_transition(&self.journal, role, mutation, Effect::Enrich, deadline)?;
         if let Err(error) = self.finish_transition(id, role).await {
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());

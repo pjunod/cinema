@@ -68,6 +68,9 @@ impl NodeResourceRuntime {
 /// for an uninvoked member or mislabel unsupported resources as local handles.
 fn live_member_facts(role: &OwnedRole) -> Result<Vec<ClosedMemberFact>, OperationError> {
     if role.transition.is_some()
+        // Typed retained assets require their complete private native inventory
+        // and conserving transfer. Refuse BEFORE consuming any graph receipt.
+        || role.typed_members.is_some()
         || role.refunded
         || role.receipt.is_some()
         || role.handle.is_none()
