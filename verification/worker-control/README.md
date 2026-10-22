@@ -127,3 +127,12 @@ The observed formatting exception requires the exact emitted property name, left
 The Linux T6 fixture additionally records a proved-unreachable generic Effect slice-equality loop increment at `library/core/src/slice/cmp.rs:136:13`. Its exact property, description, location and actual scoped source hash are required. The extra source attestation is separate from solver tool identity, so unchanged historical results retain their original tool records. All eight T6 specification assertions must still be checked `SUCCESS`.
 
 The CI helper `validation.worker_control_resume` authenticates a prior same-PR artifact, including a failed proof attempt, and safely hydrates only the files needed by `--resume-from`. It preserves origin and ZIP hash in the flat output artifact. It does not grant proof acceptance: the runner independently checks every retained target and records the original candidate, rejection and current parser/source bridges.
+
+CI reuse additionally compares actual Git bytes for the historical and current
+runner, workflow and tool manifest. Its default requires identical digests.
+[reviewed-invocations.json](reviewed-invocations.json) can record an exact
+historical commit and three-digest tuple with a review basis; this is an explicit
+review trust decision, not a solver theorem or authority inferred from a name.
+The retained origin records the actual digests and decision. Local manual
+`--resume-from` assumes the previous invocation and result producer are trusted;
+per-target source, tool, output and assertion validation still applies.

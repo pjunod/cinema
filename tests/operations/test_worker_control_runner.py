@@ -364,5 +364,48 @@ class WorkerControlRejectedParserReuseTests(unittest.TestCase):
 
 
 
+class ResumeDirectoryCliTests(unittest.TestCase):
+    def test_root_empty_and_overlapping_resume_reject_before_tools(self):
+        scratch = ROOT / "target/worker-control-resume-path-fixtures"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            base = Path(temporary)
+            ancestor = base / "ancestor"
+            ancestor.mkdir()
+            descendant = base / "output/child"
+            descendant.mkdir(parents=True)
+            for prior, output in (("", base / "empty-output"),
+                                  (str(ROOT), base / "root-output"),
+                                  (str(ancestor), ancestor / "output"),
+                                  (str(descendant), base / "output")):
+                argv = ["check-worker-control", "full", "--cache-dir", str(base / "cache"),
+                        "--output-dir", str(output), "--resume-from", prior]
+                with self.subTest(prior=prior), mock.patch("sys.argv", argv), \
+                        mock.patch.object(runner, "toolchain") as tools, \
+                        mock.patch.object(runner, "source_identity") as identity:
+                    with self.assertRaisesRegex(RuntimeError, "resume input"):
+                        runner.main()
+                    tools.assert_not_called()
+                    identity.assert_not_called()
+
+    def test_sibling_resume_remains_valid_at_cli_boundary(self):
+        scratch = ROOT / "target/worker-control-resume-path-fixtures"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            base = Path(temporary)
+            prior = base / "prior"
+            prior.mkdir()
+            output = base / "output"
+            argv = ["check-worker-control", "full", "--cache-dir", str(base / "cache"),
+                    "--output-dir", str(output), "--resume-from", str(prior)]
+            with mock.patch("sys.argv", argv), \
+                    mock.patch.object(runner, "source_identity", side_effect=RuntimeError("fixture reached source")) as identity, \
+                    mock.patch.object(runner, "toolchain") as tools:
+                self.assertEqual(runner.main(), 1)
+                identity.assert_called_once()
+                tools.assert_not_called()
+                self.assertTrue((output / "receipt.json").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

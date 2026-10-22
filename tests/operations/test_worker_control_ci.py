@@ -5,6 +5,7 @@ import json
 import hashlib
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -105,6 +106,10 @@ class WorkerControlResumeFixtures(unittest.TestCase):
         cls.fixture_scratch.mkdir(parents=True, exist_ok=True)
 
     def setUp(self) -> None:
+        from validation import worker_control_resume as resume
+        trust = patch.object(resume, "invocation_trust", return_value={"decision": "fixture_only"})
+        trust.start()
+        self.addCleanup(trust.stop)
         self.scope = {
             "repository": 1,
             "pr": 1260,
@@ -168,7 +173,7 @@ class WorkerControlResumeFixtures(unittest.TestCase):
         for status in ("failure", "success"):
             with self.subTest(status=status):
                 job = dict(self.job, status=status)
-                candidate = resume.artifact_for_run(self.api(job=job), self.scope, self.run, 5900)
+                candidate = resume.artifact_for_run(self.api(job=job), self.scope, self.run, 5900, self.run["commit_sha"], ROOT)
                 self.assertIsNotNone(candidate)
                 self.assertEqual(candidate[1]["status"], status)
 
@@ -179,7 +184,7 @@ class WorkerControlResumeFixtures(unittest.TestCase):
         artifact = dict(self.artifact, size_in_bytes=len(archive))
         api = self.api(artifact=artifact, upload_sha=hashlib.sha256(archive).hexdigest())
         with patch.object(resume, "archive_bytes", return_value=archive):
-            candidate = resume.find_prior(api, self.scope, 5900)
+            candidate = resume.find_prior(api, self.scope, 5900, self.run["commit_sha"], ROOT)
         self.assertEqual(candidate["job_result"], "failure")
         self.assertEqual(candidate["attempt"], 1)
         self.assertEqual(candidate["run_id"], 5811)
@@ -208,7 +213,7 @@ class WorkerControlResumeFixtures(unittest.TestCase):
         })
         self.assertEqual((commit, current_run), (self.run["commit_sha"], 5900))
         with patch.object(resume, "archive_bytes", return_value=archive):
-            candidate = resume.find_prior(resolved_api, scope, current_run)
+            candidate = resume.find_prior(resolved_api, scope, current_run, commit, ROOT)
         self.assertEqual(candidate["artifact_id"], 7811)
         self.assertEqual(candidate["job_result"], "failure")
 
@@ -217,15 +222,35 @@ class WorkerControlResumeFixtures(unittest.TestCase):
         from validation import worker_control_resume as resume
 
         api = self.api()
-        self.assertIsNone(resume.artifact_for_run(api, self.scope, self.run, 5811))
+        self.assertIsNone(resume.artifact_for_run(api, self.scope, self.run, 5811, self.run["commit_sha"], ROOT))
         self.assertEqual(api.run_reads, 0)
 
         wrong_pr = dict(self.scope, pr=1261)
         with self.assertRaises(receipts.ReceiptError):
-            resume.artifact_for_run(self.api(), wrong_pr, self.run, 5900)
+            resume.artifact_for_run(self.api(), wrong_pr, self.run, 5900, self.run["commit_sha"], ROOT)
 
         unassigned = dict(self.job, task_id=0)
-        self.assertIsNone(resume.artifact_for_run(self.api(job=unassigned), self.scope, self.run, 5900))
+        self.assertIsNone(resume.artifact_for_run(self.api(job=unassigned), self.scope, self.run, 5900, self.run["commit_sha"], ROOT))
+
+    def test_list_prefilter_avoids_detail_reads_for_wrong_pr_or_event(self) -> None:
+        from validation import worker_control_resume as resume
+
+        for changed in ({"prettyref": "#999"}, {"event": "push"}):
+            api = self.api(run=dict(self.run, **changed))
+            with patch.object(resume, "archive_bytes") as download:
+                self.assertIsNone(resume.find_prior(api, self.scope, 5900, self.run["commit_sha"], ROOT))
+            self.assertEqual(api.run_reads, 0)
+            download.assert_not_called()
+
+    def test_unreviewed_invocation_rejects_before_artifact_download(self) -> None:
+        from validation import python_unit_receipts as receipts
+        from validation import worker_control_resume as resume
+
+        api = self.api()
+        with patch.object(resume, "invocation_trust", side_effect=receipts.ReceiptError("unreviewed")), \
+                patch.object(resume, "archive_bytes") as download:
+            self.assertIsNone(resume.find_prior(api, self.scope, 5900, self.run["commit_sha"], ROOT))
+        download.assert_not_called()
 
     def test_safe_archive_extracts_only_receipts_logs_and_source(self) -> None:
         from validation import worker_control_resume as resume
@@ -258,6 +283,122 @@ class WorkerControlResumeFixtures(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.fixture_scratch) as scratch:
             with self.assertRaises(receipts.ReceiptError):
                 resume.extract_evidence(buffer.getvalue(), Path(scratch))
+
+
+class WorkerControlInvocationTrustTests(unittest.TestCase):
+    """Real Git blob identities, independent of receipt self-reports."""
+
+    def setUp(self) -> None:
+        from validation import worker_control_resume as resume
+
+        self.resume = resume
+        scratch = ROOT / "target/worker-control-invocation-fixtures"
+        scratch.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(temporary.cleanup)
+        self.workspace = Path(temporary.name)
+        self.git("init", "--quiet")
+        for path in resume.INVOCATION_PATHS:
+            target = self.workspace / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(("original " + path + "\n\n").encode())
+        self.prior = self.commit()
+        self.prior_digests = resume.invocation_digests(self.prior, self.workspace)
+        (self.workspace / resume.INVOCATION_PATHS[0]).write_bytes(b"changed honest runner\n")
+        self.current = self.commit()
+        self.policy = {"schema_version": 1, "entries": []}
+        self.write_policy()
+
+    def git(self, *arguments):
+        return subprocess.check_output(["git", *arguments], cwd=self.workspace,
+                                       stderr=subprocess.DEVNULL).decode().strip()
+
+    def commit(self):
+        self.git("add", ".")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--quiet", "-m", "fixture invocation")
+        return self.git("rev-parse", "HEAD")
+
+    def write_policy(self):
+        (self.workspace / self.resume.REVIEWED_POLICY).write_text(json.dumps(self.policy) + "\n")
+
+    def entry(self):
+        return {"source_commit": self.prior, "digests": self.prior_digests,
+                "review_basis": {"original_review": "fixture original review",
+                                 "delta_review": "fixture delta review"},
+                "coordinator_attestation": "fixture exact historical compatibility decision"}
+
+    def test_changed_actual_runner_rejects_without_reviewed_exception(self):
+        from validation.python_unit_receipts import ReceiptError
+
+        with self.assertRaises(ReceiptError):
+            self.resume.invocation_trust(self.prior, self.current, self.workspace)
+
+    def test_identical_actual_tuple_is_strict_default(self):
+        result = self.resume.invocation_trust(self.current, self.current, self.workspace)
+        self.assertEqual(result["decision"], "identical_invocation")
+        self.assertIsNone(result["reviewed_compatibility"])
+        self.assertEqual(result["prior_digests"], result["current_digests"])
+
+    def test_exact_reviewed_tuple_records_actual_git_bytes_and_basis(self):
+        self.policy["entries"] = [self.entry()]
+        self.write_policy()
+        result = self.resume.invocation_trust(self.prior, self.current, self.workspace)
+        self.assertEqual(result["decision"], "explicit_reviewed_compatibility")
+        self.assertEqual(result["reviewed_compatibility"], self.entry())
+        self.assertEqual(result["prior_digests"], self.prior_digests)
+        self.assertEqual(result["current_digests"], self.resume.invocation_digests(self.current, self.workspace))
+        self.assertEqual(result["policy_sha256"], hashlib.sha256(
+            (self.workspace / self.resume.REVIEWED_POLICY).read_bytes()).hexdigest())
+        path = self.resume.INVOCATION_PATHS[0]
+        original = ("original " + path + "\n\n").encode()
+        self.assertEqual(result["prior_digests"][path], hashlib.sha256(original).hexdigest())
+        self.assertNotEqual(result["prior_digests"][path], hashlib.sha256(original.rstrip()).hexdigest())
+
+    def test_reviewed_runner_does_not_authorize_changed_workflow_or_manifest(self):
+        from validation.python_unit_receipts import ReceiptError
+
+        for path in self.resume.INVOCATION_PATHS[1:]:
+            for original in self.resume.INVOCATION_PATHS:
+                (self.workspace / original).write_bytes(("original " + original + "\n\n").encode())
+            (self.workspace / path).write_bytes(b"unreviewed historical invocation\n")
+            changed = self.commit()
+            self.policy["entries"] = [dict(self.entry(), source_commit=changed)]
+            self.write_policy()
+            with self.subTest(path=path), self.assertRaises(ReceiptError):
+                self.resume.invocation_trust(changed, self.current, self.workspace)
+
+    def test_policy_schema_duplicates_and_bad_digests_fail_closed(self):
+        from validation.python_unit_receipts import ReceiptError
+
+        entry = self.entry()
+        bad_entry = dict(entry, digests=dict(entry["digests"], **{self.resume.INVOCATION_PATHS[0]: "bad"}))
+        for policy in ({"schema_version": 2, "entries": []},
+                       {"schema_version": True, "entries": []},
+                       {"schema_version": 1, "entries": [], "unknown": 1},
+                       {"schema_version": 1, "entries": [entry, entry]},
+                       {"schema_version": 1, "entries": [bad_entry]},
+                       {"schema_version": 1, "entries": [dict(entry, unknown=True)]}):
+            self.policy = policy
+            self.write_policy()
+            with self.subTest(policy=policy), self.assertRaises(ReceiptError):
+                self.resume.invocation_trust(self.current, self.current, self.workspace)
+        (self.workspace / self.resume.REVIEWED_POLICY).write_text(
+            '{"schema_version":1,"schema_version":1,"entries":[]}')
+        with self.assertRaises(ReceiptError):
+            self.resume.invocation_trust(self.current, self.current, self.workspace)
+
+    def test_unavailable_or_invalid_commit_and_oversized_blob_fail_closed(self):
+        from validation.python_unit_receipts import ReceiptError
+
+        for commit in ("HEAD", "0" * 40, "a" * 39, "a" * 40 + ":path"):
+            with self.subTest(commit=commit), self.assertRaises(ReceiptError):
+                self.resume.invocation_digests(commit, self.workspace)
+        (self.workspace / self.resume.INVOCATION_PATHS[0]).write_bytes(
+            b"x" * (self.resume.MAX_INVOCATION_BYTES + 1))
+        oversized = self.commit()
+        with self.assertRaises(ReceiptError):
+            self.resume.invocation_digests(oversized, self.workspace)
 
 
 class _WorkerProofApi:

@@ -397,7 +397,7 @@ def verdict(log: str, code: int, harness: str, marker: str | None, allowed: list
             "status_counts": {status: sum(actual == status for _, actual, _ in checks)
                               for status in ("SUCCESS", "UNREACHABLE", "FAILURE")},
             "specification_assertions": len(labelled),
-            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only narrow nonmarker compiler guards with explicit source pins"}
+            "reachability_policy": "T1-T6 assertions must be SUCCESS; unreachable only legacy unmarked panic/expect guards or exact source-pinned format/slice guards"}
 
 
 def mutate_source(original: str, control: dict) -> str:
@@ -572,11 +572,12 @@ def main() -> int:
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--provision", action="store_true")
-    parser.add_argument("--resume-from", type=Path)
+    parser.add_argument("--resume-from")
     args = parser.parse_args()
     cache, output = args.cache_dir.resolve(), args.output_dir.resolve()
-    prior = args.resume_from.resolve() if args.resume_from else None
-    if prior is not None and (prior == output or not prior.is_dir()):
+    prior = Path(args.resume_from).resolve() if args.resume_from is not None else None
+    if prior is not None and (args.resume_from == "" or prior == ROOT or prior == output or prior in output.parents
+                              or output in prior.parents or not prior.is_dir()):
         raise RuntimeError("resume input must be a distinct existing owned output")
     if cache == ROOT or output == ROOT or cache == output or cache in output.parents or output in cache.parents:
         raise RuntimeError("cache and output must be distinct owned directories")

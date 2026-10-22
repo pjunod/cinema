@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -30,6 +31,98 @@ SOURCE_FILE = re.compile(r"source/src/(?:lib|library_lifecycle|proofs)\.rs\Z")
 CONTROL_DIR = {"control-cleanup-order", "control-bind-gate", "control-wrapping-add"}
 PROOF_JOB = "production worker controller proof"
 WORKFLOW = "main-fast-lane.yml"
+
+INVOCATION_PATHS = ("scripts/check-worker-control", ".github/workflows/main-fast-lane.yml",
+                    "verification/worker-control/toolchain.json")
+REVIEWED_POLICY = "verification/worker-control/reviewed-invocations.json"
+MAX_INVOCATION_BYTES = 128 * 1024
+COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def invocation_digests(commit: str, workspace: Path) -> dict:
+    """Hash actual bounded Git blobs, preserving every byte including newlines."""
+    receipts.require(isinstance(commit, str) and COMMIT.fullmatch(commit) is not None,
+                     "Invocation commit must be a full lowercase Git commit")
+    def raw(*arguments):
+        try:
+            return subprocess.check_output(["git", *arguments], cwd=workspace,
+                                           stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            raise receipts.ReceiptError("Invocation commit/blob unavailable in local history") from None
+    receipts.require(raw("cat-file", "-t", commit).strip() == b"commit",
+                     "Invocation revision is not a commit")
+    result = {}
+    for path in INVOCATION_PATHS:
+        ref = commit + ":" + path
+        size_bytes = raw("cat-file", "-s", ref).strip()
+        receipts.require(re.fullmatch(rb"[0-9]{1,9}", size_bytes) is not None,
+                         "Invocation blob size is invalid")
+        size = int(size_bytes)
+        receipts.require(0 < size <= MAX_INVOCATION_BYTES, "Invocation blob exceeds size bound")
+        receipts.require(raw("cat-file", "-t", ref).strip() == b"blob", "Invocation path is not a blob")
+        data = raw("show", ref)
+        receipts.require(len(data) == size, "Invocation blob size changed")
+        result[path] = hashlib.sha256(data).hexdigest()
+    return result
+
+
+def reviewed_invocations(path: Path) -> tuple[list, str]:
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            receipts.require(key not in value, "Duplicate invocation policy key")
+            value[key] = item
+        return value
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_INVOCATION_BYTES + 1)
+        receipts.require(len(data) <= MAX_INVOCATION_BYTES, "Invocation policy exceeds size bound")
+        policy = json.loads(data, object_pairs_hook=unique_pairs)
+    except (OSError, ValueError, UnicodeError):
+        raise receipts.ReceiptError("Reviewed invocation policy is unavailable or invalid") from None
+    receipts.require(isinstance(policy, dict) and set(policy) == {"schema_version", "entries"}
+                     and type(policy["schema_version"]) is int and policy["schema_version"] == 1
+                     and isinstance(policy["entries"], list), "Unsupported invocation policy schema")
+    seen_commits, seen_tuples = set(), set()
+    for entry in policy["entries"]:
+        receipts.require(isinstance(entry, dict) and set(entry) == {
+            "source_commit", "digests", "review_basis", "coordinator_attestation"},
+            "Invalid reviewed invocation entry")
+        commit, digests, basis = entry["source_commit"], entry["digests"], entry["review_basis"]
+        receipts.require(isinstance(commit, str) and COMMIT.fullmatch(commit) is not None,
+                         "Invalid reviewed invocation commit")
+        receipts.require(isinstance(digests, dict) and set(digests) == set(INVOCATION_PATHS)
+                         and all(isinstance(value, str) and SHA256.fullmatch(value)
+                                 for value in digests.values()), "Invalid reviewed invocation digests")
+        receipts.require(isinstance(basis, dict) and set(basis) == {"original_review", "delta_review"}
+                         and all(isinstance(value, str) and 0 < len(value) <= 2048 for value in basis.values())
+                         and isinstance(entry["coordinator_attestation"], str)
+                         and 0 < len(entry["coordinator_attestation"]) <= 4096,
+                         "Missing reviewed invocation basis")
+        identity = tuple(digests[path] for path in INVOCATION_PATHS)
+        receipts.require(commit not in seen_commits and identity not in seen_tuples,
+                         "Duplicate reviewed invocation entry")
+        seen_commits.add(commit)
+        seen_tuples.add(identity)
+    return policy["entries"], hashlib.sha256(data).hexdigest()
+
+
+def invocation_trust(prior_commit: str, current_commit: str, workspace: Path) -> dict:
+    entries, policy_sha256 = reviewed_invocations(workspace / REVIEWED_POLICY)
+    prior = invocation_digests(prior_commit, workspace)
+    current = invocation_digests(current_commit, workspace)
+    decision = "identical_invocation"
+    reviewed = None
+    if prior != current:
+        reviewed = next((entry for entry in entries if entry["source_commit"] == prior_commit
+                         and entry["digests"] == prior), None)
+        receipts.require(reviewed is not None, "Prior invocation differs without exact reviewed compatibility")
+        decision = "explicit_reviewed_compatibility"
+    return {"prior_commit": prior_commit, "current_commit": current_commit,
+            "prior_digests": prior, "current_digests": current, "decision": decision,
+            "policy_path": REVIEWED_POLICY, "policy_sha256": policy_sha256,
+            "reviewed_compatibility": reviewed}
 
 
 def safe_member(name: str) -> tuple[str, ...]:
@@ -133,7 +226,8 @@ def archive_bytes(api: receipts.API, artifact_id: int) -> bytes:
     return data
 
 
-def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int):
+def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int,
+                     current_commit: str, workspace: Path):
     run_id = receipts.positive(run.get("id"))
     if run_id == current_run:
         return None
@@ -143,6 +237,7 @@ def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int
     if prior.get("repository", {}).get("id") != scope["repository"]:
         return None
     main_unit_receipts.authenticate_run(scope, prior)
+    trust = invocation_trust(prior["commit_sha"], current_commit, workspace)
     jobs = api.pages(f"/actions/runs/{run_id}/jobs")
     valid_jobs = [job for job in jobs if job.get("name") == PROOF_JOB
                   and job.get("repo_id") == scope["repository"] and job.get("run_id") == run_id
@@ -153,6 +248,8 @@ def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int
         if len(proof_jobs) != 1:
             continue
         job = proof_jobs[0]
+        # A cancelled job is eligible only as a container; strict per-target
+        # parsing still rejects missing, truncated or unsuccessful evidence.
         if job.get("status") not in {"success", "failure", "cancelled"}:
             continue
         name = f"worker-control-proof-{run_id}-{attempt}"
@@ -180,21 +277,23 @@ def artifact_for_run(api: receipts.API, scope: dict, run: dict, current_run: int
         if (len(upload_lines) != 1 or int(upload_lines[0][1]) != size
                 or int(upload_lines[0][2]) != artifact_id or len(zip_hashes) != 1):
             continue
-        return artifact, job, prior, attempt, zip_hashes[0]
+        return artifact, job, prior, attempt, zip_hashes[0], trust
     return None
 
 
-def find_prior(api: receipts.API, scope: dict, current_run: int):
+def find_prior(api: receipts.API, scope: dict, current_run: int, current_commit: str, workspace: Path):
     runs = api.pages("/actions/runs", {
         "workflow_id": WORKFLOW,
         "ref": f"refs/pull/{scope['pr']}/head",
     }, "workflow_runs")
     for run in sorted(runs, key=lambda item: item.get("id", 0), reverse=True):
+        if run.get("prettyref") != f"#{scope['pr']}" or run.get("event") != "pull_request":
+            continue
         try:
-            candidate = artifact_for_run(api, scope, run, current_run)
+            candidate = artifact_for_run(api, scope, run, current_run, current_commit, workspace)
             if candidate is None:
                 continue
-            artifact, job, prior, attempt, uploaded_sha256 = candidate
+            artifact, job, prior, attempt, uploaded_sha256, trust = candidate
             data = archive_bytes(api, receipts.positive(artifact.get("id")))
             archive_sha256 = hashlib.sha256(data).hexdigest()
             receipts.require(archive_sha256 == uploaded_sha256,
@@ -208,6 +307,7 @@ def find_prior(api: receipts.API, scope: dict, current_run: int):
                 "job_result": job["status"],
                 "source_commit": prior["commit_sha"],
                 "archive_sha256": archive_sha256,
+                "invocation_trust": trust,
             }
         except (receipts.ReceiptError, KeyError, TypeError, ValueError, zipfile.BadZipFile) as error:
             print(f"Prior worker proof candidate not adopted ({type(error).__name__}); checking older evidence")
@@ -251,7 +351,7 @@ def main() -> int:
     }
     try:
         api, scope, commit, current_run = current_context()
-        candidate = find_prior(api, scope, current_run)
+        candidate = find_prior(api, scope, current_run, commit, workspace)
         if candidate:
             files, byte_count = extract_evidence(candidate.pop("data"), destination)
             origin.update(candidate)
