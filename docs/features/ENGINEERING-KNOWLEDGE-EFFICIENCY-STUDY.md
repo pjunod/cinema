@@ -34,14 +34,28 @@ Model identity, common instructions, tool schemas, source/record/corpus digests,
 navigation assets and limits must be committed in the final execution receipt.
 Token reservations include counted input plus maximum output before each
 request. Missing or uncertain usage retains its reservation and halts the
-batch; it never becomes zero consumption. Scoring receives an allocation
-before the solver share is assigned. No model switch, budget increase or
+batch; it never becomes zero consumption. The solver partition is fixed at 1,500,000 tokens rounded down to equal
+shares for all 108 contexts. The scorer pool receives the remaining ceiling
+after that reservation and conservatively charged calibration; all 216
+scorer shares must fit before answers. No model switch, budget increase or
 case replacement follows an unfavorable outcome.
 
 The initial Sonnet 5.5 nomination was corrected before calibration or answers:
 account capability metadata reports that model cannot disable thinking, which
 the current transcript adapter requires. Sonnet 5 supports that mode. This
 compatibility correction precedes outcomes and applies to every context.
+
+Calibration counts all twelve complete static scoring envelopes, a
+representative 2,048-UTF-8-byte synthetic answer/edit increment over the
+largest measured static token envelope, and the three initial solver
+envelopes. Every fixed scorer share must cover its static input, the measured
+increment and its output reservation before any study answer is generated.
+This representative measurement does not guarantee that every later answer
+fits. The complete actual scoring payload is counted against its frozen
+per-case input ceiling. An oversized payload is retained as unscored without
+truncating required evidence, borrowing another share or suppressing later
+contexts. Unknown remote usage or failed durable accounting still stops all
+further account calls.
 
 ## Every arm receives actual Ripwire over the same visible corpus
 
@@ -140,6 +154,46 @@ lockfile remain unchanged. This uses Cargo's documented
 and [offline vendoring](https://doc.rust-lang.org/cargo/commands/cargo-vendor.html).
 Image acquisition is separate from actual compilation, containment probes
 and acceptance qualification.
+
+## Independent source review before execution
+
+Astra reviewed the complete generic harness at
+`6fde3602b997cbdac1db504201661a1c68625df5` on 2026-10-22 and returned
+**REQUEST_CHANGES**. The exact execution closure includes 35 Python modules
+and 11 immutable assets. The reviewer verified those bytes without reading
+private case inputs, Gold, documentation propositions or credentials. Review
+is separate from actual runtime qualification and comparative evidence.
+
+| Finding | Required correction | State |
+|---|---|---|
+| F1 | Give isolated Python roles their separate verified source import roots while retaining isolated mode. | corrected; recheck pending |
+| F2 | Classify Rust setup consistently in both phases; setup earns no assertion credit. | corrected; recheck pending |
+| F3 | Mount only the immutable wrapper's protected log directory as writable runtime storage. | corrected; recheck pending |
+| F4 | Stop later account calls after a count or durable-accounting failure. | corrected; recheck pending |
+| F5 | Advertise the actual pinned Ripwire selector contract in every arm. | corrected; recheck pending |
+| F6 | Require successful provenance-bound navigation before calibration. | corrected; recheck pending |
+| F7 | Preserve later independent scorer shares after known local exhaustion; validate measured envelopes before answers. | corrected; recheck pending |
+| N1 | Reproduce the compiler-job setting in the effective controller environment. | corrected; recheck pending |
+
+The revised controller preserves isolated Python startup and separate source
+mounts. Only the immutable wrapper's fixed log directory is writable through
+protected runtime storage; its source tree remains read-only for assertion
+steps and the worker has no access to those logs. Effective environment,
+mounts, probes and source bytes participate in qualification identity.
+Count and checkpoint failures stop later account work; known local scorer
+share exhaustion retains an unscored context and preserves later shares.
+Real container fixtures cover role-local imports and the log mount, and will
+be explicitly enabled after exact-content recheck rather than counted as
+passing when skipped. All new behavioral verification is still pending.
+
+The actual R1 report SHA-256 is
+`35c9ef188ca9062f4b0e5697b7881d660aab530f272aeb9f8fdd7e46c58b1dc5`;
+its non-authorizing verdict SHA-256 is
+`7d8a3ec94058ec704e25c4bb0a5778f81fc93058d11aadaec087c2554049298d`.
+Revisions require independent closure over their exact final source map.
+No new behavioral tests, token-count calls or inference calls had run when
+this review returned. The frozen cases, grader bytes/commands and acceptance
+thresholds remain unchanged.
 
 ## Results and interpretation
 
