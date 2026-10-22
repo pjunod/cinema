@@ -65,8 +65,9 @@ inventory plus actual waits and native active-zero queries supplies private
 graph-bound PROCESS-ONLY evidence. Ambiguous launches, failed/active queries or
 unsupported platforms cannot become zero. No task/source/external settlement,
 whole-graph receipt/refund, same-boot restart or Windows durable admission follows.
-Exact native FFI source cross-compiles; full Windows graph/compiler qualification
-still lacks SDK C headers. New fixtures remain NOT RUN; see the current ledger.
+Exact native FFI source cross-compiles; bare-target full check lacked C headers.
+Controller found the genuine SDK and owns the isolated SDK-bound full check;
+native execution/restart acceptance remains owed. Fixtures NOT RUN; see the ledger.
 
 Private cleanup consumes the original nonclone proof, retains it on queue refusal
 or uncertain commit, and refunds only after exact durable settlement. A public

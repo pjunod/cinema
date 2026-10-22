@@ -36,8 +36,8 @@ Pinned Rust1.97.1 core+daemon all-target Hiqlite-contract check PASS0 47.429s,
 library+5 libtest warnings remain; NOT strict Clippy. Initial stale fixture-field
 compile failure is retained; actual owner extraction invalidated the earlier host
 pass. Exact production native Job source plus two native tests cross-compiled
-for x86_64 Windows PASS0 .61s, NO stubs. Full Windows check FAILED in ring C
-(`assert.h` absent); native SDK/compiler/qualification remain owed. Four new graph
+for x86_64 Windows PASS0 .61s, NO stubs. Bare-target full check FAILED in ring C
+(`assert.h` absent). SDK found; controller SDK-bound check pending. Four graph
 bodies host-compiled, two native bodies cross-compiled, two Windows graph fixtures
 AUTHORED but not compiled. ALL behavior remains NOT RUN.
 
