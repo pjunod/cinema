@@ -428,3 +428,13 @@ reason = "Corrective commit e64ce973 reached main through merge c1c344132463f0f4
 [[errata]]
 commit = "845a868ff6c51ecfc6db7f3f46c3771068bfec03"
 reason = "Corrective commit 845a868f reached main through merge c1c344132463f0f4b7e9b98be82d23cad14aea24, whose subject fix(web): preserve Safari media permission across async resume omits its PR number and is not recognized as a landing. The immutable merge carries ten Regression-Test fields, all verified against its own tree. PR #1239 full local history audit reported this inherited history failure after main integration. This permanent erratum records the malformed landing subject without rewriting history, moving the boundary, waiving future regression evidence or claiming additional Safari runtime acceptance."
+
+# PR #1251 used a nonstandard immutable subject. Register its exact identity
+# so every existing Regression-Test field remains subject to normal resolution.
+[[landings]]
+commit = "7f5af452476b6911ffb84e5fcf4fb3f95de054a6"
+tree = "cf8f14961b6629513f72793ec19d069fc802ad83"
+parents = ["00c74cd8c5ebd9ff3c6957532c42854ddc3d671a", "e44718420a118bf2b05aaa49451f6ddf9327784b"]
+title = "Merge pull request #1251: connect Rust schedules to two-worker progress"
+pull = "1251"
+reason = "PR #1251 used a nonstandard merge subject that the history audit cannot parse; PR #1259 preflight task 22393 exposed corrective commit 7648d682 as outside a landing. Register the immutable commit, tree and ordered parents so all fifteen existing Regression-Test fields continue to resolve against that merge's own tree, without an exemption, history rewrite or validation-rule change."
