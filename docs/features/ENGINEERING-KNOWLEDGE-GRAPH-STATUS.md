@@ -17,16 +17,19 @@ The current agent-owned branch is `codex/knowledge-efficiency-study`.
 The study itself retains source `168fe74fb` and all twelve sealed cases.
 
 The generic paired Python/Rust runtime and common Ripwire implementation are
-complete. Actual Astra R4 source closure approved all 46 execution inputs at
-`e39859ea8`; later synthetic-fixture and ledger changes leave that closure
-unchanged. Two explicit actual OCI controls passed without skips. The first
-required CI run retained 2,108 Python passes; its three synthetic cleanup
-fixture failures passed after the fake engine honored the exact name filter.
-Required CI passed on `8caee3d6` in PR #1262, including Rust and Main
-promotion. Actual private qualification then refused at a measured 4 GiB
-compiler OOM, before calibration. The common debug-symbol policy correction
-requires a new source review and fresh qualification. Fresh CI runs preserve
-valid authenticated per-test successes; job reruns are refused by policy.
+complete. Actual Astra R5 approved the exact 46 execution inputs at
+`9afea577e`; the focused profile check and required CI passed, including Rust
+and Main promotion. The first private qualification measured a 4 GiB compiler
+OOM before any model calls; common Rust debug-symbol defaults now preserve
+explicit frozen overrides and await fresh qualification. The two affected
+OCI controls then refused because the pinned images were absent, before any
+container execution. A newly identified environment has been recreated from
+recorded public inputs and the unchanged verified crate cache; its admission
+pin and environment need a narrow independent recheck and fresh controls.
+The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md#pre-answer-environment-recreation--explicit-new-identity)
+records exact replacement identities and the limit of historical provenance.
+Fresh CI preserves valid authenticated per-test successes; job reruns are
+refused by policy.
 
 Sol 6.1 owns runtime repairs and focused CI diagnosis; custodian C owns private
 staging/scoring. The integrator owns publication and the live ledger. Private qualification has not completed; no model study or token-count

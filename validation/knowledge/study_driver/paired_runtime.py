@@ -300,7 +300,7 @@ class DependencyImageSeed:
         self.image, self.baseline = image, baseline
         self.admission, self.review_gate = admission, review_gate
 
-    BASE_IMAGE = "sha256:d41e2b39427d02f70cba7e5af3c0dfda34b0098a97c2b82722e6e3d95c0d9aa1"
+    BASE_IMAGE = "sha256:769ee1d1e2205ca810a1f281106a7d30f7aec9c4e375231027c62542ecb896fa"
     FETCH_RECEIPT_SHA256 = "f31ab7c5ab3a4427ded73c499f2588f62253e5b7e4674889f744a3997ca3c034"
     RECEIPT_FIELDS = frozenset(("schema_version", "kind", "image_id", "base_image_id",
         "base_rootfs_diff_ids", "image_rootfs_diff_ids", "source_commit", "source_archive_sha256",

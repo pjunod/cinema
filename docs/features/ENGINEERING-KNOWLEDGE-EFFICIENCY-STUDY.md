@@ -271,11 +271,62 @@ optimization level or feature selection.
 This correction was chosen before any count, inference, answer or scorer
 existed and applies identically to every arm. It changes generic executor
 policy rather than frozen case data or the closed resource-options API.
-Source recheck and fresh actual qualification remain required; reducing
-debug information has not yet been shown sufficient for the full chain.
+Actual Astra R5 approved the exact 46-input closure at `9afea577e`; the
+focused policy regression passed and required CI completed successfully,
+including Rust and Main promotion. Fresh actual qualification remains
+required; reducing debug information has not yet been shown sufficient for
+the full chain.
 The failed stage, warm state, compiler output and cgroup proof are retained.
 The safe OOM diagnostic receipt SHA-256 is
 `fa744cb45fef6c6798cb6852f9a73a12f0dcb6fbd8b564dd99c3325dc423df8b`.
+
+## Pre-answer environment recreation — explicit new identity
+
+The pinned base and dependency images were absent from the configured Docker
+store when the two affected OCI controls reached image lookup. Both controls
+refused before creating a container. Exact original image configurations and
+build provenance were recovered, but executable layers were unavailable in
+the checked store, build cache and agent-owned archives. The previous daemon
+identity was not recorded; these observations do not establish why images
+became unavailable.
+
+The human authorized the additional public image/tool acquisition, build and
+durable archive. The recorded Ubuntu material remained available; the old
+Rust material digest returned `manifest unknown`. The replacement uses the
+same official Rust **1.97.1** version at its newly resolved native ARM digest.
+The original package list is retained; its historical APT versions were not
+pinned, so this is a newly identified environment, without an equivalence
+claim for the old executable bytes.
+
+| Input or artifact | Replacement identity / observation |
+|---|---|
+| Ubuntu material | `ubuntu:24.04@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60` |
+| Rust material | `rust:1.97.1-bookworm@sha256:6e957ef098dcc77d33e310261e4ed5843bb108d5c3b5dc2b476cbc8b6caf53fa` |
+| Base image | `sha256:769ee1d1e2205ca810a1f281106a7d30f7aec9c4e375231027c62542ecb896fa` |
+| Dependency image | `sha256:198b4ef49a5b5ac641c0b28eedcd30a6a397c337b92fb3b1f0b6d17a976e2741` |
+| Dependency receipt SHA-256 | `315feaafc0a9f30bf321811bf1e09b6794a8d5f21afef86876ec6f81196860fa` |
+| Native inventory | AArch64; Rust/Cargo 1.97.1, Python 3.12.3, FFmpeg 6.1.1; 405 package versions recorded |
+| Durable Docker archive | 2,495,707,136 bytes; SHA-256 `834f8445603fd5c97e3a703c82dda061ff8bdda9b02254208acecffe6fdb3f77` |
+
+The network build contains only the public tool recipe, without candidate
+code, private study inputs or credentials. The derived build runs offline,
+copying the existing 626 checksum-verified crate sources. Its image
+configuration equals the base configuration and its root filesystem adds
+exactly one COPY layer; the crate file/mode/checksum manifest is unchanged.
+Historical failed recipes, lookup failures and acquisition receipts remain
+separate from the replacement receipts. Study execution also requires a retained,
+verified durable image export.
+
+The strict base-image admission pin is updated to this exact identity;
+receipt schema, baseline/lockfile checks and layer-lineage checks remain.
+The changed source and environment require independent narrow review, the
+two invalidated OCI controls and required current-candidate CI, followed by
+fresh containment, all four acceptance families and all navigation modes.
+Every arm and repeat must then use this same replacement image. No frozen
+case, prompt, Gold, assertion, acceptance command, model setting, resource
+limit, schedule or token ceiling changes. This environment revision precedes
+all calibration, count, inference, answer and scoring calls; it provides no
+comparison result or resource-fit conclusion on its own.
 
 ## Results and interpretation
 
