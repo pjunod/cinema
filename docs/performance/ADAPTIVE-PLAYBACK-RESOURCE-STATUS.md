@@ -24,26 +24,25 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`c0f8e1fb0` connects private `VodGenerationOwner` to ordinary production: actual
-readiness, output and diagnostics stay in the slot-owned task. Completion signals
-carry no sink; slot/observer share the retained terminal and parent audio source.
-Superseded slots join the exact old registration before terminal consumption.
-`1ea9f98f1` retains actual blocking directory write/rename jobs, including after
-waiter cancellation; the concrete VOD owner joins them before producer retirement.
-`80eb89262` writes typed v2 prepare/arm/acquired/seal/hold/unarmed-cancel through
-the existing retained journal queue. `511989003` permits only monotonic observed
-source-copy enrichment. Frozen v1 history/DDL/codecs and full startup accounting
-from `b63cb217c` remain; no serialized fact remints physical/transfer authority.
+`3e9edcdf4` adds NEW scratch-v2 immutable names/ceilings versus observed native
+IDs and bounded event results in the SAME journal. Projection/head/global sequence
+update atomically; restoration folds exact refs, never a giant film JSON or hash
+as proof. `cdf580eb0` adds bounded reader open/read/joined-close audit, preserving
+leases/buffers through EOF and producer freeze. Old scratch-v1 equality, DDL,
+fingerprints and historical dispatch stay unchanged. These data are NOT receipts.
+`4c6c3021a` puts the real ordinary VOD payload move and registration-before-entry
+latch on its retained blocking publisher; no hidden Tokio fs wrapper. Prior
+concrete actor/terminal/source/journal ownership remains, including cancellation.
 
-Pinned1.97.1 combined core+daemon PASS110.129s; only changed core/copy47.617s,
-then changed daemon/IO135.483s. Thirteen new bodies COMPILED NOT RUN; warnings,
-NOT strict Clippy. Windows80eb core+daemon PASS163.590s, later deltas unclaimed.
-Admission STILL LEGACY. Reader/native-source custody, typed core adoption and
-atomic R→S settlement remain. Astra selects a new scratch_assets_v2 immutable
-reservation/name-range plan plus bounded write-ahead operation records; old v1
-equality stays. No full-film file list/false native IDs. Exact follow-up report
-owns the remaining shape; no blanket design gate/broker. Positive exact old-domain
-restart evidence remains missing. No physical receipt/refund or behavior pass.
+Pinned1.97.1 core+daemon PASS141.483s; only changed core38.276s then8.200s.
+New bodies COMPILED NOT RUN; warnings, NOT strict Clippy. Windowsfc096 prior
+core+daemon PASS101.291s retained; new source scopes not claimed Windows-qualified.
+Admission STILL LEGACY. The actual sink still uses bare paths/rename. Missing:
+held-directory native custody, source/copy/HTTP leases, bounded index-map memory
+reservation, allocation-overage debt/fence, snapshot refs/RetainedAssetsV2 and ONE
+durable R→S/private-proof swap. No full growth/physical-quota/cap compliance claim.
+Detailed growth design is delivered, not a gate. Positive exact old-domain restart
+evidence and remaining M0–M7 integration are open; no receipt/refund/behavior pass.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
