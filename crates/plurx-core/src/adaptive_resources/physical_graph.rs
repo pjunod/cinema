@@ -26,6 +26,8 @@ use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure
 
 mod budgets;
 pub(super) mod finite_pipes;
+#[cfg(unix)]
+pub(super) mod finite_vod;
 mod live_close;
 mod live_jobs;
 mod source_files;
@@ -103,7 +105,22 @@ struct Writer {
     task: JoinHandle<()>,
     // Caller-supplied generic futures never receive an audited adapter record.
     drain: Option<pipe_drains::DrainRecord>,
+    #[cfg(unix)]
+    finite: Option<finite_vod::FiniteRecord>,
     joined: bool,
+}
+
+impl Writer {
+    fn is_concrete(&self) -> bool {
+        if self.drain.is_some() {
+            return true;
+        }
+        #[cfg(unix)]
+        if self.finite.is_some() {
+            return true;
+        }
+        false
+    }
 }
 
 pub(super) struct GraphCustody {
@@ -397,6 +414,8 @@ impl OwnedPhysicalGraph {
         members.writers.push(Writer {
             task: runtime.spawn(writer(pipes)),
             drain: None,
+            #[cfg(unix)]
+            finite: None,
             joined: false,
         });
         Ok(())
@@ -657,7 +676,7 @@ impl SealedPhysicalGraph {
         // Joining their aborted futures closes those handles even if an
         // uncontained descendant keeps its other pipe end open.
         for writer in &members.writers {
-            if writer.drain.is_some() && !writer.joined {
+            if writer.is_concrete() && !writer.joined {
                 writer.task.abort();
             }
         }
@@ -689,6 +708,14 @@ impl SealedPhysicalGraph {
             writer.joined = true;
             members.joined_writers += 1;
             members.abandoned_writers += usize::from(abandoned);
+        }
+        #[cfg(unix)]
+        for writer in &members.writers {
+            if let Some(finite) = &writer.finite {
+                if finite.close_joined_pipes().is_err() {
+                    return GraphCloseOutcome::UnknownHeld(GraphHoldReason::SourceCloseFailed);
+                }
+            }
         }
         for source in &mut members.source_files {
             if source.close().await.is_err() {

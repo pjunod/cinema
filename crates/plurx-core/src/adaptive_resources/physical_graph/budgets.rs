@@ -15,6 +15,7 @@ pub(super) struct BudgetDelta {
     pub sources: u64,
     pub read_bytes: u64,
     pub drains: u64,
+    pub finite_memory_bytes: u64,
 }
 
 fn overflow() -> io::Error {
@@ -41,7 +42,17 @@ pub(super) fn check(
         .and_then(|value| value.checked_add(sources))
         .ok_or_else(overflow)?;
     let mut drains = delta.drains;
+    let mut finite_memory = delta.finite_memory_bytes;
     for writer in &members.writers {
+        #[cfg(unix)]
+        if let Some(finite) = &writer.finite {
+            // Joined finite records may still retain diagnostics and pipe
+            // state. Keep the entire declared partition charged here.
+            finite_memory = finite_memory
+                .checked_add(finite.minimum_memory_bytes())
+                .ok_or_else(overflow)?;
+            continue;
+        }
         if !writer.joined {
             // A generic future can retain arbitrary memory or export resources.
             // Its mere JoinHandle is not a finite cost for another adapter to
@@ -57,6 +68,7 @@ pub(super) fn check(
     let mut memory = drains
         .checked_mul(pipe_drains::TASK_BYTES)
         .and_then(|value| value.checked_add(delta.read_bytes))
+        .and_then(|value| value.checked_add(finite_memory))
         .ok_or_else(overflow)?;
     for source in &members.source_files {
         memory = memory

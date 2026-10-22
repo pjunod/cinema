@@ -85,6 +85,32 @@ fn native_publication_preserves_the_original_payload_allocation() {
 }
 
 #[test]
+fn completed_payload_releases_only_after_the_held_directory_returns() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = open_directory_nofollow_blocking(root.path()).unwrap();
+    let mut payload = Vec::with_capacity(4096);
+    payload.extend_from_slice(b"payload");
+    let capacity = payload.capacity();
+    let request =
+        PublicationRequest::for_operation(INIT_NAME, payload, uuid::Uuid::new_v4()).unwrap();
+    let mut native = PublicationIo::from_held_directory(request, directory);
+
+    native.run().unwrap();
+    assert_eq!(native.payload_capacity(), capacity);
+    assert!(native.release_completed_payload().is_none());
+    assert!(!native.payload_released);
+
+    let returned = native.take_held_directory().unwrap();
+    assert!(returned.metadata().unwrap().is_dir());
+    assert_eq!(native.release_completed_payload(), Some(capacity));
+    assert!(native.payload_released);
+    assert_eq!(native.payload_capacity(), 0);
+    assert_eq!(native.logical_end(), 7);
+    assert!(native.observation().is_some());
+    assert!(native.release_completed_payload().is_none());
+}
+
+#[test]
 fn failed_publication_attempt_cannot_write_again() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join(INIT_NAME), b"existing").unwrap();
@@ -100,6 +126,8 @@ fn failed_publication_attempt_cannot_write_again() {
     let identity_before = std_file_identity(file).unwrap();
 
     assert!(native.publish_acquired().is_err());
+    assert!(native.payload_capacity() > 0);
+    assert!(native.release_completed_payload().is_none());
     let file = native.file.as_ref().unwrap();
     let after = file.metadata().unwrap();
     assert_eq!(after.len(), before.len());

@@ -510,6 +510,10 @@ impl NodeResourceRuntime {
         let result = publication.result.as_mut().ok_or(OperationError::State)?;
         let directory = result.native.take_held_directory()?;
         held.files.insert(copy, directory);
+        result
+            .native
+            .release_completed_payload()
+            .ok_or(OperationError::State)?;
         publication.acknowledged = true;
         Ok(())
     }

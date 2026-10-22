@@ -34,6 +34,7 @@ pub struct PublicationIo {
     publication_started: bool,
     acquired: Option<FileObservation>,
     published: bool,
+    payload_released: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -148,6 +149,7 @@ impl PublicationIo {
             publication_started: false,
             acquired: None,
             published: false,
+            payload_released: false,
         }
     }
 
@@ -195,6 +197,26 @@ impl PublicationIo {
             .ok_or_else(|| io::Error::other("held publication directory already moved"))
     }
 
+    /// Release source payload storage only after native success and after the
+    /// caller has returned this same directory descriptor to its custodian.
+    /// The runtime calls this only after its durable Observe acknowledgment.
+    /// Logical length and the native observation remain available afterwards.
+    pub(crate) fn release_completed_payload(&mut self) -> Option<usize> {
+        if !self.entered
+            || !self.publication_started
+            || !self.published
+            || self.file.is_some()
+            || self.directory.is_some()
+            || self.payload_released
+        {
+            return None;
+        }
+        let capacity = self.payload.capacity();
+        self.payload = Vec::new();
+        self.payload_released = true;
+        Some(capacity)
+    }
+
     pub fn run(&mut self) -> io::Result<()> {
         self.acquire()?;
         self.publish_acquired()
@@ -221,10 +243,11 @@ impl PublicationIo {
         let observation = self.observe();
         result?;
         observation?;
-        // No writable descriptor escapes successful native completion. Bytes
-        // still belong to the legacy cache, NOT a minted close/refund receipt.
+        // No writable descriptor escapes successful native completion. Keep
+        // payload bytes until the finite runtime has returned this directory
+        // and durably acknowledged its observation; this is not a close/refund
+        // receipt.
         self.file = None;
-        self.payload = Vec::new();
         Ok(())
     }
 

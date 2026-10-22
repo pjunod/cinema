@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; current source compiled, tests not run.
-**Updated:** 2026-10-22 at committed checkpoint `4c84b1e4ea558e3e4be3ea38ffe11ac3e4a157bc`.
+**Status:** open · implementation incomplete; current source checks pending, tests not run.
+**Updated:** 2026-10-22 at committed checkpoint `84c562e28b494f32d9f364cc8cc9ab4b4d86ed70`; finite pump changes are uncommitted.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -56,40 +56,43 @@ through known Arm/Observe and bounds each batch to 16 files. The daemon
 connects metadata durability, and startup passes the already-open runtime Arc to
 `VodServe::Shared`.
 
-The VOD generation engine, identity check and conversion are now core-owned and
-the daemon re-exports that engine while retaining its existing test bodies. The
-fragment parser now preflights track/run/sample limits before parsing; actual
-`Init`, `Fragment` and `Segmenter` capacities are measured, and generation
-accumulation/transfer paths have explicit bounds. Exact registered-child
-control signals only through the original registration and pidfd; it does not
-select by numeric PID and adds no root-wait-lock dependency. Guarded core-pipe
-readers exist as a bounded primitive but are not connected to the generation
-ownership graph.
+The VOD generation engine, identity check and conversion are core-owned; the
+daemon re-exports them while retaining its existing test bodies. The new
+`finite_vod` command, pump and initial-unit reader are joined to the physical
+graph's concrete `SoftwarePump` task and guarded actual pipes. The pump reads the
+exact init boundary, then queues the encoded-process marker, identity, init and
+segments through selected publication tickets and syncs them with bounded
+progress and diagnostics. Native payload allocation is released only after
+durable observation and return of the same held directory; durable charge stays
+conservative. Parser preflight and measured `Init`, `Fragment` and `Segmenter`
+capacities remain bounded, but this task record is not a complete memory
+profile: engine merge/transform/runtime/journal partitions remain unresolved.
+Exact registered-child control uses the original registration and pidfd.
 
-These remain bridge and bound components. Ordinary
-`build_rendition_with_storage` still starts with legacy admission, and the first
-metadata-marker creation caller is not fully wired. Full task/parser
-merge/transform/plan/process memory partitioning is incomplete.
+This is still a core producer component, not ordinary source closure. Ordinary
+`build_rendition_with_storage` still starts with legacy admission; root launch,
+ordinary request/task journal composition and the first real metadata caller
+are not wired. Full parser/engine memory partition, durable overage/index
+accounting, serving leases, retained transfer and retirement/settlement/reuse
+remain incomplete.
 
 All V1–V5 remain **OPEN**. Still missing: ordinary entry and root producer
 ownership/task composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest committed/pushed checkpoint
-`4c84b1e4ea558e3e4be3ea38ffe11ac3e4a157bc` remains the candidate base. The
-current frozen source passed pinned Rust 1.97.1 host core+daemon all-target
-compilation in 132.329s (EXIT 0, `source_stable: true`). Receipt:
-`direct-check-20261022-182501.json`, log SHA-256
-`463a74f135ad92e6ff6dc15dc521d8dd7bb91b186c3c4bf0f0a899d9e4392d2c`. This
-was a warning-level compile, not strict Clippy; no tests ran. The two Linux-only
-registered-child-control bodies were not compiled by this host check. The prior
-50.486s core and 139.073s daemon receipts remain evidence for their earlier
-stable source snapshot. The durable candidate PR-body draft now has 345 unique anchors (336 previous,
-plus nine new source-confirmed lines); the durable regression list has 38. Static
-bookkeeping was not rerun for this slice. No final independent review, qualification, fast lane
-or merge has run. Linux/Windows current-source compilation, strict Clippy,
-restart evidence and behavior qualification remain open.
+The latest published base is `84c562e28b494f32d9f364cc8cc9ab4b4d86ed70`.
+The frozen finite-pump source after that base passed pinned Rust 1.97.1 host
+core+daemon all-target compilation in 139.653s (EXIT 0, stable source hashes).
+Receipt `direct-check-20261022-184547.json`, log SHA-256
+`71e8a906a6b8cfd56767e8a7c6f417647c6cac1b3617f8a71816a66e1b728ac2`.
+The first attempt found an identity-error conversion mismatch; it was fixed
+before this pass. This is warning-level compilation, not strict Clippy, and no
+behavioral tests ran. Earlier receipts retain their original source scope.
+The candidate PR-body draft has 349 unique regression anchors; the durable new
+regression list has 42. Current-source Linux/Windows compilation, final independent
+review, qualification, fast lane and merge remain open, as do restart and behavior
+evidence. Catalog/status/size bookkeeping is checked separately before publication.
 
 ## Current source and compiler receipt
 

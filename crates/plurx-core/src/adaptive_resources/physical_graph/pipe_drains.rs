@@ -121,6 +121,8 @@ impl OwnedPhysicalGraph {
         members.writers.push(Writer {
             task,
             drain: Some(DrainRecord { selection }),
+            #[cfg(unix)]
+            finite: None,
             joined: false,
         });
         Ok(selection)

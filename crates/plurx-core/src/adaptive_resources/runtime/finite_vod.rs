@@ -1,5 +1,11 @@
 //! Concrete finite software-VOD preparation interface for the daemon.
 //! Request data selects plans, never native facts, callbacks or refund proofs.
+mod command;
+mod initial_unit;
+pub(in crate::adaptive_resources) mod pump;
+pub use command::SoftwareAvcCommand;
+pub use pump::{SoftwareAvcPumpPlan, SoftwareVodEvent};
+
 use super::operations::plans::{SourceCopyOwner, SourceCopyPlan, SourcePlan};
 use super::operations::source_files::SourceOpenSpec;
 use super::operations::{OperationError, OwnedPreparation, TypedGraphPlan, TypedMemberPlan};
