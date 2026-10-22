@@ -7,13 +7,13 @@
     "tables": [
       {
         "anchor": "name = \"hiqlite\"\nversion = \"0.14.0\"",
-        "sha256": "e1cda2dbcf5e390144f6b8d3c99c96ed08aa151887031b1ae7bb52048dc4f521",
+        "sha256": "89a14d94492150e41b3975c189657f4e13949a0be285831258742087bf7820bb",
         "source": "Cargo.lock",
         "table": "proposal \u00a74.2 lockfile runtime dependency pin"
       },
       {
         "anchor": "hiqlite = { version = \"=0.14.0\"",
-        "sha256": "ec53eae43edc896dd19cb6fde6132b75877446bf66d78a068ef8914c43def655",
+        "sha256": "72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f",
         "source": "Cargo.toml",
         "table": "proposal \u00a74.2 runtime dependency pin"
       },
@@ -517,25 +517,25 @@
       },
       {
         "anchor": "async fn process_library_requests(",
-        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "proposal \u00a74.1 library worker"
       },
       {
-        "anchor": "        let publisher = lease.publisher(self.store.as_ref());",
-        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
+        "anchor": "Effect::Bind => {",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:257"
       },
       {
-        "anchor": "            result => {\n                tracing::warn!(library_id, ?result, \"library publication binding refused\");\n                drop(publisher);\n                if let Err(error) = lease.release().await {",
-        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
+        "anchor": "\"library publication binding refused\"",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:260"
       },
       {
         "anchor": "                let scan = self",
-        "sha256": "a81c778118be6bd6d2239d99d062450077aa1581d2a85ca4003e86c9f179106c",
+        "sha256": "97af560c0284d54ef4228519012696d818864063ed7e13abd4eb9948444aa429",
         "source": "crates/plurxd/src/library_work.rs",
         "table": "review \u00a73 citation crates/plurxd/src/library_work.rs:434"
       },
@@ -586,6 +586,12 @@
         "sha256": "661a5a8a098b98a9df4a7771db8262ef380d0313e15e0795806ae886d24011ab",
         "source": "vendor/hiqlite/src/store/state_machine/sqlite/transaction_env.rs",
         "table": "review \u00a72 vendored output error source"
+      },
+      {
+        "table": "production-consumed post-claim lifecycle controller; local safety only",
+        "source": "crates/plurx-worker-control/src/library_lifecycle.rs",
+        "anchor": "pub fn step(state: State, event: Event)",
+        "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
     ],
     "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem."
