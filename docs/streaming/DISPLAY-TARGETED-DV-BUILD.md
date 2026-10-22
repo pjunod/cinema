@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A P8 cells passed; scanner controls partially passed, fixture repair pending review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (source), coordinator (native/media/publication) ·
+**Status:** PR A has reviewed source and completed non-P7 evidence; additive P7 continuation and promotion remain open · **Updated:** 2026-10-22 · **Owner:** direct GPT (PR #1216), Sol (source), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR B implementation checkpoint
@@ -38,8 +38,9 @@ control or later C–F feature is introduced by B.
 
 **Status:** source authored in an isolated branch; independent completed-code
 review, pinned compilation, focused regressions and publication remain open.
-PR B must be integrated before this setting is published. No functional pass
-or physical display acceptance is claimed here.
+PR B metadata is integrated into this candidate; its acceptance remains required
+before the setting is published. No functional pass or physical display
+acceptance is claimed here.
 
 - `DisplayCaps.max_nits` remains an optional integer; optional `peak_source`
   is `platform` or `viewer`. Both sources use the exact downward bucket table.
@@ -101,32 +102,38 @@ Authored regression anchors (not executed):
 
 ## PR A implementation checkpoint
 
-- **Current qualification (2026-10-22; supersedes historical states below):**
-  the independently approved base-receipt repair compiled and its exact new
-  regression passed once. Both real P8 mapped cells, 1000 and 1600 nits, passed
-  with complete 17,983-frame L1 observation and target-operation receipts.
-  Retain these and the prior 99 Rust / 141 shader / 70 helper passes unchanged.
-  P7's corrected copied interval passed all payload/timing/audio/FEL/raw-L1
-  preparation checks, but its decoded scanner exited 1 with no aggregate:
-  `complete selected video duration tag`. The selected video starts at 0.125 s,
-  ends at 750.165 s and declares `DURATION=00:12:30.165000000`; subtracting its
-  origin compares the wrong domain. The sibling renderer already uses the
-  selected-track tag as an endpoint. Only the scanner's two comparisons change;
-  relative `AVStream.duration`, independent selected-video coverage, decoder
-  drains and the one-tick allowance remain intact. No endpoint-or-span fallback,
-  audio/container substitution or real-input retiming/tag rewrite is introduced.
-  Scanner-only linking and independent delta review passed. The manual control
-  `tools/dv_processing/controls/test_scan_duration_tag.py` passed nine P7 scanner
-  observations, then failed before its truncation scan: a time cutoff produced
-  14 rather than 17 coded packets. The control-only repair copies exactly 17 AUs,
-  muxes full unrelated audio separately, verifies original payload/PTS/durations,
-  and preserves the 18-picture endpoint declaration. Hash-bound continuation
-  retains the nine passes without remux/probe/scan replay. New control-delta review,
-  repaired P7 truncation and ten unexecuted P8 observations precede failed P7
-  decoded/policy and mapped cells. No scanner rebuild or unchanged-pass replay.
-  Separate FEL integration, one fast lane and API merge remain open.
-  No display/deployment/client-DYN/general Dolby accuracy claim; output-metadata
-  PR B must land before any user-exposed targeting setting.
+- **Current qualification (2026-10-22):** the original `a49`/`c036` source
+  review is retained. Scanner controls have 20 passes. The standalone P7 run
+  retained its actual `c036` listing, 17,983 valid frames, observed maximum
+  3,441 nits, and passing policy results. Owner-interrupted attempt 258 stopped
+  at 1,000 nits after 137/1,000 and is neither a product defect nor a pass;
+  1,600 nits was not run. Additive continuation 259 is currently running the
+  1,000-nit cell and proceeds to 1,600 only if it passes. At this snapshot there
+  are zero new mapped-P7 passes.
+
+  Current-main source integration is `a316`, plus test-only missing scanner
+  fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.
+  The original compile exposed E0063 in a scanner `/bin/false` test fixture;
+  that fixture-only repair passed failed-only compile 261 on exact
+  `fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8` with pinned Rust 1.97.1 and true
+  outer exit 0. The check covered `plurxd` and `plurx-core` all targets with
+  `hiqlite-contract-tests`, without units. PR B integration `2038269` is queued
+  for pinned compile 262. Retain prior 99 Rust passes, the new receipt regression,
+  141 shader cases / 866,304 samples, 70 helper results, and P8 passes with
+  their original source attribution; do not replay or relabel them.
+
+  Separate FEL comparison/interpreter work is excluded from PR A: no reviewed
+  production fix is available to integrate (the original contract, §§113–115,
+  permits this separation). Full-app C1 still has a final source-EOF failure;
+  full-clip and general FEL accuracy remain unclaimed. PR #1216 is owned by
+  direct GPT/root; existing full and delta reviews remain retained. Narrow
+  integration review, completed P7 evidence, current fast lane, and API merge
+  with 22 regression anchors remain open. B metadata `2038269` is complete but
+  unqualified. C server and D client work are being implemented by separate Sol
+  agents in isolated clones; E/F remain planned. No setting is exposed before B,
+  and Apple peak reporting, device acceptance, and deployment are not claimed.
+
+### Historical qualification records (not current status)
 
 - The corrected real P8 excerpt reached complete 17,983-frame L1 observation and
   master preparation, then its single 1000-nit test failed with exit 101: the
@@ -198,7 +205,7 @@ Authored regression anchors (not executed):
   shader, policy/store/helper and prior B evidence; check only genuinely changed
   surfaces, not whole suites or reviews for base motion. No display/deploy claim.
 
-### Historical source checkpoints (not current acceptance)
+#### Original source checkpoints (historical)
 
 - Independent Astra reviewed the complete `0d47bc6ac` candidate: one blocking F1,
   unrelated chapters/HEVC/content-encoding grafts invalidating title generations.
@@ -665,7 +672,7 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 | A | Title L1 scan (stored with the DV facts) + helper target policy + L1 → CIE_Y + ST 2094-10 + `DvExportPolicy` identity + report operation + control scripts | server image |
 | B | MDCV/CLL writer for processed output (post-encode, reusing `hdr10_index.rs`) | server image |
 | C | Caps `max_nits`/`peak_source` (no display minimum), buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
-| D | Android HdrCapabilities + web display-peak setting; Apple excluded in phase 1 | server image (web) + Android build |
+| D | Android / Android TV HdrCapabilities + web display-peak setting; Apple excluded in phase 1 | server image (web) + Android build |
 | E | Phase 2 trims (after acceptance) | server image |
 | F | Phase 3 SDR target | server image |
 
