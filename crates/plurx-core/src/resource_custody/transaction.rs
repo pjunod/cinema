@@ -1,6 +1,7 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
 mod inventory;
+mod scratch;
 mod typed;
 use super::*;
 use codec::{MemberEnvelope, SettlementRecord};
@@ -300,6 +301,27 @@ pub(super) fn snapshot(
                     validated_last.insert(ack.obligation_id);
                 }
             }
+            DiskResult::AssetChangedV2(record) => {
+                scratch::validate_record_binding(connection, &record)?;
+                let ack = &record.ack;
+                if ack.sequence > next
+                    || !all_ids.contains_key(&ack.obligation_id)
+                    || ack.operation_id != operation_id
+                    || !operation_sequences.insert(ack.sequence)
+                {
+                    return Err(codec::invalid());
+                }
+                let (last, graph, last_seq, last_phase, _) = last_operations[&ack.obligation_id];
+                if graph != ack.graph_id || last_seq < ack.sequence {
+                    return Err(codec::invalid());
+                }
+                if last == operation_id {
+                    if last_seq != ack.sequence || last_phase != ack.phase {
+                        return Err(codec::invalid());
+                    }
+                    validated_last.insert(ack.obligation_id);
+                }
+            }
             DiskResult::RetiredWithAssets(ack) => {
                 let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
                 if version != 2
@@ -439,6 +461,7 @@ enum DiskResult {
         trial: Option<Uuid>,
     },
     Changed(CommitAck),
+    AssetChangedV2(scratch::AssetChangedV2),
     RetiredWithAssets(RetirementAck),
 }
 
@@ -517,6 +540,10 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
                 Mutation::RecordAcquired { identity } => serde_json::json!({"acquired":identity}),
                 Mutation::RecordTypedAcquired { envelope } => {
                     serde_json::json!({"typed_acquired_v2":envelope})
+                }
+                Mutation::AssetChangeV2 { change } => {
+                    codec::encode(change)?;
+                    serde_json::json!({"asset_change_v2": change})
                 }
                 Mutation::Seal => serde_json::json!("seal"),
                 Mutation::Hold { reason } => serde_json::json!({"hold":reason}),
@@ -659,6 +686,20 @@ pub(super) fn execute(
         e
     })?;
     match (&operation.command, disk_result) {
+        (
+            Command::Change {
+                key,
+                mutation: Mutation::AssetChangeV2 { change },
+            },
+            DiskResult::AssetChangedV2(record),
+        ) if record.ack.operation_id == operation.id
+            && record.ack.obligation_id == key.handle.obligation_id
+            && record.ack.graph_id == key.handle.graph_id
+            && record.change == *change =>
+        {
+            record.validate()?;
+            Ok(OperationResult::Changed(record.ack))
+        }
         (
             Command::Prepare { handles, trial, .. } | Command::PrepareTyped { handles, trial, .. },
             DiskResult::Prepared {
@@ -921,7 +962,9 @@ fn change(
     )?;
     let mut settlement = None;
     match mutation {
-        Mutation::RecordTypedAcquired { .. } => return Err(codec::invalid()),
+        Mutation::RecordTypedAcquired { .. } | Mutation::AssetChangeV2 { .. } => {
+            return Err(codec::invalid())
+        }
         Mutation::Arm { members } => {
             if !matches!(prior, Phase::Prepared | Phase::AcquisitionPossible)
                 || members.is_empty()

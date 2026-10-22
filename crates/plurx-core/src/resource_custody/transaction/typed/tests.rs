@@ -1,4 +1,5 @@
 //! Real SQLite transitions with typed fixture data; no physical receipts minted.
+mod scratch;
 use super::*;
 use crate::adaptive_resources::ResourceReservation;
 use crate::resource_custody::tests::{deadline, new_obligation, options, owner, vector};

@@ -1,6 +1,7 @@
 //! Strict v2 audit data for the concrete finite-VOD ownership path.
 //! None of these disk types constructs a physical receipt or a launch permit.
 mod cost;
+pub(crate) mod scratch;
 mod settlement;
 #[cfg(test)]
 pub(in crate::resource_custody) mod tests;
@@ -275,6 +276,10 @@ pub(crate) enum MemberPlan {
         slot: MemberSlot,
         scratch: ScratchAssets,
     },
+    ScratchAssetsV2 {
+        slot: MemberSlot,
+        plan: scratch::ScratchPlanV2,
+    },
 }
 impl MemberPlan {
     pub(crate) fn member_id(&self) -> Uuid {
@@ -282,7 +287,8 @@ impl MemberPlan {
             Self::LegacyV1 { planned } => planned.member_id,
             Self::SourceV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
-            | Self::ScratchAssetsV1 { slot, .. } => slot.member_id.uuid(),
+            | Self::ScratchAssetsV1 { slot, .. }
+            | Self::ScratchAssetsV2 { slot, .. } => slot.member_id.uuid(),
         }
     }
     pub(crate) fn kind(&self) -> MemberKind {
@@ -297,7 +303,7 @@ impl MemberPlan {
             Self::LegacyV1 { planned } => planned.adapter.as_str(),
             Self::SourceV1 { .. } => "source_file",
             Self::VodOutputTaskV1 { .. } => "vod_output_task",
-            Self::ScratchAssetsV1 { .. } => "scratch",
+            Self::ScratchAssetsV1 { .. } | Self::ScratchAssetsV2 { .. } => "scratch",
         }
     }
     fn edges(&self) -> Vec<Uuid> {
@@ -310,7 +316,8 @@ impl MemberPlan {
                 .collect(),
             Self::SourceV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
-            | Self::ScratchAssetsV1 { slot, .. } => slot
+            | Self::ScratchAssetsV1 { slot, .. }
+            | Self::ScratchAssetsV2 { slot, .. } => slot
                 .depends_on
                 .iter()
                 .copied()
@@ -336,6 +343,7 @@ pub(crate) enum Observed {
     SourceV1 { source: SourceObserved },
     VodOutputTaskV1 { task: VodOutputTask },
     ScratchAssetsV1 { scratch: ScratchAssets },
+    ScratchAssetsV2 { state: scratch::ScratchStateV2 },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -465,7 +473,11 @@ fn validate_task(task: &VodOutputTask, manifest: &Manifest) -> Result<(), Custod
     if task.version != 1 || task.graph_id != manifest.graph_id
         || task.stdout_owner_id == task.diagnostic_owner_id
         || !manifest.members.iter().any(|m| matches!(m, MemberPlan::SourceV1 { source, .. } if source.source_association == task.source_association))
-        || !manifest.members.iter().any(|m| matches!(m, MemberPlan::ScratchAssetsV1 { scratch, .. } if scratch.asset_id == task.asset_id))
+        || !manifest.members.iter().any(|m| match m {
+            MemberPlan::ScratchAssetsV1 { scratch, .. } => scratch.asset_id == task.asset_id,
+            MemberPlan::ScratchAssetsV2 { plan, .. } => plan.asset_id == task.asset_id,
+            _ => false,
+        })
         || !manifest.members.iter().any(|m| m.member_id() == task.root_member_id.uuid() && m.kind() == MemberKind::Root) { return Err(codec::invalid()); }
     task.source_association.validate()?;
     task.inventory.validate()
@@ -563,6 +575,31 @@ pub(crate) fn validate_manifest(value: &Manifest) -> Result<(), CustodyError> {
                 }
                 validate_scratch(scratch)?;
             }
+            MemberPlan::ScratchAssetsV2 { slot, plan } => {
+                validate_slot(slot)?;
+                scratch::validate_plan(plan)?;
+                if !slot
+                    .protected_paths
+                    .contains(&plan.directory.protected_absolute_path)
+                    || plan.filesystem_domain.daemon_owner_id != value.owner_id
+                    || value
+                        .members
+                        .iter()
+                        .filter(|m| match m {
+                            MemberPlan::ScratchAssetsV1 { scratch, .. } => {
+                                scratch.asset_id == plan.asset_id
+                            }
+                            MemberPlan::ScratchAssetsV2 { plan: other, .. } => {
+                                other.asset_id == plan.asset_id
+                            }
+                            _ => false,
+                        })
+                        .count()
+                        != 1
+                {
+                    return Err(codec::invalid());
+                }
+            }
         }
         let edges = member.edges();
         if edges.len() > 130
@@ -633,6 +670,9 @@ pub(crate) fn validate_envelope(
             MemberPlan::ScratchAssetsV1 { scratch, .. },
             Some(Observed::ScratchAssetsV1 { scratch: observed }),
         ) if scratch == observed => {}
+        (MemberPlan::ScratchAssetsV2 { plan, .. }, Some(Observed::ScratchAssetsV2 { state })) => {
+            scratch::validate_projection(plan, state)?
+        }
         _ => return Err(codec::invalid()),
     }
     codec::encode(envelope)?;

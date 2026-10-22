@@ -96,6 +96,14 @@ pub(super) fn load(
                 let envelope: v2::Envelope = codec::decode(&row.get::<_, String>(5)?)?;
                 let proof: Option<String> = row.get(6)?;
                 v2::validate_envelope(&manifest, &envelope)?;
+                if let v2::MemberPlan::ScratchAssetsV2 { slot, plan } = &envelope.planned {
+                    let state = match &envelope.observed {
+                        Some(v2::Observed::ScratchAssetsV2 { state }) => Some(state),
+                        None => None,
+                        _ => return Err(codec::invalid()),
+                    };
+                    super::scratch::restore(connection, id, graph, slot.member_id, plan, state)?;
+                }
                 if mid != envelope.planned.member_id()
                     || kind != envelope.planned.kind().as_str()
                     || adapter != envelope.planned.adapter()
@@ -217,7 +225,8 @@ pub(super) fn protected_paths(inventory: &ObligationInventory) -> Vec<PathBuf> {
                 v2::MemberPlan::LegacyV1 { planned } => &planned.protected_paths,
                 v2::MemberPlan::SourceV1 { slot, .. }
                 | v2::MemberPlan::VodOutputTaskV1 { slot, .. }
-                | v2::MemberPlan::ScratchAssetsV1 { slot, .. } => &slot.protected_paths,
+                | v2::MemberPlan::ScratchAssetsV1 { slot, .. }
+                | v2::MemberPlan::ScratchAssetsV2 { slot, .. } => &slot.protected_paths,
             })
             .map(PathBuf::from)
             .collect(),

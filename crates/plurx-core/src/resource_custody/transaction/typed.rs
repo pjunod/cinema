@@ -50,6 +50,26 @@ pub(super) fn prepare(
             .ok_or_else(codec::invalid)?;
     }
     let mut ids = BTreeSet::new();
+    let mut asset_ids = BTreeSet::new();
+    let mut existing =
+        tx.prepare("SELECT manifest_json FROM obligations WHERE phase!='settled'")?;
+    let mut rows = existing.query([])?;
+    while let Some(row) = rows.next()? {
+        if let v2::ManifestDocument::V2(manifest) = v2::decode_manifest(&row.get::<_, String>(0)?)?
+        {
+            for member in manifest.members {
+                match member {
+                    v2::MemberPlan::ScratchAssetsV1 { scratch, .. } => {
+                        asset_ids.insert(scratch.asset_id);
+                    }
+                    v2::MemberPlan::ScratchAssetsV2 { plan, .. } => {
+                        asset_ids.insert(plan.asset_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     for (new, handle) in batch.obligations.iter().zip(handles) {
         v2::validate_manifest(&new.manifest)?;
         if handle.journal_id != journal
@@ -63,7 +83,21 @@ pub(super) fn prepare(
         }
         // Retained assets cannot be created by a fresh producer preparation;
         // only the conserving retirement transaction may install such ownership.
+        let mut scratch_minimum = ResourceVector::default();
         for member in &new.manifest.members {
+            if let v2::MemberPlan::ScratchAssetsV2 { plan, .. } = member {
+                if !asset_ids.insert(plan.asset_id) {
+                    return Err(codec::invalid());
+                }
+                scratch_minimum = scratch_minimum
+                    .checked_add(ResourceVector {
+                        scratch_bytes: plan.limits.reserved_storage_bytes,
+                        peak_memory_bytes: plan.limits.resident_memory_bytes,
+                        handles: u64::from(plan.limits.live_handles),
+                        ..ResourceVector::default()
+                    })
+                    .ok_or_else(codec::invalid)?;
+            }
             if let v2::MemberPlan::SourceV1 { source, .. } = member {
                 for copy in &source.planned_copies {
                     match copy.owner {
@@ -77,6 +111,9 @@ pub(super) fn prepare(
                     }
                 }
             }
+        }
+        if new.resources.checked_sub(scratch_minimum).is_none() {
+            return Err(codec::invalid());
         }
         aggregate = aggregate
             .checked_add(new.resources)
@@ -143,6 +180,9 @@ pub(super) fn change(
         |r| r.get(0),
     )?;
     match mutation {
+        Mutation::AssetChangeV2 { change } => {
+            return super::scratch::change(tx, key, prior, manifest, change);
+        }
         Mutation::Arm { members } => {
             if !matches!(prior, Phase::Prepared | Phase::AcquisitionPossible)
                 || members.is_empty()
@@ -168,6 +208,11 @@ pub(super) fn change(
                 return Err(codec::invalid());
             }
             v2::validate_envelope(manifest, envelope)?;
+            // Growing scratch observations come only from the durable event
+            // fold. The generic acquisition seam cannot inject an invented head.
+            if matches!(envelope.planned, v2::MemberPlan::ScratchAssetsV2 { .. }) {
+                return Err(codec::invalid());
+            }
             let (member_phase, json): (String, String) = tx.query_row(
                 "SELECT phase,identity_json FROM members WHERE obligation_id=?1 AND member_id=?2",
                 params![

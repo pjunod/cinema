@@ -318,11 +318,22 @@ pub(crate) struct PhysicalSettlement {
 
 #[derive(Debug)]
 pub(crate) enum Mutation {
-    Arm { members: Vec<Uuid> },
-    RecordAcquired { identity: ObservedIdentity },
-    RecordTypedAcquired { envelope: codec_v2::Envelope },
+    Arm {
+        members: Vec<Uuid>,
+    },
+    RecordAcquired {
+        identity: ObservedIdentity,
+    },
+    RecordTypedAcquired {
+        envelope: codec_v2::Envelope,
+    },
+    AssetChangeV2 {
+        change: codec_v2::scratch::AssetChangeV2,
+    },
     Seal,
-    Hold { reason: String },
+    Hold {
+        reason: String,
+    },
     CancelPrepared,
     Settle(PhysicalSettlement),
 }
