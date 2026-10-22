@@ -530,7 +530,8 @@ mod output_codec_contract_tests {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGrade {
-    /// BT.709 8-bit, the only grade that existed before M5.
+    /// BT.709 SDR. Ordinary encoders use 8-bit output; the separately proved
+    /// completed reconstruction contract can deliver SDR as HEVC Main10.
     #[default]
     Sdr,
     /// HEVC Main10, PQ transfer, BT.2020 primaries, limited range. The rung

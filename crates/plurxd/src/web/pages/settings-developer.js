@@ -584,7 +584,7 @@ async function saveJellyfinCompatibility(btn){
 }
 function dolbyVisionHdrProcessingCard(settings,readiness){
   return setCard(`${cardHead("Dolby Vision processing","Use supported Dolby Vision picture information when delivering HDR or display-targeted SDR.","")}
-    ${togRow("dv-hdr-processing","Process Dolby Vision processing","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
+    ${togRow("dv-hdr-processing","Process Dolby Vision for HDR and targeted SDR","Default off. Applies to new playback when processing is available.",!!settings.dolby_vision_hdr_processing)}
     <p class="hint">New playback attempts supported Dolby Vision processing when the worker has the required tools and resources. Unsupported sources or processing failures use compatible playback. Native Dolby Vision and required color conversion are preserved. Readiness never prevents saving. A running movie is unchanged.</p>
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_backend_reference","Qualified backend and reference","Validate HDR output against an independent reference.")}
     ${devReq(readiness,"dolby_vision_hdr_processing","dv_hdr_encoder_matrix","Production encoder matrix","Test processing with the encoders used by playback workers.")}

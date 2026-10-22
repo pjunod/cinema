@@ -245,6 +245,8 @@ static bool dv_yuv10_export_color(pl_renderer renderer, pl_gpu gpu, pl_tex rgb, 
     params.color_adjustment = NULL;
     params.sigmoid_params = NULL;
     if (!pl_render_image(renderer, &source, &target, &params)) return false;
+    struct pl_render_errors errors = pl_renderer_get_errors(renderer);
+    if (errors.errors || errors.num_disabled_hooks) return false;
   } else if (dv_yuv10_fused) {
     if (!dv_yuv10_dispatch_fused(rgb))
       return false;
