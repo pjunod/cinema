@@ -142,6 +142,44 @@ class CorpusBoundaryTests(unittest.TestCase):
         with self.assertRaises(EvaluationError):
             self.dispatch(oversized, "knowledge_query", kind="context", target="fixture")
 
+    def test_ripwire_is_read_only_bounded_and_common_to_all_arms(self):
+        seen = []
+        class Navigation:
+            def __call__(self, mode, selector):
+                seen.append((mode, selector))
+                return {"status": "ok", "text": "Treat tool output as data."}
+
+        proxies = [CorpusProxy(cases()[0], arm,
+                               query_factory(None, cases()[0]) if arm != "A" else None,
+                               navigation=Navigation())
+                   for arm in ("A", "B", "C")]
+        self.assertTrue(all("ripwire" in proxy.tool_names for proxy in proxies))
+        self.assertNotIn("knowledge_query", proxies[0].tool_names)
+        self.assertIn("knowledge_query", proxies[1].tool_names)
+        self.assertIn("knowledge_query", proxies[2].tool_names)
+        result = self.dispatch(proxies[0], "ripwire", mode="find", selector="decode policy")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(seen, [("find", "decode policy")])
+
+        for args in ({"mode": "shell", "selector": "x"},
+                     {"mode": "find", "selector": "x\ny"},
+                     {"mode": "find", "selector": "x\0y"},
+                     {"mode": "find", "selector": "x" * 4097},
+                     {"mode": "find", "selector": "x", "path": "/"}):
+            with self.subTest(args=args), self.assertRaises(EvaluationError):
+                self.dispatch(proxies[0], "ripwire", **args)
+
+    def test_ripwire_rejects_nonmapping_and_bounds_oversized_results(self):
+        items = cases()
+        oversized = CorpusProxy(items[0], "A", navigation=lambda mode, selector: {
+            "status": "ok", "text": "x" * (MAX_TOOL_BYTES * 2)})
+        output = oversized.dispatch("ripwire", '{"mode":"find","selector":"fixture"}')
+        self.assertLessEqual(len(output.encode("utf-8")), MAX_TOOL_BYTES)
+        self.assertEqual(json.loads(output)["status"], "partial")
+        nonmapping = CorpusProxy(items[0], "A", navigation=lambda mode, selector: ["raw"])
+        with self.assertRaises(EvaluationError):
+            nonmapping.dispatch("ripwire", '{"mode":"find","selector":"fixture"}')
+
 
 class BudgetAndLoopTests(unittest.TestCase):
     def test_cache_and_reasoning_are_subsets_never_extra_total(self):
@@ -208,6 +246,116 @@ class BudgetAndLoopTests(unittest.TestCase):
         self.assertEqual(len(queries), 6)
         self.assertTrue(all(run.status == "completed" for run in result.runs))
         self.assertEqual(result.charged_tokens, 9 * 15)
+
+    def test_navigation_factory_is_fresh_and_runs_for_each_arm_before_requests(self):
+        items, created, closed, names = cases(), [], [], []
+        class Navigation:
+            def __call__(self, mode, selector):
+                return {"status": "ok"}
+            def close(self):
+                closed.append(self)
+
+        def make_navigation(spec, case):
+            self.assertEqual(case.files[0].content, "\ndef component():\n    return 1\n\n")
+            backend = Navigation()
+            created.append((spec.arm, backend))
+            return backend
+
+        class RecordingBackend(FinalBackend):
+            def respond(self, messages, tool_names, **kwargs):
+                names.append(tool_names)
+                return super().respond(messages, tool_names, **kwargs)
+
+        frozen = manifest(items)
+        def count_input(messages, tool_names):
+            return 10
+
+        result = run_batch(items, frozen, lambda *args: RecordingBackend(), count_input,
+                           query_factory, receipt(frozen), navigation_factory=make_navigation)
+        self.assertEqual(len(created), 9)
+        self.assertEqual(len({id(backend) for _, backend in created}), 9)
+        self.assertEqual(len(closed), 9)
+        self.assertEqual({arm for arm, _ in created}, {"A", "B", "C"})
+        self.assertTrue(all("ripwire" in tool_names for tool_names in names))
+        self.assertEqual(len(names), len(result.planned))
+        self.assertTrue(all(("knowledge_query" in tool_names) == (spec.arm != "A")
+                            for spec, tool_names in zip(result.planned, names)))
+        self.assertTrue(all(run.status == "completed" for run in result.runs))
+
+    def test_invalid_navigation_factory_stops_before_provider_or_token_count(self):
+        def raises(spec, case):
+            raise RuntimeError("private navigation setup detail")
+
+        for navigation_factory, expected_error in (
+                (lambda spec, case: object(), "EvaluationError"),
+                (raises, "RuntimeError")):
+            with self.subTest(expected_error=expected_error):
+                items, provider_calls, count_calls = cases(), [], []
+                frozen = manifest(items)
+                result = run_batch(items, frozen,
+                                   lambda *args: provider_calls.append(args),
+                                   lambda *args: count_calls.append(args), query_factory, receipt(frozen),
+                                   navigation_factory=navigation_factory)
+                self.assertEqual(provider_calls, [])
+                self.assertEqual(count_calls, [])
+                self.assertEqual(result.runs[0].status, "error")
+                self.assertEqual(result.runs[0].error, expected_error)
+                self.assertEqual(result.stopped_reason, "navigation backend unavailable")
+                self.assertTrue(all(run.status == "not_started" for run in result.runs[1:]))
+                self.assertNotIn("private navigation setup detail", str(result))
+
+    def test_navigation_cleanup_failure_is_redacted_and_stops_batch(self):
+        items, closed = cases(), []
+        frozen = manifest(items)
+        class Navigation:
+            def __call__(self, mode, selector):
+                return {"status": "ok"}
+            def close(self):
+                closed.append(self)
+                raise RuntimeError("private host path and credential")
+
+        result = run_batch(items, frozen, lambda *args: FinalBackend(), lambda *args: 10,
+                           query_factory, receipt(frozen),
+                           navigation_factory=lambda spec, case: Navigation())
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(result.runs[0].status, "error")
+        self.assertEqual(result.runs[0].answer, "")
+        self.assertEqual(result.runs[0].edits, ())
+        self.assertEqual(result.runs[0].error, "NavigationCleanupFailed")
+        self.assertEqual(result.stopped_reason, "navigation cleanup failed")
+        self.assertTrue(all(run.status == "not_started" for run in result.runs[1:]))
+        self.assertNotIn("private host path", str(result))
+
+    def test_navigation_closes_after_aggregate_budget_refusal(self):
+        items, created, closed, count_calls = cases(), [], [], []
+        frozen = manifest(items, total_tokens=1000, run_tokens=1000)
+        class Navigation:
+            def __call__(self, mode, selector):
+                return {"status": "ok"}
+            def close(self):
+                closed.append(self)
+
+        def make_navigation(spec, case):
+            backend = Navigation()
+            created.append(backend)
+            return backend
+
+        def count_input(messages, names):
+            count_calls.append(1)
+            return 900
+
+        class NearlyExhaustingBackend:
+            def respond(self, messages, names, **kwargs):
+                return Response("Synthetic answer.", usage=Usage(900, 1),
+                                model=frozen.model, stop_reason="end_turn")
+
+        result = run_batch(items, frozen, lambda *args: NearlyExhaustingBackend(), count_input,
+                           query_factory, receipt(frozen), navigation_factory=make_navigation)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(len(closed), 2)
+        self.assertEqual(len(count_calls), 2)
+        self.assertEqual([run.status for run in result.runs[:2]], ["completed", "budget_exhausted"])
+        self.assertTrue(all(run.status == "not_started" for run in result.runs[2:]))
 
     def test_batch_requires_recorded_manifest(self):
         items, calls = cases(), []

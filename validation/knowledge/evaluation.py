@@ -230,6 +230,15 @@ class QueryBackend(Protocol):
     def __call__(self, request: QueryRequest) -> Mapping[str, Any]: ...
 
 
+class NavigationBackend(Protocol):
+    """Read-only common navigator over the case's already-projected bytes."""
+    def __call__(self, mode: str, selector: str) -> Mapping[str, Any]: ...
+    def close(self) -> None: ...
+
+
+NavigationFactory = Callable[[RunSpec, CaseSpec], NavigationBackend]
+
+
 def _bounded(value: Any) -> str:
     text = _json(value)
     if len(text.encode("utf-8")) <= MAX_TOOL_BYTES:
@@ -242,18 +251,22 @@ def _bounded(value: Any) -> str:
 class CorpusProxy:
     """Fresh per run, backed only by supplied bytes; tool text remains inert."""
 
-    def __init__(self, case: CaseSpec, arm: str, query: QueryBackend | None = None):
+    def __init__(self, case: CaseSpec, arm: str, query: QueryBackend | None = None,
+                 navigation: NavigationBackend | None = None):
         _require(arm in ARMS, "unknown arm")
         _require(arm == "A" or query is not None, "B/C require the same injected query interface")
         self._files = {file.path: file for file in case.files}
         self._allowed = {edit.path: edit.visible_line_ranges for edit in case.allowed_edits}
         self._arm = arm
         self._query = None if arm == "A" else query
+        self._navigation = navigation
         self._edits: list[SourceEdit] = []
 
     @property
     def tool_names(self) -> tuple[str, ...]:
         common = ("list_files", "read", "search", "outline", "edit")
+        if self._navigation is not None:
+            common += ("ripwire",)
         return common if self._arm == "A" else common + ("knowledge_query",)
 
     @property
@@ -273,7 +286,8 @@ class CorpusProxy:
         required = {"list_files": set(), "read": {"path", "start_line", "end_line"},
                     "search": {"text"}, "outline": {"path"},
                     "edit": {"path", "start_line", "end_line", "replacement"},
-                    "knowledge_query": {"kind", "target"}}[name]
+                    "knowledge_query": {"kind", "target"},
+                    "ripwire": {"mode", "selector"}}[name]
         optional = {"continuation"} if name == "knowledge_query" else set()
         _require(required <= set(args) <= required | optional, "unexpected/missing tool arguments")
         if name == "list_files":
@@ -291,6 +305,22 @@ class CorpusProxy:
             output = _json(dict(result))
             _require(len(output.encode("utf-8")) <= MAX_TOOL_BYTES, "query violated frozen byte limit")
             return output
+        if name == "ripwire":
+            mode, selector = args["mode"], args["selector"]
+            _require(isinstance(mode, str)
+                     and mode in {"find", "outline", "body", "callers", "impact"},
+                     "unknown navigator mode")
+            _require(isinstance(selector, str) and bool(selector)
+                     and "\0" not in selector and "\n" not in selector and "\r" not in selector,
+                     "invalid navigator selector")
+            try:
+                selector_bytes = len(selector.encode("utf-8"))
+            except UnicodeError:
+                raise EvaluationError("invalid navigator selector") from None
+            _require(selector_bytes <= 4096, "invalid navigator selector")
+            result = self._navigation(mode, selector)
+            _require(isinstance(result, Mapping), "navigator result must be an object")
+            return _bounded(dict(result))
         if name == "search":
             text = args["text"]
             _require(isinstance(text, str) and 0 < len(text) <= 1024, "search requires bounded literal text")
@@ -494,7 +524,8 @@ class ManifestReceipt:
 
 def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFactory,
               count_input: InputCounter, query_factory: QueryFactory,
-              manifest_receipt: ManifestReceipt) -> BatchLog:
+              manifest_receipt: ManifestReceipt, *,
+              navigation_factory: NavigationFactory | None = None) -> BatchLog:
     """One new backend/session per scheduled run; never pass another transcript.
 
     The factory receives the same frozen model/settings for every arm. Repeats
@@ -513,6 +544,9 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
             continue
         case = by_id[spec.case_id]
         proxy = None
+        navigation_backend = None
+        navigation_close = None
+        navigation_ready = navigation_factory is None
         messages = [Message("system", manifest.common_instructions), Message("user", case.prompt)]
         if spec.arm != "A":
             depth = 0 if spec.arm == "B" else 6
@@ -520,9 +554,17 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
         requests: list[RequestLog] = []
         tool_logs: list[ToolLog] = []
         answer, status, error = "", "step_limit", None
+        navigation_cleanup_failed = False
         started = time.monotonic()
         try:
-            proxy = CorpusProxy(case, spec.arm, None if spec.arm == "A" else query_factory(spec, case))
+            if navigation_factory is not None:
+                navigation_backend = navigation_factory(spec, case)
+                navigation_close = getattr(navigation_backend, "close", None)
+                _require(callable(navigation_backend) and callable(navigation_close),
+                         "invalid navigation backend")
+                navigation_ready = True
+            query = None if spec.arm == "A" else query_factory(spec, case)
+            proxy = CorpusProxy(case, spec.arm, query, navigation=navigation_backend)
             backend = factory(spec, manifest)
             for _ in range(manifest.limits.steps):
                 predicted = count_input(tuple(messages), proxy.tool_names)
@@ -579,7 +621,18 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
             status, error = "error", type(exc).__name__
             if budget.uncertain:
                 stopped = "request failed with unavailable usage"
-        results.append(RunLog(spec, status, answer, proxy.edits if proxy is not None else (), tuple(requests), tuple(tool_logs),
+            elif not navigation_ready:
+                stopped = "navigation backend unavailable"
+        finally:
+            if navigation_close is not None:
+                try:
+                    navigation_close()
+                except Exception:
+                    status, answer, error = "error", "", "NavigationCleanupFailed"
+                    navigation_cleanup_failed = True
+                    stopped = "navigation cleanup failed"
+        edits = () if navigation_cleanup_failed or proxy is None else proxy.edits
+        results.append(RunLog(spec, status, answer, edits, tuple(requests), tuple(tool_logs),
                               time.monotonic() - started, error))
     return BatchLog(manifest, planned, tuple(results), budget.charged_tokens, stopped)
 
