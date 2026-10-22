@@ -22,6 +22,7 @@ repository.workspace = true
 cluster-integration-tests = []
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # CPU-only inference, loaded only when semantic search is enabled.
 candle-core = { version = "=0.11.0", default-features = false }
@@ -94,6 +95,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_JobObjects",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -106,7 +108,6 @@ wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "
 dolby_vision = { workspace = true }
 # Invitation seam tests compose the released broker Router and trusted local TLS.
 plurx-notification-broker = { path = "../plurx-notification-broker" }
-async-trait = { workspace = true }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

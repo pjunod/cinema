@@ -541,43 +541,43 @@
       },
       {
         "anchor": "    async fn run_targeted(",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5172"
       },
       {
         "anchor": "        };\n        let Some(lease) = self.acquire_job(\"provider:artwork\".to_owned()).await? else {\n            return Err(StoreError::Task(",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5478"
       },
       {
         "anchor": "    async fn run_scan(",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:5856"
       },
       {
         "anchor": "        match self.acquire_job(\"provider:artwork\".to_owned()).await {",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6430"
       },
       {
         "anchor": "        let lease = match self.acquire_job(\"provider:genres\".to_owned()).await {",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f",
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2",
         "source": "crates/plurxd/src/state.rs",
         "table": "review \u00a73 citation crates/plurxd/src/state.rs:6517"
       },
       {
         "anchor": "pub async fn produce(",
-        "sha256": "e17172b7fae5640a0fe53659cf1d73490ac8f4bfd4a99f1857565796a78c2df2",
+        "sha256": "81df82b9fc9c93898825c9374a40105d8f4dd4d13d88b335489c08f42e926ec5",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 artifact producer caller"
       },
       {
         "anchor": "            true\n        } else if let Some(fence) = publication_fence {\n            PublicationStore::fenced(self.store.as_ref(), fence.clone())",
-        "sha256": "e17172b7fae5640a0fe53659cf1d73490ac8f4bfd4a99f1857565796a78c2df2",
+        "sha256": "81df82b9fc9c93898825c9374a40105d8f4dd4d13d88b335489c08f42e926ec5",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 citation crates/plurxd/src/transcode/manager/produce.rs:2083"
       },
@@ -594,7 +594,7 @@
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
     ],
-    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem."
+    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem."
   },
   "configs": {
     "baseline.cfg": {

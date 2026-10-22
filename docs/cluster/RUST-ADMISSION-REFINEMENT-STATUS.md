@@ -108,3 +108,9 @@ The only added unreachable exception is the exact `core::fmt::Arguments::from_st
 The committed real-output fixture preserves every non-path byte, including the tool's whitespace; its provenance states the original candidate, source/tool identities and path-only redactions. Parser-resume tests require exact solver inputs, command, tool identities and complete current-parser success before retaining a formerly rejected log, and preserve its original rejection. The final package run records native Linux provisioning and per-target solver timings in the PR evidence.
 
 This phase's merge-time qualification and landing receipt live in [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260). This ledger records the proof boundary and implementation decisions; the PR records the current candidate, required gate, retained runtime evidence and remaining work. No clustering test is removed.
+
+### Current-main integration and evidence retention
+
+Main advanced to `2838e05ad8bf1ed30f9c88db59caa7821bc3c087` during qualification preparation. The merge preserves both status entries and both source-map updates; all three current mapping validators report no source drift. Pinned Rust 1.97.1 all-target daemon compilation on the integrated source passed in 116 seconds.
+
+The broad 1,491-file runtime identity no longer matches because upstream added playback-cache behavior. A narrower source inspection confirms that the tested worker/controller, fixture constructors, scan path and manager/admission helpers retain their exact bodies. The five fixtures construct managers directly and do not execute the changed AppState/cache-worker initialization. Their passes remain attributed to `1e4556f61`, with this explicit narrower bridge rather than a claim that a new binary ran. All 15 parser/CI-contract tests also passed (0.026 seconds); their exact runner, workflow and fixture inputs remain unchanged by main integration.

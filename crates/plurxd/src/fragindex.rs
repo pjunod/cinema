@@ -2502,6 +2502,13 @@ async fn build_with_args_owned(
         ));
     }
     let mut command = tokio::process::Command::new(ffmpeg_bin());
+    if ride_along.is_some() {
+        if let Err(error) = crate::subtitle_ride_along::configure_stage_limits(&mut command) {
+            return all(IndexOutcome::Unsupported(format!(
+                "bounded subtitle output unavailable: {error}"
+            )));
+        }
+    }
     crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
     #[cfg(unix)]
     {

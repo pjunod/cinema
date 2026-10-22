@@ -3,6 +3,7 @@
 **Updated:** 2026-10-22 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
 - **2026-10-22 · Rust admission refinement:** [live ledger](docs/cluster/RUST-ADMISSION-REFINEMENT-STATUS.md); production controller and exact-body harnesses built; Fable final review delivered, amendments implemented and five affected runtime schedules passed. Qualification and landing are tracked in the PR. Owner: Codex coordinator; draft [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260).
+- **2026-10-21 · Playback cache disk safety:** [shared budget contract](docs/streaming/PLAYBACK-CACHE-BUDGET.md); aggregate accounting, owner eviction and write admission built. Astra review addressed; focused qualification in progress; deployment acceptance remains open. Owner: Codex.
 - **2026-10-21 · Worker refinement:** [live ledger](docs/cluster/WORKER-REFINEMENT-STATUS.md); seven Rust schedules pass; two complete workers, reviewed correspondence and observation projection built. Qualification and landing receipt: [PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Owner: Codex coordinator.
 - **2026-10-21 · Avatar Dolby Vision:** [live diagnosis and evidence](docs/clients/AVATAR-WEB-PLAYBACK-STATUS.md); Intel repair #1250 deployed and Apple TV confirmed. Follow-up corrects shared capability/timeline contracts; Astra approved, Rust regression and 38 web tests passed; injected Safari reports FEL/RPU/DYN and 3,010 frames / zero drops. [Automatic frame-drop capture](docs/clients/FRAME-DROP-RECORDER.md) is built; production acceptance, slow startup and original display-drop trigger remain open. Paul owns deployment.
 - **2026-10-21 · Operation progress:** [live ledger](docs/cluster/OPERATION-PROGRESS-STATUS.md); wait map/model/checker built and qualified; Fable approved; live promotion and landing are in PR #1249. Owner: Codex coordinator.
@@ -36,8 +37,7 @@ B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; sim
 
 ## Startup and tone-map: fewer create-path reads, a tone-map census, lab arms
 
-**Branch `effort/startup-tone-map`.** Executes
-[STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
+**Branch `effort/startup-tone-map`.** Executes [STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md](docs/streaming/STARTUP-AND-TONE-MAP-BUILD-HANDOFF.md)
 rev 6.
 
 - **Part B is built.** The create read-budget line had its authority and local labels swapped; that is corrected, and the line now carries `store_ms` and a per-phase split. Seven read reductions follow, none of which moves a read across a fence or changes its consistency.
@@ -98,8 +98,7 @@ wiring pinned by source tests). Not yet on hardware.
 
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28,
-2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28, 2026-10-04, 2026-10-17 and 2026-10-19 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|

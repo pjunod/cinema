@@ -921,7 +921,14 @@ pub async fn sweep_with_readers(
     // 3. Budget.
     let budget = budget_bytes(store).await;
     let mut used = store.cache_bytes(node_id).await.unwrap_or(0);
-    let ceiling = budget.unwrap_or(0);
+    // Configured daemons evict under the aggregate playback authority. The
+    // legacy standalone path remains for maintenance fixtures and callers
+    // without a registered playback layout.
+    let ceiling = if crate::playback_cache::lookup(root).is_some() {
+        used
+    } else {
+        budget.unwrap_or(0)
+    };
     if used > ceiling {
         // Coldest first. Asking for them in one page rather than one at a time
         // because the alternative re-queries per eviction, and the answer only
@@ -1008,6 +1015,78 @@ pub async fn sweep_with_readers(
         );
     }
     out
+}
+
+/// Global pressure uses the same recipe ownership and capability-relative
+/// deletion as the historical transcode sweeper. It never unlinks a path
+/// merely because a directory walk found it.
+struct PlaybackTranscodeOwner {
+    store: Arc<dyn Store>,
+    root: PathBuf,
+    node: String,
+    readers: ActiveCacheReaders,
+}
+
+pub(crate) fn register_playback_cache(
+    budget: &Arc<crate::playback_cache::PlaybackCacheBudget>,
+    store: Arc<dyn Store>,
+    root: PathBuf,
+    node: String,
+    readers: ActiveCacheReaders,
+) {
+    budget.register(Arc::new(PlaybackTranscodeOwner {
+        store,
+        root,
+        node,
+        readers,
+    }));
+}
+
+#[async_trait::async_trait]
+impl crate::playback_cache::CacheOwner for PlaybackTranscodeOwner {
+    async fn candidates(&self) -> std::io::Result<Vec<crate::playback_cache::CacheCandidate>> {
+        let rows = self
+            .store
+            .cache_by_age(&self.node, 512)
+            .await
+            .map_err(std::io::Error::other)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|entry| {
+                let path = entry_dir(&self.root, &entry.relative_dir)?;
+                Some(crate::playback_cache::CacheCandidate {
+                    path,
+                    last_used: std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(
+                            u64::try_from(entry.last_used_at).unwrap_or(0),
+                        ),
+                })
+            })
+            .collect())
+    }
+
+    async fn evict(
+        &self,
+        candidate: &crate::playback_cache::CacheCandidate,
+    ) -> std::io::Result<bool> {
+        // Re-read ownership rather than retaining a stale database snapshot
+        // across the coordinator's global age ordering.
+        let rows = self
+            .store
+            .cache_by_age(&self.node, 512)
+            .await
+            .map_err(std::io::Error::other)?;
+        let Some(entry) = rows.into_iter().find(|entry| {
+            entry_dir(&self.root, &entry.relative_dir).as_ref() == Some(&candidate.path)
+        }) else {
+            return Ok(false);
+        };
+        let _eviction = match self.readers.begin_eviction(&entry.recipe_hash) {
+            Ok(guard) => guard,
+            Err(_) => return Ok(false),
+        };
+        Ok(forget(&self.store, &self.root, &self.node, &entry).await)
+    }
 }
 
 /// Tests that do not model an active HTTP reader use an empty registry. The

@@ -249,25 +249,25 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "b6c335ead63a04449eb1ffbe9e42df2e074672ef53c865994ef06e0b0139c99a"
+        "sha256": "0e827be0b8f02b4da1fcf12d99ec041c25bb260c9737c86707bba0aa4d93cfeb"
       },
       {
         "table": "42 daemon schedule loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f"
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2"
       },
       {
         "table": "43 daemon worker loop no token",
         "source": "crates/plurxd/src/state.rs",
         "anchor": "pub(crate) async fn background_work_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {",
-        "sha256": "1448ed96b7ac98d46bff3ec76ba1b5c6b4b9d5f841e612b0e8d439925be1857f"
+        "sha256": "d65d88e778b09471a2ab9a4e18e232a20942a3b05a629e158d570baec38948b2"
       },
       {
         "table": "44 main worker spawn no shutdown arg",
         "source": "crates/plurxd/src/main.rs",
         "anchor": ".background_work_loop(std::sync::Arc::clone(&state.transcode)),",
-        "sha256": "59d0c6168706d38fa1fc148c21b120fc32f4ab1e6d04f0bed36a72e8f6666573"
+        "sha256": "28150af6c4f83ed44a28063832f34404908d794e1026c4f89803772e91844894"
       },
       {
         "table": "45 completion trigger updates waiter and parent job",
@@ -287,7 +287,8 @@
         "anchor": "pub fn step(state: State, event: Event)",
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
       }
-    ]
+    ],
+    "review_basis": "Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: fragment admission remains try-only, library work remains independently polled, and modeled scheduler/worker shutdown behavior is unchanged. The new cache-maintenance loop owns a separate shutdown token. All four affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence."
   },
   "configs": {
     "progress.cfg": {

@@ -19,6 +19,10 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- All playback caches share one disk budget with reader-safe global eviction,
+  pre-write capacity reservations and a filesystem free-space reserve, preventing
+  completed renditions and concurrent producers from exhausting server disks.
+
 - Processed Dolby Vision Profile 8.1 playlists include the required HDR10
   compatibility brand so Apple players can recognize the Dolby Vision enhancement.
 
