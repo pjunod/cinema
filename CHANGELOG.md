@@ -36,6 +36,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Explicit internal display-targeted HDR10 windows carry consistent post-encode
+  mastering/content-light declarations in init boxes and every IRAP prefix SEI,
+  independent of encoder family. Mastering primaries/minimum use title L9/L6 or
+  the selected held source's MDCV when missing; contradictory or unknown facts
+  refuse the target. Max luminance/CLL follow the bucket and scanned L1 bound;
+  MaxFALL remains unknown. Default/master output is unchanged, and targeting
+  controls remain unexposed pending subsequent delivery stages.
+
+
 - Complete-title Dolby Vision scans compare a selected Matroska track's
   `DURATION` tag to its timestamp endpoint rather than subtracting a nonzero
   video origin. Independent selected-video declarations, complete decoder

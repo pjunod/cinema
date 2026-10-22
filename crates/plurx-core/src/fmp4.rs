@@ -1816,7 +1816,8 @@ pub use dvh1::validate_rolling_dvh1_fragment;
 #[path = "fmp4/hdr10_index.rs"]
 mod hdr10_index;
 pub use hdr10_index::{
-    normalize_indexed_hdr10_metadata, Hdr10IndexMetadata, HDR10_INDEX_METADATA_REVISION,
+    normalize_indexed_hdr10_metadata, Hdr10IndexMetadata, Hdr10OutputMetadata,
+    HDR10_INDEX_METADATA_REVISION,
 };
 
 /// Promote an init from captured inputs — the planned generation's path.

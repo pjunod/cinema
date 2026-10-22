@@ -13,8 +13,8 @@ use crate::domain::DolbyVisionFacts;
 
 mod display_target;
 pub use display_target::{
-    DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline, DISPLAY_TARGET_BUCKETS,
-    DISPLAY_TARGET_METHOD,
+    DvDisplayTarget, DvDisplayTargetChoice, DvDisplayTargetDecline, DvSourceMastering,
+    DISPLAY_TARGET_BUCKETS, DISPLAY_TARGET_METHOD,
 };
 
 fn encoder_token(encoder: Encoder) -> &'static str {
@@ -1238,6 +1238,52 @@ pub fn dv_author_profile81_window(
         source_rpus,
         DvDestination::Profile81,
     )?;
+    Ok(output)
+}
+
+/// Author the completed explicit target after encoding, independent of encoder
+/// family. The caller validates the resulting complete window before publication.
+/// Init and in-band declarations are derived from exactly the same payloads.
+pub fn dv_author_hdr10_window(
+    bytes: &[u8],
+    metadata: crate::fmp4::Hdr10OutputMetadata,
+) -> Result<Vec<u8>, DvContractError> {
+    use crate::fmp4::{FragmentReader, Unit};
+    let invalid = || DvContractError::Invalid("post-encode targeted HDR10 metadata authoring");
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return Err(invalid());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(bytes);
+    let Some(Unit::Init(mut init)) = reader.next_unit().map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    metadata.write_init(&mut init).map_err(|_| invalid())?;
+    let mut output = init.bytes.clone();
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|_| invalid())? {
+        let mut fragment = match unit {
+            Unit::Fragment(fragment) => fragment,
+            Unit::Trailer => continue,
+            Unit::Init(_) => return Err(invalid()),
+        };
+        metadata
+            .write_fragment(&mut fragment, &init)
+            .map_err(|_| invalid())?;
+        fragments += 1;
+        output.extend_from_slice(&fragment.bytes);
+        if output.len() > 64 * 1024 * 1024 {
+            return Err(DvContractError::Capacity);
+        }
+    }
+    if fragments == 0 || !reader.saw_trailer() || reader.buffered() != 0 {
+        return Err(invalid());
+    }
+    // Init/sample growth invalidates encoder-authored random-access offsets.
+    output.extend_from_slice(&completed_window_trailer(&init));
+    if output.len() > 64 * 1024 * 1024 {
+        return Err(DvContractError::Capacity);
+    }
     Ok(output)
 }
 
