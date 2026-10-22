@@ -16,7 +16,7 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-22 · Display-targeted HDR10-E:** [PR A qualification and A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Direct GPT owns PR #1216; pinned compilation passed, missing-only P7 qualification is running. B metadata is implemented; C/D candidates await integration and qualification. Separate FEL full-application acceptance remains open.
+- **2026-10-22 · Display-targeted HDR10-E:** [PR A qualification and A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Direct GPT owns PR #1216; pinned prior compilation passed; P7 continuation 259 failed its zero-origin guard after complete scan. The common-origin fix is authored and awaits review/native qualification. B metadata is implemented; C/D candidates await integration and qualification. Separate FEL full-application acceptance remains open.
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,

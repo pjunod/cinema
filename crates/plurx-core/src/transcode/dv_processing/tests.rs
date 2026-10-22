@@ -1471,7 +1471,12 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
             display_ordinal: ordinal as u64,
         })
         .collect();
-    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), grid, 0, 48)
+    let origin = DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1).unwrap(),
+        super::super::VodSourceClock::ReportedOrigin(0),
+    )
+    .unwrap();
+    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), origin, grid, 0, 48)
         .expect("valid bounded clock fixture");
     assert_eq!(mapped.len(), 48);
     assert_eq!(
@@ -1482,12 +1487,127 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
         mapped[1].output_pts,
         DvTimestamp::new(1_001, 24_000).expect("valid bounded clock fixture")
     );
-    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), origin, grid, 0, 48).is_err());
     let mut dropped = source.clone();
     dropped[24].pts = dropped[25].pts;
-    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), origin, grid, 0, 48).is_err());
     let mut wrong = source.clone();
     wrong[47].pts = DvTimestamp::new(1_970, 1_000).expect("valid bounded clock fixture");
-    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), grid, 0, 48).is_err());
-    assert!(dv_map_source_to_output_grid(&source, (1, 24), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), origin, grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source, (1, 24), origin, grid, 0, 48).is_err());
+}
+
+#[test]
+fn common_source_origin_preserves_absolute_keys_across_film_windows() {
+    let grid = super::super::VodFrameGrid::new(24_000, 1_001).unwrap();
+    for millis in [0, 125] {
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(millis, 1000).unwrap(),
+            super::super::VodSourceClock::ReportedOrigin(millis * 1000),
+        )
+        .unwrap();
+        for entry in [0, 1, 2, 360] {
+            let first = entry * 48_u64;
+            let keys: Vec<_> = (first..first + 48)
+                .map(|frame| DvFrameKey {
+                    absolute_video_index: 0,
+                    continuity_epoch: 11,
+                    pts: DvTimestamp::new(millis + i64::try_from(frame * 1001 / 24).unwrap(), 1000)
+                        .unwrap(),
+                    display_ordinal: frame,
+                })
+                .collect();
+            let mapped =
+                dv_map_source_to_output_grid(&keys, (1, 1000), origin, grid, first, 48).unwrap();
+            assert_eq!(
+                mapped.iter().map(|m| m.source.clone()).collect::<Vec<_>>(),
+                keys
+            );
+            assert_eq!(
+                mapped[0].output_pts,
+                DvTimestamp::new(i64::try_from(first * 1001).unwrap(), 24000).unwrap()
+            );
+            assert!(
+                dv_map_source_to_output_grid(&keys[..47], (1, 1000), origin, grid, first, 48)
+                    .is_err()
+            );
+            let mut duplicate = keys.clone();
+            duplicate[24] = duplicate[23].clone();
+            assert!(
+                dv_map_source_to_output_grid(&duplicate, (1, 1000), origin, grid, first, 48)
+                    .is_err()
+            );
+            let mut drift = keys.clone();
+            drift[47].pts = DvTimestamp::new(
+                millis + i64::try_from((first + 47) * 1001 / 24).unwrap() + 2,
+                1000,
+            )
+            .unwrap();
+            assert!(
+                dv_map_source_to_output_grid(&drift, (1, 1000), origin, grid, first, 48).is_err()
+            );
+            let wrong = DvSourceOrigin::observed_common(
+                DvTimestamp::new(millis + 2, 1000).unwrap(),
+                super::super::VodSourceClock::ReportedOrigin((millis + 2) * 1000),
+            )
+            .unwrap();
+            assert!(
+                dv_map_source_to_output_grid(&keys, (1, 1000), wrong, grid, first, 48).is_err()
+            );
+            assert!(
+                dv_map_source_to_output_grid(&keys, (1, 1000), origin, grid, u64::MAX, 48).is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn common_source_origin_bounds_are_absolute_exact_and_seek_stable() {
+    for millis in [0, 125] {
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(millis, 1000).unwrap(),
+            super::super::VodSourceClock::ReportedOrigin(millis * 1000),
+        )
+        .unwrap();
+        for entry in [0, 1, 2, 360] {
+            let first = entry * 48 * 1001_u64;
+            let start = origin.source_boundary(first, 24000, (1, 1000)).unwrap();
+            let end = origin
+                .source_boundary(first + 48 * 1001, 24000, (1, 1000))
+                .unwrap();
+            let expected = if entry == 0 {
+                DvTimestamp::new(millis, 1000).unwrap()
+            } else {
+                DvTimestamp::new(
+                    i64::try_from(first * 1000 / 24000).unwrap() + millis - 1,
+                    1000,
+                )
+                .unwrap()
+            };
+            assert_eq!(DvTimestamp::new(start.0, start.1).unwrap(), expected);
+            assert_eq!(
+                end,
+                origin
+                    .source_boundary((entry + 1) * 48 * 1001, 24000, (1, 1000))
+                    .unwrap()
+            );
+        }
+        assert!(origin.source_boundary(u64::MAX, 24000, (1, 1000)).is_err());
+        assert!(origin.source_boundary(1, 0, (1, 1000)).is_err());
+    }
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1).unwrap(),
+        super::super::VodSourceClock::ProducerDefaultZero
+    )
+    .is_err());
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(1, 8).unwrap(),
+        super::super::VodSourceClock::ReportedOrigin(0)
+    )
+    .is_err());
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(-1, 8).unwrap(),
+        super::super::VodSourceClock::ReportedOrigin(-125000)
+    )
+    .is_err());
 }

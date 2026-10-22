@@ -28,6 +28,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Processed Dolby Vision windows support an observed nonnegative common
+  source origin instead of requiring literal zero. Absolute picture keys,
+  soundtrack offset and bounded membership checks stay intact; missing or
+  differing held video/FORMAT origins explicitly fall back.
+
 - Complete-title Dolby Vision scans compare a selected Matroska track's
   `DURATION` tag to its timestamp endpoint rather than subtracting a nonzero
   video origin. Independent selected-video declarations, complete decoder

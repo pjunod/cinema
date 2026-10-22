@@ -226,6 +226,88 @@ impl DvTimestamp {
         })
     }
 }
+/// Exact common demux origin observed in both the held selected-video probe
+/// and its FORMAT clock. Producer-default zero is not an observation. Keeping
+/// this typed prevents a seek window's first picture becoming a new origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DvSourceOrigin {
+    value: DvTimestamp,
+}
+impl DvSourceOrigin {
+    pub fn observed_common(
+        selected_video: DvTimestamp,
+        format: super::VodSourceClock,
+    ) -> Result<Self, DvContractError> {
+        let super::VodSourceClock::ReportedOrigin(micros) = format else {
+            return Err(DvContractError::Invalid(
+                "DV common source origin is unobserved",
+            ));
+        };
+        if selected_video.numerator < 0 || micros < 0 {
+            return Err(DvContractError::Invalid(
+                "negative DV source origin is unsupported",
+            ));
+        }
+        if selected_video != DvTimestamp::new(micros, 1_000_000)? {
+            return Err(DvContractError::Invalid(
+                "DV selected-video/FORMAT source origins differ",
+            ));
+        }
+        Ok(Self {
+            value: selected_video,
+        })
+    }
+
+    pub fn timestamp(self) -> DvTimestamp {
+        self.value
+    }
+
+    /// O + max(0, film boundary - source tick), in the untouched source clock.
+    pub fn source_boundary(
+        self,
+        film_ticks: u64,
+        grid: u32,
+        tick: (u32, u32),
+    ) -> Result<(i64, u32), DvContractError> {
+        if grid == 0 || tick.0 == 0 || tick.1 == 0 {
+            return Err(DvContractError::Invalid("source boundary clock"));
+        }
+        let film = DvTimestamp::new(
+            i64::try_from(film_ticks).map_err(|_| DvContractError::Capacity)?,
+            grid,
+        )?;
+        let tick = DvTimestamp::new(i64::from(tick.0), tick.1)?;
+        let before = timestamp_difference(film, tick)?;
+        let before = if before.numerator < 0 {
+            DvTimestamp::new(0, 1)?
+        } else {
+            before
+        };
+        let negative_origin = DvTimestamp::new(-self.value.numerator, self.value.denominator)?;
+        let absolute = timestamp_difference(before, negative_origin)?;
+        Ok((absolute.numerator, absolute.denominator))
+    }
+}
+
+fn timestamp_difference(
+    left: DvTimestamp,
+    right: DvTimestamp,
+) -> Result<DvTimestamp, DvContractError> {
+    let numerator = i128::from(left.numerator) * i128::from(right.denominator)
+        - i128::from(right.numerator) * i128::from(left.denominator);
+    let denominator = u64::from(left.denominator) * u64::from(right.denominator);
+    let mut a = numerator.unsigned_abs();
+    let mut b = u128::from(denominator);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let divisor = a.max(1);
+    DvTimestamp::new(
+        i64::try_from(numerator / divisor as i128).map_err(|_| DvContractError::Capacity)?,
+        u32::try_from(u128::from(denominator) / divisor).map_err(|_| DvContractError::Capacity)?,
+    )
+}
+
 impl Ord for DvTimestamp {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (i128::from(self.numerator) * i128::from(other.denominator))
@@ -321,6 +403,7 @@ pub struct DvFrameGridMapping {
 pub fn dv_map_source_to_output_grid(
     source: &[DvFrameKey],
     source_tick: (u32, u32),
+    source_origin: DvSourceOrigin,
     grid: super::VodFrameGrid,
     first_output_frame: u64,
     expected_frames: usize,
@@ -352,12 +435,15 @@ pub fn dv_map_source_to_output_grid(
             .and_then(|ticks| i64::try_from(ticks).ok())
             .ok_or(DvContractError::Capacity)?;
         let output_pts = DvTimestamp::new(output_ticks, grid.numerator)?;
-        let error = (i128::from(key.pts.numerator) * i128::from(output_pts.denominator)
-            - i128::from(output_pts.numerator) * i128::from(key.pts.denominator))
+        let film_pts = timestamp_difference(key.pts, source_origin.timestamp())?;
+        let error = (i128::from(film_pts.numerator) * i128::from(output_pts.denominator)
+            - i128::from(output_pts.numerator) * i128::from(film_pts.denominator))
         .unsigned_abs();
-        if error * u128::from(source_tick.1)
+        if error
+            .checked_mul(u128::from(source_tick.1))
+            .ok_or(DvContractError::Capacity)?
             > u128::from(source_tick.0)
-                * u128::from(key.pts.denominator)
+                * u128::from(film_pts.denominator)
                 * u128::from(output_pts.denominator)
         {
             return Err(DvContractError::Invalid(
@@ -1340,6 +1426,7 @@ pub struct DvCompletedWindowInput<'a> {
     pub source_keys: &'a [DvFrameKey],
     pub source_rpus: &'a [Vec<u8>],
     pub source_tick: (u32, u32),
+    pub source_origin: DvSourceOrigin,
     pub grid: super::VodFrameGrid,
     pub first_global_frame: u64,
     pub encoded: &'a [u8],
@@ -1464,6 +1551,7 @@ pub fn dv_plan_completed_window(
     dv_map_source_to_output_grid(
         input.source_keys,
         input.source_tick,
+        input.source_origin,
         input.grid,
         input.first_global_frame,
         input.source_rpus.len(),
