@@ -2,10 +2,9 @@
 //!
 //! The ledger retains this bounded custody independently of an async waiter.
 //! Roots enter only through the real launcher; writers are real owned tasks.
-//! This initial backend cannot certify descendant extinction. Successful root
-//! waits and writer joins therefore leave UnknownHeld, never a close receipt.
-//! Positive kernel containment, audited nonprocess adapters and restart-journal
-//! reconciliation remain required before this can enable production expansion.
+//! Generic root waits/writer joins leave UnknownHeld. A private live-close path
+//! combines original Windows Job extinction with audited local owners only;
+//! restart-journal reconciliation and production composition remain required.
 
 use std::future::Future;
 use std::io;
@@ -26,6 +25,7 @@ use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, Unkn
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
 mod budgets;
+mod live_close;
 mod live_jobs;
 mod source_files;
 pub use source_files::GraphSourceFile;
@@ -86,6 +86,11 @@ struct Members {
     // An incomplete launch may lack the actual child/job identity. Successful
     // observations of other roots must never conceal that acquisition window.
     uncertain_launch: bool,
+    // Set BEFORE any arbitrary factory can receive pipes (including a panic
+    // before task registration), or copied source bytes escape. Never cleared.
+    unaudited_handoff: bool,
+    // One actual graph can mint at most one nonclone physical receipt.
+    receipt_issued: bool,
     roots: Vec<Root>,
     writers: Vec<Writer>,
     joined_writers: usize,
@@ -221,6 +226,8 @@ impl ResourceReservation {
             members: Mutex::new(Members {
                 acquired: false,
                 uncertain_launch: false,
+                unaudited_handoff: false,
+                receipt_issued: false,
                 roots: Vec::new(),
                 writers: Vec::new(),
                 joined_writers: 0,
@@ -356,9 +363,9 @@ impl OwnedPhysicalGraph {
                 "writer root belongs to another physical graph",
             ));
         }
-        let member = members
+        members
             .roots
-            .get_mut(root.index)
+            .get(root.index)
             .filter(|member| {
                 member.process == root.process && !member.pipes_claimed && !member.waited
             })
@@ -376,6 +383,8 @@ impl OwnedPhysicalGraph {
         {
             return Err(io::Error::other("durable writer requires armed adapter"));
         }
+        members.unaudited_handoff = true;
+        let member = &mut members.roots[root.index];
         member.pipes_claimed = true;
         let pipes = RootPipes {
             stdin: member.child.stdin.take(),

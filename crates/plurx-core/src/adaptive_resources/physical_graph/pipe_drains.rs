@@ -31,6 +31,20 @@ pub(super) struct DrainRecord {
     selection: GraphPipeDrain,
 }
 
+impl DrainRecord {
+    pub(super) fn matches_writer(&self, generation: Uuid, index: usize, roots: &[Root]) -> bool {
+        self.selection.generation == generation
+            && self.selection.index == index
+            && roots
+                .get(self.selection.root)
+                .is_some_and(|root| root.pipes_claimed)
+    }
+
+    pub(super) fn owns_root(&self, index: usize) -> bool {
+        self.selection.root == index
+    }
+}
+
 async fn discard<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) {
     if let Some(mut pipe) = pipe {
         let mut bytes = [0u8; BUFFER_BYTES];

@@ -210,7 +210,12 @@ impl OwnedPhysicalGraph {
             if pending.kind != kind {
                 return Err(io::Error::other("different source operation still owned"));
             }
-            return member.complete().await;
+            let result = member.complete().await;
+            // Copied buffers can outlive this graph after the caller receives
+            // them (even EOF can retain allocation capacity). No audited owner
+            // tracks that transfer yet, so local closure cannot certify it.
+            members.unaudited_handoff |= result.is_ok();
+            return result;
         }
         let owned_file = Arc::clone(&member.file);
         budgets::check(
@@ -238,7 +243,9 @@ impl OwnedPhysicalGraph {
         });
         let member = &mut members.source_files[source.index];
         member.pending = Some(PendingOperation { kind, task });
-        member.complete().await
+        let result = member.complete().await;
+        members.unaudited_handoff |= result.is_ok();
+        result
     }
 }
 
