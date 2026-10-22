@@ -1,6 +1,7 @@
 //! Registration/cancelled-wait fixtures. These NEVER release native entry and
 //! are not a Linux filesystem/namespace/physical-cleanup acceptance receipt.
 use super::*;
+mod steps;
 fn id() -> v2::Id {
     v2::Id::new(Uuid::new_v4()).unwrap()
 }
@@ -29,7 +30,7 @@ async fn bootstrap_native_unreleased_entry_latch_proves_only_neverentered_job() 
         result.audit.outcome,
         v2::scratch::NativeOutcomeV1::NeverEntered
     );
-    assert!(result._file.is_none() && result.audit.acquired.is_none());
+    assert!(result.files.is_empty() && result.audit.acquired.is_none());
     assert_eq!(result.audit.inventory, InventoryCertainty::Exact);
 }
 #[tokio::test]

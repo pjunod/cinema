@@ -11,6 +11,8 @@ pub(super) struct BootstrapMember {
     fold: Option<BootstrapFold>,
     change: Option<(v2::Id, AssetChangeV3)>,
     root_arm: Option<(v2::Id, v2::Id)>,
+    root_ready: bool,
+    next_arm: Option<(v2::Id, BootstrapIoV1)>,
     #[cfg(unix)]
     native_root: Option<native::RootCell>,
 }
@@ -111,6 +113,8 @@ impl NodeResourceRuntime {
                     plan,
                     change: None,
                     root_arm: None,
+                    root_ready: false,
+                    next_arm: None,
                     #[cfg(unix)]
                     native_root: None,
                 },
@@ -155,7 +159,7 @@ fn queue_root(
         .get_mut(&member)
         .ok_or(OperationError::State)?;
     if bootstrap.root_arm.is_some() {
-        return Ok(());
+        return resume_change(journal, role, member, deadline);
     }
     if role.transition.is_some() {
         return Err(OperationError::State);
@@ -180,14 +184,42 @@ fn queue_root(
     };
     bootstrap.change = Some((io_id, change.clone()));
     bootstrap.root_arm = Some((io_id, copy_id));
-    start_named_transition(
-        journal,
-        role,
-        io_id.uuid(),
-        Mutation::AssetChangeV3 { change },
-        Effect::Bootstrap(member),
-        deadline,
-    )
+    resume_change(journal, role, member, deadline)
+}
+
+// A command may be retained before queue submission fails (e.g. its deadline).
+// Retry that EXACT command/id, not a new native operation or an invented ack.
+fn resume_change(
+    journal: &CustodyJournal,
+    role: &mut OwnedRole,
+    member: Uuid,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    if let Some(transition) = &role.transition {
+        return if transition.effect == Effect::Bootstrap(member) {
+            Ok(())
+        } else {
+            Err(OperationError::State)
+        };
+    }
+    if let Some((id, change)) = role
+        .bootstrap
+        .get(&member)
+        .ok_or(OperationError::State)?
+        .change
+        .as_ref()
+        .cloned()
+    {
+        start_named_transition(
+            journal,
+            role,
+            id.uuid(),
+            Mutation::AssetChangeV3 { change },
+            Effect::Bootstrap(member),
+            deadline,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn apply_committed(

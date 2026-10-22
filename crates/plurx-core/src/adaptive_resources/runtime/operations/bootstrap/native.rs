@@ -5,10 +5,12 @@ use super::*;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use tokio::task::JoinHandle;
+mod steps;
 #[cfg(test)]
 mod tests;
 
 pub(super) struct RootCell {
+    io_id: v2::Id,
     observe_id: v2::Id,
     join_id: v2::Id,
     pending: Option<JoinHandle<RootResult>>,
@@ -17,7 +19,7 @@ pub(super) struct RootCell {
 }
 struct RootResult {
     // Even a partial fstat failure keeps the ACTUAL descriptor, not only JSON.
-    _file: Option<File>,
+    files: BTreeMap<v2::Id, File>,
     audit: BootstrapResultV1,
 }
 impl RootCell {
@@ -32,7 +34,7 @@ impl RootCell {
         let pending = tokio::task::spawn_blocking(move || {
             if registered.blocking_recv().is_err() {
                 return RootResult {
-                    _file: None,
+                    files: BTreeMap::new(),
                     audit: BootstrapResultV1 {
                         outcome: v2::scratch::NativeOutcomeV1::NeverEntered,
                         acquired: None,
@@ -45,6 +47,7 @@ impl RootCell {
             open_root(domain, io, copy, observe_id)
         });
         let cell = Self {
+            io_id: io,
             observe_id,
             join_id,
             pending: Some(pending),
@@ -81,8 +84,8 @@ fn open_root(
     copy: v2::Id,
     observed: v2::Id,
 ) -> RootResult {
-    let failure = |file| RootResult {
-        _file: file,
+    let failure = |file: Option<File>| RootResult {
+        files: file.into_iter().map(|file| (copy, file)).collect(),
         audit: BootstrapResultV1 {
             outcome: v2::scratch::NativeOutcomeV1::Failed {
                 error_class: "namespace root native acquisition unavailable".into(),
@@ -117,9 +120,7 @@ fn open_root(
                 file_type: v2::FileType::Directory,
                 device: v2::NativeValue::Known { value: m.dev() },
                 inode: v2::NativeValue::Known { value: m.ino() },
-                mount_id: v2::NativeValue::Unknown {
-                    reason: "mount ID not observed by root fstat".into(),
-                },
+                mount_id: steps::mount_id(&file),
                 filesystem_domain: domain,
             },
             v2::scratch::NativeOutcomeV1::Completed,
@@ -144,7 +145,7 @@ fn open_root(
         ),
     };
     RootResult {
-        _file: Some(file),
+        files: BTreeMap::from([(copy, file)]),
         audit: BootstrapResultV1 {
             outcome,
             acquired: Some(v2::scratch::DirectoryObservedV1 {
@@ -190,10 +191,17 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        resume_change(&self.journal, role, member, deadline)?;
+        if role.transition.is_some() {
+            self.finish_transition(bundle_id, role).await?;
+        }
         let bootstrap = role
             .bootstrap
             .get_mut(&member)
             .ok_or(OperationError::State)?;
+        if bootstrap.root_ready {
+            return Ok(());
+        }
         let (io, copy) = bootstrap.root_arm.ok_or(OperationError::State)?;
         let state = bootstrap
             .fold
@@ -247,6 +255,7 @@ impl NodeResourceRuntime {
             && bootstrap.change.is_none()
             && role.transition.is_none()
         {
+            bootstrap.root_ready = completed;
             return if completed {
                 Ok(())
             } else {
@@ -281,6 +290,10 @@ impl NodeResourceRuntime {
         // Exact retries resolve the retained result/command, never open '/' again.
         self.finish_transition(bundle_id, role).await?;
         if completed {
+            role.bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?
+                .root_ready = true;
             Ok(())
         } else {
             Err(OperationError::State)
