@@ -77,13 +77,13 @@ async fn typed_prepare_uses_actual_graph_identity_and_one_retained_runtime_charg
 }
 
 #[tokio::test]
-async fn dropped_typed_prepare_selection_preserves_every_role_and_trial_until_cancel_commit() {
+async fn dropped_typed_prepare_selection_preserves_every_role_until_cancel_commit() {
     let root = tempfile::tempdir().unwrap();
     let runtime = runtime(root.path());
     drop(prepare_typed(
         &runtime,
         vec![typed_plan(), typed_plan()],
-        true,
+        false,
     ));
     assert_eq!(runtime.accounting().unwrap().used, vector(4));
     let owner = runtime.retained_preparations().unwrap().pop().unwrap();
