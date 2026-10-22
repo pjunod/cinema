@@ -28,35 +28,35 @@ def scratch():
 def reference():
     return {"expected_references":[{"reference_id":"role","role":"synthetic policy",
         "required_coverage":[{"coverage_id":"first","document_proposition":"Use isolated source."},{"coverage_id":"second","document_proposition":"Count actual assertions."}],
-        "alternatives":[{"path":"docs/policy.md","canonical_heading":"Runtime policy","supports_coverage_ids":["first","second"],
+        "alternatives":[{"path":"fixtures/policy.md","canonical_heading":"Runtime policy","supports_coverage_ids":["first","second"],
             "source_sections":[{"line_range":[1,3],"visible_excerpt":"# Runtime policy\nUse isolated source.\nCount actual assertions.\n".rstrip("\n")}]}]}]}
 
 
 def view():
     text="# Runtime policy\nUse isolated source.\nCount actual assertions.\n\n# Alternate policy\nUse isolated source and count actual assertions.\n"
-    return {"files":{"docs/policy.md":{"content":text}},"visibility":{"docs/policy.md":{"content_sha256":hashlib.sha256(text.encode()).hexdigest(),"line_ranges":[[1,6]]}}}
+    return {"files":{"fixtures/policy.md":{"content":text}},"visibility":{"fixtures/policy.md":{"content_sha256":hashlib.sha256(text.encode()).hexdigest(),"line_ranges":[[1,6]]}}}
 
 
 class CitationBoundaryTests(unittest.TestCase):
     def test_partial_union_cannot_claim_full_role(self):
-        ref=reference();run=NS(answer="docs/policy.md Runtime policy: use isolated source.",edits=(),spec=NS(id="synthetic"))
+        ref=reference();run=NS(answer="fixtures/policy.md Runtime policy: use isolated source.",edits=(),spec=NS(id="synthetic"))
         projected=docs.project(ref,view(),run.answer,())
-        coverage=[{"id":"first","applied":True,"cited_path":"docs/policy.md","cited_locator":"Runtime policy","source_quote":"Use isolated source.","evidence_quote":"use isolated source.","application_reason":"Isolate this proposal's execution."},
+        coverage=[{"id":"first","applied":True,"cited_path":"fixtures/policy.md","cited_locator":"Runtime policy","source_quote":"Use isolated source.","evidence_quote":"use isolated source.","application_reason":"Isolate this proposal's execution."},
             {"id":"second","applied":False,"cited_path":"","cited_locator":"","source_quote":"","evidence_quote":"","application_reason":""}]
         data={"references":[{"id":"role","found":True,"coverage":coverage}],"unsupported_claims":0,"unsupported_evidence":[]}
         with self.assertRaisesRegex(ValueError,"partial document coverage"):
             docs.parse(data,ref,projected,run,NS(DocumentScore=lambda *a:a),"fresh")
 
     def test_equivalent_visible_heading_is_projected_without_hidden_lines(self):
-        ref=reference();visible=view();visible["visibility"]["docs/policy.md"]["line_ranges"]=[[1,3],[5,6]]
-        projected=docs.project(ref,visible,"Apply docs/policy.md § Alternate policy to isolate source and count assertions.",())
+        ref=reference();visible=view();visible["visibility"]["fixtures/policy.md"]["line_ranges"]=[[1,3],[5,6]]
+        projected=docs.project(ref,visible,"Apply fixtures/policy.md § Alternate policy to isolate source and count assertions.",())
         self.assertTrue(any("Use isolated source and count actual assertions." in row["content"] for row in projected["visible_evidence"]))
         for row in projected["visible_evidence"]:
             start,end=row["line_range"]
             self.assertTrue(any(a<=start<=end<=b for a,b in visible["visibility"][row["path"]]["line_ranges"]))
 
     def test_projection_refuses_changed_sealed_source_bytes(self):
-        visible=view();visible["files"]["docs/policy.md"]["content"]+="hidden addition"
+        visible=view();visible["files"]["fixtures/policy.md"]["content"]+="hidden addition"
         with self.assertRaisesRegex(ValueError,"digest mismatch"):
             docs.project(reference(),visible,"",())
 
