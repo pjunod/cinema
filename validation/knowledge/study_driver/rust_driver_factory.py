@@ -109,9 +109,13 @@ def run(mode,argv,context):
         if context.get('protocol')!=2 or step.get('argv') not in (argv,tuple(argv)):return _unavailable()
         if rpc('health',[],{})!={'value':{'ready':True}}:return _unavailable()
         observed=_runtime.run_exact_assertion_command(tuple(argv),rpc,cwd=step['cwd'],env=dict(context['effective_environment']),timeout=1800)
-        if mode=='prerequisite' or step.get('kind')=='setup':
+        if step.get('kind')=='setup':
             if observed.returncode:return _unavailable()
-            completed=1;failed=0;outcome='prerequisite-passed' if mode=='prerequisite' else 'passed';kind='prerequisite' if mode=='prerequisite' else 'setup'
+            completed=1;failed=0;outcome='setup-passed';kind='setup'
+            log_digest=hashlib.sha256(observed.stdout+observed.stderr).hexdigest()
+        elif mode=='prerequisite':
+            if observed.returncode:return _unavailable()
+            completed=1;failed=0;outcome='prerequisite-passed';kind='prerequisite'
             log_digest=hashlib.sha256(observed.stdout+observed.stderr).hexdigest()
         else:
             if step.get('kind')!='assertion' or argv[0]!='/work/scripts/quiet':return _unavailable()

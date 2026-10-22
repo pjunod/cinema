@@ -3,6 +3,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
+from validation.knowledge import evaluation_isolation as isolation
 from validation.knowledge.study_driver import rust_driver_factory as factory
 
 
@@ -22,6 +23,39 @@ def observed(returncode=0):
 
 
 class RustFrameworkBoundaryTests(unittest.TestCase):
+    def test_generated_successful_setup_classifies_in_both_phases(self):
+        argv=["/work/scripts/quiet", "cargo", "build"]
+        context={"protocol":2,"step":{"argv":argv,"kind":"setup","cwd":"/work","effective_environment":{}}}
+        for mode in ("prerequisite", "acceptance"):
+            namespace=protected_namespace()
+            namespace["_runtime"].run_exact_assertion_command=lambda *args,**kwargs:NS(
+                returncode=0,stdout=b"setup complete",stderr=b"",rpc_calls=0)
+            namespace["rpc"]=lambda method,args,kwargs:{"value":{"ready":True}}
+            result=namespace["run"](mode,argv,context)
+            packet={"driver_started":True,"driver_completed":True,"hardened":True,
+                "resources_verified":True,"resource_failure":False,"result":result}
+            with self.subTest(mode=mode):
+                self.assertEqual(isolation._classification_v2(packet,NS(kind="setup"),mode),"setup-passed")
+
+    def test_setup_classifier_rejects_malformed_failed_empty_and_assertion_results(self):
+        argv=["/work/scripts/quiet", "cargo", "build"]
+        context={"protocol":2,"step":{"argv":argv,"kind":"setup","cwd":"/work","effective_environment":{}}}
+        namespace=protected_namespace()
+        namespace["_runtime"].run_exact_assertion_command=lambda *args,**kwargs:NS(
+            returncode=0,stdout=b"setup complete",stderr=b"",rpc_calls=0)
+        namespace["rpc"]=lambda method,args,kwargs:{"value":{"ready":True}}
+        result=namespace["run"]("acceptance",argv,context)
+        bad_results=[]
+        malformed=dict(result);malformed["evidence"]=dict(result["evidence"],sha256="bad");bad_results.append(malformed)
+        failed=dict(result,outcome="setup-failed");bad_results.append(failed)
+        empty=dict(result);empty["evidence"]=dict(result["evidence"],completed_checks=0);bad_results.append(empty)
+        masquerading=dict(result,outcome="passed");masquerading["evidence"]=dict(result["evidence"],kind="assertion");bad_results.append(masquerading)
+        for bad in bad_results:
+            packet={"driver_started":True,"driver_completed":True,"hardened":True,
+                "resources_verified":True,"resource_failure":False,"result":bad}
+            with self.subTest(result=bad):
+                self.assertEqual(isolation._classification_v2(packet,NS(kind="setup"),"acceptance"),"unavailable")
+
     def test_actual_terminal_success_has_positive_framework_counts(self):
         namespace=protected_namespace();raw=("running 1 test\ntest synthetic ... ok\n\n"+summary()).encode()
         with patch.dict(namespace,{"_read_log":lambda path:raw}):
