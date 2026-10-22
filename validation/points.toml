@@ -771,6 +771,7 @@ paths = [
   "crates/plurxd/src/cache_preparation.rs",
   "crates/plurxd/src/background_jobs.rs",
   "crates/plurxd/src/library_work.rs",
+  "crates/plurxd/src/library_work/**",
   "crates/plurx-worker-control/**",
   "crates/plurxd/src/source_probe.rs",
   "crates/plurxd/src/subtitle_transcription.rs",

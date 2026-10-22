@@ -4,6 +4,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod library_driver;
 pub mod library_lifecycle;
 
 #[cfg(kani)]

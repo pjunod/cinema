@@ -6,6 +6,7 @@ import hashlib
 import json
 import importlib.machinery
 import importlib.util
+import re
 import unittest
 import tempfile
 from unittest import mock
@@ -177,6 +178,25 @@ class WorkerControlLinuxT6Tests(unittest.TestCase):
 
 
 class WorkerControlInventoryTests(unittest.TestCase):
+    def test_every_declared_module_is_staged_from_hash_bound_source_bytes(self) -> None:
+        declared = set(re.findall(r"^\s*(?:pub\s+)?mod\s+(\w+)\s*;", (ROOT / f"{runner.CRATE}/src/lib.rs").read_text(), re.MULTILINE))
+        declared.add("proofs")  # lib.rs includes this cfg-gated module by filename.
+        self.assertEqual(set(runner.STAGED_RUST_SOURCES), {"lib.rs", *(name + ".rs" for name in declared)})
+        source_paths = {f"{runner.CRATE}/src/{name}" for name in runner.STAGED_RUST_SOURCES}
+        self.assertTrue(source_paths <= set(runner.GOVERNED))
+        scratch = ROOT / "target/worker-control-runner-fixtures"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temporary:
+            output = Path(temporary)
+            files = {path: runner.digest(ROOT / path) for path in runner.GOVERNED}
+            _, packaging = runner.stage_sources(output, {"files": files})
+            self.assertEqual(set(packaging["source_files"]), set(runner.STAGED_RUST_SOURCES))
+            for name in runner.STAGED_RUST_SOURCES:
+                original = ROOT / runner.CRATE / "src" / name
+                staged = output / "source/src" / name
+                self.assertEqual(packaging["source_files"][name], runner.digest(original))
+                self.assertEqual(staged.read_bytes(), original.read_bytes())
+
     def test_exact_six_names_and_counts_are_required(self) -> None:
         self.assertEqual(runner.parse_inventory(inventory()), list(runner.HARNESSES))
         for change in ("missing", "duplicate", "extra", "count", "contract", "version", "schema"):
@@ -282,6 +302,36 @@ class WorkerControlMutationTests(unittest.TestCase):
 
 
 class WorkerControlResumeTests(unittest.TestCase):
+    def test_old_candidate_without_driver_input_is_not_adopted(self) -> None:
+        base = ROOT / "target/worker-control-runner-fixtures"
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as directory:
+            prior, output = Path(directory) / "prior", Path(directory) / "next"
+            prior.mkdir(); output.mkdir()
+            name = HARNESS.rsplit("::", 1)[1]
+            log_path = prior / f"{name}.log"
+            log_path.write_text(log())
+            old_files = {path: "same-input" for path in runner.PROOF_INPUTS
+                         if not path.endswith("/library_driver.rs")}
+            old_source = {"head": "old", "files": old_files,
+                          "staging": {"manifest_sha256": "same-envelope", "source_files": {}}}
+            result = runner.verdict(log(), 0, HARNESS, None)
+            result.update({"source": old_source, "tools": {}, "command": [],
+                           "execution_directory": str(prior), "unwinding_checks": True,
+                           "default_safety_checks": True, "log_sha256": runner.digest(log_path)})
+            runner.write_json(prior / f"{name}.json", result)
+            current = {"head": "new", "files": {path: "same-input" for path in runner.PROOF_INPUTS},
+                       "staging": {"manifest_sha256": "same-envelope", "source_files": {}}}
+            def fresh_command(args, cwd, env, log_path, **kwargs):
+                log_path.write_text(log())
+                return 0, log()
+            with mock.patch.object(runner, "validate_case_sources"), \
+                    mock.patch.object(runner, "command", side_effect=fresh_command) as invoked:
+                fresh = runner.verify(Path("unused"), {}, output, HARNESS, current, {},
+                                      manifest=output / "source/Cargo.toml", prior=prior)
+                self.assertEqual(fresh["outcome"], "proved")
+                invoked.assert_called_once()
+
     def test_success_is_reparsed_and_preserves_original_candidate(self) -> None:
         base = ROOT / "target/worker-control-runner-fixtures"
         base.mkdir(parents=True, exist_ok=True)
