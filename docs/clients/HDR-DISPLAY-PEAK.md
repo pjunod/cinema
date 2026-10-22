@@ -75,18 +75,36 @@ measured monitor.
 Generate or replace the embedded clip from the repository root:
 
 ```bash
-python3 scripts/generate-hdr-peak-pattern --update  # FFmpeg with libx265 + ffprobe
+mkdir -p target/hdr-peak-pattern/tmp
+TMPDIR="$PWD/target/hdr-peak-pattern/tmp" python3 scripts/generate-hdr-peak-pattern --update
+# Requires CPU FFmpeg with libx265 + ffprobe on PATH.
 ```
 
 The generator writes its raw source, MP4, probe and exact command/version/hash
-provenance under `target/hdr-peak-pattern/`. It uses no external media. The
-embedded MP4 is under 20 KB; no separate media endpoint or runtime generator is
-required. FFmpeg 9.0.2 produced SHA-256
-`3a5d3270dd673ccd1a3c3bb0b7088d0a98acf4927511784f355e44bbef770e1f`.
-The two decoded frames' raw SHA-256 is
+provenance under `target/hdr-peak-pattern/`. It declares the known synthetic
+color domain on the raw input before `-i`, as well as on the encoder output,
+and explicitly requests MP4 `write_colr` alongside `faststart`. The generator
+refuses to embed a result unless its container has BT.2020/ST2084/BT.2020nc
+limited-range `nclx` metadata. FFprobe's stream tags alone can come from HEVC
+VUI and do not prove this container tag.
+
+The original embedded clip omitted `nclx`. Adding `write_colr` alone with
+FFmpeg 9.0.2 produced unspecified primaries and transfer (2/2), despite x265's
+9/16 VUI tags; the strict guard rejected that artifact before embedding.
+Declaring the raw frame color properties before `-i` supplied the muxer with
+the required 9/16/9 limited-range metadata. The failed generation is retained
+in `target/hdr-peak-pattern/generation.log`; the successful replacement is
+recorded in `generation-input-colors.log`, `provenance.json` and
+`decoded-verification.json` in that directory.
+
+It uses no external media. The embedded MP4 is 14,627 bytes; no separate media
+endpoint or runtime generator is required. FFmpeg 9.0.2 produced SHA-256
+`a38290de338fd9c1ad4eeefd16f0a25a5e70c8f250cb54331445897ccf2aea22`.
+The replacement's two decoded frames have raw SHA-256
 `efd17bd8d92f23be053f7738fbb6362f48cdf68f5e2195719d0e6ecd5673cf80`,
-identical to the generated source. Reproducible MP4 bytes require the same
-encoder/tool versions; the signal code values remain defined above.
+identical to the generated source in the actual CPU decode check.
+Reproducible MP4 bytes require the same encoder/tool versions; the signal
+code values remain defined above.
 
 ## Validation — compilation is not display acceptance
 
