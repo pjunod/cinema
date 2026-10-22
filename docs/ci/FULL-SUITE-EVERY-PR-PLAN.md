@@ -649,13 +649,15 @@ not part of the requested fresh-execution contract.
 |---|---|---|
 | Audit and plan | Complete | Read-only source inventory and Forgejo sample in the linked JSON; no controlled current full pass |
 | M0 | Instrumentation built; measurement and qualification open · Codex | Independent clone on `codex/full-pr-suite-m0`, draft PR #1237 into `effort/full-pr-suite`; frozen `86f13850` runtime observations in the linked baseline report, with unfinished executions and fixture gaps explicit |
-| M1 | Unclaimed | Current repair qualification and failure-safe cleanup |
-| M2 | Unclaimed | Measured fixture setup optimizations |
-| M3 | Unclaimed | Qualified execution/sharding and host budgets |
+| M1 | Rust qualified and merged · Codex | PR #1244, source `761b371c`, gate 5740 and full Rust run 5743; [repair ledger](RUST-SUITE-REPAIR-2026-10-20.md) |
+| M2 | Qualified and merged · Codex | PR #1258, source `61801d85a`, gate 5762 and full Rust run 5765; [setup ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md) |
+| M3 | Implementation built; complete measurement and qualification open · Codex | Draft PR #1261, branch `codex/full-pr-suite-m3`; [parallel execution ledger](FULL-SUITE-PARALLEL-EXECUTION-2026-10-22.md) |
 | M4 | Unclaimed | Automatic full candidates, strict gate and serialized landing |
 | M5 | Unclaimed | Pilot, policy cutover and complete effort promotion |
 
 The ledger records owner, task branch/PR, tested SHA/tree, commands, counts,
 resource/timing evidence and acceptance outcome as work is claimed.
-M0 instrumentation is implemented and under measurement; M1–M5 remain unclaimed.
-A diagnostic observation does not qualify the complete execution gate.
+M0 instrumentation and the M1/M2 ordinary Rust results do not qualify other
+feature/platform cells. M3 runtime and host qualification remain open;
+M4/M5 remain unclaimed. A diagnostic observation does not qualify the complete
+execution gate.

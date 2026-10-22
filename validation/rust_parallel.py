@@ -165,7 +165,7 @@ def run_shard(shard, plan, inventory, output, lease_fd, stop):
     return receipt
 
 
-def execute(mode, inventory, metadata, output, lease_fd):
+def execute(mode, inventory, metadata, output, lease_fd, *, stop_event=None):
     output = Path(output)
     output.mkdir(exist_ok=False)
     started = time.monotonic()
@@ -173,7 +173,7 @@ def execute(mode, inventory, metadata, output, lease_fd):
                   errors=[], scope='ordinary Rust, doctests and two explicit serial regressions only')
     write(output / 'results.json', report)
     policy = load_policy('validation/rust_repair_cases.json')
-    stop = threading.Event()
+    stop = stop_event if stop_event is not None else threading.Event()
     previous_handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
     for number in previous_handlers:
         signal.signal(number, lambda _number, _frame: stop.set())
@@ -262,6 +262,7 @@ def execute(mode, inventory, metadata, output, lease_fd):
         process_records = [read(path) for path in output.glob('**/*.process.json')]
         report['safe_to_release'] = (not getattr(stop, 'unsafe_cleanup', False)
                                      and all(row.get('cleanup_complete') is True for row in process_records))
+        report['canceled'] = stop.is_set()
         report['seconds'] = round(time.monotonic() - started, 3)
         write(output / 'results.json', report)
     return report

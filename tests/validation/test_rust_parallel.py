@@ -259,6 +259,20 @@ raise SystemExit(status)
         self.assertEqual(receipt["binaries"], [])
         self.assertIn("canceled", receipt["blocked"])
 
+    def test_shared_stop_preserves_cancellation_and_unsafe_cleanup_across_arms(self):
+        stop = threading.Event()
+        stop.set()
+        stop.unsafe_cleanup = True
+        with self.cargo_route():
+            report = parallel.execute("parallel", self.inventory, self.metadata,
+                                      self.root / "shared-stop", self.fd, stop_event=stop)
+        self.assertFalse(report["success"])
+        self.assertTrue(report["canceled"])
+        self.assertFalse(report["safe_to_release"])
+        self.assertTrue(stop.is_set())
+        self.assertTrue(stop.unsafe_cleanup)
+        self.assertTrue(all(not shard["binaries"] for shard in report["shards"]))
+
     def test_unsafe_cleanup_blocks_remaining_lane_and_sets_global_stop(self):
         plan = build_plan(self.inventory, workers=1)
         stop = threading.Event()

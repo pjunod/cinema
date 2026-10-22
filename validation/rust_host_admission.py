@@ -158,7 +158,7 @@ def acquire(directory, timeout=60, *, repository=None, proc_root=Path('/proc'), 
 
 
 def inspect_environment(runner_name, repository, directory, *, proc_root=Path('/proc'),
-                        max_cpu=12, max_memory_bytes=24 * GIB, reserve_bytes=8 * GIB,
+                        max_cpu=12, max_memory_bytes=15 * GIB, reserve_bytes=8 * GIB,
                         max_pids=4096, volume_name=VOLUME):
     """Observe eligibility and actual local cgroup-v2 caps without changing them.
 
@@ -190,9 +190,11 @@ def inspect_environment(runner_name, repository, directory, *, proc_root=Path('/
             raise AdmissionError('current cgroup-v2 boundary is unavailable')
         quota, period = (root / 'cpu.max').read_text().split()
         memory = int((root / 'memory.max').read_text().strip())
+        swap = int((root / 'memory.swap.max').read_text().strip())
         pids = int((root / 'pids.max').read_text().strip())
         cpus = int(quota) / int(period)
-        if min(int(quota), int(period), memory, pids) <= 0 or cpus > max_cpu or memory > max_memory_bytes or pids > max_pids:
+        if (min(int(quota), int(period), memory, pids) <= 0 or cpus > max_cpu
+                or memory > max_memory_bytes or pids > max_pids or swap != 0):
             raise AdmissionError('actual job cgroup exceeds the configured CPU/memory/pid bounds')
         matches = re.findall(r'^MemAvailable:\s+(\d+) kB$', (proc_root / 'meminfo').read_text(), re.M)
         if len(matches) != 1:
@@ -208,5 +210,6 @@ def inspect_environment(runner_name, repository, directory, *, proc_root=Path('/
     return {**mount, 'runner': runner_name, 'host': runner['host'],
             'roster_sha256': hashlib.sha256(source).hexdigest(),
             'cpu_limit': cpus, 'memory_limit_bytes': memory, 'pids_limit': pids,
+            'swap_limit_bytes': swap,
             'observed_mem_available_bytes': available, 'required_reserve_bytes': reserve_bytes,
             'other_workflows_reserved': False, 'live_fleet_verified': False}

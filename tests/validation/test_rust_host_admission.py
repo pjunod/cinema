@@ -38,7 +38,8 @@ class RustHostAdmissionTests(unittest.TestCase):
         self.write_mount()
         (self.proc / 'self/cgroup').write_text('0::/\n')
         (self.cg / 'cpu.max').write_text('1200000 100000')
-        (self.cg / 'memory.max').write_text(str(24 * admission.GIB))
+        (self.cg / 'memory.max').write_text(str(15 * admission.GIB))
+        (self.cg / 'memory.swap.max').write_text('0')
         (self.cg / 'pids.max').write_text('4096')
         (self.proc / 'meminfo').write_text(f'MemAvailable: {40 * admission.GIB // 1024} kB\n')
         self.roster()
@@ -75,7 +76,8 @@ class RustHostAdmissionTests(unittest.TestCase):
     def test_current_caps_and_roster_are_observations_not_host_reservation(self):
         receipt = self.inspect()
         self.assertEqual(receipt['cpu_limit'], 12)
-        self.assertEqual(receipt['memory_limit_bytes'], 24 * admission.GIB)
+        self.assertEqual(receipt['memory_limit_bytes'], 15 * admission.GIB)
+        self.assertEqual(receipt['swap_limit_bytes'], 0)
         self.assertEqual(len(receipt['roster_sha256']), 64)
         self.assertFalse(receipt['other_workflows_reserved'])
         self.assertFalse(receipt['live_fleet_verified'])
@@ -102,7 +104,9 @@ class RustHostAdmissionTests(unittest.TestCase):
     def test_unlimited_missing_malformed_or_oversized_caps_are_refused(self):
         for filename, invalid in [('cpu.max', 'max 100000'), ('cpu.max', '1 0'),
                                   ('cpu.max', '1300000 100000'), ('memory.max', 'max'),
-                                  ('memory.max', str(25 * admission.GIB)), ('pids.max', 'max'),
+                                  ('memory.max', str(16 * admission.GIB)),
+                                  ('memory.swap.max', 'max'), ('memory.swap.max', '1'),
+                                  ('memory.swap.max', '-1'), ('pids.max', 'max'),
                                   ('pids.max', '4097'), ('pids.max', '0')]:
             path = self.cg / filename
             original = path.read_text()
@@ -116,11 +120,11 @@ class RustHostAdmissionTests(unittest.TestCase):
             self.inspect()
 
     def test_reserve_is_checked_against_actual_cap_and_available_memory(self):
-        (self.proc / 'meminfo').write_text(f'MemAvailable: {31 * admission.GIB // 1024} kB\n')
+        (self.proc / 'meminfo').write_text(f'MemAvailable: {22 * admission.GIB // 1024} kB\n')
         with self.assertRaises(admission.AdmissionError):
             self.inspect()
-        (self.cg / 'memory.max').write_text(str(20 * admission.GIB))
-        self.assertEqual(self.inspect()['memory_limit_bytes'], 20 * admission.GIB)
+        (self.cg / 'memory.max').write_text(str(14 * admission.GIB))
+        self.assertEqual(self.inspect()['memory_limit_bytes'], 14 * admission.GIB)
 
     def test_ineligible_voter_android_vm_and_unknown_runner_are_refused(self):
         for host, labels in [('voter', ['lab', 'general', 'high-cpu', 'baremetal']),

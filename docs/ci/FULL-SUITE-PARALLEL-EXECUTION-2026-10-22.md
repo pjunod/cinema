@@ -58,12 +58,37 @@ admission lease. Inherited leases keep cooperating pilots serialized while
 native leaders remain alive; arbitrary detached grandchildren are not
 thereby proved clean.
 
+Source-only experiments use `validation/rust_source_bundle.py`. A clean
+committed archive carries an external manifest of original Git blob/mode
+identities and raw commit bytes. The isolated compiler reconstructs the
+tree and commit hashes without receiving `.git` or repository credentials.
+Unknown source files and changed bytes, modes or symlinks fail verification.
+Archive transport checksums are separate from source identity; neither
+asserts an authenticated CI result.
+
 Doctests and the two explicit ignored real-FFmpeg regressions execute outside
 fan-out. Their results remain separate from ordinary native passes. A fresh
 legacy Cargo run supplies the comparison universe, including exact doctest
 identities. Other features and platforms remain separate required cells.
 Existing replicated Store shards and schema-lineage coverage are not replaced
 by the ordinary SQLite/units pilot.
+
+`validation/rust_parallel_rehearsal.py` holds one lease across compilation,
+discovery and the six declared execution arms: cold parallel, fresh legacy,
+three warm parallel repetitions and nextest. It requires a new private Cargo
+target and separate artifact directory. Emptiness and target inode identity
+are checked again after admission, so another waiting campaign cannot turn
+a cold observation into warm reuse. Original native exits are retained;
+independent arms can continue after an assertion failure only when cleanup
+qualified. Cancellation and cleanup uncertainty block later arms.
+
+Every phase has a resource sampler whose exact process must exit and whose
+counter summary must be complete. The source, Cargo/configuration inputs,
+compile environment, native executable bytes and stat identities, pre-run
+manifest and source binding stay frozen across all arms. Doctests still
+compile within their arms; native payload reuse does not prove that no
+unobserved dependency compilation occurred. Results remain observations
+with `adoption_ready: false` until the remaining acceptance is satisfied.
 
 ## 3. Compare nextest without accepting a smaller suite
 
@@ -104,6 +129,20 @@ for independent teardown confirmation and explicit manual recovery.
 The lock covers cooperating M3 jobs sharing one Docker
 daemon, not other repositories, Android/general workflows or separate VMs.
 Available memory is a point-in-time observation, not a reservation.
+
+The agent-owned Linux experiment uses an isolated container on a non-voter
+22-logical-CPU host with 30 GiB RAM. Its actual limits are 12 CPUs, 15 GiB
+memory, no swap and 4,096 PIDs, with an 8 GiB observed host-memory reserve
+required for admission. The container has the persistent admission volume,
+no host Docker socket and no repository credentials. Its source-only
+measurements remain distinct from Forgejo and promotion evidence.
+
+The retained Linux image provides Rust 1.97.1, Python 3.11.2 and Jellyfin
+FFmpeg 8.1.3. On source `ca55fd2c74597ab12e0d9bce22e2a1f917d234eb`, all
+142 focused controller/accounting/source controls passed in 9.317 seconds,
+including Linux process cancellation. An earlier Python 3.11 fixture
+extraction incompatibility was fixed without changing the ten source-bundle
+assertions. No application full-suite timing follows from those controls.
 
 The manual `rust-parallel-pilot.yml` first records read-only current capacity.
 No test execution is enabled by that observation. A named volume requires
