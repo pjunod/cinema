@@ -166,14 +166,14 @@ is separate from actual runtime qualification and comparative evidence.
 
 | Finding | Required correction | State |
 |---|---|---|
-| F1 | Give isolated Python roles their separate verified source import roots while retaining isolated mode. | corrected; recheck pending |
-| F2 | Classify Rust setup consistently in both phases; setup earns no assertion credit. | corrected; recheck pending |
-| F3 | Mount only the immutable wrapper's protected log directory as writable runtime storage. | corrected; recheck pending |
-| F4 | Stop later account calls after a count or durable-accounting failure. | corrected; recheck pending |
-| F5 | Advertise the actual pinned Ripwire selector contract in every arm. | corrected; recheck pending |
-| F6 | Require successful provenance-bound navigation before calibration. | corrected; recheck pending |
-| F7 | Preserve later independent scorer shares after known local exhaustion; validate measured envelopes before answers. | corrected; recheck pending |
-| N1 | Reproduce the compiler-job setting in the effective controller environment. | corrected; recheck pending |
+| F1 | Give isolated Python roles their separate verified source import roots while retaining isolated mode. | closed by Astra R2 |
+| F2 | Classify Rust setup consistently in both phases; setup earns no assertion credit. | closed by Astra R2 |
+| F3 | Mount only the immutable wrapper's protected log directory as writable runtime storage. | closed by Astra R2 |
+| F4 | Stop later account calls after a count or durable-accounting failure. | closed by Astra R2 |
+| F5 | Advertise the actual pinned Ripwire selector contract in every arm. | closed by Astra R2 |
+| F6 | Require successful provenance-bound navigation before calibration. | closed by Astra R2 |
+| F7 | Preserve later independent scorer shares after known local exhaustion; validate measured envelopes before answers. | closed by Astra R2 |
+| N1 | Reproduce the compiler-job setting in the effective controller environment. | closed by Astra R2 |
 
 The revised controller preserves isolated Python startup and separate source
 mounts. Only the immutable wrapper's fixed log directory is writable through
@@ -182,9 +182,12 @@ steps and the worker has no access to those logs. Effective environment,
 mounts, probes and source bytes participate in qualification identity.
 Count and checkpoint failures stop later account work; known local scorer
 share exhaustion retains an unscored context and preserves later shares.
-Real container fixtures cover role-local imports and the log mount, and will
-be explicitly enabled after exact-content recheck rather than counted as
-passing when skipped. All new behavioral verification is still pending.
+The two explicitly enabled actual OCI controls passed: 2 tests, no skips,
+8.973 seconds. They exercise isolated role imports and the protected log
+mount. Their original receipts remain intact; the later six-line synthetic
+engine repair changes neither production source nor the actual OCI class
+and its seven methods/helpers. This scoped retention does not claim that
+the entire test file stayed byte-identical.
 
 The actual R1 report SHA-256 is
 `35c9ef188ca9062f4b0e5697b7881d660aab530f272aeb9f8fdd7e46c58b1dc5`;
@@ -194,6 +197,46 @@ Revisions require independent closure over their exact final source map.
 No new behavioral tests, token-count calls or inference calls had run when
 this review returned. The frozen cases, grader bytes/commands and acceptance
 thresholds remain unchanged.
+
+## Final source closure and public verification
+
+Astra R2 closed F1–F7 and N1. The final narrow R4 review approved execution
+source at `e39859ea8a7ccb9df34717f68608d549077c38f1`, tree
+`d8ab8210c6bbc5c271743d994c0f37c1e0c2f53b`, with no blocking findings.
+Its exact map binds all 35 modules and 11 assets; subsequent fixture and
+ledger commits leave those 46 execution inputs unchanged.
+
+| Independent artifact | SHA-256 |
+|---|---|
+| R4 review report, actual model `gpt-6-astra`, task `t_633fcc38` | `d3bc2ef19dcb94de0a834aa6346a9592ff3e935a625a341b12ae10e8e663e1b6` |
+| R4 authorizing verdict | `82fe72f68c14b8fe2c1d5220ba48a1ef9342fde8efbb7837fc62a2acd08abd98` |
+| Exact execution map | `88bd599948abd6952ffef6b97ef008d9a0a2417d4760f03e58c3b412ed1eb302` |
+| Source/asset closure | `51f335cb473a0ec16188e5aa75a046a1ab10dc89065409b64c4ba18b5569bdb8` |
+
+The [isolation executor](../../validation/knowledge/evaluation_isolation.py)
+now declares the image packaging environment explicitly and verifies kernel
+link state, routes and actual network denial. Its immutable Linux probe
+reports a versioned guest errno table and semantic labels. Host validation
+checks table/label/number consistency and each boundary's permitted outcomes;
+it does not interpret Linux errors with macOS constants. All observations,
+probe bytes and executor bytes participate in receipt identity. Unknown or
+contradictory observations still refuse qualification.
+
+| Public verification | Actual evidence and limit |
+|---|---|
+| Required CI run 5783 | 2,108 Python passes retained; three failures and two OCI skips explicitly recorded. |
+| Three failed synthetic checks | Passed on their own after the fake engine honored Docker's exact owned-container-name filter; 0.869 seconds. Production code was unchanged. |
+| Explicit actual OCI controls | Both passed with no skips. Original receipt SHA-256 `f8306ed5b6d96000eb2c30f298fee0bae686990bda58c1ef9dcb980a293534e8`; scoped unchanged-control proof `8bfff8ff0ea817c342e561169a3a1fb4431a6f92ca16a4a430ac978a9087a8d2`. |
+| Current-head required CI | Pending in PR #1262. A later runtime-download DNS failure occurred before tests. Fresh runs are required: the authenticated receipt policy rejects job reruns. |
+| Private study qualification and provider calls | Not started; public controls do not qualify frozen private acceptance bundles. |
+
+CI adopts only attributable successes whose declared inputs remain valid;
+it must not turn historical passes or the three local repairs into an
+unverified whole-tree success. Required CI and actual four-family acceptance
+and five-mode navigation qualification remain prerequisites to calibration.
+The frozen cases, model settings, original thresholds and 3,000,000-token
+ceiling are unchanged. Source approval and prerequisite checks establish no
+comparative token savings or documentation-reliability result.
 
 ## Results and interpretation
 

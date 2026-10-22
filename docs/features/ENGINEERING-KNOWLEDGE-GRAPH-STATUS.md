@@ -16,14 +16,19 @@ the earlier pre-publication evidence below is retained as historical scope.
 The current agent-owned branch is `codex/knowledge-efficiency-study`.
 The study itself retains source `168fe74fb` and all twelve sealed cases.
 
-The owner requests completing the missing prerequisites and running the actual
-token/documentation comparison. Ordered acceptance, separate protected
-assertions/candidate RPC workers, and common actual Ripwire are being finished.
-One static isolated toolchain discovery confirmed Rust 1.97.1/Python 3.12.3;
-no study model or token-count calls have run. Sol owns executor and Rust worker
-implementation, custodian C owns private staging/scoring, and Luna completed
-the small navigation API task. The integrator owns common navigation and
-integration. Gold stays outside builder, reviewer and record-author contexts.
+The generic paired Python/Rust runtime and common Ripwire implementation are
+complete. Actual Astra R4 source closure approved all 46 execution inputs at
+`e39859ea8`; later synthetic-fixture and ledger changes leave that closure
+unchanged. Two explicit actual OCI controls passed without skips. The first
+required CI run retained 2,108 Python passes; its three synthetic cleanup
+fixture failures passed after the fake engine honored the exact name filter.
+Current-head required CI remains pending in PR #1262. Fresh CI runs preserve
+valid authenticated per-test successes; job reruns are refused by policy.
+
+Sol 6.1 owns runtime repairs and focused CI diagnosis; custodian C owns private
+staging/scoring. The integrator owns publication and the live ledger. No
+private acceptance qualification, model study or token-count call has run.
+Gold stays outside builder, reviewer and record-author contexts.
 
 The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md) records the
 pre-answer descriptive documentation metric. Independent audit/sealing,
