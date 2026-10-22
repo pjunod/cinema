@@ -74,6 +74,18 @@ class SoftwareReferenceTests(unittest.TestCase):
         parsed['vdr_dm_data']['cmv40_metadata']['ext_metadata_blocks'][1]['Level3']['avg_pq_offset'] = 1501
         self.assertNotEqual(non_l8_rpu_identity(parsed), baseline)
 
+    def test_companion_l2_is_variable_only_in_explicit_mixed_scope(self):
+        parsed = {'rpu_data_crc32': 1, 'vdr_dm_data': {'cmv40_metadata': {'ext_metadata_blocks': [
+            {'Level2': {'trim_slope': 2048}}, {'Level8': {'trim_slope': 2048}},
+            {'Level3': {'avg_pq_offset': 1500}}]}}}
+        strict = non_l8_rpu_identity(parsed)
+        mixed = non_l8_rpu_identity(parsed, ('Level2', 'Level8'))
+        parsed['vdr_dm_data']['cmv40_metadata']['ext_metadata_blocks'][0]['Level2']['trim_slope'] = 2100
+        self.assertNotEqual(non_l8_rpu_identity(parsed), strict)
+        self.assertEqual(non_l8_rpu_identity(parsed, ('Level2', 'Level8')), mixed)
+        parsed['vdr_dm_data']['cmv40_metadata']['ext_metadata_blocks'][2]['Level3']['avg_pq_offset'] = 1501
+        self.assertNotEqual(non_l8_rpu_identity(parsed, ('Level2', 'Level8')), mixed)
+
     def test_acquired_xml_target_and_frame_association_are_frozen(self):
         import xml.etree.ElementTree as ET
         original = Path(os.environ['PLURX_DV_REFERENCE_PACKET'])/'cases/zero/metadata.xml'

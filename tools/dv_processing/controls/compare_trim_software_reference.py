@@ -88,6 +88,41 @@ def reference_case(root, result, transfer, case):
     return xml, image, frozen
 
 
+def authoring_scope(reference, cases, reference_root, parent_root):
+    scope = reference.get('metadata_delta_scope', 'L8-plus-officially-regenerated-companion-L2')
+    if scope == 'L8-plus-officially-regenerated-companion-L2':
+        return ('Level2', 'Level8'), None, None
+    if scope != 'strict-l8-only-authored-xml' or parent_root is None:
+        raise ValueError('strict authored XML requires its original parent reference packet')
+    parent_root = parent_root.resolve(strict=True)
+    parent, transfer = acquisition(parent_root)
+    if reference['parent_reference_result_sha256'] != sha(parent_root/'RESULT.json') or reference['baseline_result_sha256'] != parent['baseline_result_sha256']:
+        raise ValueError('authored XML parent/source acquisition binding mismatch')
+    parents = {c['name']: c for c in parent['cases']}
+    records = reference['metadata_authoring']
+    if len(records) != len(cases) or len({r['name'] for r in records}) != len(cases):
+        raise ValueError('complete unique metadata-authoring records required')
+    records = {r['name']: r for r in records}
+    if set(records) != {c['name'] for c in cases}:
+        raise ValueError('authoring case coverage mismatch')
+    baseline_name = 'cases/zero/metadata.xml'
+    baseline = packet_file(parent_root, baseline_name, transfer[baseline_name])
+    fixed = non_l8_xml_identity(baseline)
+    for case in cases:
+        name = case['name']; record = records[name]
+        donor_name = f'cases/{name}/metadata.xml'
+        donor = packet_file(parent_root, donor_name, transfer[donor_name])
+        output = reference_root/f'cases/{name}/metadata.xml'
+        if (record['baseline_xml_sha256'], record['donor_xml_sha256'],
+            record['output_xml_sha256'], record['replaced_l8_nodes']) != (
+                sha(baseline), sha(donor), sha(output), 4) or parents[name]['l8_vector'] != case['l8_vector']:
+            raise ValueError('metadata-authoring input/output/vector binding mismatch')
+        if non_l8_xml_identity(output) != fixed:
+            raise ValueError('authored variant changed non-L8 original baseline XML')
+    return ('Level8',), {'parent_reference_acquisition': bind(parent_root/'RESULT.json'),
+        'records': list(records.values()), 'method': 'original zero XML; donor L8 only; fixed non-L8 verified'}, fixed
+
+
 def parsed_block(parsed, level):
     dm = parsed['vdr_dm_data']
     return [b[level] for version in ('cmv29_metadata', 'cmv40_metadata')
@@ -143,7 +178,8 @@ def observe(args):
     frozen = [reference_case(reference_root, reference, rt, c) for c in cases]
     if any(contract != frozen[0][2] for _, _, contract in frozen):
         raise ValueError('source/target/version/shot contract varies across cases')
-    varying_levels = ('Level2', 'Level8')
+    varying_levels, authored, original_fixed = authoring_scope(reference, cases, reference_root,
+        getattr(args, 'parent_reference_packet', None))
     xml_baseline = non_l8_xml_identity(frozen[0][0], varying_levels)
     if any(non_l8_xml_identity(xml, varying_levels) != xml_baseline for xml, _, _ in frozen):
         raise ValueError('metadata beyond explicitly recorded L8/companion-L2 changed in XML')
@@ -231,7 +267,8 @@ def observe(args):
         'frozen_contract': frozen[0][2], 'rgb_to_xyz_matrix': XYZ,
         'frozen_metadata_except_levels': varying_levels,
         'frozen_metadata_xml_sha256': xml_baseline, 'frozen_metadata_rpu_sha256': rpu_baseline,
-        'metadata_delta_scope': 'L8-plus-officially-regenerated-companion-L2',
+        'metadata_delta_scope': reference.get('metadata_delta_scope', 'L8-plus-officially-regenerated-companion-L2'),
+        'metadata_authoring': authored, 'original_fixed_xml_sha256': original_fixed,
         'companion_l2_changed_cases': [a['case'] for a in association
             if a['actual_rpu_companion_l2'] != association[0]['actual_rpu_companion_l2']],
         'reference_quantization_step_normalized_pq': 1/65535,
@@ -247,7 +284,8 @@ def observe(args):
         'comparisons': comparisons, 'patches': patches,
         'limitations': ['SOP-only candidate; chroma/saturation/L3/detail/extended controls unapplied',
             'zero-reference has other nonneutral instructions; baseline error is separate from metadata delta',
-            'Metafier also regenerates L2; recorded delta is not a causally isolated L8-only effect',
+            ('Metafier regenerated L2; recorded delta is not a causally isolated L8-only effect'
+             if authored is None else 'L8-only authored XML input variation; finite cases do not establish an algorithm'),
             'delta comparison does not remove nonlinear interactions with baseline instructions',
             'supported public XML importer supplies actual RPU mapping, not Dolby algorithm equivalence',
             'source is decoded self-owned master RGB, not proof of encoded-DV reconstruction',
@@ -262,5 +300,7 @@ if __name__ == '__main__':
     for key in ('baseline-packet', 'reference-packet', 'converter', 'decoder', 'probe',
                 'candidate', 'source-archive', 'dependency-manifest', 'output'):
         parser.add_argument('--' + key, required=True, type=Path)
+    parser.add_argument('--parent-reference-packet', type=Path,
+        help='original mixed packet, required for strict L8-only authored variants')
     report = observe(parser.parse_args())
     print(f"{report['status']}: {report['matched_cases']} software-reference cases")

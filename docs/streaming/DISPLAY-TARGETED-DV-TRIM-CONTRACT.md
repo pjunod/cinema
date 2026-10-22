@@ -289,3 +289,23 @@ still do not identify an ICtCp chroma-weight/saturation algorithm or justify
 replacing it with fitted weights. The raw-to-B.3 renderer bridge remains
 inferred. Those are implementation/contract gaps even after reference access
 has been resolved; E is not complete and production remains L1-only.
+
+
+**Strict L8-only authored variant:** a separate packet may copy the original
+zero-case XML and replace only its four matching Level8 nodes with a case's
+original L8 nodes. Ordinary official XML validation/target-info/render calls
+then produce a new reference; no skip/update-suppression flag is substituted
+for validation. The original mixed packet remains immutable. This is an
+explicitly authored XML experiment, not original unmodified Metafier output.
+
+Its result declares `metadata_delta_scope: strict-l8-only-authored-xml`, binds
+`parent_reference_result_sha256`, and includes a `metadata_authoring` record
+per case with `name`, `baseline_xml_sha256`, `donor_xml_sha256`,
+`output_xml_sha256` and `replaced_l8_nodes: 4`. Pass its original packet with
+`--parent-reference-packet`. The adapter verifies parent/source hashes, donor
+vectors, authoring output identity, complete case coverage and unchanged
+non-L8 original zero-case XML. It then freezes all non-L8 actual RPU metadata,
+including L2. Reports distinguish strict authored L8 input variation from the
+mixed original packet's L8-plus-companion-L2 variation. A controlled input
+variation supports numerical QC of that input; it does not identify a
+proprietary algorithm or establish CM2.9 equivalence.
