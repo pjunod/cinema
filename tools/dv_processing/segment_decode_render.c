@@ -59,6 +59,7 @@ static AVStream *nut_stream;
 static int64_t output_pts, output_duration, nut_tick_scale;
 static int64_t last_pts = AV_NOPTS_VALUE;
 static AVRational source_time_base;
+static struct rational source_origin;
 struct coded_input {
   int64_t pts, duration;
   char packet_sha[65], rpu_sha[65];
@@ -910,8 +911,13 @@ int main(int argc, char **argv) {
   need(source_time_base.num > 0 && source_time_base.den > 0,
        "positive source time base");
   if (window_mode) {
-    need(stream->start_time == 0,
-         "initial window requires observed zero source origin");
+    need(stream->start_time != AV_NOPTS_VALUE && stream->start_time >= 0 &&
+             stream->start_time <= INT64_MAX / source_time_base.num,
+         "window requires valid observed nonnegative source origin");
+    source_origin = (struct rational){stream->start_time * source_time_base.num,
+                                      source_time_base.den};
+    need(compare_window(stream->start_time, window_start) <= 0,
+         "window starts before observed source origin");
     int64_t target =
         av_rescale_q_rnd(window_start.num, (AVRational){1, window_start.den},
                          source_time_base, AV_ROUND_DOWN);
@@ -1052,8 +1058,8 @@ int main(int argc, char **argv) {
   }
   if (window_mode) {
     printf("{\"kind\":\"window_complete\",\"requested_start\":\"%lld/"
-           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"0/"
-           "1\",\"origin_provenance\":\"observed_stream_start_time\","
+           "%d\",\"requested_end\":\"%lld/%d\",\"source_origin\":\"%lld/"
+           "%d\",\"origin_provenance\":\"observed_stream_start_time\","
            "\"frames\":%d,\"preroll_pairs\":%u,\"paired_pictures\":%u,"
            "\"boundary_pts_ticks\":%lld,\"boundary_observed\":%s,\"source_eof_"
            "observed\":%s,\"first_emitted_pts_ticks\":%lld,\"last_emitted_end_"
@@ -1062,7 +1068,8 @@ int main(int argc, char **argv) {
            "observed\",\"membership\":\"frame_pts_in_half_open_window_"
            "durations_unclipped\",\"production_qualified\":false}\n",
            (long long)window_start.num, window_start.den,
-           (long long)window_end.num, window_end.den, emitted, preroll, paired,
+           (long long)window_end.num, window_end.den,
+           (long long)source_origin.num, source_origin.den, emitted, preroll, paired,
            (long long)boundary_pts, window_done ? "true" : "false",
            source_eof ? "true" : "false", (long long)first_emitted_pts,
            (long long)last_emitted_end, source_time_base.num,
