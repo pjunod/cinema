@@ -150,6 +150,60 @@ runner allowlisting; a workflow option alone does not prove CPU limits.
 Host budget and cleanup must be established before dispatching full fan-out.
 Preserve Apple/Android capacity rather than inferring it from runner count.
 
+### First application observations
+
+The effort incorporated the qualified main snapshot as
+`27b71d42a25201343b5a880ae8c2dcdf59395e1a`; M3 candidate
+`94b5cebe9a0363818ff979b272baa1b77b21885f` includes that refresh.
+Its Linux controller controls passed 171 tests in 9.404 seconds. Fresh
+ordinary discovery found 36 binaries and 7,024 cases, with all 50 ignores
+preserved. Every M2 case remains; three active cases were added by the
+refresh. This is inventory retention, not execution evidence.
+
+The first warm parallel attempt failed after 34.948 seconds because strict
+source verification observed a live desktop-control fixture beneath the
+source working directory. That fixture deliberately creates a temporary
+replicated Store under its current directory. Another lane's source check
+therefore correctly refused the changing source tree. Native processes were
+canceled, their original exits retained and cleanup qualified. The attempt
+is incomplete and supplies no full-suite runtime or speedup.
+
+Direct native execution now needs a fresh private external working directory
+per binary and explicit serial case, with protected real ancestors and no
+source overlap. Cargo, doctests and nextest retain their existing directory
+behavior. Exact case union alone does not establish equivalent execution
+environments; a complete application run must qualify this directory change.
+The source verifier remains strict, including refusal of unknown files.
+The updated controller suite ran 180 controls in 13.366 seconds on macOS:
+179 passed and one Linux-only cancellation control was skipped. The initial
+sandboxed invocation could not inspect owned process groups and failed cleanup
+controls; the retained successful invocation used normal process visibility.
+Exact-candidate Linux controls and application execution remain owed.
+
+A separate replicated Store discovery found 385 contract cases (three
+ignored) and one active schema-lineage case. A focused repair contract then
+failed during three-voter startup after 60.90 seconds, before its historical
+repair-result assertion. Original failure and resource evidence are retained;
+the exported child test-thread environment and readiness protocol are being
+investigated. A standalone libtest reproduction confirmed that inherited
+`RUST_TEST_THREADS=1` prefixes the child READY line, which the exact-line
+protocol cannot recognize. Unsetting that environment variable while keeping
+the parent's `--test-threads=1` matches Make's serialization behavior and
+preserves a standalone child READY line. This does not prove the unrecorded
+original children were ready. The corrected application probe was refused
+before compile or native execution because observed free host memory did not
+preserve admission's reserve. No test result follows from that refusal. These
+observations neither complete the Store suite nor repair its historical
+application failure.
+
+The user declined the proposed six-hour exclusive host window. Shared CI
+stays available; no runner services or optional runner configuration are
+changed. Six hours was a conservative campaign allowance for reference,
+cold/warm comparisons, nextest, replicated Store and cleanup checks, not a
+measured parallel runtime or a proposed per-PR duration. The next useful
+measurement is one complete parallel execution. Shared-host observations
+cannot establish reserved capacity or reliable every-PR latency.
+
 ## 5. Acceptance still owed
 
 Record one fresh legacy execution and the nextest comparison on the same

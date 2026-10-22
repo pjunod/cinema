@@ -14,6 +14,7 @@ from pathlib import Path
 import runpy
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -72,23 +73,62 @@ def check_inputs(inventory, binary=None):
                 'inventoried executable changed: ' + binary['target']['name'])
 
 
-def command(argv, output, name, timeout, lease_fd, *, combined=True, cancel_event=None):
+def validate_native_working_directory(path, *, existing_only=False):
+    """Require protected real ancestors; preflight may inspect a missing leaf."""
+    path = Path(path)
+    require(path.is_absolute(), 'Native working directory must be absolute')
+    owner = os.getuid()
+    for index, candidate in enumerate((path, *path.parents)):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            require(existing_only, 'Native working directory is missing')
+            continue
+        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),
+                'Native working directory ancestor must be a real directory')
+        require(info.st_uid == owner if index == 0 else info.st_uid in (0, owner),
+                'Native working directory ownership is unsafe')
+        require(stat.S_IMODE(info.st_mode) == 0o700 if index == 0 else not info.st_mode & 0o022,
+                'Native working directory permissions are unsafe')
+
+
+def native_working_directory(output, name):
+    """Create, never reuse, one writable runtime scope outside frozen source."""
+    require(name and Path(name).name == name and name not in ('.', '..'), 'Invalid native working directory name')
+    path = Path(os.path.abspath(output)) / 'native-work' / name
+    source = Path.cwd().resolve()
+    resolved = path.resolve(strict=False)
+    require(all(not candidate.is_relative_to(source) and not source.is_relative_to(candidate)
+                for candidate in (path, resolved)),
+            'Native working directory must be outside frozen source')
+    # Refuse existing symlink/unsafe ancestors before mkdir can follow them.
+    # Recheck the complete real directory chain after creation as well.
+    validate_native_working_directory(path, existing_only=True)
+    path.mkdir(parents=True, mode=0o700, exist_ok=False)
+    validate_native_working_directory(path)
+    return path
+
+
+def command(argv, output, name, timeout, lease_fd, *, combined=True, cancel_event=None, cwd=None):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = output / (name + '.log'), output / (name + '.stderr')
     # Native stack and body selection match the qualified ordinary cell.
     argv = ['env', '-u', 'RUST_MIN_STACK', 'RUST_TEST_THREADS=4', *argv]
+    working_directory = Path.cwd().resolve() if cwd is None else Path(cwd).absolute()
+    process_options = {} if cwd is None else dict(cwd=working_directory)
     with stdout_path.open('wb') as stdout:
         if combined:
-            result = run_process(argv, stdout, stdout, timeout, pass_fds=(lease_fd,), cancel_event=cancel_event)
+            result = run_process(argv, stdout, stdout, timeout, pass_fds=(lease_fd,), cancel_event=cancel_event, **process_options)
         else:
             with stderr_path.open('wb') as stderr:
-                result = run_process(argv, stdout, stderr, timeout, pass_fds=(lease_fd,), cancel_event=cancel_event)
+                result = run_process(argv, stdout, stderr, timeout, pass_fds=(lease_fd,), cancel_event=cancel_event, **process_options)
     if result.get('cleanup_complete') is not True and cancel_event is not None:
         # Record unsafe ownership before any log I/O can itself fail.
         cancel_event.unsafe_cleanup = True
         cancel_event.set()
-    result.update(argv=argv, log=stdout_path.name, log_sha256=sha256(stdout_path))
+    result.update(argv=argv, log=stdout_path.name, log_sha256=sha256(stdout_path),
+                  cwd=str(working_directory), cwd_policy='explicit-native-private' if cwd is not None else 'inherited-controller-cargo')
     write(output / (name + '.process.json'), result)
     return result, stdout_path.read_text(errors='replace')
 
@@ -139,8 +179,10 @@ def run_shard(shard, plan, inventory, output, lease_fd, stop):
         observed = {key: binary[key] for key in BINDINGS}
         try:
             check_inputs(inventory, binary)
+            working_directory = native_working_directory(destination, 'binary-%02d' % index)
             result, text = command([binary['executable'], '--test-threads=' + str(plan['test_threads'])],
-                                   destination, 'binary-%02d' % index, 5400, lease_fd, cancel_event=stop)
+                                   destination, 'binary-%02d' % index, 5400, lease_fd, cancel_event=stop,
+                                   cwd=working_directory)
             evidence = parse_bound(text, inventory, root=Path.cwd(), policy=policy,
                                    selected={Path(binary['executable']).name: [c['name'] for c in binary['cases']]},
                                    direct_binary=Path(binary['executable']).name)
@@ -170,7 +212,13 @@ def execute(mode, inventory, metadata, output, lease_fd, *, stop_event=None):
     output.mkdir(exist_ok=False)
     started = time.monotonic()
     report = dict(schema=1, mode=mode, source=inventory['source'], success=False,
-                  errors=[], scope='ordinary Rust, doctests and two explicit serial regressions only')
+                  errors=[], scope='ordinary Rust, doctests and two explicit serial regressions only',
+                  working_directory_policy=dict(
+                      direct_native='fresh private external directory per binary or explicit serial run; protected ancestors',
+                      cargo_doctest_nextest='controller source cwd retained; Cargo/nextest own native cwd behavior unchanged',
+                      controller_source_root=str(Path.cwd().resolve()),
+                      path_budget='Use short protected output paths; native Unix socket path limits remain application-enforced.',
+                      environment_equivalence='not established by exact case union; direct-native cwd differs from Cargo-managed execution'))
     write(output / 'results.json', report)
     policy = load_policy('validation/rust_repair_cases.json')
     stop = stop_event if stop_event is not None else threading.Event()
@@ -244,8 +292,10 @@ def execute(mode, inventory, metadata, output, lease_fd, *, stop_event=None):
         for index, name in enumerate(SERIAL):
             require(not stop.is_set(), 'execution canceled')
             require([c for c in binary['cases'] if c['name'] == name and c['ignored']] != [], 'serial regression missing/active')
+            working_directory = native_working_directory(output, 'serial-' + str(index))
             result, text = command([binary['executable'], name, '--exact', '--ignored', '--test-threads=1'],
-                                   output, 'serial-' + str(index), 600, lease_fd, cancel_event=stop)
+                                   output, 'serial-' + str(index), 600, lease_fd, cancel_event=stop,
+                                   cwd=working_directory)
             evidence = parse_bound(text, inventory, root=Path.cwd(), policy=policy,
                                    selected={Path(binary['executable']).name: [name]}, execute_ignored=True,
                                    direct_binary=Path(binary['executable']).name)

@@ -1,18 +1,22 @@
 """Coordinator controls using real native parsing and tiny executable fixtures."""
 import copy
+import base64
 from contextlib import redirect_stdout
 import io
 import json
 import os
+import stat
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import patch, call
 
 from validation import rust_parallel as parallel
+from validation import rust_source_bundle as bundle
 from validation.rust_parallel_manifest import build_plan
 
 SOURCE = dict(commit="a" * 40, tree="b" * 40, tracked_clean=True)
@@ -73,6 +77,12 @@ class RustParallelCase(unittest.TestCase):
         self.identity.start()
         self.addCleanup(self.identity.stop)
         self.actual_command = parallel.command
+        # Native fixtures live below the test runner's world-writable /tmp.
+        # Only this unit boundary is stubbed; production protection is tested
+        # independently below, without this fixture patch.
+        protection = patch.object(parallel, 'validate_native_working_directory')
+        self.protection = protection.start()
+        self.addCleanup(protection.stop)
 
     def binary(self, name, cases, mode="normal"):
         row = dict(executable=str(self.root / (name + "-abcdef")), sha256="c" * 64,
@@ -138,6 +148,20 @@ raise SystemExit(status)
                 report = parallel.execute(mode, self.inventory, self.metadata, self.root / mode, self.fd)
             self.assertTrue(report["success"], report["errors"])
             self.assertEqual(len(report["serial"]), 2)
+            self.assertIn('not established', report['working_directory_policy']['environment_equivalence'])
+            native_cwds = [row['process']['cwd'] for row in report['serial']]
+            for row in report['serial']:
+                self.assertEqual(row['process']['cwd_policy'], 'explicit-native-private')
+            if mode == 'parallel':
+                native_cwds.extend(row['process']['cwd'] for shard in report['shards'] for row in shard['binaries'])
+                self.assertEqual(report['doctests']['process']['cwd'], str(Path.cwd().resolve()))
+                self.assertEqual(report['doctests']['process']['cwd_policy'], 'inherited-controller-cargo')
+            else:
+                self.assertEqual(report['process']['cwd'], str(Path.cwd().resolve()))
+            self.assertEqual(len(native_cwds), len(set(native_cwds)))
+            for directory in native_cwds:
+                self.assertTrue(Path(directory).is_relative_to(self.root / mode))
+                self.assertEqual(stat.S_IMODE(Path(directory).stat().st_mode), 0o700)
             for serial in report["serial"]:
                 suite = serial["evidence"]["observed_suites"][0]
                 self.assertEqual(suite["result"]["passed"], 1)
@@ -290,6 +314,100 @@ raise SystemExit(status)
             parallel.run_shard(plan["shards"][0], plan, self.inventory, self.root / "following", self.fd, stop)
         following.assert_not_called()
 
+    def test_command_passes_cwd_only_when_explicit_and_records_inherited_cargo_boundary(self):
+        process = dict(returncode=0, success=True, cleanup_complete=True, timed_out=False)
+        with patch.object(parallel, 'run_process', side_effect=lambda *args, **kwargs: dict(process)) as run:
+            result, _ = self.actual_command(['cargo', '--version'], self.root / 'command', 'inherited', 2, self.fd)
+            self.assertNotIn('cwd', run.call_args.kwargs)
+            self.assertEqual(result['cwd'], str(Path.cwd().resolve()))
+            self.assertEqual(result['cwd_policy'], 'inherited-controller-cargo')
+            cwd = parallel.native_working_directory(self.root / 'command', 'explicit')
+            result, _ = self.actual_command(['/bin/true'], self.root / 'command', 'explicit', 2, self.fd, cwd=cwd)
+            self.assertEqual(run.call_args.kwargs['cwd'], cwd)
+            self.assertEqual(result['cwd'], str(cwd))
+            self.assertEqual(result['cwd_policy'], 'explicit-native-private')
+
+    def test_native_working_directory_is_fresh_and_never_created_in_source(self):
+        output = self.root / 'fresh-runtime'
+        path = parallel.native_working_directory(output, 'binary-00')
+        self.assertEqual(self.protection.call_args_list, [call(path, existing_only=True), call(path)])
+        retained = path / 'retained'
+        retained.write_text('do not delete')
+        with self.assertRaises(FileExistsError):
+            parallel.native_working_directory(output, 'binary-00')
+        self.assertEqual(retained.read_text(), 'do not delete')
+        with self.assertRaisesRegex(ValueError, 'outside frozen source'):
+            parallel.native_working_directory(Path.cwd(), 'forbidden-runtime')
+        with self.assertRaisesRegex(ValueError, 'Invalid native'):
+            parallel.native_working_directory(output, '../escape')
+
+    def test_output_ancestor_link_into_source_refuses_without_creating_source_artifacts(self):
+        source = self.root / 'frozen-source'
+        source.mkdir()
+        (source / 'original.rs').write_text('// frozen source')
+        alias = self.root / 'source-alias'
+        alias.symlink_to(source, target_is_directory=True)
+        with patch.object(Path, 'cwd', return_value=source):
+            with self.assertRaisesRegex(ValueError, 'outside frozen source'):
+                parallel.native_working_directory(alias / 'not-created', 'binary-00')
+        self.assertEqual([path.name for path in source.iterdir()], ['original.rs'])
+        self.assertFalse((source / 'not-created').exists())
+        self.protection.assert_not_called()
+
+    def test_real_shell_runtime_write_keeps_strict_source_identity_and_source_write_refuses(self):
+        source = self.root / 'immutable-source'
+        source.mkdir()
+        content = b'// source bound fixture\n'
+        (source / 'fixture.rs').write_bytes(content)
+        blob = bundle._object('blob', content)
+        tree = bundle._tree({'fixture.rs': ('100644', blob)})
+        raw_commit = ('tree ' + tree + '\nauthor Fixture <fixture@example.invalid> 0 +0000\n'
+                      'committer Fixture <fixture@example.invalid> 0 +0000\n\nFixture\n').encode()
+        manifest = dict(schema=1, commit=bundle._object('commit', raw_commit), tree=tree,
+                        raw_commit_base64=base64.b64encode(raw_commit).decode(),
+                        entries=[dict(path='fixture.rs', mode='100644', blob=blob)])
+        manifest_path = self.root / 'source-bundle.json'
+        parallel.write(manifest_path, manifest)
+        inventory = copy.deepcopy(self.inventory)
+        inventory['source'] = bundle.identity(source, manifest_path)
+        output = self.root / 'shell-runtime'
+        ready, release = self.root / 'shell-ready', self.root / 'shell-release'
+        result, errors = [], []
+        with patch.object(parallel, 'SOURCE_BUNDLE', manifest_path), patch.object(Path, 'cwd', return_value=source):
+            cwd = parallel.native_working_directory(output, 'binary-00')
+            # Positional shell arguments avoid interpreting paths as shell code.
+            script = ('mkdir -p .tmp-fixture/data; printf database > .tmp-fixture/data/plurx.db; '
+                      'touch "$1"; while [ ! -f "$2" ]; do sleep 0.02; done')
+            def run():
+                try:
+                    result.append(self.actual_command(['/bin/sh', '-c', script, 'fixture', str(ready), str(release)],
+                                                      output, 'native', 8, self.fd, cwd=cwd))
+                except BaseException as error:
+                    errors.append(error)
+            thread = threading.Thread(target=run)
+            thread.start()
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists(), 'shell did not create its real runtime fixture')
+                self.assertTrue((cwd / '.tmp-fixture/data/plurx.db').is_file())
+                parallel.check_inputs(inventory)
+                (source / 'unexpected-source-write').write_text('must refuse')
+                with self.assertRaisesRegex(bundle.BundleError, 'unexpected source file'):
+                    parallel.check_inputs(inventory)
+            finally:
+                release.touch()
+                thread.join(timeout=9)
+        self.assertFalse(thread.is_alive(), 'owned shell fixture did not finish')
+        self.assertEqual(errors, [])
+        self.assertEqual(len(result), 1)
+        process = result[0][0]
+        self.assertTrue(process['cleanup_complete'], process)
+        self.assertTrue(process['success'], process)
+        self.assertEqual(process['cwd'], str(cwd))
+        self.assertEqual(process['cwd_policy'], 'explicit-native-private')
+
     @unittest.skipUnless(sys.platform == "linux", "real cancellation ownership control uses Linux /proc")
     def test_global_cancellation_drains_actual_running_process_before_return(self):
         marker = self.root / "started"
@@ -314,6 +432,70 @@ raise SystemExit(status)
         self.assertFalse(result["timed_out"])
         self.assertLess(result["seconds"], 8)
         self.assertTrue(result["leader_reaped_after_cleanup"])
+
+
+class NativeWorkingDirectoryProtectionCase(unittest.TestCase):
+    """Hermetic ancestor metadata; production validator is never stubbed here."""
+    def setUp(self):
+        self.path = Path('/owned/runtime/binary-00')
+        self.records = {path: SimpleNamespace(st_mode=stat.S_IFDIR | (0o700 if index == 0 else 0o755),
+                                             st_uid=1000 if index < 2 else 0)
+                        for index, path in enumerate((self.path, *self.path.parents))}
+
+    def validate(self):
+        with patch.object(os, 'getuid', return_value=1000), \
+                patch.object(Path, 'lstat', autospec=True, side_effect=lambda path: self.records[path]):
+            parallel.validate_native_working_directory(self.path)
+
+    def test_real_symlink_ancestor_is_refused_before_mkdir_mutates_its_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            target = base / 'symlink-target'
+            target.mkdir()
+            alias = base / 'alias'
+            alias.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'real directory'):
+                parallel.native_working_directory(alias / 'not-created', 'binary-00')
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_preflight_allows_missing_leaf_but_preserves_unsafe_ancestor_refusal(self):
+        records = dict(self.records)
+        del records[self.path]
+        def lookup(path):
+            if path not in records:
+                raise FileNotFoundError(str(path))
+            return records[path]
+        with patch.object(os, 'getuid', return_value=1000), \
+                patch.object(Path, 'lstat', autospec=True, side_effect=lookup):
+            parallel.validate_native_working_directory(self.path, existing_only=True)
+            records[self.path.parent] = SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=1000)
+            with self.assertRaisesRegex(ValueError, 'permissions are unsafe'):
+                parallel.validate_native_working_directory(self.path, existing_only=True)
+
+    def test_private_leaf_and_real_root_or_owner_ancestors_are_accepted(self):
+        self.validate()
+
+    def test_shared_write_ancestors_and_nonprivate_leaf_are_refused(self):
+        for path, mode in ((self.path, 0o755), (self.path.parent, 0o777),
+                           (self.path.parent.parent, 0o775), (Path('/'), 0o777)):
+            with self.subTest(path=path):
+                original = self.records[path].st_mode
+                self.records[path].st_mode = stat.S_IFDIR | mode
+                with self.assertRaisesRegex(ValueError, 'permissions are unsafe'):
+                    self.validate()
+                self.records[path].st_mode = original
+
+    def test_symlink_or_foreign_owner_anywhere_in_chain_is_refused(self):
+        for path in self.records:
+            with self.subTest(path=path):
+                original = self.records[path]
+                self.records[path] = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=1000)
+                with self.assertRaisesRegex(ValueError, 'real directory'):
+                    self.validate()
+                self.records[path] = SimpleNamespace(st_mode=original.st_mode, st_uid=2000)
+                with self.assertRaisesRegex(ValueError, 'ownership is unsafe'):
+                    self.validate()
+                self.records[path] = original
 
 
 if __name__ == "__main__":
