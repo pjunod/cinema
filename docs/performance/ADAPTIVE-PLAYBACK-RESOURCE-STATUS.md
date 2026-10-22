@@ -36,9 +36,11 @@ These mechanisms are NOT permission/proof constructors or completed V2 closure.
 
 Pinned1.97.1 current host core all-target check PASS11.885s; combined core/daemon
 108.631s retains unchanged daemon source. Seven new host bodies COMPILED NOT RUN;
-two Linux-only bodies authored, NOT host-compiled. Warnings, NOT strict Clippy.
-Initial closure-type compile failure preserved/fixed. Controller exact7b783effa
-Linux source compile is IN PROGRESS, NOT a pass; Windows changed scopes requested.
+two Linux-only bodies compiled by controller Linux check, NOT host. No bodies run.
+Warnings, NOT strict Clippy; initial closure-type failure preserved/fixed.
+Controller exact7b783effa Linux117.758s and Windows132.363s checks PASS; unchanged
+native step/statx/test sources retain those scopes. Later common guards and held
+publisher have host checks above, not claimed exact7b Linux/Windows coverage.
 No behavior/restart qualification. Earlier source/evidence remains retained.
 
 The authoritative [V1–V5 checklist](ADAPTIVE-PLAYBACK-DELIVERY.md#authoritative-first-ordinary-vod-source-checklist)
