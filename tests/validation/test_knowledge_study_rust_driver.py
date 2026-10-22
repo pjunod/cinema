@@ -25,7 +25,7 @@ def observed(returncode=0):
 class RustFrameworkBoundaryTests(unittest.TestCase):
     def test_generated_successful_setup_classifies_in_both_phases(self):
         argv=["/work/scripts/quiet", "cargo", "build"]
-        context={"protocol":2,"step":{"argv":argv,"kind":"setup","cwd":"/work","effective_environment":{}}}
+        context={"protocol":2,"effective_environment":{},"step":{"argv":argv,"kind":"setup","cwd":"/work"}}
         for mode in ("prerequisite", "acceptance"):
             namespace=protected_namespace()
             namespace["_runtime"].run_exact_assertion_command=lambda *args,**kwargs:NS(
@@ -39,7 +39,7 @@ class RustFrameworkBoundaryTests(unittest.TestCase):
 
     def test_setup_classifier_rejects_malformed_failed_empty_and_assertion_results(self):
         argv=["/work/scripts/quiet", "cargo", "build"]
-        context={"protocol":2,"step":{"argv":argv,"kind":"setup","cwd":"/work","effective_environment":{}}}
+        context={"protocol":2,"effective_environment":{},"step":{"argv":argv,"kind":"setup","cwd":"/work"}}
         namespace=protected_namespace()
         namespace["_runtime"].run_exact_assertion_command=lambda *args,**kwargs:NS(
             returncode=0,stdout=b"setup complete",stderr=b"",rpc_calls=0)
