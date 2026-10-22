@@ -133,6 +133,23 @@ incident and general remote processed requalification remain out of B scope.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
+**Current qualification (2026-10-22):** the base-receipt repair is compiled,
+independently approved, and its new regression and both real P8 mapped cells
+passed. P7 demux/payload/audio/FEL/raw-L1 preparation passed; the subsequent
+scanner exited 1 with no aggregate because a positive-origin Matroska selected
+track's DURATION tag was compared as elapsed duration instead of its endpoint.
+Sol corrected only the two tag comparisons, preserving the one-tick allowance
+and all independent-video/drain/count guards. New manual
+`test_scan_duration_tag.py::test_selected_video_duration_tag_uses_endpoint`
+controls cover P7/P8 positive-origin multistreams, unchanged L1/coded payloads,
+old-code sensitivity and contradictory/missing/malformed/truncated declarations.
+Authored controls are not passing evidence: scanner-only native linking,
+existing independent reviewer's NEW-delta closure and new/invalidated controls
+remain before failed P7 scanner and both mapped cells. Retain prior software,
+NEW core and P8 passes without replay or relabelling them as new-scanner runs.
+Coordinator owns native execution/publication. One fast lane/API merge and
+separate FEL integration remain; no deployment/device/client-DYN acceptance.
+
 **Latest qualification correction (2026-10-21):** the genuine bright P8 excerpt
 reached complete L1 observation and master preparation, but the exact single
 1000-nit test exited 101 on a missing display-target receipt operation count.

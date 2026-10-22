@@ -231,9 +231,11 @@ int main(int argc, char **argv) {
     int64_t duration_us;
     need(av_parse_time(&duration_us, duration->value, 1) >= 0 && duration_us > 0,
          "selected video duration tag");
-    need(av_compare_ts(last_end + 1 - first_pts, stream->time_base,
+    // Matroska's selected-track DURATION tag is a timestamp endpoint, unlike
+    // the relative AVStream.duration above. Do not subtract a nonzero origin.
+    need(av_compare_ts(last_end + 1, stream->time_base,
                       duration_us, AV_TIME_BASE_Q) >= 0 &&
-         av_compare_ts(last_end - 1 - first_pts, stream->time_base,
+         av_compare_ts(last_end - 1, stream->time_base,
                       duration_us, AV_TIME_BASE_Q) <= 0,
          "complete selected video duration tag");
     endpoint_known = true;

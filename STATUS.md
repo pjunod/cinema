@@ -1,18 +1,21 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-21 · Kept current by the working agent in the same
+**Updated:** 2026-10-22 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
 <!-- status: insert new efforts below this line -->
 
-- **2026-10-21 · display-targeted HDR10-E PR #1216:** actual bright P8/1000
-  qualification failed receipt accounting after complete L1 observation and
-  master preparation; no mapped pass. Sol's narrow base-receipt repair and
-  new regression await pinned compilation, independent targeted closure and
-  new/failed-only checks. Existing 99 Rust / 141 shader / 70 helper passes are
-  retained. Coordinator owns native execution/publication; remaining real-input
-  cells, separate FEL integration, fast lane and merge stay open in the
+- **2026-10-22 · display-targeted HDR10-E PR #1216:** the reviewed base-receipt
+  repair's new regression and both real P8/1000+1600 cells passed. P7 preparation
+  passed, but its scanner refused a positive-origin selected-track duration tag:
+  the tag declares the timestamp endpoint, not elapsed duration. Sol corrected
+  only that comparison and authored P7/P8 offset, selected-track, one-tick-boundary
+  and truncation controls. Scanner-only native linking, independent delta closure
+  and new/invalidated checks remain; authored controls are not passing evidence.
+  Existing 99 Rust / 141 shader / 70 helper passes and P8 results are retained,
+  not relabelled as new-scanner runs. Coordinator owns native execution/publication;
+  P7 mapped cells, separate FEL integration, fast lane and merge stay open in the
   [canonical build ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md).
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is

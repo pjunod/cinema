@@ -26,6 +26,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Complete-title Dolby Vision scans compare a selected Matroska track's
+  `DURATION` tag to its timestamp endpoint rather than subtracting a nonzero
+  video origin. Independent selected-video declarations, complete decoder
+  drains and the existing one-tick completeness allowance remain required;
+  unrelated audio or container durations cannot supply missing coverage.
+
 - Internal complete-title scan state survives chapter, HEVC-parameter-set and
   content-encoding probe decorations, including repeated identical writes and
   manually cancelled generations. Only actual source changes or fresh ordinary

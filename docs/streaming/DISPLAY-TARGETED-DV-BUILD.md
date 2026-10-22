@@ -1,9 +1,36 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A software controls retained; P8 receipt repair awaiting compilation/review · **Updated:** 2026-10-21 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (native/media/publication) ·
+**Status:** PR A P8 cells passed; P7 scanner endpoint repair awaiting linking/review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
+
+- **Current qualification (2026-10-22; supersedes historical states below):**
+  the independently approved base-receipt repair compiled and its exact new
+  regression passed once. Both real P8 mapped cells, 1000 and 1600 nits, passed
+  with complete 17,983-frame L1 observation and target-operation receipts.
+  Retain these and the prior 99 Rust / 141 shader / 70 helper passes unchanged.
+  P7's corrected copied interval passed all payload/timing/audio/FEL/raw-L1
+  preparation checks, but its decoded scanner exited 1 with no aggregate:
+  `complete selected video duration tag`. The selected video starts at 0.125 s,
+  ends at 750.165 s and declares `DURATION=00:12:30.165000000`; subtracting its
+  origin compares the wrong domain. The sibling renderer already uses the
+  selected-track tag as an endpoint. Only the scanner's two comparisons change;
+  relative `AVStream.duration`, independent selected-video coverage, decoder
+  drains and the one-tick allowance remain intact. No endpoint-or-span fallback,
+  audio/container substitution or real-input retiming/tag rewrite is introduced.
+  `tools/dv_processing/controls/test_scan_duration_tag.py` authors 20 small
+  scanner observations across retained synthetic P7/P8 fixtures: positive-origin
+  multistream acceptance with unchanged L1, old-scanner sensitivity, +/-one-tick
+  acceptance, and missing/malformed/span/+/-two-tick/truncated refusals. Exact
+  coded payloads and timing are checked; unrelated audio ends later. These have
+  not run. Actual current compiler-only syntax/dependency evidence exists;
+  scanner-only linking in the isolated SDK, independent NEW-delta closure and
+  new/invalidated controls must precede failed P7 scanner/mapped execution.
+  Old passes remain old-helper evidence, not new-scanner runs. Both P7 mapped
+  cells, separate FEL integration, one fast lane and API merge remain open.
+  No display/deployment/client-DYN/general Dolby accuracy claim; output-metadata
+  PR B must land before any user-exposed targeting setting.
 
 - The corrected real P8 excerpt reached complete 17,983-frame L1 observation and
   master preparation, then its single 1000-nit test failed with exit 101: the
