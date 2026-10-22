@@ -34,11 +34,10 @@ production switch or runtime exact-manifest settlement is claimed.
 Pinned1.97.1 combined all-target host check PASS125.139s; two changed core files
 then rechecked PASS47.42s (`compile-run73-host-202323.json`). Seven source hashes;
 core46 library+3 libtest warnings; NOT strict Clippy. Twelve new bodies:
-nine host-compiled, three Windows-only authored; ALL behavior NOT RUN.
-Controller SDK-bound full Windows check on fixture repair `2726df816` PASS0
-96.023s: real launcher/graph/daemon and earlier Windows bodies compiled, NOT RUN.
-Its original211.686s failure remains preserved. New live-close source needs its
-own SDK-bound compile; actual native/restart acceptance remains separately owed.
+nine host-compiled; all twelve Windows-compiled on `35f0d8715` (135.763s).
+Two changed core paths rechecked PASS73.591s on `6dc165309`; ALL behavior NOT RUN.
+Earlier Windows fixture repair `2726df816` PASS96.023s and failures retained.
+Native/restart acceptance remains owed.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
@@ -54,12 +53,11 @@ Source guards and claim/Prepared/winner/adoption/fence authority, not worker RPC
 advertisement or a normal Closed writer. Preserve ALL earlier anchors/receipts
 and the strict-default child failure. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
 
-Full typed closure/positive restart/old-owner fencing, production/supervisor/
-shared transfer, learning/pacing/M4 runtime/M5 and remaining M0–M7 stay open.
-Ordinary production remains legacy; no unsupported trial/finite admission.
-Draft PR1248 needs complete implementation, actual independent Fable review/fixes,
-once-only affected qualification/fast lane/authorized merge; no extra handoff or
-deployment. Fresh unsupported Windows has NO ledger, not zero measured usage.
+See the [finite delivery table](ADAPTIVE-PLAYBACK-DELIVERY.md): implemented/missing
+M0–M7 deliverables, dependencies, owners, observable behavior and first finite VOD
+closure target. No milestone is accepted end-to-end; ordinary playback is still
+legacy. Complete source/review/fixes precede once-only qualification/merge, with
+no new handoff gate/deployment. Unsupported Windows has NO ledger, not zero usage.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.

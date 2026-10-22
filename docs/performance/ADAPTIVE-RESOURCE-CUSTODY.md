@@ -75,8 +75,8 @@ Public close remains UnknownHeld. No restart proof or Windows durable admission.
 
 The controller's genuine SDK-bound core+daemon all-target Windows compile passes
 on fixture repair2726df816 (96.023s); prior failures remain evidence. New live-close
-source host-compiles (combined125.139s, only changed core rechecked47.42s) and its
-Windows compile is in progress. Native execution/
+source host-compiles (combined125.139s, changed core47.42s); full Windows check
+passes135.763s on35f0d8715 with changed core73.591s on6dc165309. Native execution/
 restart acceptance remains owed; every behavioral fixture remains NOT RUN.
 
 Private cleanup consumes the original nonclone proof, retains it on queue refusal
@@ -140,8 +140,8 @@ cannot prove that a copied source host's processes or external resources ended.
 
 The released journal retains original authorship and earlier scoped compiler
 receipts; its synthetic fixtures are protocol checks, not native physical proof.
-Twelve new live-close bodies are authored: nine host-compiled and three Windows-
-only bodies awaiting full Windows compilation. All behavior remains NOT RUN.
+Twelve new live-close bodies are Windows-compiled, nine also host-compiled.
+All behavior remains NOT RUN.
 The canonical ledger binds current source/compiler evidence and preserved failures.
 Private APIs still produce warnings because production composition is missing;
 there is no strict Clippy, independent full-candidate review, behavioral
