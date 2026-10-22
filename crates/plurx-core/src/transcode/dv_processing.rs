@@ -1296,6 +1296,24 @@ fn completed_window_trailer(init: &crate::fmp4::Init) -> Vec<u8> {
     trailer
 }
 
+fn completed_target_policy(export: DvExportPolicy) -> Result<DvTargetPolicy, DvContractError> {
+    if let Some(display) = export.display_target() {
+        // Refuse an unresolved proposal before it can become a completed plan.
+        display.output_metadata()?;
+        let floor = display.mastering().min_1e4_nits;
+        let mut target = DvTargetPolicy::new(
+            2,
+            display.nits() * 1000,
+            floor / 10,
+            export.target_parameters(),
+        )?;
+        target.black_1e4_nits = Some(floor);
+        Ok(target)
+    } else {
+        DvTargetPolicy::new(1, 10_000_000, 5, export.target_parameters())
+    }
+}
+
 /// Inputs are collected by the daemon from its held source and completed
 /// private processes. This type is intentionally neither deserializable nor
 /// a helper receipt. Every byte-changing output fact is rechecked below.
@@ -1588,7 +1606,7 @@ pub fn dv_plan_completed_window(
             output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
         },
     );
-    let target = if let Some(display) = input.export_policy.display_target() {
+    if let Some(display) = input.export_policy.display_target() {
         pixels.insert(
             index + 1,
             DvGraphEdge {
@@ -1599,18 +1617,8 @@ pub fn dv_plan_completed_window(
                 output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
             },
         );
-        let floor = display.mastering().min_1e4_nits;
-        let mut target = DvTargetPolicy::new(
-            2,
-            display.nits() * 1000,
-            floor / 10,
-            input.export_policy.target_parameters(),
-        )?;
-        target.black_1e4_nits = Some(floor);
-        target
-    } else {
-        DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?
-    };
+    }
+    let target = completed_target_policy(input.export_policy)?;
     let graph = DvGraph {
         strategy,
         pixels,

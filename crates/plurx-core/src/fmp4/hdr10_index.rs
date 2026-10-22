@@ -584,7 +584,33 @@ mod tests {
         )
         .expect("old metadata");
         let stale = dv_author_hdr10_window(&source, old).expect("old encoder declarations");
-        let metadata = Hdr10OutputMetadata::new(P3, 1600, 17, 1600).expect("target metadata");
+        use crate::{scan::dv_title::*, transcode::dv_processing::*};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+        else {
+            panic!("target");
+        };
+        let target = target
+            .resolve_source(Some(DvSourceMastering {
+                primaries_rgbw: P3,
+                min_1e4_nits: 17,
+            }))
+            .expect("one effective render target");
+        assert_eq!(target.endpoint_args(), ["17", "4000"]);
+        let metadata = target
+            .output_metadata()
+            .expect("metadata uses the resolved helper floor");
         let output = dv_author_hdr10_window(&stale, metadata).expect("post-encode metadata");
         assert_eq!(
             dv_author_hdr10_window(&output, metadata).expect("repeat authoring"),
