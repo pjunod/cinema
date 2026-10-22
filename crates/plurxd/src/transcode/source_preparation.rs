@@ -845,17 +845,21 @@ mod dv_source_origin_tests {
             let format = held_source_clock(&document.to_string()).expect("held FORMAT clock");
             let origin = held_dv_source_origin(&document["streams"][0], (1, 1000), format)
                 .expect("common origin");
-            assert_eq!(origin.timestamp(), DvTimestamp::new(start, 1000).unwrap());
+            assert_eq!(
+                origin.timestamp(),
+                DvTimestamp::new(start, 1000).expect("valid held source timestamp")
+            );
             assert!(
                 held_dv_source_origin(&document["streams"][1], (1, 1000), format).is_err(),
                 "a later audio/other-stream start cannot replace the common clock"
             );
         }
-        let default = held_source_clock(r#"{"format":{}}"#).unwrap();
+        let default = held_source_clock(r#"{"format":{}}"#).expect("default held FORMAT clock");
         assert!(
             held_dv_source_origin(&serde_json::json!({"start_pts":0}), (1, 1000), default).is_err()
         );
-        let observed = held_source_clock(r#"{"format":{"start_time":"0.000000"}}"#).unwrap();
+        let observed = held_source_clock(r#"{"format":{"start_time":"0.000000"}}"#)
+            .expect("observed held FORMAT clock");
         for stream in [
             serde_json::json!({}),
             serde_json::json!({"start_pts":"N/A"}),

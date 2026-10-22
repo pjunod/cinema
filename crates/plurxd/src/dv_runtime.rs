@@ -1867,12 +1867,13 @@ mod source_origin_tests {
     fn renderer_receipt_requires_exact_observed_held_common_origin() {
         for (origin, micros, equivalent) in [("0/1", 0, "0/1000"), ("1/8", 125000, "125/1000")] {
             let expected = DvSourceOrigin::observed_common(
-                DvTimestamp::new(micros, 1000000).unwrap(),
+                DvTimestamp::new(micros, 1000000).expect("valid expected held-format timestamp"),
                 VodSourceClock::ReportedOrigin(micros),
             )
-            .unwrap();
+            .expect("valid observed common origin");
             for actual in [origin, equivalent] {
-                validate_window_origin(actual, "observed_stream_start_time", expected).unwrap();
+                validate_window_origin(actual, "observed_stream_start_time", expected)
+                    .expect("matching held-origin receipt");
             }
             for wrong in ["1/7", "124/1000", "N/A", "1/0", "9223372036854775808/1"] {
                 assert!(
