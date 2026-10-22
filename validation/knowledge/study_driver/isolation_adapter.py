@@ -170,11 +170,14 @@ class IsolatedAcceptance:
 
     def retire_acceptance(self,receipt,*,run_id,receipt_sha256,checkpoint_sha256):
         pending=self._pending_retirements.get(id(receipt))
-        if pending is None or pending["receipt"] is not receipt or pending["sha256"]!=digest(canonical(receipt)):
+        if pending is None or pending["receipt"] is not receipt or pending["object_sha256"]!=digest(canonical(receipt)):
             raise AcceptanceAdapterError("UnknownAcceptanceRetirement")
         event={"event":"acceptance_finished","run_id":run_id,"receipt_sha256":receipt_sha256}
         saved,authorization=self._checkpoint("acceptance-"+digest(run_id.encode())+".private.json",receipt_sha256,checkpoint_sha256,event)
-        if saved!=receipt or receipt_sha256!=pending["sha256"]:raise AcceptanceAdapterError("AcceptanceRetirementReceiptMismatch")
+        # Object integrity and persisted-byte identity are distinct: the atomic
+        # checkpoint writer includes a trailing newline in its actual file hash.
+        # _checkpoint already verified that exact file digest and journal event.
+        if saved!=receipt:raise AcceptanceAdapterError("AcceptanceRetirementReceiptMismatch")
         evidence=self.stager.retirement_evidence(pending["handle"])
         if not pending["proof_digests"] or not set(pending["proof_digests"])<=set(evidence["isolation_receipts"].values()):
             raise AcceptanceAdapterError("AcceptanceCleanupEvidenceMissing")
@@ -197,7 +200,7 @@ class IsolatedAcceptance:
         if self._study_terminal:raise AcceptanceAdapterError("AcceptanceAfterTerminalStudy")
         if self._pending_retirements:raise AcceptanceAdapterError("AcceptanceRetirementRequiredBeforeNextRun")
         result=self._evaluate(case,replacements,commands)
-        self._pending_retirements[id(result)]["sha256"]=digest(canonical(result))
+        self._pending_retirements[id(result)]["object_sha256"]=digest(canonical(result))
         return result
 
     def _evaluate(self,case,replacements,commands):

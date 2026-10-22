@@ -55,7 +55,7 @@ class StageRetirementTests(unittest.TestCase):
         private=handle.root/".isolation";private.mkdir(mode=0o700)
         body={"status":"verified" if cleanup else "unavailable","cleanup_proved":cleanup,"synthetic":True}
         path=private/("probe-"+uuid.uuid4().hex+".json")
-        digest=bindings.durable(path,body)
+        digest=isolation._write_private(path,body)
         proof=isolation.ProbeReceipt(body["status"],digest,path,"e"*64)
         if cleanup:isolation._ISSUED[id(proof)]=(proof,body)
         self.stager.record_receipt(handle,proof)
@@ -66,7 +66,7 @@ class StageRetirementTests(unittest.TestCase):
     def pending(self,handle,proof):
         receipt={"status":"passed","isolation_verified":True,"receipt_sha256":proof.digest}
         self.runner._pending_retirements[id(receipt)]={"receipt":receipt,"handle":handle,"proof_digests":(proof.digest,),
-                                                      "sha256":adapter.digest(adapter.canonical(receipt))}
+                                                      "object_sha256":adapter.digest(adapter.canonical(receipt))}
         return receipt
 
     def checkpoint(self,receipt,run_id="synthetic-run"):
@@ -93,6 +93,20 @@ class StageRetirementTests(unittest.TestCase):
         manifest=json.loads((archive/"archive.json").read_bytes())
         self.assertEqual(manifest["files"][proof.private_path.name]["sha256"],hashlib.sha256(original).hexdigest())
         self.assertEqual(json.loads((archive/"retirement-completed.json").read_bytes())["authorization"]["checkpoint_sha256"],self.journal.previous)
+
+    def test_real_atomic_checkpoint_file_digest_is_distinct_from_object_integrity(self):
+        handle,proof=self.stage();receipt=self.pending(handle,proof)
+        object_sha=self.runner._pending_retirements[id(receipt)]["object_sha256"]
+        fields=self.checkpoint(receipt,"newline-checkpoint")
+        path=self.output/("acceptance-"+launcher.sha(b"newline-checkpoint")+".private.json")
+        raw=path.read_bytes()
+        self.assertTrue(raw.endswith(b"\n"))
+        self.assertEqual(fields["receipt_sha256"],hashlib.sha256(raw).hexdigest())
+        self.assertNotEqual(fields["receipt_sha256"],object_sha)
+        self.runner.retire_acceptance(receipt,**fields)
+        self.assertTrue(handle.retired)
+        complete=json.loads((self.output/"stage-evidence"/handle.root.name/"retirement-completed.json").read_bytes())
+        self.assertEqual(complete["authorization"]["receipt_sha256"],fields["receipt_sha256"])
 
     def test_internal_build_hardlinks_can_retire_without_outside_aliases(self):
         handle,proof=self.stage();receipt=self.pending(handle,proof)
