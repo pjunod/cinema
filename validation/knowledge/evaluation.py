@@ -587,7 +587,23 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
             proxy = CorpusProxy(case, spec.arm, query, navigation=navigation_backend)
             backend = factory(spec, manifest)
             for ordinal in range(1, manifest.limits.steps + 1):
-                predicted = count_input(tuple(messages), proxy.tool_names)
+                try:
+                    emit("count-started", spec, request_ordinal=ordinal)
+                    predicted = count_input(tuple(messages), proxy.tool_names)
+                    _require(type(predicted) is int and predicted >= 0, "input counter unavailable")
+                    emit("count-finished", spec, request_ordinal=ordinal,
+                         predicted_input_tokens=predicted)
+                except Exception as exc:
+                    # A failed account count or either durable boundary is
+                    # terminal. It is not a deterministic per-run token limit.
+                    budget.uncertain = True
+                    stopped = "input counting or checkpoint unavailable"
+                    try:
+                        emit("count-failed", spec, request_ordinal=ordinal,
+                             result_unavailable=True, error_class=type(exc).__name__)
+                    except EvaluationError:
+                        pass
+                    raise EvaluationError("InputCounterUnavailable") from None
                 reservation = budget.reserve(spec.id, predicted, manifest.limits.output_tokens)
                 emit("request-reserved", spec, request_ordinal=ordinal,
                      predicted_input_tokens=predicted, max_output_tokens=manifest.limits.output_tokens,
@@ -650,7 +666,7 @@ def run_batch(cases: Sequence[CaseSpec], manifest: Manifest, factory: BackendFac
         except Exception as exc:
             status, error = "error", type(exc).__name__
             if budget.uncertain:
-                stopped = "request failed with unavailable usage"
+                stopped = stopped or "request failed with unavailable usage"
             elif not navigation_ready:
                 stopped = "navigation backend unavailable"
         finally:

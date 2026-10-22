@@ -70,6 +70,21 @@ class NavigationBoundaryTests(unittest.TestCase):
         self.assertFalse(root.exists())
         self.assertEqual(len(list((Path(self.owned.name) / 'audit').glob('*.json'))), 1)
 
+    def test_every_declared_mode_accepts_its_advertised_selector_and_receipt(self):
+        nav=VisibleRipwire(self.config,case())
+        try:
+            for mode in ("find","outline","body","callers","impact"):
+                selector="visible" if mode=="find" else "src/example.py:visible"
+                with self.subTest(mode=mode):
+                    result=nav(mode,selector)
+                    self.assertEqual(result["status"],"ok")
+                    self.assertEqual(result["mode"],mode)
+                    self.assertEqual(nav.audit["queries"][-1]["mode"],mode)
+                    receipt=nav.audit["queries"][-1]["receipt"]
+                    self.assertEqual(receipt["binary_sha256"],self.config.assets.expected_binary_sha256)
+                    self.assertEqual(receipt["head"],nav.audit["synthetic_head"])
+        finally:nav.close()
+
     def test_response_bound_counts_utf8_and_discloses_truncation(self):
         nav = VisibleRipwire(self.config, case())
         try:

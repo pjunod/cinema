@@ -507,11 +507,11 @@ if __name__ == "__main__":
 
 
 class DurableJournalTests(unittest.TestCase):
-    def run_observed(self, observer, factory=None):
+    def run_observed(self, observer, factory=None, counter=None):
         items = cases()
         frozen = manifest(items)
         return run_batch(items, frozen, factory or (lambda spec, frozen: FinalBackend()),
-                         lambda messages, names: 10, query_factory, receipt(frozen), observer=observer)
+                         counter or (lambda messages, names: 10), query_factory, receipt(frozen), observer=observer)
 
     def test_reservation_precedes_dispatch_and_response_precedes_completion(self):
         events = []
@@ -524,9 +524,9 @@ class DurableJournalTests(unittest.TestCase):
         for identity in (r.spec.id for r in batch.runs):
             rows = [e for e in events if e['run_id'] == identity]
             self.assertEqual([e['event'] for e in rows],
-                             ['run-start', 'request-reserved', 'response-received', 'run-finished'])
-            self.assertEqual(rows[1]['reserved_tokens'], 60)
-            self.assertEqual(rows[2]['response']['usage']['input_tokens'], 10)
+                             ['run-start', 'count-started', 'count-finished', 'request-reserved', 'response-received', 'run-finished'])
+            self.assertEqual(rows[3]['reserved_tokens'], 60)
+            self.assertEqual(rows[4]['response']['usage']['input_tokens'], 10)
         self.assertEqual(events[-1]['event'], 'batch-finished')
         self.assertEqual(batch.charged_tokens, 135)
 
@@ -563,3 +563,39 @@ class DurableJournalTests(unittest.TestCase):
             if event['event'] == 'request-reserved': event['messages'][0]['text'] = 'tampered'
         batch = self.run_observed(observe, lambda spec, frozen: Backend())
         self.assertIsNone(batch.stopped_reason)
+
+    def test_counter_transport_or_invalid_result_stops_all_later_calls(self):
+        for failure in (OSError("synthetic remote failure"), None, -1, True):
+            with self.subTest(failure=type(failure).__name__):
+                counted=[];dispatched=[];events=[]
+                def counter(*args):
+                    counted.append(1)
+                    if isinstance(failure,Exception):raise failure
+                    return failure
+                class Backend(FinalBackend):
+                    def respond(inner,*args,**kwargs):
+                        dispatched.append(1)
+                        return super().respond(*args,**kwargs)
+                batch=self.run_observed(events.append,lambda *a:Backend(),counter)
+                self.assertEqual(counted,[1]);self.assertEqual(dispatched,[])
+                self.assertEqual(sum(run.status=="not_started" for run in batch.runs),8)
+                self.assertEqual(batch.charged_tokens,0)
+                self.assertIsNotNone(batch.stopped_reason)
+                self.assertTrue(any(e["event"]=="count-failed" for e in events))
+
+    def test_counter_and_post_count_journal_failure_are_terminal(self):
+        for boundary in ("count-started","count-finished"):
+            with self.subTest(boundary=boundary):
+                counted=[];dispatched=[]
+                def observe(event):
+                    if event["event"]==boundary:raise OSError("synthetic checkpoint failure")
+                def counter(*args):counted.append(1);return 10
+                class Backend(FinalBackend):
+                    def respond(inner,*args,**kwargs):
+                        dispatched.append(1)
+                        return super().respond(*args,**kwargs)
+                batch=self.run_observed(observe,lambda *a:Backend(),counter)
+                self.assertEqual(len(counted),int(boundary=="count-finished"))
+                self.assertEqual(dispatched,[])
+                self.assertEqual(sum(run.status=="not_started" for run in batch.runs),8)
+                self.assertIsNotNone(batch.stopped_reason)

@@ -116,10 +116,60 @@ def tool_registry():
         "search":"Search literal text within frozen visible source lines.",
         "outline":"List visible declarations in a frozen source file.",
         "edit":"Stage an edit in original source coordinates inside an explicit edit permission.",
-        "ripwire":"Run pinned actual Ripwire against this session's visible source only. Modes: find words; outline path; body/callers/impact path:symbol.",
+        "ripwire":"Run pinned actual Ripwire against this session's visible source only. Modes: find words; outline/body/callers/impact file:symbol (a visible file path, colon, and symbol).",
         "knowledge_query":"Query only this case's projected knowledge. Traversal depth is fixed by the arm; target is a path, identity or cohort appropriate to kind."}
     return {name:{"name":name,"description":descriptions[name],"input_schema":{"type":"object","properties":properties,
         "required":[key for key in properties if key!="continuation"],"additionalProperties":False}} for name,properties in fields.items()}
+
+
+def navigation_symbol_selector(case):
+    """Choose a declared callable from visible source, never a hidden body."""
+    import re
+    patterns=(r"^\s*(?:(?:pub(?:\([^)]*\))?|unsafe|async|const)\s+)*fn\s+([A-Za-z_]\w*)",r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)",r"^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+    for file in case.files:
+        for number,line in enumerate(file.content.splitlines(),1):
+            if not any(a<=number<=b for a,b in file.visible_line_ranges):continue
+            for pattern in patterns:
+                match=re.match(pattern,line)
+                if match:return file.path+":"+match[1]
+    return None
+
+
+def verify_navigation_result(session,value,mode,*,assets,expected_view_sha256,previous_queries):
+    """A successful result must have its newly observed verified provenance."""
+    require(isinstance(value,dict) and value.get("status") in {"ok","partial"} and value.get("mode")==mode,"actual visible Ripwire query unavailable")
+    audit=session.audit
+    require(audit.get("assets_sha256")==assets.digest and audit.get("view_sha256")==expected_view_sha256,"navigation asset/view provenance mismatch")
+    require(len(audit.get("queries",()))==previous_queries+1,"actual navigation query receipt required")
+    query=audit["queries"][-1];receipt=query.get("receipt",{})
+    require(query.get("mode")==mode and receipt.get("binary_sha256")==assets.expected_binary_sha256 and receipt.get("head")==audit.get("synthetic_head") and receipt.get("root")==str(session.root),"actual navigation source/binary receipt mismatch")
+    return {"mode":mode,"status":value["status"],"result_sha256":digest(value),"receipt_sha256":digest(receipt)}
+
+
+def calibrated_allocation(counts,initial,stress_count,stress_base_count,charged):
+    """Validate a measured admitted envelope before any paid study answer.
+
+    The synthetic increment is a finite representative answer/edit, not a
+    worst-case bound on arbitrary solver output or citation expansion. Actual
+    complete scorer inputs must independently fit these frozen per-case token
+    ceilings, identically across arms and raters, or remain unscored. Required
+    source evidence is never truncated to pass admission.
+    """
+    require(len(counts)==12 and all(type(v) is int and v>0 for v in counts.values()),"complete measured scorer counts required")
+    require(set(initial)=={"A","B","C"} and all(type(v) is int and v>0 for v in initial.values()),"complete measured initial solver counts required")
+    require(type(stress_count) is int and stress_count>0 and stress_base_count==max(counts.values()),"measured stress envelope required")
+    require(type(charged) is int and 0<charged<=CALIBRATION_PARTITION,"finite charged calibration required")
+    solver_total=(SOLVER_PARTITION//108)*108;solver_run=solver_total//108
+    require(max(initial.values())+1600<=solver_run,"measured initial solver envelope cannot fit frozen share")
+    scorer_total=HARD_CEILING-charged-solver_total
+    require(scorer_total<=SCORER_PARTITION+CALIBRATION_PARTITION-charged+108,"scorer allocation outside predeclared redistribution")
+    output=3000;stress_delta=max(0,stress_count-stress_base_count)
+    required={key:value+stress_delta+output for key,value in counts.items()}
+    require(18*sum(required.values())<=scorer_total,"measured scorer stress envelopes cannot fit all 216 reserved shares")
+    extra=(scorer_total//18-sum(required.values()))//len(counts)
+    caps={key:value+extra for key,value in required.items()}
+    require(18*sum(caps.values())<=scorer_total,"all 216 scorer shares must be reserved equally across arms")
+    return solver_total,solver_run,scorer_total,output,caps,stress_delta+extra
 
 
 class PreparedStudy:
@@ -217,21 +267,30 @@ class PreparedStudy:
         proof=self.runner.preflight();require(proof.get("status")=="verified","actual execution containment preflight unavailable")
         family=self.runner.study_prerequisites(families)
         require(family.get("status")=="qualified" and family.get("supported_count")==4 and family.get("unsupported_count")==0,"all four frozen acceptance families must actually qualify")
-        nav_receipts=[]
+        nav_receipts=[];contract_modes=set()
         for case in self.cases:
             spec=SimpleNamespace(case_id=case.id)
             session=self.nav(spec,case)
             try:
-                value=session("find",case.files[0].path)
-                require(isinstance(value,dict),"actual visible Ripwire result required")
-                nav_receipts.append({"case_id":case.id,"result_sha256":digest(value)})
+                files=navigation._visible(case)
+                expected_view=digest({key:hashlib.sha256(raw).hexdigest() for key,raw in sorted(files.items())})
+                selectors=[("find",case.files[0].path)]
+                symbol=navigation_symbol_selector(case)
+                if symbol and len(contract_modes)<len(navigation.MODES):
+                    selectors.extend((mode,symbol) for mode in ("outline","body","callers","impact") if mode not in contract_modes)
+                for mode,selector in selectors:
+                    previous=len(session.audit["queries"])
+                    value=session(mode,selector)
+                    observed=verify_navigation_result(session,value,mode,assets=self.nav.factory.config.assets,expected_view_sha256=expected_view,previous_queries=previous)
+                    nav_receipts.append({"case_id":case.id,**observed});contract_modes.add(mode)
             finally:session.close()
+        require(contract_modes==set(navigation.MODES),"every declared Ripwire mode must actually qualify")
         report={"containment":proof,"families":family,"navigation":nav_receipts,"navigation_identity_sha256":digest(self.nav.factory.identity),
             "qualification_keys":sorted(self.runner.prequalified),"source_closure_sha256":self.closure.sha256}
         self.qualification_sha256=checkpoints.atomic_private(self.output,"qualification.private.json",report,replace=False)
         self.config.update(qualification_path=str(self.output/"qualification.private.json"),qualification_sha256=self.qualification_sha256,source_closure_sha256=self.closure.sha256)
         self.qualified=True
-        return {"status":"qualified","families":4,"navigation_cases":len(nav_receipts),"receipt_sha256":self.qualification_sha256}
+        return {"status":"qualified","families":4,"navigation_cases":len(self.cases),"navigation_queries":len(nav_receipts),"navigation_modes":len(contract_modes),"receipt_sha256":self.qualification_sha256}
 
     def calibrate(self):
         require(self.qualified and not self.calibrated and self.client is None,"once-only complete runtime qualification must precede calibration")
@@ -269,9 +328,14 @@ class PreparedStudy:
             return value
         try:
             for identifier,payload in static:counts[identifier]=count("static-scorer-"+identifier,messages(payload),(),{})
-            largest=max(static,key=lambda pair:len(checkpoints.canonical(pair[1])))
-            stress=json.loads(json.dumps(largest[1]));stress["answer"]="synthetic constraint and explicit source citation. "*320
-            stress["edits"]=[{"path":"synthetic.py","source_identity":"synthetic","start_line":i+1,"end_line":i+1,"replacement":"s"*8192} for i in range(8)]
+            largest=max(static,key=lambda pair:counts[pair[0]])
+            stress=json.loads(json.dumps(largest[1]))
+            # Preregistered finite representative increment: 2,048 UTF-8
+            # bytes split equally between answer and one edit. This does not
+            # claim every possible full evidence projection fits a share.
+            stress["answer"]=("Apply the cited constraint to this proposal. "*32)[:1024]
+            stress["edits"]=[{"path":"synthetic.py","source_identity":"synthetic","start_line":1,"end_line":1,"replacement":("synthetic replacement constraint\n"*40)[:1024]}]
+            require(len(stress["answer"].encode())+sum(len(edit["replacement"].encode()) for edit in stress["edits"])==2048,"fixed calibration increment changed")
             stress_count=count("stress-scorer",messages(stress),(),{})
             largest_case=max(self.cases,key=lambda case:len(case.prompt.encode()))
             initial={}
@@ -295,19 +359,13 @@ class PreparedStudy:
             require(type(actual) is int and actual>0 and actual<=reservation and response.usage.input_tokens<=10000 and response.usage.output_tokens<=1600,"synthetic usage unavailable or exceeds reservation")
             charged+=actual
             require(response.model==self.model and response.stop_reason=="tool_use" and len(response.calls)==1 and response.calls[0].name=="list_files" and json.loads(response.calls[0].arguments_json)=={},"synthetic exact model/tool capability unavailable")
-            # Redistribute unused calibration allocation before any answers; the
-            # total ceiling remains exactly bounded and each cell owns its share.
-            solver_total=(SOLVER_PARTITION//108)*108;solver_run=solver_total//108
-            scorer_total=HARD_CEILING-charged-solver_total
-            require(scorer_total<=SCORER_PARTITION+CALIBRATION_PARTITION-charged+108,"scorer allocation outside predeclared redistribution")
-            output=3000;base=sum(value+output for value in counts.values())
-            allowance=scorer_total//18-base
-            require(allowance>=0,"exact complete scorer envelopes cannot fit finite pre-answer allocation")
-            extra=allowance//len(counts);caps={key:value+output+extra for key,value in counts.items()}
-            require(18*sum(caps.values())<=scorer_total,"all 216 scorer shares must be reserved equally across arms")
+            solver_total,solver_run,scorer_total,output,caps,extra=calibrated_allocation(counts,initial,stress_count,counts[largest[0]],charged)
             calibration={"status":"calibrated","model":self.model,"settings":self.settings,"count_calls":calls,"synthetic_inference_calls":1,
                 "counted_input_tokens":sum(row["input_tokens"] for row in observations),"synthetic_usage":asdict(response.usage),"charged_calibration_tokens":charged,
-                "stress_input_tokens":stress_count,"static_scorer_counts":counts,"initial_solver_counts":initial,"scorer_payload_allowance":extra,
+                "stress_input_tokens":stress_count,"stress_answer_edit_utf8_bytes":2048,
+                "stress_scope":"representative admitted envelope; not worst-case arbitrary output",
+                "scorer_admission":"complete input count plus output reservation <= frozen case cap; oversize durable unscored; never truncate evidence",
+                "static_scorer_counts":counts,"initial_solver_counts":initial,"scorer_payload_allowance":extra,
                 "solver_total_tokens":solver_total,"solver_run_tokens":solver_run,"scorer_total_tokens":scorer_total,"scorer_case_caps":caps,
                 "hard_aggregate_tokens":HARD_CEILING,"qualification_sha256":self.qualification_sha256,"source_closure_sha256":self.closure.sha256,
                 "document_reference_sha256":self.config["document_reference_sha256"],"operator_plan_sha256":self.spec_sha256,"client_identity":self.client_identity,

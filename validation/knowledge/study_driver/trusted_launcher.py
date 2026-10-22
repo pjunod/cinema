@@ -152,6 +152,35 @@ def parse_blind_score(raw,private,run,ev,anonymous,scorer_id,patch_status):
     score=ev.Score(scorer_id,run.spec.id,len(ids),sum(not x["honored"] for x in rows),data["false_obligations"],data["unsupported_claims"],patch,data["critical_authority_claim"],data["critical_patch_regression"],judgment_digest=judgment_digest)
     return score,{**data,"documentation":documentation}
 
+def perform_scorer_request(entry,*,messages,count_score,admission,scorer_limits,case_cap,score_budget,backend,request_journal,batch_tokens,dry,calibrated):
+    """Only a known local share miss can return without halting the study.
+
+    Full evidence is counted before admission; nothing is truncated to fit.
+    Remote uncertainty or any durable-boundary failure raises to the caller,
+    which stops all later count and inference calls with reservations retained.
+    """
+    identifiers={key:entry[key] for key in ("run_id","scorer_id","anonymous_id")}
+    request_journal.append({"event":"scorer_count_prepared",**identifiers,"messages":[asdict(m) for m in messages]})
+    with admission.request():input_tokens=count_score(messages,())
+    request_journal.append({"event":"scorer_count_received",**identifiers,"input_tokens":input_tokens})
+    require(type(input_tokens) is int and input_tokens>0,"ScorerInputCountUnavailable")
+    if input_tokens+scorer_limits.output_tokens>case_cap:
+        entry.update(status="unscored",reason="ScorerCaseShareExceeded",input_tokens=input_tokens,case_cap=case_cap)
+        request_journal.append({"event":"scorer_share_exhausted",**identifiers,"input_tokens":input_tokens,"case_cap":case_cap,"output_reservation":scorer_limits.output_tokens})
+        return None
+    reservation=score_budget.reserve(entry["anonymous_id"],input_tokens,scorer_limits.output_tokens)
+    entry["reservation"]=reservation
+    request_journal.append({"event":"scorer_request_reserved",**identifiers,"reservation":reservation})
+    entry["status"]="request_started"
+    response=backend.respond(messages,(),max_output_tokens=scorer_limits.output_tokens,timeout_seconds=scorer_limits.request_timeout_seconds)
+    entry.update(response=response.text,request_id=response.request_id,usage=asdict(response.usage),status="response_received")
+    request_journal.append({"event":"scorer_response_received",**identifiers,"response":asdict(response)})
+    score_budget.settle(entry["anonymous_id"],reservation,response.usage)
+    request_journal.append({"event":"scorer_settled",**identifiers,"charged_tokens":score_budget.charged_tokens})
+    require(not score_budget.uncertain and not response.calls and response.stop_reason not in ("max_tokens","pause_turn","refusal"),"IncompleteOrUnaccountedScoring")
+    require(batch_tokens+score_budget.charged_tokens+dry<=calibrated,"CalibratedAggregateCeilingReached")
+    return response
+
 def _launch(config,*,ev,provider,projection_api,graph,client,query_backend_factory,
            baseline_reader,acceptance_runner,admission,review_gate,output_root,navigation_factory,request_journal,reporting,document_api):
     """No call is authorized by merely having this draft source file."""
@@ -252,35 +281,32 @@ def _launch(config,*,ev,provider,projection_api,graph,client,query_backend_facto
             count_score=provider.make_input_counter(client,model=manifest.model,settings=json.loads(manifest.settings_json),tool_registry={},timeout_seconds=scorer_limits.request_timeout_seconds)
             entry={"anonymous_id":anonymous,"run_id":run.spec.id,"scorer_id":scorer_id,"payload_sha256":sha(canonical(payload)),"reservation":None,"status":"prepared"}
             try:
-                request_journal.append({"type":"scorer_count_prepared","run_id":run.spec.id,"scorer_id":scorer_id,"anonymous_id":anonymous,"messages":[asdict(m) for m in messages]})
-                with admission.request():input_tokens=count_score(messages,())
-                request_journal.append({"type":"scorer_count_received","run_id":run.spec.id,"scorer_id":scorer_id,"anonymous_id":anonymous,"input_tokens":input_tokens})
-                require(type(input_tokens) is int and input_tokens>0 and input_tokens+scorer_limits.output_tokens<=scorer_caps[run.spec.case_id],"ScorerCaseShareExceeded")
-                reservation=score_budget.reserve(anonymous,input_tokens,scorer_limits.output_tokens)
-                request_journal.append({"type":"scorer_request_reserved","run_id":run.spec.id,"scorer_id":scorer_id,"anonymous_id":anonymous,"reservation":reservation})
-                entry["reservation"]=reservation;entry["status"]="request_started"
-                response=backend.respond(messages,(),max_output_tokens=scorer_limits.output_tokens,timeout_seconds=scorer_limits.request_timeout_seconds)
-                entry.update({"response":response.text,"request_id":response.request_id,"usage":asdict(response.usage),"status":"response_received"})
-                request_journal.append({"type":"scorer_response_received","run_id":run.spec.id,"scorer_id":scorer_id,"anonymous_id":anonymous,"response":asdict(response)})
-                score_budget.settle(anonymous,reservation,response.usage)
-                request_journal.append({"event":"scorer_settled","run_id":run.spec.id,"scorer_id":scorer_id,"anonymous_id":anonymous,"charged_tokens":score_budget.charged_tokens})
-                require(not score_budget.uncertain and not response.calls and response.stop_reason not in ("max_tokens","pause_turn","refusal"),"IncompleteOrUnaccountedScoring")
-                require(batch.charged_tokens+score_budget.charged_tokens+dry<=calibrated,"CalibratedAggregateCeilingReached")
+                response=perform_scorer_request(entry,messages=messages,count_score=count_score,admission=admission,
+                    scorer_limits=scorer_limits,case_cap=scorer_caps[run.spec.case_id],score_budget=score_budget,backend=backend,
+                    request_journal=request_journal,batch_tokens=batch.charged_tokens,dry=dry,calibrated=calibrated)
             except Exception as error:
                 if entry["status"]=="request_started":score_budget.uncertain=True
                 entry["error"]=type(error).__name__;entry["status"]="stopped";journal.append(entry)
                 journal_hash=save_private(output_root,"scoring-journal.private.json",journal)
                 return {"status":"inconclusive","reason":"ScoringBudgetOrRequestStopped","batch_sha256":batch_hash,"private_scoring_journal_sha256":journal_hash,"scorer_tokens":score_budget.charged_tokens}
+            if response is None:
+                pending.append(run.spec.id);journal.append(entry)
+                save_private(output_root,"scoring-journal.private.json",journal)
+                continue
             try:
                 score,judgment=parse_blind_score(response.text,row,run,ev,anonymous,scorer_id,patch_status)
+                # The descriptive citation vector cannot invalidate a valid
+                # original Gold judgment or silently remove its denominator.
+                scores.append(score);entry["judgment"]=judgment
                 docscore=document_api.parse(judgment["documentation"],reference_rows[run.spec.case_id],projection,run,reporting,scorer_id)
-                scores.append(score);document_scores.append(docscore);entry["judgment"]=judgment
-                entry["document_score"]=asdict(docscore)
-                request_journal.append({"event":"scorer_judgment_checkpoint","run_id":run.spec.id,"scorer_id":scorer_id,"judgment_sha256":sha(canonical(judgment))})
+                document_scores.append(docscore);entry["document_score"]=asdict(docscore)
             except Exception as error:entry["score_error"]=type(error).__name__;pending.append(run.spec.id)
+            # A checkpoint failure is terminal, never a parse miss that permits
+            # another paid request. The outer launcher preserves diagnostics.
+            if "judgment" in entry:
+                request_journal.append({"event":"scorer_judgment_checkpoint","run_id":run.spec.id,"scorer_id":scorer_id,"judgment_sha256":sha(canonical(entry["judgment"]))})
             journal.append(entry);save_private(output_root,"scoring-journal.private.json",journal)
     journal_hash=save_private(output_root,"scoring-journal.private.json",journal)
-    if pending:return {"status":"inconclusive","reason":"UnavailableQualificationOrScoring","batch_sha256":batch_hash,"private_scoring_journal_sha256":journal_hash}
     # Generic analysis retains independent disagreement; it never receives gold text.
     try:analysis=ev.analyze(batch,scores)
     except Exception as error:analysis={"status":"inconclusive","reason":type(error).__name__}
@@ -290,7 +316,7 @@ def _launch(config,*,ev,provider,projection_api,graph,client,query_backend_facto
     token_report=reporting.token_summary(batch)
     token_hash=save_private(output_root,"token-summary.private.json",token_report)
     request_journal.append({"event":"analysis_checkpoint","primary_sha256":analysis_hash,"documentation_sha256":document_hash,"tokens_sha256":token_hash})
-    return {"status":"complete" if analysis.get("all_runs_completed") is True and not analysis.get("unscored_runs") and not analysis.get("disagreements") else "inconclusive","batch_sha256":batch_hash,"private_scoring_journal_sha256":journal_hash,"private_analysis_sha256":analysis_hash,"solver_tokens":batch.charged_tokens,"scorer_tokens":score_budget.charged_tokens,"recorded_dry_run_tokens":dry,"analysis":public_numeric_analysis(analysis,set(public_rows)),"documentation":document_report,"token_summary":token_report,"private_document_analysis_sha256":document_hash,"private_token_summary_sha256":token_hash}
+    return {"status":"complete" if not pending and analysis.get("all_runs_completed") is True and not analysis.get("unscored_runs") and not analysis.get("disagreements") else "inconclusive","batch_sha256":batch_hash,"private_scoring_journal_sha256":journal_hash,"private_analysis_sha256":analysis_hash,"solver_tokens":batch.charged_tokens,"scorer_tokens":score_budget.charged_tokens,"unscored_contexts":len(pending),"recorded_dry_run_tokens":dry,"analysis":public_numeric_analysis(analysis,set(public_rows)),"documentation":document_report,"token_summary":token_report,"private_document_analysis_sha256":document_hash,"private_token_summary_sha256":token_hash}
 
 
 

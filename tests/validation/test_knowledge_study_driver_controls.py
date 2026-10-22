@@ -1,4 +1,5 @@
 """Synthetic operator boundary controls; no real cases, Gold or providers."""
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace as NS
 import hashlib
@@ -14,6 +15,8 @@ from validation.knowledge.study_driver import document_scoring as docs
 from validation.knowledge.study_driver import request_journal as journal
 from validation.knowledge.study_driver import source_binding as sources
 from validation.knowledge.study_driver import operator_workflow as workflow
+from validation.knowledge.study_driver import trusted_launcher as launcher
+from validation.knowledge import evaluation as ev
 
 
 def scratch():
@@ -143,3 +146,102 @@ print('synthetic exact buffer pass')
             result=subprocess.run([sys.executable,"-I","-S","-c",program,sources.__file__,hashlib.sha256(Path(sources.__file__).read_bytes()).hexdigest(),str(module),str(root/"sources.json"),sha],capture_output=True,timeout=30)
             self.assertEqual(result.returncode,0,result.stderr.decode())
             self.assertEqual(result.stdout,b"synthetic exact buffer pass\n")
+
+
+class NavigationQualificationTests(unittest.TestCase):
+    def fixture(self):
+        assets=NS(digest="assets",expected_binary_sha256="binary")
+        session=NS(root=Path("/synthetic-visible"),audit={"assets_sha256":"assets","view_sha256":"view","synthetic_head":"head","queries":[{"mode":"outline","receipt":{"binary_sha256":"binary","head":"head","root":"/synthetic-visible"}}]})
+        return session,assets
+
+    def test_registry_declares_same_file_symbol_selector_for_every_symbol_mode(self):
+        tool=workflow.tool_registry()["ripwire"]
+        self.assertIn("outline/body/callers/impact file:symbol",tool["description"])
+        self.assertEqual(tool["input_schema"]["properties"]["mode"]["enum"],["find","outline","body","callers","impact"])
+
+    def test_unavailable_dict_and_missing_or_mismatched_provenance_refuse(self):
+        session,assets=self.fixture()
+        kwargs=dict(assets=assets,expected_view_sha256="view",previous_queries=0)
+        with self.assertRaisesRegex(ValueError,"unavailable"):
+            workflow.verify_navigation_result(session,{"status":"unavailable","mode":"outline"},"outline",**kwargs)
+        session.audit["queries"][-1]["receipt"]["head"]="other"
+        with self.assertRaisesRegex(ValueError,"receipt mismatch"):
+            workflow.verify_navigation_result(session,{"status":"ok","mode":"outline"},"outline",**kwargs)
+        session.audit["queries"]=[]
+        with self.assertRaisesRegex(ValueError,"receipt required"):
+            workflow.verify_navigation_result(session,{"status":"ok","mode":"outline"},"outline",**kwargs)
+
+    def test_successful_empty_result_needs_exact_verified_fresh_receipt(self):
+        session,assets=self.fixture()
+        observed=workflow.verify_navigation_result(session,{"status":"ok","mode":"outline","text":"","coverage_warning":"empty heuristic graph is not proof of absence"},"outline",assets=assets,expected_view_sha256="view",previous_queries=0)
+        self.assertEqual(observed["status"],"ok")
+        self.assertEqual(len(observed["receipt_sha256"]),64)
+
+
+class CalibrationAdmissionTests(unittest.TestCase):
+    def test_measured_envelope_reserves_every_share_before_answers(self):
+        values={str(i):1000+i for i in range(12)}
+        solver,run,scorer,output,caps,extra=workflow.calibrated_allocation(values,{a:1200 for a in "ABC"},1600,1011,50000)
+        self.assertLessEqual(108*run,solver)
+        self.assertLessEqual(18*sum(caps.values()),scorer)
+        self.assertTrue(all(caps[key]>=count+589+output for key,count in values.items()))
+        self.assertLessEqual(solver+scorer+50000,3000000)
+
+    def test_infeasible_measured_stress_or_initial_solver_refuses(self):
+        values={str(i):1000 for i in range(12)}
+        with self.assertRaisesRegex(ValueError,"216 reserved shares"):
+            workflow.calibrated_allocation(values,{a:1200 for a in "ABC"},100000,1000,50000)
+        with self.assertRaisesRegex(ValueError,"initial solver envelope"):
+            workflow.calibrated_allocation(values,{a:14000 for a in "ABC"},1500,1000,50000)
+
+
+class ScorerAdmissionTests(unittest.TestCase):
+    def fixture(self):
+        limits=NS(total_tokens=1000,run_tokens=100,output_tokens=30,request_timeout_seconds=10)
+        budget=ev.Budget(limits);events=[]
+        backend=NS(respond=Mock(return_value=ev.Response("synthetic score",(),ev.Usage(20,5),"synthetic-request",None,"synthetic","end_turn")))
+        entry={"run_id":"synthetic-run","scorer_id":"S1","anonymous_id":"one","reservation":None,"status":"prepared"}
+        kwargs=dict(messages=(ev.Message("user","synthetic inert evidence"),),admission=NS(request=nullcontext),scorer_limits=limits,case_cap=100,score_budget=budget,backend=backend,request_journal=NS(append=events.append),batch_tokens=10,dry=10,calibrated=3000000)
+        return entry,kwargs,events,backend,budget
+
+    def test_local_oversize_is_durable_unscored_then_later_context_runs(self):
+        entry,kwargs,events,backend,budget=self.fixture()
+        self.assertIsNone(launcher.perform_scorer_request(entry,count_score=lambda *a:80,**kwargs))
+        self.assertEqual(entry["status"],"unscored")
+        self.assertEqual(events[-1]["event"],"scorer_share_exhausted")
+        self.assertEqual(budget.charged_tokens,0);backend.respond.assert_not_called()
+        later={**entry,"anonymous_id":"two","status":"prepared"}
+        self.assertIsNotNone(launcher.perform_scorer_request(later,count_score=lambda *a:20,**kwargs))
+        self.assertEqual(budget.charged_tokens,25);self.assertEqual(backend.respond.call_count,1)
+
+    def test_remote_or_count_checkpoint_failure_raises_before_dispatch(self):
+        for fail in ("remote","count-journal"):
+            with self.subTest(fail=fail):
+                entry,kwargs,events,backend,budget=self.fixture()
+                def counter(*args):
+                    if fail=="remote":raise OSError("synthetic quota failure")
+                    return 20
+                def append(event):
+                    if fail=="count-journal" and event["event"]=="scorer_count_received":raise OSError("synthetic journal failure")
+                    events.append(event)
+                kwargs["request_journal"]=NS(append=append)
+                with self.assertRaises(OSError):launcher.perform_scorer_request(entry,count_score=counter,**kwargs)
+                backend.respond.assert_not_called();self.assertEqual(budget.charged_tokens,0)
+
+    def test_response_checkpoint_failure_retains_full_reservation(self):
+        entry,kwargs,events,backend,budget=self.fixture()
+        def append(event):
+            if event["event"]=="scorer_response_received":raise OSError("synthetic journal failure")
+            events.append(event)
+        kwargs["request_journal"]=NS(append=append)
+        with self.assertRaises(OSError):launcher.perform_scorer_request(entry,count_score=lambda *a:20,**kwargs)
+        self.assertEqual(budget.charged_tokens,50)
+        self.assertEqual(entry["reservation"],50)
+        self.assertEqual(backend.respond.call_count,1)
+
+    def test_unknown_remote_usage_is_terminal_with_reservation_retained(self):
+        entry,kwargs,events,backend,budget=self.fixture()
+        backend.respond.return_value=ev.Response("synthetic",(),ev.Usage(),"request",None,"synthetic","end_turn")
+        with self.assertRaisesRegex(launcher.LaunchRefusal,"Unaccounted"):
+            launcher.perform_scorer_request(entry,count_score=lambda *a:20,**kwargs)
+        self.assertTrue(budget.uncertain);self.assertEqual(budget.charged_tokens,50)
