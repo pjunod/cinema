@@ -24,23 +24,23 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`feb5c2fdf` composes exact acquired root/discard-task facts with the original
-single-use live receipt into retained journal settlement. Same bundle lock,
-retained-user fence and original graph generation/counts are checked before
-cleanup; omitted sources/unsupported members refuse. No await/fallible lookup
-between receipt and retained mutation. Existing rejection/unknown-commit retry
-and matching durable-settle-before-once-refund remain. Seven Unix bodies are
-host-COMPILED NOT RUN; no positive end-to-end settlement/recovery is claimed.
+`b63cb217c` connects exact same-file v1→v2 upgrade to `Storage::open`, after
+witness/location/file guards and before owner registration. Frozen v1 DDL/codecs,
+all historical rows/JSON/operations/u64 values survive; one transaction rebuilds
+only meta/members, adds typed asset ownership and checks both inventories/totals.
+Strict SourceFile/copy/task/scratch/Closed-or-Transferred documents now feed startup
+reconstruction and family-OR-asset accounting, never receipt deserialization.
+Retained vectors cover actual declared handles/buffers/readers/files, not CPU slots.
 
-Pinned1.97.1 changed-core all-target Hiqlite-contract PASS10.075s, four source
-hashes (`compile-run75-host-204823.json`); initial helper compile errors repaired.
-Prior host125.139s+47.42s and Windows135.763s+73.591s remain scoped to unchanged
-source. New runtime composition not yet Windows-compiled; ALL behavior NOT RUN,
-NOT strict Clippy. `35f0d8715`/`6dc165309` still provide restricted Windows LIVE
-proof after real native-owner disposal, not Windows durable/restart support.
-Owner-requested C1 reassessment: custom privilege is NOT inherently required;
-earlier hostile-peer premises over-constrained the plan. Explicit R2 scope amendment
-must precede any weaker receipt. Typed owners/normal finite playback remain open.
+Pinned1.97.1 combined core+daemon all-target Hiqlite-contract PASS225.756s;
+subsequent copy/cost guards invalidated only core, PASS56.750s on17bindings.
+Fourteen new bodies COMPILED NOT RUN;51lib/4libtest warnings, NOT strict Clippy.
+Real VOD source/task owners and atomic R→S writer still missing: startup decoding
+is connected, actual request/admission/output/retirement remains LEGACY.
+Controller's current prior C2 Windows check PASS12.246s; v2 Windows unclaimed.
+Final C1 amendment accepts trusted fixed-software/known-helper normal ownership,
+NOT a custom broker; exact positive old-domain restart evidence remains missing.
+No receipt was weakened by this data/migration slice; all behavior NOT RUN.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before

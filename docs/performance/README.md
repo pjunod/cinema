@@ -17,7 +17,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
-| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Exact retained live settlement, Store/custody; compiled NOT RUN, typed owners/recovery/normal playback/M0–M7 open. | open |
+| [ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) | Typed v2 migration/startup custody; compiled NOT RUN, actual VOD owners/retirement/recovery/M0–M7 open. | open |
 | [ADAPTIVE-PLAYBACK-DELIVERY.md](ADAPTIVE-PLAYBACK-DELIVERY.md) | Finite M0–M7 implemented/missing deliverables, dependencies, owners, application behavior and first finite VOD closure target. | open |
 | [ADAPTIVE-RESOURCE-CUSTODY.md](ADAPTIVE-RESOURCE-CUSTODY.md) | Local custody storage, live-close restrictions, startup refusal and backup/recovery limits. | open |
 | [ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) | Required workload, lifecycle, cluster, platform and latency evidence for adaptive resource management. | open |
