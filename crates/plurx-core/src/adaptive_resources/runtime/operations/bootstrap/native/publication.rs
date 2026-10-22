@@ -109,6 +109,33 @@ impl NodeResourceRuntime {
     ) -> Result<Uuid, OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        self.queue_scratch_publication_locked(&mut bundle, index, member, output, payload)
+    }
+
+    /// Wait for the SAME bundle lock before adopting a producer payload. The
+    /// caller retains the payload for the entire wait; every rejection leaves
+    /// it untouched.
+    pub(in crate::adaptive_resources::runtime) async fn queue_scratch_publication_wait(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        output: OutputKey,
+        payload: &mut Vec<u8>,
+    ) -> Result<Uuid, OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        self.queue_scratch_publication_locked(&mut bundle, index, member, output, payload)
+    }
+
+    fn queue_scratch_publication_locked(
+        &self,
+        bundle: &mut Bundle,
+        index: usize,
+        member: Uuid,
+        output: OutputKey,
+        payload: &mut Vec<u8>,
+    ) -> Result<Uuid, OperationError> {
         if !bundle.installed {
             return Err(OperationError::State);
         }

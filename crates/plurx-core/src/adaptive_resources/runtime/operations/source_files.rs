@@ -4,7 +4,7 @@
 use super::*;
 use crate::source_identity::SourceIdentity;
 use std::fs::File;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use tokio::task::JoinHandle;
 
@@ -39,6 +39,26 @@ pub(super) struct SourceCell {
     root_observed_committed: bool,
     selected_root_member: Option<Uuid>,
     pending_root: Option<(Uuid, v2::SourceCopy, v2::SourceObserved)>,
+    parent_close_operation_id: Uuid,
+    parent_close: ParentCloseState,
+}
+
+enum ParentCloseState {
+    NotStarted,
+    Registered {
+        task: JoinHandle<ParentCloseOutcome>,
+        enter: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+    Closed,
+    Failed(i32),
+    Unknown,
+}
+
+enum ParentCloseOutcome {
+    Closed,
+    Failed(i32),
+    NotEntered,
+    Unknown,
 }
 
 pub(super) struct InheritedSource {
@@ -229,6 +249,8 @@ impl NodeResourceRuntime {
                 root_observed_committed: false,
                 selected_root_member: None,
                 pending_root: None,
+                parent_close_operation_id: Uuid::new_v4(),
+                parent_close: ParentCloseState::NotStarted,
             },
         );
         Ok(())
@@ -466,6 +488,107 @@ impl SourceCell {
             },
             acknowledged: self.root_observed_committed,
         })
+    }
+
+    /// Closes only this retained parent descriptor. A failed/ambiguous close is
+    /// terminal because retrying its numeric fd could close a recycled handle.
+    pub(super) async fn close_parent(&mut self) -> Result<(), OperationError> {
+        match &self.parent_close {
+            ParentCloseState::Closed => return Ok(()),
+            ParentCloseState::Failed(errno) => {
+                return Err(std::io::Error::from_raw_os_error(*errno).into());
+            }
+            ParentCloseState::Unknown => return Err(OperationError::State),
+            ParentCloseState::NotStarted | ParentCloseState::Registered { .. } => {}
+        }
+
+        if matches!(&self.parent_close, ParentCloseState::NotStarted) {
+            // Refuse before taking the File on unsupported platforms or when
+            // the source still has another exported owner.
+            if !cfg!(target_os = "linux")
+                || self.lease_issued
+                || !self.observed_committed
+                || self.pending.is_some()
+                || self.spec.is_some()
+            {
+                return Err(OperationError::State);
+            }
+            let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
+            let result = self.result.as_mut().ok_or(OperationError::State)?;
+            if result.observed.is_none() {
+                return Err(OperationError::State);
+            }
+            let file = result.file.take().ok_or(OperationError::State)?;
+            let file = match Arc::try_unwrap(file) {
+                Ok(file) => file,
+                Err(file) => {
+                    result.file = Some(file);
+                    return Err(OperationError::State);
+                }
+            };
+            let (enter, registered) = tokio::sync::oneshot::channel();
+            let task = runtime.spawn_blocking(move || {
+                if registered.blocking_recv().is_err() {
+                    return ParentCloseOutcome::NotEntered;
+                }
+                let raw_fd = file.into_raw_fd();
+                // SAFETY: this worker owns the original File allocation, has
+                // converted it to a raw descriptor, and calls close once.
+                let result = unsafe { libc::close(raw_fd) };
+                if result == 0 {
+                    ParentCloseOutcome::Closed
+                } else if let Some(errno) = std::io::Error::last_os_error().raw_os_error() {
+                    ParentCloseOutcome::Failed(errno)
+                } else {
+                    ParentCloseOutcome::Unknown
+                }
+            });
+            self.parent_close = ParentCloseState::Registered {
+                task,
+                enter: Some(enter),
+            };
+        }
+
+        if let ParentCloseState::Registered { enter, .. } = &mut self.parent_close {
+            if let Some(enter) = enter.take() {
+                // The task handle and latch are already in this SourceCell.
+                // A failed send is joined below and recorded as unknown.
+                let _ = enter.send(());
+            }
+        }
+
+        let outcome = match &mut self.parent_close {
+            ParentCloseState::Registered { task, .. } => match task.await {
+                Ok(outcome) => outcome,
+                Err(_) => ParentCloseOutcome::Unknown,
+            },
+            _ => return Err(OperationError::State),
+        };
+        self.parent_close = match outcome {
+            ParentCloseOutcome::Closed => ParentCloseState::Closed,
+            ParentCloseOutcome::Failed(errno) => ParentCloseState::Failed(errno),
+            ParentCloseOutcome::NotEntered | ParentCloseOutcome::Unknown => {
+                ParentCloseState::Unknown
+            }
+        };
+        match &self.parent_close {
+            ParentCloseState::Closed => Ok(()),
+            ParentCloseState::Failed(errno) => {
+                Err(std::io::Error::from_raw_os_error(*errno).into())
+            }
+            ParentCloseState::Unknown => Err(OperationError::State),
+            ParentCloseState::NotStarted | ParentCloseState::Registered { .. } => {
+                Err(OperationError::State)
+            }
+        }
+    }
+
+    pub(super) fn parent_closed(&self) -> bool {
+        matches!(&self.parent_close, ParentCloseState::Closed)
+    }
+
+    pub(super) fn parent_close_operation_id(&self) -> Uuid {
+        self.parent_close_operation_id
     }
 }
 

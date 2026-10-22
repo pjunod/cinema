@@ -8,10 +8,20 @@ pub struct GenerationMemoryLimits {
     pub read_chunk_bytes: usize,
     pub retained_fragment_memory_bytes: usize,
     pub retained_fragments: usize,
+    pub init_memory_bytes: usize,
+    pub segmenter: crate::fmp4::FiniteSegmenterLimits,
 }
 impl GenerationMemoryLimits {
     pub fn validate(&self) -> Result<(), Fmp4Error> {
         self.reader.validate()?;
+        self.segmenter.validate()?;
+        if self.segmenter.retained_fragments != self.retained_fragments
+            || self.init_memory_bytes == 0
+        {
+            return Err(Fmp4Error::Unsupported(
+                "inconsistent finite AVC partitions".into(),
+            ));
+        }
         if self.read_chunk_bytes == 0
             || self.read_chunk_bytes > self.reader.buffer_bytes
             || self.retained_fragments == 0
@@ -145,4 +155,15 @@ impl<S: Sink> GenerationRun<'_, S> {
         }
         Ok(())
     }
+}
+
+pub(super) fn fixed_vec<T>(count: usize) -> Result<Vec<T>, Outcome> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(count)
+        .map_err(|_| refusal("fixed generation allocation failed"))?;
+    if bytes.capacity() > count {
+        return Err(refusal("fixed generation allocation exceeded partition"));
+    }
+    Ok(bytes)
 }

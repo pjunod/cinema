@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete; current source checks pending, tests not run.
-**Updated:** 2026-10-22 at committed checkpoint `6e57aeb774b408e4b5b4c9fa1e559c64391fc0c8`; finite-request runtime changes are uncommitted.
+**Updated:** 2026-10-22 at committed checkpoint `cea99379440881b02ffe3d3a6bcb49179f5700ca`; current finite-request runtime changes are uncommitted.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -56,33 +56,11 @@ through known Arm/Observe and bounds each batch to 16 files. The daemon
 connects metadata durability, and startup passes the already-open runtime Arc to
 `VodServe::Shared`.
 
-The VOD generation engine, identity check and conversion are core-owned; the
-daemon re-exports them while retaining its existing test bodies. The new
-`finite_vod` command, pump and initial-unit reader are joined to the physical
-graph's concrete `SoftwarePump` task and guarded actual pipes. The pump reads the
-exact init boundary, then queues the encoded-process marker, identity, init and
-segments through selected publication tickets and syncs them with bounded
-progress and diagnostics. Known durable Observe ends pending-I/O payload
-accounting. The actual payload is cleared and the same directory returned under
-the original bundle lock, before another queue operation can enter; the whole
-role reservation remains held until retirement. Parser preflight and measured
-`Init`, `Fragment` and `Segmenter`
-capacities remain bounded, but this task record is not a complete memory
-profile: engine merge/transform/runtime/journal partitions remain unresolved.
-Exact registered-child control uses the original registration and pidfd.
+The VOD generation engine, identity check and conversion are core-owned; the daemon re-exports them while retaining its existing test bodies. The `finite_vod` command, pump and initial-unit reader are joined to the physical graph's concrete `SoftwarePump` task and guarded actual pipes. The pump reads the exact init boundary, then queues the encoded-process marker, identity, init and segments through selected publication tickets and syncs them with bounded progress and diagnostics. Known durable Observe ends pending-I/O payload accounting; actual payload is cleared and the same directory returned under the original bundle lock before another queue operation can enter. The whole role reservation remains held until retirement.
 
-The core finite-request path now requires an immutable `SoftwareAvcCommand` and
-`SoftwareAvcPumpPlan` in the same reserved bundle before I/O, and verifies the
-actual source identity, path and scanner sizes against command inputs. It
-prearms source cells without exporting a lease; `start_finite_vod` uses the
-predeclared root acquisition ID and carries the same actual `File` through
-spawn. It enriches the source-copy observation only after the actual root launch
-is known, then arms and registers the retained pump task and durably acknowledges
-the typed task observation once. A cancelled wait for graph ownership does not
-consume the root-entry latch, and the pump task remains in the bundle until the
-graph locks and registers it. Shared-fd helper extraction preserves daemon
-behavior. The bounded AVC merge preflights workspace/output before allocation,
-but is not yet wired into Segmenter or `GenerationMemoryLimits`.
+The source-bound AVC route now preflights and accounts the bounded Segmenter prefix, merge, finish split and published batch through `GenerationMemoryLimits`/`Generation`. Init parsing has an explicit four-copy bound; parser reads, fragment inventory allocations and plan-boundary vectors are fallible. A canonical grid command and producer clock alignment are compiled. These are bounded components, not an end-to-end quota: parser metadata, native process, launcher and runtime-journal memory remain unresolved. The retained task-start latch is released only after known typed task Observe and same-ledger entry recheck. The pump waits for publication/sync bundle ownership through the same locked-queue helper; public sync queue behavior remains fail-fast. Finite control retains stop intent across root registration and uses the exact original control without waiting on Child or holding the journal lock, but whole closure is not proven.
+
+The core finite-request path requires an immutable `SoftwareAvcCommand` and `SoftwareAvcPumpPlan` in the same reserved bundle before I/O, verifies actual source identity/path/scanner inputs, prearms source cells without exporting a lease, and carries the same `File` through spawn. It enriches the source-copy observation only after actual root launch, then registers and observes the retained pump task once. A cancelled graph-lock wait preserves the root-entry latch. The SourceCell parent-close job records Linux `close(2)` success only on return 0; an error or unknown outcome is never retried on a potentially recycled descriptor, and cancellation retains the original job/latch. This is parent-file closure only: production terminal composition, whole SourceMember/root closure and refund proof are not wired. Shared-fd helper extraction preserves daemon behavior.
 
 This is still runtime composition, not ordinary request closure. Ordinary
 `build_rendition_with_storage` still uses legacy admission; the production
@@ -94,19 +72,23 @@ ownership/task composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `6e57aeb774b408e4b5b4c9fa1e559c64391fc0c8`.
-The frozen retained-source/root/task and bounded-merge source passed pinned
-Rust 1.97.1 host core+daemon all-target compilation in 128.579s (EXIT 0,
-stable source hashes). Receipt `direct-check-20261022-185956.json`, log SHA-256
-`dfa06c1bd4c7c13d4cc0217a54b40b548dc9c73c724c53e505a02bd5c84768d7`.
-The first attempt found plan-binding order and moof-borrow errors; both were
-fixed before this pass. This is warning-level compilation, not strict Clippy.
-No behavioral tests ran. The candidate PR-body draft has 352 unique regression
-anchors; the durable new regression list has 45. The inherited-source regression
-is Linux-only and was not compiled by this host check. Current Linux/Windows
-compilation, final independent review, qualification, fast lane, merge and
-restart/behavior evidence remain open. The writer's actual terminal join and
-source closure still need their production retirement composition.
+The latest published base is `cea99379440881b02ffe3d3a6bcb49179f5700ca`.
+The frozen sixth-checkpoint source passed pinned Rust 1.97.1 host core+daemon
+all-target compilation in 132.333s (EXIT 0, stable source hashes). Receipt:
+`direct-check-20261022-192247.json`, log SHA-256
+`6a5b8beed04a8bd75f8143d7469a446039ceafc5402e135d5662be1a2c6d4aa2`.
+The first attempt found a missing registration field in an existing original-Job
+root constructor; it was corrected before this pass. Warning-level compilation
+does not establish strict Clippy. The candidate body has 359 unique regression
+anchors; the durable new-regression list has 52. The AAC-prefix and actual pump
+latch cases compiled on host; source-parent close and late-control cases are
+Linux-only and were not compiled by this host check. No behavioral tests ran.
+Current Linux/Windows compilation, final independent review, qualification,
+fast lane, merge and restart/behavior evidence remain open. Production terminal
+composition and whole source closure remain unwired. The source-only descriptor
+helper has a `3N + 1` transient peak for N distinct source mappings; standard
+spawn pipe/error-pipe overhead remains unestablished. Current minimum-handle
+checks do not prove a complete native quota.
 
 ## Current source and compiler receipt
 

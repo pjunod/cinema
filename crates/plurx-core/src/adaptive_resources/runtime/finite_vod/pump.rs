@@ -35,9 +35,7 @@ impl SoftwareAvcPumpPlan {
     pub fn new(
         plan: SegmentPlan,
         start_entry: u32,
-        audio_anchor: Option<u64>,
-        frame_ticks: u32,
-        video_origin: Option<u64>,
+        grid: crate::transcode::VodFrameGrid,
         policy: CutPolicy,
         memory: GenerationMemoryLimits,
         diagnostic_bytes: usize,
@@ -47,7 +45,8 @@ impl SoftwareAvcPumpPlan {
         memory.validate().map_err(io::Error::other)?;
         if plan.entries.is_empty()
             || plan.timescale == 0
-            || frame_ticks == 0
+            || crate::transcode::VodFrameGrid::new(grid.numerator, grid.denominator) != Some(grid)
+            || plan.timescale != grid.numerator
             || plan.entry(start_entry).is_none()
             || plan.entries[0].start_ticks != 0
             || diagnostic_bytes == 0
@@ -74,12 +73,17 @@ impl SoftwareAvcPumpPlan {
             }
             previous_end = end;
         }
+        let start_seconds = plan
+            .entry(start_entry)
+            .expect("validated entry")
+            .start_ticks as f64
+            / f64::from(plan.timescale);
         let result = Self {
             plan,
             start_entry,
-            audio_anchor,
-            frame_ticks,
-            video_origin,
+            audio_anchor: Some(crate::transcode::vod_audio_anchor(start_seconds)),
+            frame_ticks: grid.denominator,
+            video_origin: None,
             policy,
             memory,
             diagnostic_bytes,
@@ -90,13 +94,27 @@ impl SoftwareAvcPumpPlan {
         Ok(result)
     }
 
+    pub(super) fn matches_clock(
+        &self,
+        grid: crate::transcode::VodFrameGrid,
+        start_seconds: f64,
+    ) -> bool {
+        self.plan.timescale == grid.numerator
+            && self.frame_ticks == grid.denominator
+            && self.video_origin.is_none()
+            && self.plan.entry(self.start_entry).is_some_and(|entry| {
+                entry.start_ticks as f64 / f64::from(self.plan.timescale) == start_seconds
+            })
+            && self.audio_anchor == Some(crate::transcode::vod_audio_anchor(start_seconds))
+    }
+
     pub(super) fn segment_count(&self) -> usize {
         self.plan.entries.len()
     }
 
     /// Explicit retained partitions, not the final end-to-end profile. Engine
-    /// merge/transformation peaks and runtime/journal state still need their
-    /// own partition before a production demand or close receipt can rely on it.
+    /// Parser metadata, native process/launcher and runtime/journal state still
+    /// need their own partition before a production demand or receipt relies on it.
     pub(in crate::adaptive_resources) fn minimum_memory_bytes(&self) -> io::Result<u64> {
         let total = size_of::<Self>()
             .checked_add(
@@ -112,11 +130,17 @@ impl SoftwareAvcPumpPlan {
             .and_then(|n| n.checked_add(self.memory.retained_fragment_memory_bytes))
             // Muxer init, served init and engine replay can coexist. The
             // initial parser itself is dropped before the engine is entered.
+            .and_then(|n| n.checked_add(self.memory.init_memory_bytes))
+            .and_then(|n| n.checked_add(self.memory.segmenter.merge.workspace_bytes))
+            .and_then(|n| n.checked_add(self.memory.segmenter.merge.output_bytes))
+            .and_then(|n| n.checked_add(self.memory.segmenter.prefix_memory_bytes))
+            .and_then(|n| n.checked_add(self.memory.segmenter.split_memory_bytes))
+            .and_then(|n| n.checked_add(self.memory.segmenter.published_batch_bytes))
             .and_then(|n| {
-                self.memory
-                    .reader
-                    .unit_bytes
-                    .checked_mul(3)
+                self.plan
+                    .entries
+                    .len()
+                    .checked_mul(size_of::<u64>())
                     .and_then(|b| n.checked_add(b))
             })
             .and_then(|n| n.checked_add(self.diagnostic_bytes))
@@ -220,6 +244,14 @@ impl SoftwarePump {
             self.plan.memory.read_chunk_bytes,
         )
         .await?;
+        if muxer
+            .resident_memory_bytes()
+            .ok()
+            .and_then(|n| n.checked_mul(4))
+            .is_none_or(|n| n > self.plan.memory.init_memory_bytes)
+        {
+            return Err(invalid("finite AVC init partition exceeded"));
+        }
         if muxer
             .video()
             .is_none_or(|video| video.codec != Some(VideoCodec::H264))
@@ -328,18 +360,18 @@ impl Sink for FiniteSink<'_> {
 }
 
 async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -> io::Result<()> {
-    let ticket = match file {
-        FiniteFile::Init => output.queue_init(bytes),
-        FiniteFile::Segment(index) => output.queue_segment(index, bytes),
-        FiniteFile::IdentityMetadata => output.queue_identity_metadata(bytes),
-        FiniteFile::EncodedProcessMetadata => output.queue_encoded_process_metadata(bytes),
-    }
-    .map_err(io::Error::other)?;
+    let ticket = output
+        .queue_file_wait(file, bytes)
+        .await
+        .map_err(io::Error::other)?;
     output
         .finish(&ticket, deadline()?)
         .await
         .map_err(io::Error::other)?;
-    let ticket = output.queue_sync(&[file]).map_err(io::Error::other)?;
+    let ticket = output
+        .queue_sync_one_wait(file)
+        .await
+        .map_err(io::Error::other)?;
     output
         .finish(&ticket, deadline()?)
         .await

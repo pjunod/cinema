@@ -13,6 +13,8 @@ pub(super) struct FiniteLaunch {
     command: SoftwareAvcCommand,
     pump: Option<SoftwarePump>,
     pub(super) entered: bool,
+    pub(super) control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
+    task_entered: bool,
     task: Option<GraphFiniteVodTask>,
     task_observation: Uuid,
     task_observed_committed: bool,
@@ -30,6 +32,7 @@ impl NodeResourceRuntime {
         source_members: Vec<Uuid>,
         command: SoftwareAvcCommand,
         pump: SoftwarePump,
+        control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
@@ -50,6 +53,8 @@ impl NodeResourceRuntime {
             command,
             pump: Some(pump),
             entered: false,
+            control,
+            task_entered: false,
             task: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
@@ -97,7 +102,7 @@ impl NodeResourceRuntime {
             *root
         } else {
             let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
-            if finite.entered {
+            if finite.entered || finite.control.requested() {
                 return Err(OperationError::State);
             }
             let mut descriptors = [(0, 3), (0, 4)];
@@ -209,7 +214,7 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?
             .task_observed_committed
         {
-            return Ok(());
+            return self.release_finite_task(role).await;
         }
         if role
             .finite_vod
@@ -270,7 +275,28 @@ impl NodeResourceRuntime {
             Effect::FiniteTask(member),
             deadline,
         )?;
-        self.finish_transition(bundle_id, role).await
+        self.finish_transition(bundle_id, role).await?;
+        self.release_finite_task(role).await
+    }
+
+    async fn release_finite_task(&self, role: &mut OwnedRole) -> Result<(), OperationError> {
+        let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+        if finite.task_entered {
+            return Ok(());
+        }
+        if !finite.task_observed_committed || finite.control.requested() {
+            return Err(OperationError::State);
+        }
+        let task = finite.task.ok_or(OperationError::State)?;
+        let enter = role
+            .graph
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .take_finite_vod_start(task)
+            .await?;
+        self.release_native_entry(role.binding, enter)?;
+        finite.task_entered = true;
+        Ok(())
     }
 }
 

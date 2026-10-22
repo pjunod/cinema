@@ -81,6 +81,53 @@ pub struct SoftwareVodRequest {
 
 /// Nonserde ownership selection. The runtime book retains all actual resources
 /// if a request drops this value or cancels any borrowed setup wait.
+pub(in crate::adaptive_resources::runtime) struct FiniteControl {
+    requested: std::sync::atomic::AtomicBool,
+    root: std::sync::Mutex<Option<crate::process::priority::RegisteredChildControl>>,
+}
+impl FiniteControl {
+    fn new() -> Self {
+        Self {
+            requested: std::sync::atomic::AtomicBool::new(false),
+            root: std::sync::Mutex::new(None),
+        }
+    }
+    pub(in crate::adaptive_resources::runtime) fn requested(&self) -> bool {
+        self.requested.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(in crate::adaptive_resources::runtime) fn install(
+        &self,
+        control: crate::process::priority::RegisteredChildControl,
+    ) -> std::io::Result<()> {
+        let mut root = self
+            .root
+            .lock()
+            .map_err(|_| std::io::Error::other("finite root control unavailable"))?;
+        if root.is_some_and(|previous| previous != control) {
+            return Err(std::io::Error::other(
+                "finite root control cannot change identity",
+            ));
+        }
+        *root = Some(control);
+        if self.requested() {
+            control.start_kill()?;
+        }
+        Ok(())
+    }
+    fn request(&self) -> std::io::Result<()> {
+        self.requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(root) = *self
+            .root
+            .lock()
+            .map_err(|_| std::io::Error::other("finite root control unavailable"))?
+        {
+            root.start_kill()?;
+        }
+        Ok(())
+    }
+}
+
 pub struct SoftwareVodOwner {
     runtime: Arc<NodeResourceRuntime>,
     preparation: OwnedPreparation,
@@ -90,6 +137,7 @@ pub struct SoftwareVodOwner {
     directory_path: PathBuf,
     encoded_process_marker: bool,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
+    control: Arc<FiniteControl>,
 }
 
 /// A bounded selection of the same custodian, not an exported File/Arc<File>.
@@ -121,6 +169,17 @@ pub enum FiniteFile {
     Segment(u32),
     IdentityMetadata,
     EncodedProcessMetadata,
+}
+
+impl FiniteFile {
+    fn key(self) -> OutputKey {
+        match self {
+            Self::Init => OutputKey::Init,
+            Self::Segment(index) => OutputKey::Segment { index },
+            Self::IdentityMetadata => OutputKey::IdentityMetadata,
+            Self::EncodedProcessMetadata => OutputKey::EncodedProcessMetadata,
+        }
+    }
 }
 
 impl FiniteOutput {
@@ -194,6 +253,34 @@ impl FiniteOutput {
             kind: TicketKind::Sync,
         })
     }
+    async fn queue_file_wait(
+        &self,
+        file: FiniteFile,
+        bytes: &mut Vec<u8>,
+    ) -> Result<PublicationTicket, FiniteVodError> {
+        let id = self
+            .runtime
+            .queue_scratch_publication_wait(&self.preparation, 0, self.member, file.key(), bytes)
+            .await?;
+        Ok(PublicationTicket {
+            id,
+            kind: TicketKind::Publication,
+        })
+    }
+    async fn queue_sync_one_wait(
+        &self,
+        file: FiniteFile,
+    ) -> Result<PublicationTicket, FiniteVodError> {
+        let id = self
+            .runtime
+            .queue_scratch_sync_wait(&self.preparation, 0, self.member, &[file.key()])
+            .await?;
+        Ok(PublicationTicket {
+            id,
+            kind: TicketKind::Sync,
+        })
+    }
+
     pub async fn finish(
         &self,
         ticket: &PublicationTicket,
@@ -262,6 +349,12 @@ impl SoftwareVodOwner {
             encoded_process_marker: self.encoded_process_marker,
         })
     }
+    /// Request stop through the original registration without waiting for a
+    /// child-wait or journal lock. This is neither wait nor extinction proof.
+    pub fn request_stop(&self) -> Result<(), FiniteVodError> {
+        self.control.request().map_err(Into::into)
+    }
+
     /// Metadata notifications do not confer root/task completion or refunds.
     pub fn take_events(&mut self) -> Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>> {
         self.events.take()
@@ -319,6 +412,7 @@ impl NodeResourceRuntime {
             || request.recipe_source_binding.len() > 4096
             || !request.encoded_process_marker
             || request.sources.len() != request.command.source_count()
+            || !request.command.matches_producer(&request.producer)
             || request.producer.segment_count() != request.segment_count as usize
             || request
                 .sources
@@ -627,6 +721,7 @@ impl NodeResourceRuntime {
         };
         let (pump, events) = pump::SoftwarePump::new(output, request.producer)
             .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;
+        let control = Arc::new(FiniteControl::new());
         self.queue_finite_vod(
             &preparation,
             0,
@@ -636,6 +731,7 @@ impl NodeResourceRuntime {
             source_members.clone(),
             request.command,
             pump,
+            Arc::clone(&control),
         )?;
         Ok(SoftwareVodOwner {
             runtime: Arc::clone(self),
@@ -646,6 +742,13 @@ impl NodeResourceRuntime {
             directory_path,
             encoded_process_marker: request.encoded_process_marker,
             events: Some(events),
+            control,
         })
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod control_tests;
+
+#[cfg(test)]
+mod tests;

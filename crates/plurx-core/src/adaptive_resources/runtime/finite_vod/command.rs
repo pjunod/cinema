@@ -28,6 +28,8 @@ pub struct SoftwareAvcCommand {
     source_id: i64,
     scanner_size: i64,
     scanner_mtime: i64,
+    grid: VodFrameGrid,
+    start_seconds: f64,
     args: Vec<String>,
     env: Vec<(OsString, OsString)>,
     runtime_cache: PathBuf,
@@ -104,7 +106,7 @@ impl SoftwareAvcCommand {
                 return Err(invalid("selected audio stream is absent from the source"));
             }
         }
-        if grid.numerator == 0 || grid.denominator == 0 {
+        if VodFrameGrid::new(grid.numerator, grid.denominator) != Some(grid) {
             return Err(invalid("VOD frame grid is invalid"));
         }
 
@@ -144,6 +146,8 @@ impl SoftwareAvcCommand {
             source_id: source.id,
             scanner_size: source.size,
             scanner_mtime: source.mtime,
+            grid,
+            start_seconds: execution.start_seconds,
             args,
             env,
             runtime_cache,
@@ -152,6 +156,13 @@ impl SoftwareAvcCommand {
         validate_collection_limits(&command)?;
         command.resident_memory_bytes()?;
         Ok(command)
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn matches_producer(
+        &self,
+        producer: &super::SoftwareAvcPumpPlan,
+    ) -> bool {
+        producer.matches_clock(self.grid, self.start_seconds)
     }
 
     pub(in crate::adaptive_resources::runtime) fn matches_source(

@@ -62,6 +62,15 @@ pub struct GraphRoot {
     generation: Uuid,
     index: usize,
     pub process: Metric<ProcessIdentity>,
+    control: Option<crate::process::priority::RegisteredChildControl>,
+}
+
+impl GraphRoot {
+    pub(in crate::adaptive_resources) fn registered_control(
+        self,
+    ) -> Option<crate::process::priority::RegisteredChildControl> {
+        self.control
+    }
 }
 
 /// Pipes move directly from the owned root into its registered task. This is
@@ -471,6 +480,7 @@ fn retain_root(
         generation: custody.identity.generation,
         index: members.roots.len(),
         process,
+        control: job.as_ref().and_then(ChildJob::registered_control),
     };
     members.roots.push(Root {
         child,
@@ -588,6 +598,15 @@ impl Drop for SealedPhysicalGraph {
 }
 
 impl SealedPhysicalGraph {
+    /// Another selection of the SAME retained custody, no descriptor duplication
+    /// or second receipt. Used to release the runtime bundle lock before joins.
+    pub(in crate::adaptive_resources) fn select_same(&self) -> Self {
+        Self {
+            ledger: self.ledger.clone(),
+            custody: Arc::clone(&self.custody),
+        }
+    }
+
     pub fn retained_role(&self) -> RetainedRole<'_> {
         retained_role(&self.custody)
     }

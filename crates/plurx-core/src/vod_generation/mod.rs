@@ -310,6 +310,42 @@ where
     R: AsyncRead + Unpin,
     S: Sink,
 {
+    if let Some(limits) = memory_limits {
+        if let Err(error) = limits.validate() {
+            return Outcome::Failed(Failure::Stream(error.to_string()));
+        }
+    }
+    if memory_limits.is_some()
+        && (generation.index.is_some()
+            || generation.landing_clock.is_some()
+            || generation.convert_dolby_vision
+            || generation.retain_hevc_parameter_sets
+            || generation.encoded_audio_anchor.is_none()
+            || generation.encoded_frame_ticks.is_none()
+            || generation.identity.promotion != crate::fmp4::PromotionInputs::default())
+    {
+        return Outcome::Failed(Failure::Stream(
+            "finite generation requires ordinary encoded AVC".into(),
+        ));
+    }
+    let (landing, observed, mut buf) = if let Some(limits) = memory_limits {
+        let allocated = (|| {
+            Ok((
+                bounded::fixed_vec::<Fragment>(limits.retained_fragments)?,
+                bounded::fixed_vec::<u32>(limits.retained_fragments)?,
+                bounded::fixed_vec::<u8>(limits.read_chunk_bytes)?,
+            ))
+        })();
+        match allocated {
+            Ok(mut vectors) => {
+                vectors.2.resize(limits.read_chunk_bytes, 0);
+                vectors
+            }
+            Err(outcome) => return outcome,
+        }
+    } else {
+        (Vec::new(), Vec::new(), vec![0u8; READ_CHUNK])
+    };
     let mut reader = match bounded::Reader::new(memory_limits) {
         Ok(reader) => reader,
         Err(error) => return Outcome::Failed(Failure::Stream(error.to_string())),
@@ -325,9 +361,9 @@ where
         served: None,
         video_id: None,
         converter: None,
-        landing: memory_limits.map_or_else(Vec::new, |l| Vec::with_capacity(l.retained_fragments)),
+        landing,
         landing_bytes: 0,
-        observed: memory_limits.map_or_else(Vec::new, |l| Vec::with_capacity(l.retained_fragments)),
+        observed,
         memory_limits,
         transferring_fragment_memory_bytes: 0,
         transferring_fragments: 0,
@@ -340,7 +376,6 @@ where
         encoded_init: None,
         audio_segmenter: None,
     };
-    let mut buf = vec![0u8; memory_limits.map_or(READ_CHUNK, |l| l.read_chunk_bytes)];
 
     loop {
         let capacity = reader.read_capacity(buf.len());
@@ -464,6 +499,21 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// an evicted-and-regenerated URI must fail loudly rather than serve
     /// quietly incompatible media (plan §2.2).
     fn on_init(&mut self, mut muxer: Init) -> Result<(), Outcome> {
+        if let Some(limits) = self.memory_limits {
+            if muxer
+                .video()
+                .is_none_or(|video| video.codec != Some(crate::fmp4::VideoCodec::H264))
+                || muxer
+                    .resident_memory_bytes()
+                    .ok()
+                    .and_then(|n| n.checked_mul(4))
+                    .is_none_or(|n| n > limits.init_memory_bytes)
+            {
+                return Err(Outcome::Failed(Failure::Stream(
+                    "finite AVC init partition exceeded".into(),
+                )));
+            }
+        }
         sanitize_stale_dolby_brand(&mut muxer);
         match self.generation.identity.served_init_for(&muxer) {
             Ok(served) => {
@@ -847,14 +897,21 @@ impl<S: Sink> GenerationRun<'_, S> {
         // video boundary — `Segmenter::finish` splits the tail at the
         // policy's ceiling exactly as the plan did, so the tail entries come
         // out of `finish` under the right indexes.
-        let starts: Vec<u64> = self
-            .generation
-            .plan
-            .entries
-            .iter()
-            .filter(|entry| entry.index >= start_entry && entry.kind == PlanEntryKind::Video)
-            .map(|entry| entry.start_ticks)
-            .collect();
+        let selected = || {
+            self.generation
+                .plan
+                .entries
+                .iter()
+                .filter(|entry| entry.index >= start_entry && entry.kind == PlanEntryKind::Video)
+                .map(|entry| entry.start_ticks)
+        };
+        let starts: Vec<u64> = if self.memory_limits.is_some() {
+            let mut starts = bounded::fixed_vec(selected().count())?;
+            starts.extend(selected());
+            starts
+        } else {
+            selected().collect()
+        };
         if starts.is_empty() {
             return Err(landing_failed(format!(
                 "no video boundary at or after entry {start_entry}; a \
@@ -865,27 +922,31 @@ impl<S: Sink> GenerationRun<'_, S> {
             .served
             .take()
             .expect("the landing buffer fills only after the init");
-        let following = if self.generation.encoded_audio_anchor.is_some() {
-            Segmenter::following_encoded
+        let placed = if let Some(limits) = self.memory_limits {
+            Segmenter::following_encoded_bounded(
+                init,
+                self.generation.policy,
+                u64::from(start_entry),
+                starts,
+                limits.segmenter,
+            )
+        } else if self.generation.encoded_audio_anchor.is_some() {
+            Segmenter::following_encoded(
+                init,
+                self.generation.policy,
+                u64::from(start_entry),
+                starts,
+            )
         } else {
-            Segmenter::following
+            Segmenter::following(init, self.generation.policy, u64::from(start_entry), starts)
         };
-        let segmenter =
-            match following(init, self.generation.policy, u64::from(start_entry), starts) {
-                Ok(segmenter) => segmenter
-                    .retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets),
-                Err(error) => {
-                    return Err(Outcome::Failed(Failure::Stream(format!(
-                        "placing the generation against its plan: {error}"
-                    ))))
-                }
-            };
-        let mut segmenter = segmenter;
-        if let Some(limits) = self.memory_limits {
-            segmenter
-                .reserve_pending_fragments(limits.retained_fragments)
-                .map_err(|error| Outcome::Failed(Failure::Stream(error.to_string())))?;
-        }
+        let segmenter = placed
+            .map_err(|error| {
+                Outcome::Failed(Failure::Stream(format!(
+                    "placing the generation against its plan: {error}"
+                )))
+            })?
+            .retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets);
         self.segmenter = Some(segmenter);
 
         // Drop the first `discards` video-carrying fragments — the index

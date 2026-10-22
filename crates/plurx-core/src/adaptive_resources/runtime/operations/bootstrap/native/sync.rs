@@ -113,6 +113,36 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        self.queue_scratch_sync_locked(&mut bundle, index, member, outputs)
+    }
+
+    /// Wait for the SAME bundle lock before registering sync against observed
+    /// outputs. The caller retains its output selection across the wait.
+    pub(in crate::adaptive_resources::runtime) async fn queue_scratch_sync_wait(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        outputs: &[OutputKey],
+    ) -> Result<Uuid, OperationError> {
+        self.validate_preparation(owner)?;
+        if outputs.is_empty()
+            || outputs.len() > 16
+            || outputs.iter().collect::<BTreeSet<_>>().len() != outputs.len()
+        {
+            return Err(OperationError::State);
+        }
+        let mut bundle = owner.state.lock().await;
+        self.queue_scratch_sync_locked(&mut bundle, index, member, outputs)
+    }
+
+    fn queue_scratch_sync_locked(
+        &self,
+        bundle: &mut Bundle,
+        index: usize,
+        member: Uuid,
+        outputs: &[OutputKey],
+    ) -> Result<Uuid, OperationError> {
         if !bundle.installed {
             return Err(OperationError::State);
         }

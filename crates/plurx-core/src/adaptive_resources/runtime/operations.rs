@@ -848,6 +848,15 @@ impl NodeResourceRuntime {
             }
         };
         role.roots.insert(member, root);
+        #[cfg(unix)]
+        if named_arm.is_some() {
+            let control = root.registered_control().ok_or(OperationError::State)?;
+            role.finite_vod
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .control
+                .install(control)?;
+        }
         let Metric::Known(process) = root.process else {
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());

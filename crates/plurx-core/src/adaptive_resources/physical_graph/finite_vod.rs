@@ -25,6 +25,7 @@ pub(super) struct FiniteRecord {
     pipes: [PipeRecord; 2],
     finished: Arc<StdMutex<Option<PumpFinished>>>,
     minimum_memory: u64,
+    start: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl FiniteRecord {
     pub(super) fn minimum_memory_bytes(&self) -> u64 {
@@ -113,7 +114,11 @@ impl OwnedPhysicalGraph {
         // Only this exact concrete implementation receives the guarded readers.
         // No await or caller factory separates creation from retaining its task.
         let pump = pump.take().expect("validated retained pump");
+        let (start, registered) = tokio::sync::oneshot::channel();
         let task = runtime.spawn(async move {
+            if registered.await.is_err() {
+                return;
+            }
             let terminal = pump.run(readers, control).await;
             if let Ok(mut result) = result.lock() {
                 *result = Some(terminal);
@@ -127,10 +132,32 @@ impl OwnedPhysicalGraph {
                 pipes,
                 finished,
                 minimum_memory,
+                start: Some(start),
             }),
             joined: false,
         });
         Ok(selection)
+    }
+}
+
+impl OwnedPhysicalGraph {
+    pub(in crate::adaptive_resources) async fn take_finite_vod_start(
+        &self,
+        task: GraphFiniteVodTask,
+    ) -> io::Result<tokio::sync::oneshot::Sender<()>> {
+        let mut members = self.custody().members.lock().await;
+        if self.custody().sealed.load(Ordering::Acquire)
+            || task.generation != self.identity().generation
+        {
+            return Err(io::Error::other("finite VOD entry was sealed"));
+        }
+        members
+            .writers
+            .get_mut(task.index)
+            .and_then(|writer| writer.finite.as_mut())
+            .filter(|record| record.selection == task)
+            .and_then(|record| record.start.take())
+            .ok_or_else(|| io::Error::other("finite VOD start already decided or mismatched"))
     }
 }
 

@@ -5539,6 +5539,11 @@ impl PlannedAudioSegmenter {
     }
 }
 
+mod finish_budget;
+mod finite_segmenter;
+mod prefix_budget;
+pub use finite_segmenter::FiniteSegmenterLimits;
+
 /// Accumulates fragments and publishes segments that start on clean keyframes.
 ///
 /// Pure by design: the daemon feeds it fragments and writes what comes back
@@ -5550,6 +5555,7 @@ pub struct Segmenter {
     policy: CutPolicy,
     video_timescale: u32,
     pending: Vec<Fragment>,
+    finite_limits: Option<FiniteSegmenterLimits>,
     pending_bytes: usize,
     pending_ticks: u64,
     next_index: u64,
@@ -5568,6 +5574,7 @@ impl Segmenter {
             policy,
             video_timescale,
             pending: Vec::new(),
+            finite_limits: None,
             pending_bytes: 0,
             pending_ticks: 0,
             next_index: 0,
@@ -5748,6 +5755,16 @@ impl Segmenter {
     /// once you can see what comes after it.
     pub fn push(&mut self, fragment: Fragment) -> Result<Option<Published>, Fmp4Error> {
         let mut fragment = fragment;
+        if let Some(limits) = self.finite_limits {
+            let count = self.pending.len().checked_add(1).ok_or_else(|| {
+                Fmp4Error::Unsupported("finite pending fragment count overflows".into())
+            })?;
+            if count > limits.retained_fragments {
+                return Err(Fmp4Error::Unsupported(
+                    "finite pending fragments exceed their reserved slots".into(),
+                ));
+            }
+        }
         self.on_film_time(&mut fragment)?;
         let class = classify(&fragment, &self.init);
         self.counts.fragments += 1;
@@ -5759,11 +5776,39 @@ impl Segmenter {
                 if self.encoded_audio_boundaries {
                     let plan = self.boundaries.as_ref().expect("encoded plan");
                     let boundary = plan.starts[self.entry_after(plan)];
-                    if let Some(prefix) = take_encoded_audio_before(
+                    let prefix_shape = self
+                        .finite_limits
+                        .map(|limits| {
+                            prefix_budget::preflight(
+                                &fragment,
+                                &self.init,
+                                boundary,
+                                self.video_timescale,
+                                limits.prefix_memory_bytes,
+                            )
+                        })
+                        .transpose()?;
+                    if prefix_shape.is_some_and(prefix_budget::PrefixShape::present) {
+                        let count = self.pending.len().checked_add(2).ok_or_else(|| {
+                            Fmp4Error::Unsupported("finite pending fragment count overflows".into())
+                        })?;
+                        if count
+                            > self
+                                .finite_limits
+                                .expect("bounded prefix")
+                                .retained_fragments
+                        {
+                            return Err(Fmp4Error::Unsupported(
+                                "finite audio prefix exceeds reserved pending slots".into(),
+                            ));
+                        }
+                    }
+                    if let Some(prefix) = take_encoded_audio_before_budgeted(
                         &mut fragment,
                         &self.init,
                         boundary,
                         self.video_timescale,
+                        prefix_shape,
                     )? {
                         self.pending_bytes += prefix.len();
                         self.pending.push(prefix);
@@ -5894,6 +5939,9 @@ impl Segmenter {
     pub fn finish(&mut self) -> Result<Vec<Published>, Fmp4Error> {
         if self.pending.is_empty() {
             return Ok(Vec::new());
+        }
+        if let Some(limits) = self.finite_limits {
+            return self.finish_bounded(limits);
         }
         let chunks = self.end_of_stream_chunks()?;
         let mut published = Vec::with_capacity(chunks.len());
@@ -6212,12 +6260,22 @@ impl Segmenter {
     fn flush(&mut self, reason: CutReason) -> Result<Published, Fmp4Error> {
         let index = self.next_index;
         let seconds = self.seconds_for(&self.pending, reason);
-        let segment = merge_retaining(
-            &self.pending,
-            &self.init,
-            index as u32 + 1,
-            self.retain_hevc_parameter_sets,
-        )?;
+        let segment = if let Some(limits) = self.finite_limits {
+            merge_retaining_bounded(
+                &self.pending,
+                &self.init,
+                index as u32 + 1,
+                self.retain_hevc_parameter_sets,
+                limits.merge,
+            )?
+        } else {
+            merge_retaining(
+                &self.pending,
+                &self.init,
+                index as u32 + 1,
+                self.retain_hevc_parameter_sets,
+            )?
+        };
         self.pending.clear();
         self.pending_bytes = 0;
         self.pending_ticks = 0;
@@ -6245,14 +6303,33 @@ impl Segmenter {
 /// boundary into the preceding segment. Copy only those packet payloads;
 /// video and the rest of the muxed fragment remain in their existing buffer.
 /// The merger writes fresh moof/data offsets from these resolved track runs.
+#[cfg(test)]
 fn take_encoded_audio_before(
     fragment: &mut Fragment,
     init: &Init,
     boundary: u64,
     video_timescale: u32,
 ) -> Result<Option<Fragment>, Fmp4Error> {
-    let mut bytes = Vec::new();
-    let mut tracks = Vec::new();
+    take_encoded_audio_before_budgeted(fragment, init, boundary, video_timescale, None)
+}
+
+fn take_encoded_audio_before_budgeted(
+    fragment: &mut Fragment,
+    init: &Init,
+    boundary: u64,
+    video_timescale: u32,
+    shape: Option<prefix_budget::PrefixShape>,
+) -> Result<Option<Fragment>, Fmp4Error> {
+    let mut bytes = if let Some(shape) = shape {
+        merge_budget::reserve::<u8>(shape.bytes)?
+    } else {
+        Vec::new()
+    };
+    let mut tracks = if let Some(shape) = shape {
+        merge_budget::reserve::<TrackFragment>(shape.tracks)?
+    } else {
+        Vec::new()
+    };
     for track in &mut fragment.tracks {
         let Some(info) = init
             .tracks
@@ -6264,7 +6341,16 @@ fn take_encoded_audio_before(
         let cutoff = u128::from(boundary) * u128::from(info.timescale);
         let mut time = track.base_decode_time;
         let base_decode_time = time;
-        let mut runs = Vec::new();
+        let mut runs = if shape.is_some() {
+            merge_budget::reserve::<Run>(prefix_budget::selected_runs(
+                track,
+                info,
+                boundary,
+                video_timescale,
+            )?)?
+        } else {
+            Vec::new()
+        };
         for run in &mut track.runs {
             let mut count = 0;
             let mut length = 0usize;
@@ -6292,15 +6378,22 @@ fn take_encoded_audio_before(
                 .get(run.data_offset..end)
                 .ok_or_else(|| Fmp4Error::Malformed("encoded audio leaves its payload".into()))?;
             let data_offset = bytes.len();
+            if shape.is_some() && bytes.capacity().saturating_sub(bytes.len()) < payload.len() {
+                return malformed("encoded audio prefix exceeds reserved bytes");
+            }
+            let mut samples = if shape.is_some() {
+                merge_budget::reserve::<Sample>(count)?
+            } else {
+                Vec::new()
+            };
             bytes.extend_from_slice(payload);
-            let samples = run
-                .samples
-                .drain(..count)
-                .map(|mut sample| {
-                    sample.size_at = None;
-                    sample
-                })
-                .collect();
+            samples.extend(run.samples.drain(..count).map(|mut sample| {
+                sample.size_at = None;
+                sample
+            }));
+            if shape.is_some() && runs.len() >= runs.capacity() {
+                return malformed("encoded audio prefix exceeds reserved runs");
+            }
             runs.push(Run {
                 version: run.version,
                 composition_offsets_present: run.composition_offsets_present,
@@ -6317,11 +6410,19 @@ fn take_encoded_audio_before(
         if !runs.is_empty() {
             track.base_decode_time = time;
             track.runs.retain(|run| !run.samples.is_empty());
+            if shape.is_some() && tracks.len() >= tracks.capacity() {
+                return malformed("encoded audio prefix exceeds reserved tracks");
+            }
             tracks.push(TrackFragment {
                 track_id: track.track_id,
                 base_decode_time,
                 runs,
             });
+        }
+    }
+    if let Some(shape) = shape {
+        if bytes.len() != shape.bytes || tracks.len() != shape.tracks {
+            return malformed("encoded audio prefix changed after preflight");
         }
     }
     fragment.tracks.retain(|track| track.sample_count() > 0);

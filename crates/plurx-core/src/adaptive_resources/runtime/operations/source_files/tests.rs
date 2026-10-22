@@ -112,6 +112,8 @@ fn source_cell(path: &Path, domain: v2::FilesystemDomain) -> SourceCell {
         root_observed_committed: false,
         selected_root_member: None,
         pending_root: None,
+        parent_close_operation_id: Uuid::new_v4(),
+        parent_close: ParentCloseState::NotStarted,
     }
 }
 
@@ -182,6 +184,47 @@ async fn inherited_source_stages_only_the_planned_child_copy_on_the_same_file() 
         !cell.lease_issued,
         "inheritance does not export an Arc lease"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn parent_close_releases_original_descriptor_once_and_keeps_it_unexportable() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("source.mkv");
+    std::fs::write(&path, b"parent close fixture").expect("fixture source");
+    let mut cell = source_cell(&path, filesystem_domain(namespace()));
+    let enter = cell.launch().expect("register source job");
+    enter.send(()).expect("enter source open");
+    cell.join().await.expect("join source acquisition");
+    cell.observed_committed = true;
+    let original_fd = cell
+        .result
+        .as_ref()
+        .and_then(|result| result.file.as_ref())
+        .expect("retained source")
+        .as_raw_fd();
+    let close_operation = cell.parent_close_operation_id();
+
+    cell.close_parent().await.expect("close original parent fd");
+    assert!(cell.parent_closed());
+    assert!(cell.result.as_ref().unwrap().file.is_none());
+    assert_eq!(cell.parent_close_operation_id(), close_operation);
+
+    // If the OS reuses the just-closed number, an idempotent repeat must not
+    // close the new owner of that number.
+    let sentinel_path = directory.path().join("sentinel");
+    std::fs::write(&sentinel_path, b"sentinel remains open").expect("sentinel file");
+    let sentinel = File::open(&sentinel_path).expect("open sentinel");
+    let reused = sentinel.as_raw_fd() == original_fd;
+    cell.close_parent()
+        .await
+        .expect("repeat successful parent close is idempotent");
+    assert!(cell.parent_closed());
+    assert_eq!(cell.parent_close_operation_id(), close_operation);
+    if reused {
+        // SAFETY: the sentinel File still owns this descriptor.
+        assert_ne!(unsafe { libc::fcntl(original_fd, libc::F_GETFD) }, -1);
+    }
 }
 
 #[tokio::test]

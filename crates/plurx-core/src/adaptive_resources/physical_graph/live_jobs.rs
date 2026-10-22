@@ -73,6 +73,7 @@ impl SealedPhysicalGraph {
                 generation: self.custody.identity.generation,
                 index,
                 process: root.process,
+                control: job.registered_control(),
             });
         }
         // Every object remains retained, no new root can enter, and these

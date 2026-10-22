@@ -349,7 +349,7 @@ pub struct Registration {
 /// A signal capability for exactly one registered child. It carries only the
 /// registry key: the registration remains owned by `ChildJob`, and dropping
 /// that job removes the row even when this value was copied elsewhere.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RegisteredChildControl {
     key: u64,
 }
