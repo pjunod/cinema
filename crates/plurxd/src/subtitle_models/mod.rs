@@ -1906,6 +1906,9 @@ mod tests {
         .is_err());
     }
 
+    // Exercises the Unix immutable-model store (0700 directory, 0400 files
+    // and replacement of an open inode), not a portable permission fixture.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_install_cache_cannot_requalify_after_restart_or_replacement() {
         use plurx_core::fs_secure::std_file_identity;

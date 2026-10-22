@@ -2627,7 +2627,8 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         _filler: Option<crate::admission::TranscodePermit>,
     }
 
-    #[cfg(unix)]
+    // Prepared reader identity is platform-independent; only the process-backed
+    // handoff fixtures below require Unix.
     const STAGED_SUCCESSOR: &str = "4b1e0a52-58a4-4d3e-9d0f-0d6c5c1a7a01";
 
     #[cfg(unix)]
