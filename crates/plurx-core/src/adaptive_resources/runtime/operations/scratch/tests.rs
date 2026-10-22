@@ -26,14 +26,19 @@ async fn fixture_kind(
     root: &Path,
     bootstrap: bool,
 ) -> (NodeResourceRuntime, OwnedPreparation, Uuid) {
-    let runtime = NodeResourceRuntime::open(super::super::super::tests::options(
+    let options = super::super::super::tests::options(
         root,
         daemon_owner(
             "scratch-fixture-node".into(),
             "scratch-fixture-cluster".into(),
         ),
         InstallationContext::FirstInstallation,
-    ))
+    );
+    let runtime = if bootstrap {
+        NodeResourceRuntime::open_with_rendition_root(options, root.to_path_buf())
+    } else {
+        NodeResourceRuntime::open(options)
+    }
     .unwrap();
     runtime.update_capacity(1, Metric::Known(cost())).unwrap();
     let member = id();
@@ -249,6 +254,32 @@ async fn bootstrap_runtime_drain_preserves_charged_original_member() {
     assert_eq!(runtime.accounting().unwrap().used, before.used);
     let bundle = owner.state.lock().await;
     assert!(!bundle.roles[0].refunded && bundle.roles[0].bootstrap.len() == 1);
+}
+
+#[tokio::test]
+async fn bootstrap_runtime_configured_root_mismatch_never_arms_or_opens() {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime, owner, member) = fixture_kind(root.path(), true).await;
+    {
+        let mut bundle = owner.state.lock().await;
+        let v2::MemberPlan::ScratchAssetsV3 { plan, .. } =
+            &mut bundle.roles[0].typed_members.as_mut().unwrap()[0]
+        else {
+            unreachable!()
+        };
+        let v2::scratch::bootstrap::DirectoryOriginV1::ConfiguredRootBootstrapV1 { bootstrap } =
+            &mut plan.directory;
+        bootstrap
+            .authority
+            .resolved_absolute_root
+            .push_str("/unconfigured");
+    }
+    assert!(runtime
+        .arm_scratch_bootstrap(&owner, 0, member, deadline())
+        .await
+        .is_err());
+    let bundle = owner.state.lock().await;
+    assert!(bundle.roles[0].armed.is_empty() && bundle.roles[0].bootstrap.is_empty());
 }
 
 async fn queue_unconsumed_directory(

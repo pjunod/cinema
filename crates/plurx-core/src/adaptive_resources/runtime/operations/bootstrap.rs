@@ -3,12 +3,16 @@
 //! immutable configured-root/native adapter must consume this known arm in place.
 use super::*;
 use v2::scratch::bootstrap::*;
+#[cfg(unix)]
+mod native;
 
 pub(super) struct BootstrapMember {
     plan: ScratchPlanV3,
     fold: Option<BootstrapFold>,
     change: Option<(v2::Id, AssetChangeV3)>,
-    root_arm: Option<v2::Id>,
+    root_arm: Option<(v2::Id, v2::Id)>,
+    #[cfg(unix)]
+    native_root: Option<native::RootCell>,
 }
 
 impl NodeResourceRuntime {
@@ -42,6 +46,10 @@ impl NodeResourceRuntime {
             })
             .ok_or(OperationError::State)?;
         if plan.bootstrap().authority.installation_id.uuid() != self.recovered.installation_id
+            || self.rendition_root.as_deref()
+                != Some(Path::new(
+                    &plan.bootstrap().authority.resolved_absolute_root,
+                ))
             || role.refunded
             || role.scratch.contains_key(&member)
             || !matches!(
@@ -103,6 +111,8 @@ impl NodeResourceRuntime {
                     plan,
                     change: None,
                     root_arm: None,
+                    #[cfg(unix)]
+                    native_root: None,
                 },
             );
         }
@@ -151,6 +161,7 @@ fn queue_root(
         return Err(OperationError::State);
     }
     let io_id = v2::Id::new(Uuid::new_v4())?;
+    let copy_id = v2::Id::new(Uuid::new_v4())?;
     let change = AssetChangeV3 {
         scratch_member_id: v2::Id::new(member)?,
         asset_id: bootstrap.plan.asset_id,
@@ -164,13 +175,11 @@ fn queue_root(
             .head,
         event: AssetEventV3::ArmBootstrapV1 {
             io_id,
-            operation: BootstrapIoV1::OpenNamespaceRoot {
-                copy_id: v2::Id::new(Uuid::new_v4())?,
-            },
+            operation: BootstrapIoV1::OpenNamespaceRoot { copy_id },
         },
     };
     bootstrap.change = Some((io_id, change.clone()));
-    bootstrap.root_arm = Some(io_id);
+    bootstrap.root_arm = Some((io_id, copy_id));
     start_named_transition(
         journal,
         role,

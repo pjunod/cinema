@@ -38,6 +38,7 @@ pub(crate) async fn open_before_cleanup(
         return Ok(None);
     }
     let dirs = crate::configured_dirs(&config.storage);
+    let rendition_root = dirs.renditions.clone();
     let mut excluded = vec![
         dirs.transcode,
         dirs.artwork,
@@ -56,10 +57,12 @@ pub(crate) async fn open_before_cleanup(
         .context("retaining actual daemon lock for resource custody")?;
     // Enqueued blocking startup is not raced against a cancellation timeout.
     // Its real owner drains and retains the lock even if its async waiter goes.
-    let runtime = tokio::task::spawn_blocking(move || NodeResourceRuntime::open(options))
-        .await
-        .context("resource custody startup owner failed")?
-        .context("opening authoritative resource custody before cleanup")?;
+    let runtime = tokio::task::spawn_blocking(move || {
+        NodeResourceRuntime::open_with_rendition_root(options, rendition_root)
+    })
+    .await
+    .context("resource custody startup owner failed")?
+    .context("opening authoritative resource custody before cleanup")?;
     require_no_unreconciled_custody(&runtime)?;
     Ok(Some(Arc::new(runtime)))
 }

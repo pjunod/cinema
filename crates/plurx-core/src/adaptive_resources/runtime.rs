@@ -3,7 +3,7 @@
 //! Reconstruction never recreates acquisition handles or physical receipts.
 //! The journal remains separate from replicated Store and advisory telemetry.
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -55,6 +55,8 @@ pub struct NodeResourceRuntime {
     ledger: ResourceLedger,
     recovered_bindings: BTreeMap<Uuid, ReservationBinding>,
     operations: Mutex<operations::Operations>,
+    // Immutable actual daemon configuration, not a path authorized by audit JSON.
+    rendition_root: Option<PathBuf>,
 }
 
 impl NodeResourceRuntime {
@@ -77,7 +79,19 @@ impl NodeResourceRuntime {
             ledger,
             recovered_bindings,
             operations: Mutex::new(operations::Operations::default()),
+            rendition_root: None,
         })
+    }
+
+    /// Bind the real configured output root before this runtime is shared.
+    /// This does not open/create/adopt the directory or authorize uncharged IO.
+    pub fn open_with_rendition_root(
+        options: OpenOptions,
+        root: PathBuf,
+    ) -> Result<Self, RuntimeOpenError> {
+        let mut runtime = Self::open(options)?;
+        runtime.rendition_root = Some(root);
+        Ok(runtime)
     }
 
     pub fn accounting(&self) -> Result<LedgerSnapshot, AdmissionRefusal> {

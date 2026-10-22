@@ -308,3 +308,37 @@ fn scratch_v3_bootstrap_reserve_and_protected_child_are_mandatory() {
     slot.protected_paths.clear();
     assert!(execute(&mut f.storage, &f.command, f.owner).is_err());
 }
+
+#[test]
+fn scratch_v3_old_decoder_rejects_new_results_without_sql_schema_change() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)] // Frozen previous result decoder, not an execution API.
+    #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+    enum OldResult {
+        Prepared {
+            sequence: i64,
+            obligations: Vec<Uuid>,
+            trial: Option<Uuid>,
+        },
+        Changed(CommitAck),
+        AssetChangedV2 {
+            version: u32,
+            ack: CommitAck,
+            change: AssetChangeV2,
+            after: ScratchStateV2,
+        },
+        RetiredWithAssets(RetirementAck),
+    }
+    let mut f = bootstrap();
+    let (handle, member, plan) = arm(&mut f);
+    let command = root_arm(&f, &handle, member, &plan);
+    execute(&mut f.storage, &command, f.owner).unwrap();
+    assert!(serde_json::from_str::<OldResult>(&result_json(&f, command.id)).is_err());
+    let version: i64 = f
+        .storage
+        .connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    snapshot(&f.storage.connection, &f.storage.witness).unwrap();
+}
