@@ -104,6 +104,15 @@ def case_evidence(name, output, code):
         markers = [json.loads(x) for x in re.findall(r'async_store_predicate_partitions=(\{[^\n]+\})',output)]
         c.require(markers == [{'queue_identity_expiry_cases':96,'relation_coverage':False}], 'queue partition marker drift')
         facts['partition_marker'] = markers[0]
+    retirement_markers = {
+      'store-'+STORE_TESTS['retirement_primitive_test'].rsplit('::',1)[-1]: STORE_TESTS['retirement_primitive_marker'],
+      'store-'+STORE_TESTS['refusal_guard_test'].rsplit('::',1)[-1]: STORE_TESTS['refusal_guard_marker'],
+    }
+    if name in retirement_markers:
+        contract = retirement_markers[name]
+        markers = [json.loads(x) for x in re.findall(re.escape(contract['prefix'])+r'(\{[^\n]+\})',output)]
+        c.require(markers == [contract['fields']], f'{name}: missing, duplicate, or drifted named marker')
+        facts['named_marker'] = markers[0]
     return facts
 
 
@@ -229,10 +238,11 @@ def source_identity(include_proof=True):
 
 def case_sources(name, sources, root=ROOT):
     crates = SCOPE_CRATES[case_scope(name)]
+    path_roots = tuple(vendor+'/' for vendor in patch_path_overrides(root))
     return {path:digest for path,digest in sources.items() if path in {'Cargo.toml','Cargo.lock','rust-toolchain.toml'}
       or any(path.startswith(crate+'/') for crate in crates)
       or path.startswith('vendor/')
-      or any(path.startswith(vendor+'/') for vendor in patch_path_overrides(root))}
+      or path.startswith(path_roots)}
 
 
 def reusable_case(name, row, out, sources):

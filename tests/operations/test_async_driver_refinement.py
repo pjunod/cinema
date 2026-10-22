@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import importlib.machinery
+import json
 from pathlib import Path
 import shutil
 import unittest
@@ -187,6 +188,30 @@ class ReceiptContracts(unittest.TestCase):
     def test_selector_compile_failure_is_not_a_named_mutation(self):
         with self.assertRaises(runner.c.Invalid):
             runner.case_evidence('control-selector','error: failed to compile SELECTOR_WORK_BEFORE_TICK',101)
+
+    def test_retirement_primitive_markers_are_exact_unique_and_required(self):
+        cases = (
+            ('store-'+runner.STORE_TESTS['retirement_primitive_test'].rsplit('::',1)[-1],
+             runner.STORE_TESTS['retirement_primitive_marker']),
+            ('store-'+runner.STORE_TESTS['refusal_guard_test'].rsplit('::',1)[-1],
+             runner.STORE_TESTS['refusal_guard_marker']),
+        )
+        result = 'test result: ok. 1 passed; 0 failed;\n'
+        for name,contract in cases:
+            line = contract['prefix']+json.dumps(contract['fields'],separators=(',',':'))
+            good = result+line+'\n'
+            with self.subTest(case=name):
+                facts = runner.case_evidence(name,good,0)
+                self.assertEqual(facts['named_marker'],contract['fields'])
+                malformed = (
+                    result,
+                    good+line+'\n',
+                    result+line.replace(contract['prefix'],'async_store_unknown=')+'\n',
+                    result+contract['prefix']+json.dumps({**contract['fields'],'unexpected':True})+'\n',
+                )
+                for output in malformed:
+                    with self.subTest(output=output),self.assertRaises(runner.c.Invalid):
+                        runner.case_evidence(name,output,0)
 
     def test_reader_scope_sentence_is_shared_by_docs_and_receipt_definition(self):
         sentence = runner.CLAIM_BOUNDARIES['NoTwoSourceReaders']
