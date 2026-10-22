@@ -244,6 +244,8 @@ impl NodeResourceRuntime {
             .head
             .as_ref()
             .is_some_and(|h| h.operation_id == observe_id)
+            && bootstrap.change.is_none()
+            && role.transition.is_none()
         {
             return if completed {
                 Ok(())
