@@ -10,9 +10,13 @@ first.
   repair's new regression and both real P8/1000+1600 cells passed. P7 preparation
   passed, but its scanner refused a positive-origin selected-track duration tag:
   the tag declares the timestamp endpoint, not elapsed duration. Sol corrected
-  only that comparison and authored P7/P8 offset, selected-track, one-tick-boundary
-  and truncation controls. Scanner-only native linking, independent delta closure
-  and new/invalidated checks remain; authored controls are not passing evidence.
+  only that comparison; scanner-only linking and independent delta approval passed.
+  Nine new P7 scanner observations passed before a time-limited synthetic remux
+  produced 14 rather than the asserted 17 packets, before its truncation scan.
+  The control now copies exactly 17 coded packets and preserves unrelated audio,
+  original payload/timing and the full 18-picture declaration. Hash-bound continuation
+  retains nine passes without replay. Independent control-delta closure, repaired
+  P7 truncation and ten unexecuted P8 observations remain before P7 runtime checks.
   Existing 99 Rust / 141 shader / 70 helper passes and P8 results are retained,
   not relabelled as new-scanner runs. Coordinator owns native execution/publication;
   P7 mapped cells, separate FEL integration, fast lane and merge stay open in the

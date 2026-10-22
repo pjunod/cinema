@@ -143,9 +143,14 @@ and all independent-video/drain/count guards. New manual
 `test_scan_duration_tag.py::test_selected_video_duration_tag_uses_endpoint`
 controls cover P7/P8 positive-origin multistreams, unchanged L1/coded payloads,
 old-code sensitivity and contradictory/missing/malformed/truncated declarations.
-Authored controls are not passing evidence: scanner-only native linking,
-existing independent reviewer's NEW-delta closure and new/invalidated controls
-remain before failed P7 scanner and both mapped cells. Retain prior software,
+Scanner-only linking and independent delta review passed. Nine P7 observations
+passed; the truncation fixture then had 14 rather than the asserted 17 packets,
+before its scanner ran. The control-only repair copies exactly 17 AUs, retains
+full unrelated audio and checks payload/absolute timing before preserving the
+18-picture endpoint declaration. Pinned continuation reuses the nine passes
+without executing their preparation/scans again. Independent control-delta closure,
+repaired P7 truncation and ten unexecuted P8 observations remain before failed
+P7 scanner and both mapped cells. No scanner rebuild. Retain prior software,
 NEW core and P8 passes without replay or relabelling them as new-scanner runs.
 Coordinator owns native execution/publication. One fast lane/API merge and
 separate FEL integration remain; no deployment/device/client-DYN acceptance.

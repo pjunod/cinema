@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A P8 cells passed; P7 scanner endpoint repair awaiting linking/review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (current source; prior Astra authorship retained), coordinator (native/media/publication) ·
+**Status:** PR A P8 cells passed; scanner controls partially passed, fixture repair pending review · **Updated:** 2026-10-22 · **Owner:** Sol 6.1 (source), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR A implementation checkpoint
@@ -19,16 +19,16 @@
   relative `AVStream.duration`, independent selected-video coverage, decoder
   drains and the one-tick allowance remain intact. No endpoint-or-span fallback,
   audio/container substitution or real-input retiming/tag rewrite is introduced.
-  `tools/dv_processing/controls/test_scan_duration_tag.py` authors 20 small
-  scanner observations across retained synthetic P7/P8 fixtures: positive-origin
-  multistream acceptance with unchanged L1, old-scanner sensitivity, +/-one-tick
-  acceptance, and missing/malformed/span/+/-two-tick/truncated refusals. Exact
-  coded payloads and timing are checked; unrelated audio ends later. These have
-  not run. Actual current compiler-only syntax/dependency evidence exists;
-  scanner-only linking in the isolated SDK, independent NEW-delta closure and
-  new/invalidated controls must precede failed P7 scanner/mapped execution.
-  Old passes remain old-helper evidence, not new-scanner runs. Both P7 mapped
-  cells, separate FEL integration, one fast lane and API merge remain open.
+  Scanner-only linking and independent delta review passed. The manual control
+  `tools/dv_processing/controls/test_scan_duration_tag.py` passed nine P7 scanner
+  observations, then failed before its truncation scan: a time cutoff produced
+  14 rather than 17 coded packets. The control-only repair copies exactly 17 AUs,
+  muxes full unrelated audio separately, verifies original payload/PTS/durations,
+  and preserves the 18-picture endpoint declaration. Hash-bound continuation
+  retains the nine passes without remux/probe/scan replay. New control-delta review,
+  repaired P7 truncation and ten unexecuted P8 observations precede failed P7
+  decoded/policy and mapped cells. No scanner rebuild or unchanged-pass replay.
+  Separate FEL integration, one fast lane and API merge remain open.
   No display/deployment/client-DYN/general Dolby accuracy claim; output-metadata
   PR B must land before any user-exposed targeting setting.
 
