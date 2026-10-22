@@ -1,4 +1,5 @@
 use super::*;
+mod scale;
 use crate::resource_custody::codec_v2::tests::fixture;
 fn id() -> Id {
     Id::new(Uuid::new_v4()).unwrap()

@@ -73,7 +73,7 @@ fn io_arm(
     command
 }
 #[test]
-fn scratch_v2_arm_is_durable_before_directory_file_task_or_reader_entry() {
+fn scratch_v2_directory_arm_is_refused_before_member_write_ahead() {
     let mut f = growth();
     let prepared = prepare(&mut f);
     let handle = &prepared.obligations[0];
@@ -114,7 +114,7 @@ fn scratch_v2_arm_is_durable_before_directory_file_task_or_reader_entry() {
     assert_eq!(snap.trial_groups.len(), 1);
 }
 #[test]
-fn scratch_v2_same_operation_retry_never_repeats_physical_write_or_duplicate_file() {
+fn scratch_v2_exact_journal_retry_preserves_one_arm_and_sequence() {
     let mut f = growth();
     let (handle, member, plan) = arm(&mut f);
     let command = io_arm(&f, &handle, member, &plan);
@@ -167,6 +167,17 @@ fn scratch_v2_missing_cross_asset_or_reordered_event_ref_refuses_restore() {
         )
         .unwrap();
     assert!(snapshot(&f.storage.connection, &f.storage.witness).is_err());
+    let mut reordered: serde_json::Value = serde_json::from_str(&json).unwrap();
+    reordered["change"]["previous"] =
+        serde_json::json!({"operation_id": command.id.to_string(), "revision": 1});
+    f.storage
+        .connection
+        .execute(
+            "UPDATE operations SET result_json=?2 WHERE operation_id=?1",
+            params![command.id.as_bytes(), reordered.to_string()],
+        )
+        .unwrap();
+    assert!(snapshot(&f.storage.connection, &f.storage.witness).is_err());
     f.storage
         .connection
         .execute(
@@ -199,6 +210,7 @@ fn scratch_v2_outer_seal_keeps_only_existing_allocator_growth_and_hold_fences_en
 #[test]
 fn scratch_v2_old_reader_rejects_new_operation_and_sql_shape_is_unchanged() {
     #[derive(serde::Deserialize)]
+    #[allow(dead_code)] // Frozen old decoder fixture; successful payloads are not consumed.
     #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
     enum OldResult {
         Prepared {

@@ -1,10 +1,12 @@
 //! Deterministic audit fold. Input is a chain of complete journal result events,
 //! not caller-supplied totals. A fold never constructs a native receipt.
 use super::*;
+mod readers;
 
 pub(crate) struct ScratchFold {
     pub(crate) state: ScratchStateV2,
     pub(crate) files: Vec<FileObservedV1>,
+    readers: Vec<ReaderLeaseV1>,
     pending: Option<(Id, AssetIoV1)>,
 }
 impl ScratchFold {
@@ -21,6 +23,7 @@ impl ScratchFold {
                 totals: AssetTotalsV1::default(),
             },
             files: Vec::new(),
+            readers: Vec::new(),
             pending: None,
         })
     }
@@ -65,13 +68,22 @@ impl ScratchFold {
     ) -> Result<(), CustodyError> {
         match event {
             AssetEventV1::ArmIo { io_id, operation } => {
-                if self.state.lifecycle != ScratchLifecycleV1::Open
+                let read_only = matches!(
+                    operation,
+                    AssetIoV1::ReadRange { .. } | AssetIoV1::CloseReader { .. }
+                );
+                if (self.state.lifecycle != ScratchLifecycleV1::Open && !read_only)
                     || self.pending.is_some()
                     || *io_id != operation_id
                 {
                     return Err(codec::invalid());
                 }
                 match operation {
+                    AssetIoV1::OpenReader { .. }
+                    | AssetIoV1::ReadRange { .. }
+                    | AssetIoV1::CloseReader { .. } => {
+                        self.arm_reader(plan, *io_id, operation)?;
+                    }
                     AssetIoV1::CreateDirectory { copy_id } => {
                         if self.state.directory.is_some() || self.copy_exists(*copy_id) {
                             return Err(codec::invalid());
@@ -249,6 +261,14 @@ impl ScratchFold {
                             return Err(codec::invalid());
                         }
                     }
+                    (
+                        AssetIoV1::OpenReader { .. }
+                        | AssetIoV1::ReadRange { .. }
+                        | AssetIoV1::CloseReader { .. },
+                        _,
+                    ) => {
+                        self.observe_reader(&operation, observation, outcome)?;
+                    }
                     _ => return Err(codec::invalid()),
                 }
                 self.pending = None;
@@ -269,7 +289,7 @@ impl ScratchFold {
                     || self.pending.is_some()
                     || self.state.directory.is_none()
                     || self.files.iter().any(|f| {
-                        !f.held_copy_ids.is_empty() || f.temporary || f.published.is_none()
+                        !self.only_reader_copies(f) || f.temporary || f.published.is_none()
                     })
                 {
                     return Err(codec::invalid());
@@ -317,6 +337,7 @@ impl ScratchFold {
                 .checked_add(u32::try_from(f.held_copy_ids.len()).map_err(|_| codec::invalid())?)
                 .ok_or_else(codec::invalid)?;
         }
+        self.count_readers(&mut totals)?;
         if let Some((_, pending)) = &self.pending {
             totals.pending_jobs = 1;
             match pending {
@@ -344,13 +365,28 @@ impl ScratchFold {
                         .charged_storage_bytes
                         .checked_add(plan.limits.storage_for(*logical_end)?)
                         .ok_or_else(codec::invalid)?;
-                    totals.memory_reserved_bytes = *payload_capacity;
+                    totals.memory_reserved_bytes = totals
+                        .memory_reserved_bytes
+                        .checked_add(*payload_capacity)
+                        .ok_or_else(codec::invalid)?;
                     totals.handles_reserved = totals
                         .handles_reserved
                         .checked_add(1)
                         .ok_or_else(codec::invalid)?;
                 }
                 AssetIoV1::RemoveOwned { .. } => {}
+                AssetIoV1::OpenReader { lease } => {
+                    totals.handles_reserved = totals
+                        .handles_reserved
+                        .checked_add(1)
+                        .ok_or_else(codec::invalid)?;
+                    totals.memory_reserved_bytes = totals
+                        .memory_reserved_bytes
+                        .checked_add(lease.memory_cap)
+                        .ok_or_else(codec::invalid)?;
+                    totals.readers = totals.readers.checked_add(1).ok_or_else(codec::invalid)?;
+                }
+                AssetIoV1::ReadRange { .. } | AssetIoV1::CloseReader { .. } => {}
                 AssetIoV1::SyncFiles { file_ids } => {
                     // One opened file at a time plus directory sync descriptor.
                     totals.handles_reserved = totals

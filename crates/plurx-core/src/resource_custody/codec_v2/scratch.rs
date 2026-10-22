@@ -177,9 +177,27 @@ pub(crate) struct FileObservedV1 {
     pub charged_bytes: u64,
     pub held_copy_ids: Vec<Id>,
 }
-/// Concrete first-path compound operations. No arbitrary callback, path or
-/// unbounded write API. Reader/copy/retained-origin variants require their own
-/// complete ownership adapters before they can be accepted by this protocol.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ByteRangeV1 {
+    pub start: u64,
+    pub end_exclusive: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReaderLeaseV1 {
+    pub lease_id: Id,
+    pub asset_id: Id,
+    pub file_id: Id,
+    pub copy_id: Id,
+    pub owner_id: Id,
+    pub memory_cap: u64,
+    pub read_range: ByteRangeV1,
+    pub cursor: u64,
+    pub acquisition_io_id: Id,
+}
+/// Concrete compound operations, not arbitrary callbacks or unbounded writes.
+/// These audit variants do not supply their native/runtime ownership adapters.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 pub(crate) enum AssetIoV1 {
@@ -198,6 +216,16 @@ pub(crate) enum AssetIoV1 {
     },
     SyncFiles {
         file_ids: Vec<Id>,
+    },
+    OpenReader {
+        lease: ReaderLeaseV1,
+    },
+    ReadRange {
+        lease_id: Id,
+        range: ByteRangeV1,
+    },
+    CloseReader {
+        lease_id: Id,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +249,17 @@ pub(crate) enum AssetObservationV1 {
         file_id: Id,
     },
     Synced,
+    ReaderOpened {
+        lease: ReaderLeaseV1,
+        native_object: NativeObject,
+    },
+    ReaderRead {
+        lease_id: Id,
+        bytes_read: u64,
+    },
+    ReaderClosed {
+        lease_id: Id,
+    },
     NoAcquisition,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,10 +359,6 @@ pub(crate) fn validate_projection(
         || t.handles_reserved > l.live_handles
         || t.readers > l.reader_leases
         || t.pending_jobs > l.pending_native_jobs
-        || (matches!(
-            state.lifecycle,
-            ScratchLifecycleV1::Frozen | ScratchLifecycleV1::RetainedReadOnly
-        ) && t.pending_jobs != 0)
     {
         return Err(codec::invalid());
     }

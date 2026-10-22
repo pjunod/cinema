@@ -126,7 +126,9 @@ pub(super) fn change(
     if !matches!(
         prior,
         Phase::AcquisitionPossible | Phase::Sealed | Phase::UnknownHeld
-    ) || (prior == Phase::UnknownHeld && matches!(change.event, AssetEventV1::ArmIo { .. }))
+    ) || (prior == Phase::UnknownHeld
+        && matches!(&change.event,
+        AssetEventV1::ArmIo { operation, .. } if !matches!(operation, AssetIoV1::CloseReader { .. })))
     {
         return Err(codec::invalid());
     }
