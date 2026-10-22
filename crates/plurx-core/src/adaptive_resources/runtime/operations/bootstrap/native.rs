@@ -210,6 +210,8 @@ impl NodeResourceRuntime {
             .state();
         if bootstrap.plan.bootstrap().authority.installation_id.uuid()
             != self.recovered.installation_id
+            || bootstrap.plan.filesystem_domain.platform != v2::FilesystemPlatform::Linux
+            || bootstrap.plan.filesystem_domain.daemon_owner_id.uuid() != self.owner.owner_id
             || self.rendition_root.as_deref()
                 != Some(Path::new(
                     &bootstrap.plan.bootstrap().authority.resolved_absolute_root,

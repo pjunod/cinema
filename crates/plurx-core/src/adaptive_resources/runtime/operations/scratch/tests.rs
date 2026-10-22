@@ -282,6 +282,37 @@ async fn bootstrap_runtime_configured_root_mismatch_never_arms_or_opens() {
     assert!(bundle.roles[0].armed.is_empty() && bundle.roles[0].bootstrap.is_empty());
 }
 
+#[tokio::test]
+async fn bootstrap_runtime_foreign_owner_or_boot_never_arms_native_domain() {
+    for foreign_boot in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, owner, member) = fixture_kind(root.path(), true).await;
+        {
+            let mut bundle = owner.state.lock().await;
+            let v2::MemberPlan::ScratchAssetsV3 { plan, .. } =
+                &mut bundle.roles[0].typed_members.as_mut().unwrap()[0]
+            else {
+                unreachable!()
+            };
+            if foreign_boot {
+                plan.filesystem_domain.os_boot = BootIdentity::Known {
+                    value: Uuid::new_v4(),
+                    provider: "fixture-foreign".into(),
+                    version: 1,
+                };
+            } else {
+                plan.filesystem_domain.daemon_owner_id = id();
+            }
+        }
+        assert!(runtime
+            .arm_scratch_bootstrap(&owner, 0, member, deadline())
+            .await
+            .is_err());
+        let bundle = owner.state.lock().await;
+        assert!(bundle.roles[0].armed.is_empty() && bundle.roles[0].bootstrap.is_empty());
+    }
+}
+
 async fn queue_unconsumed_directory(
     runtime: &NodeResourceRuntime,
     owner: &OwnedPreparation,

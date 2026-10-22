@@ -48,6 +48,8 @@ impl NodeResourceRuntime {
             })
             .ok_or(OperationError::State)?;
         if plan.bootstrap().authority.installation_id.uuid() != self.recovered.installation_id
+            || plan.filesystem_domain.daemon_owner_id.uuid() != self.owner.owner_id
+            || plan.filesystem_domain.os_boot != self.owner.os_boot
             || self.rendition_root.as_deref()
                 != Some(Path::new(
                     &plan.bootstrap().authority.resolved_absolute_root,
