@@ -2,6 +2,85 @@
 use super::*;
 
 #[test]
+fn held_publication_uses_selected_operation_and_same_directory_without_path_reopen() {
+    let root = crate::test_tempdir().unwrap();
+    let original = root.path().join("original");
+    let moved = root.path().join("moved");
+    let foreign = root.path().join("foreign");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::create_dir(&foreign).unwrap();
+    let directory = open_directory_nofollow_blocking(&original).unwrap();
+    let descriptor = directory.as_raw_fd();
+    let operation = uuid::Uuid::new_v4();
+    let request =
+        PublicationRequest::for_operation(INIT_NAME, b"held bytes".to_vec(), operation).unwrap();
+    let mut native = PublicationIo::from_held_directory(request, directory);
+    assert!(native.path.is_none());
+    assert_eq!(
+        native.temporary_name.to_str().unwrap(),
+        format!(".{INIT_NAME}.{operation}.tmp")
+    );
+    assert!(
+        native.take_held_directory().is_err(),
+        "not entered or completed"
+    );
+    std::fs::rename(&original, &moved).unwrap();
+    std::os::unix::fs::symlink(&foreign, &original).unwrap();
+    native.run().unwrap();
+    assert_eq!(std::fs::read(moved.join(INIT_NAME)).unwrap(), b"held bytes");
+    assert!(!foreign.join(INIT_NAME).exists());
+    let returned = native.take_held_directory().unwrap();
+    assert_eq!(returned.as_raw_fd(), descriptor, "no dup or reopen");
+    assert!(native.take_held_directory().is_err(), "single move");
+    assert!(native.run().is_err(), "native operation is never replayed");
+}
+
+#[test]
+fn held_publication_conflict_retains_parent_and_file_without_false_transfer() {
+    let root = crate::test_tempdir().unwrap();
+    std::fs::write(root.path().join(INIT_NAME), b"original").unwrap();
+    let request =
+        PublicationRequest::for_operation(INIT_NAME, b"new".to_vec(), uuid::Uuid::new_v4())
+            .unwrap();
+    let directory = open_directory_nofollow_blocking(root.path()).unwrap();
+    let descriptor = directory.as_raw_fd();
+    let mut native = PublicationIo::from_held_directory(request, directory);
+    assert_eq!(
+        native.run().unwrap_err().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert!(native.take_held_directory().is_err());
+    assert_eq!(native.directory.as_ref().unwrap().as_raw_fd(), descriptor);
+    assert!(native.has_unresolved_object());
+    assert_eq!(
+        std::fs::read(root.path().join(INIT_NAME)).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
+fn held_publication_validation_precedes_directory_transfer_and_missing_fd_has_no_fallback() {
+    let root = crate::test_tempdir().unwrap();
+    let directory = open_directory_nofollow_blocking(root.path()).unwrap();
+    assert!(PublicationRequest::for_operation(INIT_NAME, vec![], uuid::Uuid::nil()).is_err());
+    assert!(
+        PublicationRequest::for_operation("../init.mp4", vec![], uuid::Uuid::new_v4()).is_err()
+    );
+    assert!(
+        directory.metadata().unwrap().is_dir(),
+        "validation never consumed the parent"
+    );
+    let request =
+        PublicationRequest::for_operation(INIT_NAME, vec![1], uuid::Uuid::new_v4()).unwrap();
+    let mut native = PublicationIo::from_held_directory(request, directory);
+    let retained_elsewhere = native.directory.take().unwrap();
+    assert!(native.run().is_err());
+    assert!(native.path.is_none() && native.acquired.is_none());
+    assert!(!root.path().join(INIT_NAME).exists());
+    assert!(retained_elsewhere.metadata().unwrap().is_dir());
+}
+
+#[test]
 fn native_publication_refuses_paths_and_preserves_original_payload_allocation() {
     let root = crate::test_tempdir().unwrap();
     for name in [

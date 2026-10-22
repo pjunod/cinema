@@ -12,7 +12,8 @@ use std::os::unix::fs::MetadataExt;
 /// No serde constructor, pathname, or completed task can manufacture this owner.
 #[derive(Debug)]
 pub(super) struct PublicationIo {
-    path: PathBuf,
+    // None is held-directory input: it can NEVER fall back to a pathname.
+    path: Option<PathBuf>,
     temporary_name: CString,
     destination_name: CString,
     payload: Vec<u8>,
@@ -44,33 +45,85 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-impl PublicationIo {
-    pub(super) fn new(path: PathBuf, name: &str, payload: Vec<u8>) -> io::Result<Self> {
+/// Logical validation before moving an actual directory. This native request is
+/// NOT a journal permit or physical proof; its caller owes the durable binding.
+pub(super) struct PublicationRequest {
+    temporary_name: CString,
+    destination_name: CString,
+    payload: Vec<u8>,
+    logical_end: u64,
+}
+impl PublicationRequest {
+    pub(super) fn for_operation(
+        name: &str,
+        payload: Vec<u8>,
+        io_id: uuid::Uuid,
+    ) -> io::Result<Self> {
         let segment = parse_segment_name(name)
             .and_then(|n| u32::try_from(n).ok())
             .is_some_and(|n| segment_name(u64::from(n)) == name);
-        if name != INIT_NAME && !segment {
+        if (name != INIT_NAME && !segment) || io_id.is_nil() {
             return Err(invalid(
-                "publication requires a canonical init/segment name",
+                "publication requires a canonical name and nonnil operation",
             ));
         }
         let logical_end = u64::try_from(payload.len()).map_err(io::Error::other)?;
-        let operation = uuid::Uuid::new_v4();
         Ok(Self {
-            path,
-            temporary_name: CString::new(format!(".{name}.{operation}.tmp"))
+            temporary_name: CString::new(format!(".{name}.{io_id}.tmp"))
                 .expect("canonical name and UUID contain no NUL"),
             destination_name: CString::new(name).expect("canonical name contains no NUL"),
             payload,
             logical_end,
-            directory: None,
+        })
+    }
+}
+
+impl PublicationIo {
+    pub(super) fn new(path: PathBuf, name: &str, payload: Vec<u8>) -> io::Result<Self> {
+        // Local UUID selection is restricted to the existing legacy profile.
+        let request = PublicationRequest::for_operation(name, payload, uuid::Uuid::new_v4())?;
+        Ok(Self::from_request(Some(path), None, request))
+    }
+
+    /// Infallible ownership move AFTER request validation; a validation failure
+    /// must not drop the sole descriptor before its custodian records closure.
+    /// Actual finite entry still needs known arm and registered job/latch.
+    pub(super) fn from_held_directory(request: PublicationRequest, directory: File) -> Self {
+        Self::from_request(None, Some(directory), request)
+    }
+
+    fn from_request(
+        path: Option<PathBuf>,
+        directory: Option<File>,
+        request: PublicationRequest,
+    ) -> Self {
+        Self {
+            path,
+            temporary_name: request.temporary_name,
+            destination_name: request.destination_name,
+            payload: request.payload,
+            logical_end: request.logical_end,
+            directory,
             file: None,
             entered: false,
             acquired: None,
             published: false,
             #[cfg(test)]
             barrier: None,
-        })
+        }
+    }
+
+    /// Return the SAME descriptor only after actual success. Errors/cancellation
+    /// retain it here. This counted ownership move is NOT a close/refund fact.
+    pub(super) fn take_held_directory(&mut self) -> io::Result<File> {
+        if self.path.is_some() || !self.entered || !self.published || self.file.is_some() {
+            return Err(io::Error::other(
+                "held publication directory is not transferable",
+            ));
+        }
+        self.directory
+            .take()
+            .ok_or_else(|| io::Error::other("held publication directory already moved"))
     }
 
     pub(super) fn has_unresolved_object(&self) -> bool {
@@ -121,8 +174,13 @@ impl PublicationIo {
         self.entered = true;
         // Opening this legacy directory is itself native I/O, performed inside
         // the retained real job. It is NOT retroactive finite bootstrap custody.
-        self.directory = Some(open_directory_nofollow_blocking(&self.path)?);
-        let directory = self.directory.as_ref().expect("opened directory");
+        if let Some(path) = self.path.as_ref() {
+            self.directory = Some(open_directory_nofollow_blocking(path)?);
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .ok_or_else(|| io::Error::other("held publication directory unavailable"))?;
         // SAFETY: terminated single-component name, held parent fd, exclusive
         // create; on success the new fd is moved into this retained owner.
         let fd = unsafe {
