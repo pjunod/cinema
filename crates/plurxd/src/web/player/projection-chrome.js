@@ -30,6 +30,54 @@ function playerInputSurface(){ return "desktop"; }
 // `_seekPending`, a pointer drag sets `_seekPreview`. Either one means the
 // bar is showing a time the film is not at yet.
 function playerSeekPending(){ return !!(PLAYER&&(PLAYER._seekPending!=null||PLAYER._seekPreview!=null)); }
+// Intrinsic dimensions belong to the presented picture. Requested rungs and
+// source metadata can describe another stream while a change is still pending.
+function playbackQualityResolution(width,height){
+  return [144,240,360,480,540,576,720,1080,1440,2160,4320].includes(height)
+    ?`${height}p`:`${width}×${height}`;
+}
+function updatePlaybackQualityChrome(v,p){
+  if(!v||!p||PLAYER!==p||document.getElementById("video")!==v) return;
+  const now=performance.now(),presentation=p.transportPresentation;
+  let current=p.qualityChrome;
+  const width=Math.round(Number(v.videoWidth)||0),height=Math.round(Number(v.videoHeight)||0);
+  const owns=playbackOwnsAttachedMedia(p)&&!p.terminalStop;
+  if(owns&&!p.preparedCommitting&&!v.seeking&&width>0&&height>0
+    &&presentation?.element===v&&presentation.attachment===p.mediaAttachment
+    &&Number.isFinite(p.presentationAdvancedAt)&&current?.proof!==p.presentationAdvancedAt){
+    const label=playbackQualityResolution(width,height);
+    const grade=["sdr","hdr10","hdr10plus","hlg","dolby_vision"].includes(p.deliveredRange)?p.deliveredRange:null;
+    const candidate=(p.qualityCandidates||[]).find(row=>row.id===p.qualityCandidateId);
+    const codec=["h264","hevc","av1","vp9","vp8"].includes(candidate?.planned_codec)?candidate.planned_codec:null;
+    const resized=!!current&&(current.width!==width||current.height!==height);
+    const changed=resized||!!current&&(current.grade&&grade&&current.grade!==grade
+      ||current.codec&&codec&&current.codec!==codec);
+    const range=grade&&grade!=="sdr"?` · ${grade==="dolby_vision"?"Dolby Vision":grade.toUpperCase()}`:"";
+    current=p.qualityChrome={width,height,label,grade,codec,proof:p.presentationAdvancedAt,
+      notice:changed?resized?`Quality changed: ${current.label} → ${label}`:`Quality changed: ${label}${range}${codec?` · ${codec.toUpperCase()}`:""}`:current?.notice||"",
+      until:changed?now+3500:current?.until||0};
+  }
+  const selected=playQuality();
+  const mode=selected==="auto"?"Auto":["original","nomse"].includes(selected)?"Original":"Manual";
+  const modeNode=document.getElementById("pbqualitymode"),resolution=document.getElementById("pbqualitycurrent");
+  if(modeNode) modeNode.textContent=mode;
+  if(resolution) resolution.textContent=current?.label||"—";
+  const button=document.getElementById("pbquality");
+  if(button){
+    const detail=current?`${mode} · ${current.label} (${current.width}×${current.height})`:`${mode} · awaiting picture`;
+    button.title=`Playback quality: ${detail}`;
+    button.setAttribute("aria-label",`Playback quality: ${detail}`);
+  }
+  const notice=document.getElementById("pqualitynotice");
+  if(!notice) return;
+  const surface=PLAYBACK_SURFACE.surface;
+  const clear=owns&&!p.preparedCommitting&&!p.controlSeek&&(!surface||surface.kind==="none");
+  if(current&&!clear) current.until=0;
+  const shown=clear&&current?.until>now;
+  notice.hidden=!shown;
+  const message=shown?current.notice:"";
+  if(notice.textContent!==message) notice.textContent=message;
+}
 function playerInputState(){
   const p=document.getElementById("player");
   // The input contract's `failed` state is the presenter's answer, not a DOM

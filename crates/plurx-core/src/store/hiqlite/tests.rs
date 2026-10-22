@@ -655,6 +655,8 @@ async fn takeover_authority_attribution_settings_pair_reaches_timed_client_retri
             activity_refreshes: Arc::new(ActivityRefreshGate::default()),
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
             watch_fences: Arc::new(super::super::watch_fence::WatchWriteFences::default()),
+            #[cfg(feature = "hiqlite-contract-tests")]
+            insertion_seam: Default::default(),
         };
         let started = tokio::time::Instant::now();
         assert_eq!(

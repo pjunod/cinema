@@ -275,7 +275,7 @@ pub(crate) struct Encoding {
     pub candidate_recipe: Option<[u8; 32]>,
     pub production_proofs: Arc<CandidateProductionProofs>,
     pub active_production: Mutex<ActiveProductionWindow>,
-    pub processed_samplers: Mutex<Vec<std::sync::Weak<ProcessedProductionSampler>>>,
+
     pub queued: Mutex<Option<LiveWait>>,
     pub policy_retry: std::sync::atomic::AtomicBool,
     /// Set while a refused prepared successor has asked its own viewer's
@@ -306,116 +306,6 @@ pub(crate) struct ActiveProductionEvidence {
     pub active_ms: u32,
     pub completed_segments: u32,
     pub observed_at: Instant,
-}
-
-/// Private qualification observation. This owns no executable or capacity and
-/// never publishes its sealed receipt into live catalogue production proofs.
-#[derive(Debug)]
-pub(crate) struct ProcessedProductionSampler {
-    reservation: std::sync::Weak<EncodeReservation>,
-    from: u32,
-    through: u32,
-    next: std::sync::atomic::AtomicU32,
-    deadline: Instant,
-    state: Mutex<(ActiveProductionWindow, Option<ActiveProductionEvidence>)>,
-}
-
-impl ProcessedProductionSampler {
-    pub(crate) fn bounds(&self) -> (u32, u32) {
-        (self.from, self.through)
-    }
-    pub(crate) fn next_entry(&self) -> u32 {
-        self.next.load(std::sync::atomic::Ordering::Acquire)
-    }
-    pub(crate) fn proof(&self, permit: &EncodePermit) -> Option<ActiveProductionEvidence> {
-        if Instant::now() >= self.deadline
-            || !self
-                .reservation
-                .ptr_eq(&Arc::downgrade(&permit._reservation))
-        {
-            return None;
-        }
-        self.state
-            .lock()
-            .expect("processed sampler")
-            .1
-            .filter(|proof| proof.observed_at.elapsed() <= Duration::from_secs(15))
-    }
-
-    pub(crate) fn qualified(&self) -> bool {
-        self.reservation.upgrade().is_some_and(|reservation| {
-            self.proof(&EncodePermit {
-                _reservation: reservation,
-            })
-            .is_some()
-        })
-    }
-
-    fn pause(&self) {
-        let mut state = self.state.lock().expect("processed sampler");
-        if state.1.is_none() {
-            state.0 = ActiveProductionWindow::default();
-        }
-    }
-
-    #[cfg(any(target_os = "linux", test))]
-    fn observe(&self, permit: &EncodePermit, generation: u64, entry: u32, end_ms: i64) {
-        self.observe_at(permit, generation, entry, end_ms, Instant::now());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn observe_for_test(
-        &self,
-        permit: &EncodePermit,
-        generation: u64,
-        entry: u32,
-        end_ms: i64,
-        at: Instant,
-    ) {
-        self.observe_at(permit, generation, entry, end_ms, at);
-    }
-
-    #[cfg(any(target_os = "linux", test))]
-    fn observe_at(
-        &self,
-        permit: &EncodePermit,
-        generation: u64,
-        entry: u32,
-        end_ms: i64,
-        at: Instant,
-    ) {
-        if Instant::now() >= self.deadline
-            || entry < self.from
-            || entry > self.through
-            || !self
-                .reservation
-                .ptr_eq(&Arc::downgrade(&permit._reservation))
-        {
-            self.pause();
-            return;
-        }
-        if entry < self.next_entry() {
-            self.pause();
-            return;
-        }
-        self.next.store(
-            entry.saturating_add(1),
-            std::sync::atomic::Ordering::Release,
-        );
-        let mut state = self.state.lock().expect("processed sampler");
-        if state.1.is_some() {
-            return;
-        }
-        state.0.begin_processed_window(generation, entry, permit);
-        if let Some(proof) = state.0.observe(at, generation, entry, end_ms) {
-            if proof.milli_realtime >= 1150
-                && proof.active_ms >= 2000
-                && proof.completed_segments >= 2
-            {
-                state.1 = Some(proof);
-            }
-        }
-    }
 }
 
 impl CandidateProductionProofs {
@@ -955,7 +845,7 @@ impl Encoding {
             candidate_recipe: self.candidate_recipe,
             production_proofs: Arc::clone(&self.production_proofs),
             active_production: Mutex::new(ActiveProductionWindow::default()),
-            processed_samplers: Mutex::new(Vec::new()),
+
             speculative: std::sync::atomic::AtomicBool::new(
                 self.speculative.load(std::sync::atomic::Ordering::Acquire),
             ),
@@ -996,17 +886,6 @@ impl Encoding {
         if self.shared_audio.is_none() {
             self.production_proofs.remove(self.candidate_recipe);
         }
-        self.processed_samplers
-            .lock()
-            .expect("processed samplers")
-            .retain(|weak| {
-                if let Some(sampler) = weak.upgrade() {
-                    sampler.pause();
-                    true
-                } else {
-                    false
-                }
-            });
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -1017,20 +896,7 @@ impl Encoding {
         permit: &EncodePermit,
     ) {
         let mut window = self.active_production.lock().expect("active production");
-        let contiguous = window.begin_processed_window(generation, entry, permit);
-        if !contiguous {
-            self.processed_samplers
-                .lock()
-                .expect("processed samplers")
-                .retain(|weak| {
-                    if let Some(sampler) = weak.upgrade() {
-                        sampler.pause();
-                        true
-                    } else {
-                        false
-                    }
-                });
-        }
+        window.begin_processed_window(generation, entry, permit);
         if window.evidence.is_none() {
             self.production_proofs.remove(self.candidate_recipe);
         }
@@ -1042,25 +908,7 @@ impl Encoding {
         }
         let mut window = self.active_production.lock().expect("active production");
         let proof = window.observe(Instant::now(), generation, entry, end_ms);
-        #[cfg(any(target_os = "linux", test))]
-        if window.active && window.generation == generation {
-            if let Some(reservation) = window.processed_reservation.upgrade() {
-                let permit = EncodePermit {
-                    _reservation: reservation,
-                };
-                self.processed_samplers
-                    .lock()
-                    .expect("processed samplers")
-                    .retain(|weak| {
-                        if let Some(sampler) = weak.upgrade() {
-                            sampler.observe(&permit, generation, entry, end_ms);
-                            true
-                        } else {
-                            false
-                        }
-                    });
-            }
-        }
+
         if let (Some(recipe), Some(proof)) = (self.candidate_recipe, proof) {
             self.production_proofs.record(recipe, proof);
         } else if window.evidence.is_none() {
@@ -1077,44 +925,6 @@ impl Encoding {
             .expect("active production")
             .evidence
             .filter(|proof| proof.observed_at.elapsed() <= Duration::from_secs(15))
-    }
-
-    #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn processed_production_for(
-        &self,
-        permit: &EncodePermit,
-    ) -> Option<ActiveProductionEvidence> {
-        let window = self.active_production.lock().expect("active production");
-        (window.active
-            && window
-                .processed_reservation
-                .ptr_eq(&Arc::downgrade(&permit._reservation)))
-        .then_some(window.evidence)
-        .flatten()
-        .filter(|proof| proof.observed_at.elapsed() <= Duration::from_secs(15))
-    }
-
-    #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn processed_sampler(
-        &self,
-        permit: &EncodePermit,
-        from: u32,
-        through: u32,
-        deadline: Instant,
-    ) -> Arc<ProcessedProductionSampler> {
-        let sampler = Arc::new(ProcessedProductionSampler {
-            reservation: Arc::downgrade(&permit._reservation),
-            from,
-            through,
-            next: std::sync::atomic::AtomicU32::new(from),
-            deadline,
-            state: Mutex::new((ActiveProductionWindow::default(), None)),
-        });
-        self.processed_samplers
-            .lock()
-            .expect("processed samplers")
-            .push(Arc::downgrade(&sampler));
-        sampler
     }
 
     pub(crate) fn promote(&self) {
@@ -1617,7 +1427,9 @@ impl Encoding {
             return None;
         };
         plan.profile81_level()
-            .map(|level| format!("dvhe.08.{level:02}"))
+            // Profile 8.1 is HDR10-compatible. Apple requires the compatibility
+            // brand alongside VIDEO-RANGE=PQ to recognize the DV enhancement.
+            .map(|level| format!("dvhe.08.{level:02}/db1p"))
     }
 
     pub(crate) fn processed_candidate_digest(
@@ -1910,116 +1722,6 @@ mod production_evidence_tests {
 mod source_copy_admission_tests {
     use super::*;
     use plurx_core::store::SettingsStore;
-
-    #[test]
-    fn processed_sampler_seals_only_bounded_contiguous_exact_credit_publications() {
-        let permit = || EncodePermit {
-            _reservation: Arc::new(EncodeReservation {
-                _hardware: None,
-                _software: None,
-                worker_claimed: std::sync::atomic::AtomicBool::new(false),
-            }),
-        };
-        let credit = permit();
-        let other = permit();
-        let now = Instant::now();
-        let sampler = ProcessedProductionSampler {
-            reservation: Arc::downgrade(&credit._reservation),
-            from: 10,
-            through: 16,
-            next: std::sync::atomic::AtomicU32::new(10),
-            deadline: now + Duration::from_secs(8),
-            state: Mutex::new((ActiveProductionWindow::default(), None)),
-        };
-        for entry in 10..=12 {
-            sampler.observe_for_test(&other, 1, entry, i64::from(entry) * 4000, now);
-        }
-        assert!(
-            sampler.proof(&credit).is_none(),
-            "another reservation cannot contribute"
-        );
-        sampler.observe_for_test(&credit, 1, 10, 40_000, now - Duration::from_secs(3));
-        sampler.observe_for_test(&credit, 2, 11, 44_000, now - Duration::from_millis(1500));
-        sampler.observe_for_test(&credit, 3, 40, 160_000, now - Duration::from_millis(500));
-        sampler.observe_for_test(&credit, 4, 12, 48_000, now);
-        assert!(
-            sampler.proof(&credit).is_none(),
-            "out-of-range producer seek cannot bridge probe points"
-        );
-        assert_eq!(
-            sampler.next_entry(),
-            13,
-            "published entries cannot be scheduled again after eviction"
-        );
-        sampler.observe_for_test(&credit, 5, 10, 40_000, now);
-        assert_eq!(
-            sampler.next_entry(),
-            13,
-            "backward replay cannot rewind the probe"
-        );
-        let replacement_sampler = ProcessedProductionSampler {
-            reservation: Arc::downgrade(&credit._reservation),
-            from: 10,
-            through: 16,
-            next: std::sync::atomic::AtomicU32::new(10),
-            deadline: now + Duration::from_secs(8),
-            state: Mutex::new((ActiveProductionWindow::default(), None)),
-        };
-        replacement_sampler.observe_for_test(&credit, 5, 10, 40_000, now - Duration::from_secs(3));
-        replacement_sampler.observe_for_test(
-            &credit,
-            6,
-            11,
-            44_000,
-            now - Duration::from_millis(1500),
-        );
-        assert_eq!(replacement_sampler.next_entry(), 12);
-        assert_eq!(
-            replacement_sampler
-                .state
-                .lock()
-                .expect("sampler")
-                .0
-                .points
-                .len(),
-            2
-        );
-        replacement_sampler.observe_for_test(
-            &other,
-            7,
-            12,
-            48_000,
-            now - Duration::from_millis(500),
-        );
-        replacement_sampler.observe_for_test(&credit, 8, 12, 48_000, now);
-        assert!(
-            replacement_sampler.proof(&credit).is_none(),
-            "A to B to A credit changes reset valid earlier points"
-        );
-        sampler.pause();
-        sampler.observe_for_test(&credit, 3, 12, 48_000, now);
-        assert!(
-            sampler.proof(&credit).is_none(),
-            "an interruption cannot bridge prior points"
-        );
-        sampler.observe_for_test(&credit, 4, 14, 56_000, now - Duration::from_secs(3));
-        sampler.observe_for_test(&credit, 5, 15, 60_000, now - Duration::from_millis(1500));
-        sampler.observe_for_test(&credit, 6, 16, 64_000, now);
-        assert!(
-            sampler.proof(&credit).is_some(),
-            "three actual contiguous points pass all floors"
-        );
-        assert!(sampler.proof(&other).is_none());
-        sampler.pause();
-        assert!(
-            sampler.proof(&credit).is_some(),
-            "completed private qualification can settle its demand"
-        );
-        let weak = Arc::downgrade(&credit._reservation);
-        drop(credit);
-        assert!(weak.upgrade().is_none(), "the sampler owns no capacity");
-        assert!(!sampler.qualified());
-    }
 
     #[tokio::test]
     async fn processed_preparation_requests_background_yield_and_owns_actual_capacity() {

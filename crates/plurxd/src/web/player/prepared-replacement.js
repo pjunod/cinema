@@ -487,12 +487,37 @@ function preparedHlsAttach(p,state,spare){
     failPreparedReplacement(p,state,String(d.details||d.type||"hls.js fatal error"));
   });
 }
+// After the first visible frame, the successor needs the same recovery and
+// observations as an ordinary HLS attachment. Until that proof, rollback owns
+// a failed exposure. Keep the attachment token captured by the reporter that
+// still owes the prepared commit acknowledgement.
+function adoptPreparedHls(p,state,video){
+  const hls=state.hls;
+  if(!hls||p.hls!==hls||state.hlsAdopted) return;
+  const mediaAttachment=p.mediaAttachment;
+  const attachment={current:()=>PLAYER===p&&p.mediaAttachment===mediaAttachment
+    &&p.hls===hls&&document.getElementById("video")===video
+    &&!playbackAttemptTerminallyStopped(p,mediaAttachment)};
+  const {startup}=hlsStartupEpisode(p,attachment,state.playlistUrl,state.startAtSec);
+  startup.hls=hls;
+  startup.state='presenting';
+  startup.manifestState='parsed';
+  startup.levelState='loaded';
+  startup.mediaLoaded=true;
+  p.hlsRetryUsed=0;
+  state.hlsAdopted=true;
+  const observesCurrent=()=>attachment.current()&&p.hlsStartup===startup
+    &&playbackOwnsAttachedMedia(p)&&!playbackAttemptTerminallyStopped(p,mediaAttachment);
+  wireHlsObservers(hls,startup,video,observesCurrent);
+  hls.on(Hls.Events.ERROR,onHlsError(hls,startup,video,observesCurrent));
+}
 // The staged pipeline does not own the viewer's bandwidth history until it is
 // exposed. Once attached it must measure its own fragments: otherwise the
 // predecessor's last sample ages out, and a later cliff can only take the slow
 // two-sample voluntary path even while the successor's hls.js EWMA falls.
 function attachedPreparedHls(p,state){
-  return PLAYER===p&&p.hls===state.hls&&p.sessionId===state.sessionId;
+  return PLAYER===p&&p.hls===state.hls&&p.sessionId===state.sessionId
+    &&!playbackAttemptTerminallyStopped(p);
 }
 function createPreparedHlsLoader(StockLoader,p,state){
   return class PlurxPreparedLoader extends StockLoader{
@@ -534,6 +559,7 @@ function createPreparedHlsLoader(StockLoader,p,state){
   };
 }
 function notePreparedHlsFragmentLoaded(p,state,d){
+  if(state.hlsAdopted) return;
   if(preparedState(p)===state&&d&&d.frag&&d.frag.type==='main'){
     const stats=d.frag.stats||d.stats||{};
     const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now(),stats.loaded);
@@ -1164,6 +1190,7 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   // already authoritative for telemetry; paint the changed badges with the
   // bounded idle retirement instead of blocking its first visible frame.
   preparedFirstFrame(p,state,spare,unixMs=>{
+    adoptPreparedHls(p,state,spare);
     notePreparedSwitchFirstFrame(p);
     state.state="committed";
     if(p.preparedCommitting===state) p.preparedCommitting=null;

@@ -1099,7 +1099,7 @@ class InstallerCase(unittest.TestCase):
         for mode in ("linux", "macos", "docker", "binary"):
             installer = str(fake_root / "deploy" / "install") if mode == "docker" else str(INSTALL)
             result = subprocess.run(
-                [installer, mode, *(["--server-only"] if mode == "macos" else []), "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "p")],
+                [installer, mode, *(["--server-only"] if mode in ("linux", "macos") else []), "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "p")],
                 cwd=self.tmp, env={"PATH": f"{self.host.bin}:{self.host.sysbin}", "HOME": str(self.host.home), "DESTDIR": str(self.host.destdir), "TMPDIR": str(self.tmp)},
                 capture_output=True, text=True, timeout=60,
             )

@@ -42,6 +42,36 @@ final class AppKitTests: XCTestCase {
         XCTAssertEqual(menu.items.last?.keyEquivalent, "q")
     }
 
+    func testLongMenuRowsStayCompactAndKeepFullDetails() throws {
+        var state = snapshot(.running)
+        let full = String(repeating: "W", count: 200)
+        state.lastError = "The release could not be verified: " + full
+        state.appVersion = full
+        state.trayLogin = .unavailable(full)
+        let menu = NSMenu()
+        let target = Target()
+        let entries = buildMenu(state)
+        MenuRenderer.render(entries, into: menu, target: target, selector: #selector(Target.hit(_:)))
+        for item in menu.items where !item.isSeparatorItem {
+            let width = (item.title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width
+            XCTAssertLessThanOrEqual(width, MenuRenderer.maximumTitleWidth)
+            XCTAssertFalse(item.title.contains("\n"))
+        }
+        let details = try XCTUnwrap(menu.items.first { ($0.representedObject as? ActionBox)?.action == .showErrorDetails })
+        XCTAssertEqual(details.title, "View error details…")
+        XCTAssertTrue(details.isEnabled)
+        XCTAssertTrue(details.target === target)
+        let shortened = try XCTUnwrap(menu.items.first { $0.title.hasPrefix("Tray app ") })
+        XCTAssertTrue(shortened.title.hasSuffix("…"))
+        XCTAssertEqual(shortened.toolTip, "Tray app " + full + " (abc)")
+        XCTAssertEqual(shortened.accessibilityLabel(), shortened.toolTip)
+        let login = try XCTUnwrap(menu.items.first { ($0.representedObject as? ActionBox)?.action == .toggleTrayLogin })
+        XCTAssertTrue(login.title.hasSuffix("…"))
+        XCTAssertEqual(login.state, .mixed)
+        XCTAssertFalse(login.isEnabled)
+        XCTAssertEqual(MenuRenderer.compactTitle("  hello\nworld  ", font: NSFont.menuFont(ofSize: 0)), "hello world")
+    }
+
     func testIconsAreTemplateImagesWithStateText() throws {
         var bitmaps: [Data] = []
         for state in ServiceState.allCases {

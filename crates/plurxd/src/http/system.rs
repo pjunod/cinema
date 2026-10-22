@@ -251,6 +251,14 @@ pub async fn setup(
 
 #[derive(Serialize)]
 pub struct SystemDto {
+    pub platform: &'static str,
+    pub application_executable: Option<String>,
+    pub runtime_location: Option<String>,
+    pub graphics_devices: Vec<plurx_core::transcode::GraphicsDevice>,
+    pub encoder_device_bindings: Vec<plurx_core::transcode::EncoderDeviceBinding>,
+    pub transcoding_facts: Vec<crate::ffmpeg_support::TranscodingFact>,
+    pub additional_media_support: Vec<crate::ffmpeg_support::MediaSupport>,
+    pub ffmpeg_support: crate::ffmpeg_support::SupportReport,
     pub node_id: String,
     pub hwaccel_requested: String,
     pub hwaccel_restart_required: bool,
@@ -411,7 +419,8 @@ pub async fn system_info(
         .store
         .get_setting(&crate::state::node_hwaccel_key(&state.node_id))
         .await?;
-    let optimization = crate::transcoder_optimization::status(&state.system).await;
+    let optimization =
+        crate::transcoder_optimization::status(&state.system, &state.transcode).await;
     let hwaccel_restart_required = (hwaccel_requested.is_some()
         && hwaccel_requested != state.system.hwaccel_override)
         || optimization.restart_required;
@@ -421,7 +430,33 @@ pub async fn system_info(
         .await?
         .unwrap_or_else(|| state.server_name.clone());
     let hostname = state.node_hostname.clone();
+    let ffmpeg_support = crate::ffmpeg_support::report(&state.system).await;
+    let current_preference = state
+        .store
+        .get_setting(keys::HWACCEL)
+        .await?
+        .unwrap_or_default();
+    let encoder = state.transcode.encoder_for_preference(&current_preference);
+    let transcoding_facts = crate::ffmpeg_support::transcoding_facts(
+        &state.system,
+        &ffmpeg_support,
+        encoder,
+        state.transcode.macos_video_processing_enabled(),
+        hw_max > 0,
+    );
+    let executable = std::env::current_exe().ok();
     Ok(Json(SystemDto {
+        platform: std::env::consts::OS,
+        application_executable: executable.as_ref().map(|path| path.display().to_string()),
+        runtime_location: executable
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|path| path.display().to_string()),
+        graphics_devices: state.system.encoders.graphics_devices.clone(),
+        encoder_device_bindings: state.system.encoders.device_bindings.clone(),
+        transcoding_facts,
+        additional_media_support: ffmpeg_support.additional_media_support.clone(),
+        ffmpeg_support,
         node_id: state.node_id.clone(),
         hwaccel_requested: hwaccel_requested.unwrap_or_else(|| state.system.hwaccel_pref.clone()),
         hwaccel_restart_required,
@@ -517,7 +552,8 @@ pub async fn update_hardware_preference(
             &request.preference,
         )
         .await?;
-    let optimization = crate::transcoder_optimization::status(&state.system).await;
+    let optimization =
+        crate::transcoder_optimization::status(&state.system, &state.transcode).await;
     Ok(Json(serde_json::json!({
         "node_id": state.node_id,
         "preference": request.preference,
@@ -966,9 +1002,13 @@ where
     Option::<FileId>::deserialize(deserializer).map(|id| id.map(|id| id.0))
 }
 
+mod frame_drop;
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
+    /// Bounded numeric frame-drop incident; retained in playback-event extra.
+    frame_drop: Option<frame_drop::ClientFrameDrop>,
     pub transport: Option<ClientTransportRecord>,
     /// "error" | "warn" — anything but "error" logs at WARN.
     pub level: String,
@@ -1701,6 +1741,11 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         (!context.is_empty()).then_some(serde_json::Value::Object(context))
     }
     let mut extra = serde_json::Map::new();
+    if ev.event == "frame_drop" {
+        if let Some(incident) = ev.frame_drop.as_ref().and_then(|value| value.value()) {
+            extra.insert("frame_drop".to_owned(), incident);
+        }
+    }
     if let Some(record) = ev.transport.as_ref().filter(|record| {
         record.command_id.len() <= 64
             && !record.command_id.is_empty()
@@ -2429,10 +2474,9 @@ pub struct SettingsDto {
     /// nobody asked for. See `keys::ARTWORK_RETRY_DEFAULT_MINS`.
     pub artwork_retry_mins: i64,
     pub transcode_cleanup_mins: i64,
-    /// How often the pre-transcode producer looks for something worth making,
-    /// and how much disk what it makes may occupy. Both off/0 by default: the
-    /// producer competes with live playback for the encoder, so it is a thing
-    /// an operator turns on, not a thing an upgrade turns on for them.
+    /// How often the optional background pre-transcode producer looks for work.
+    /// The disk ceiling below is shared by every node-local playback cache;
+    /// its unset value is 50 GiB, independently of background production.
     pub cache_produce_mins: i64,
     pub cache_max_gb: i64,
     /// What the cache currently holds on this node, in bytes — the number that
@@ -2515,7 +2559,8 @@ async fn subtitle_store_diagnostics(
     state: &AppState,
     switch_on: bool,
 ) -> crate::subtitle_source::StoreDiagnostics {
-    let mut diagnostics = crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir);
+    let mut diagnostics =
+        crate::subtitle_source::diagnostics(switch_on, &state.runtime_cache_dir).await;
     let mut titles = HashMap::new();
     for ride in &mut diagnostics.riding {
         let Ok(Some(file)) = state.store.get_file(ride.file_id).await else {
@@ -2531,8 +2576,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // This page renders the settings as one administrative snapshot. On the
     // clustered backend, reading each field independently turns one response
     // into dozens of leader barriers; it can also mix values from different
-    // commits. `cache_bytes` below is one additional authoritative aggregate
-    // for this node's cache ownership when a cache location is configured.
+    // commits. Cache usage below is the node-local physical inventory shared
+    // by all playback writers, including restart leftovers and reservations.
     let settings = state.store.settings_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
     let decoder_health_requested =
@@ -2620,10 +2665,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // unset is the 50 GB default, `0` is off.
     let cache_max_gb = crate::cachekeep::cache_budget(setting(keys::CACHE_MAX_GB).as_deref())
         .map_or(0, |bytes| i64::try_from(bytes >> 30).unwrap_or(i64::MAX));
-    let cache_used_bytes = match state.transcode.cache_location() {
-        Some((_, node)) => state.store.cache_bytes(node).await.unwrap_or(0),
-        None => 0,
-    };
+    let cache_used_bytes =
+        i64::try_from(state.playback_cache.used_bytes().await.map_err(|error| {
+            ApiError::Internal(format!("reading playback cache usage: {error}"))
+        })?)
+        .unwrap_or(i64::MAX);
     let telemetry_retain_days = setting(keys::TELEMETRY_RETAIN_DAYS)
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(keys::TELEMETRY_RETAIN_DEFAULT_DAYS)

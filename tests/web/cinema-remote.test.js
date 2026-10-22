@@ -120,7 +120,7 @@ test("play_item uses the existing authorized autoplay detail path",()=>{
 // Exercise the actual changed owner function, not a mock transport adapter.
 function shipped(name,file){const source=fs.readFileSync(path.join(web,file),"utf8"),start=source.indexOf("function "+name+"(");assert.ok(start>=0);const tail=source.slice(source.slice(Math.max(0,start-6),start)==="async "?start-6:start);const end=tail.slice(1).search(/\n(?:async function |function |const |let |window\.|document\.)/);return end<0?tail:tail.slice(0,end+1);}
 test("desired playing is idempotent and respects pending transport intent",()=>{
-  let wants=true,toggles=0;const v={};const fn=new Function("document","playerWantsPlayback","togglePlay",shipped("setPlayerPlaying","player/transport.js")+";return setPlayerPlaying;")({getElementById:()=>v},()=>wants,()=>{toggles++;wants=!wants;});
+  let wants=true,toggles=0;const v={},player={playPermissionDenied:false};const fn=new Function("document","PLAYER","playerWantsPlayback","togglePlay","hasPendingPlaybackOpen",shipped("setPlayerPlaying","player/transport.js")+";return setPlayerPlaying;")({getElementById:()=>v},player,()=>wants,()=>{toggles++;wants=!wants;},()=>false);
   fn(false);fn(false);assert.equal(toggles,1);fn(true);fn(true);assert.equal(toggles,2);
 });
 test("Live TV Stop pauses immediately and preserves fullscreen teardown while server is offline",async()=>{

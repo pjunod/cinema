@@ -3064,8 +3064,6 @@ dependencies = [
 [[package]]
 name = "ksni"
 version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "814b44c24cd2cb236c3b8a41c7f08237b452a8e76ecaa81f1cec40b5b678215b"
 dependencies = [
  "async-executor",
  "async-io",
@@ -3973,6 +3971,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-worker-control"
+version = "0.7.0"
+
+[[package]]
 name = "plurxd"
 version = "0.7.0"
 dependencies = [
@@ -3988,6 +3990,7 @@ dependencies = [
  "chrono",
  "clap",
  "crc32fast",
+ "dolby_vision",
  "flate2",
  "futures-util",
  "hex",
@@ -4008,6 +4011,7 @@ dependencies = [
  "plurx-desktop-control",
  "plurx-notification-broker",
  "plurx-pgs",
+ "plurx-worker-control",
  "qrcode",
  "quick-xml",
  "rayon",

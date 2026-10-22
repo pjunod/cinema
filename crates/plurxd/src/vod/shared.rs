@@ -1054,6 +1054,9 @@ impl Shared {
     /// the same per-key gate through session attach, while maintenance skips
     /// a key whose build/attach is active; different keys never wait for it.
     pub(super) async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
+        if crate::playback_cache::is_pinned(&self.base.join(key)) {
+            return;
+        }
         let Ok(build_guard) = self.rendition_build_gate(key).try_lock_owned() else {
             return;
         };

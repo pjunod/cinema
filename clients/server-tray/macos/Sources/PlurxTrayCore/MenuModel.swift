@@ -18,7 +18,7 @@ public enum Action: Equatable, Sendable {
     case openBrowser, viewLogs, start, stop, restart
     case toggleServerStartup, toggleTrayLogin
     case checkForUpdates, openReleaseNotes(version: String), upgrade(version: String), showUpgradeProgress
-    case retryStatus, quit
+    case retryStatus, showErrorDetails, quit
 }
 
 public enum CheckState: Equatable, Sendable { case on, off, mixed }
@@ -102,8 +102,8 @@ public func buildMenu(_ s: TraySnapshot) -> [MenuEntry] {
     if let busy = s.busy {
         entries.append(.info(progressTitle(busy)))
     }
-    if let error = s.lastError ?? s.statusFailure?.message {
-        entries.append(.info(error))
+    if s.lastError != nil || s.statusFailure != nil {
+        entries.append(.command("View error details…", .showErrorDetails))
     }
     if s.status == nil, s.statusFailure != nil {
         entries.append(.command("Retry", .retryStatus, enabled: idle))

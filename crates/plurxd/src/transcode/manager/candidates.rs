@@ -1773,19 +1773,17 @@ pub(super) fn processed_client_compatible(
                 .effective_height()
                 .is_none_or(|height| i64::from(height) > maximum)
         })
-        || match destination {
-            DvDestination::Hdr10 => !caps
+        || (destination == DvDestination::Hdr10
+            && !caps
                 .hls_hevc_sample_entries
                 .as_ref()
-                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1")),
-            DvDestination::Profile81 => caps
-                .dv_transport
-                .as_deref()
-                .is_some_and(|transport| transport != "hls"),
-        }
+                .is_some_and(|entries| entries.iter().any(|entry| entry == "hvc1")))
     {
         return false;
     }
+    // dv_transport makes original preserved DV require an HLS envelope;
+    // "progressive" does not prohibit encoded HLS when transports admits it.
+    // The actual HLS/MP4 and same-entry decoder claims decide this output.
     let mut eligible = caps.clone();
     eligible.video.retain(|entry| {
         entry.codec == "hevc"
@@ -2016,6 +2014,30 @@ mod snapshot_catalog_regression {
             !processed_client_compatible(&caps, &plan, &facts, DvDestination::Hdr10),
             "HDR10 still requires hvc1"
         );
+        // Safari supports both envelopes and advertises progressive original
+        // DV. That requirement must not veto its actual encoded-HLS decoder.
+        for dv_transport in [Some("hls"), Some("progressive"), None] {
+            let mut safari = caps.clone();
+            safari.transports = vec!["progressive".into(), "hls".into()];
+            safari.dv_transport = dv_transport.map(str::to_owned);
+            assert!(
+                processed_client_compatible(&safari, &plan, &facts, DvDestination::Profile81),
+                "original DV requirement {dv_transport:?} does not exclude HLS"
+            );
+            assert!(!processed_client_compatible(
+                &safari,
+                &plan,
+                &facts,
+                DvDestination::Hdr10
+            ));
+            safari.hls_hevc_sample_entries = Some(vec!["hvc1".into()]);
+            assert!(processed_client_compatible(
+                &safari,
+                &plan,
+                &facts,
+                DvDestination::Hdr10
+            ));
+        }
         let mut bad = caps.clone();
         bad.video[0].dv_profiles.clear();
         assert!(!processed_client_compatible(
@@ -2039,6 +2061,7 @@ mod snapshot_catalog_regression {
             "bitrate",
             "transfer",
             "transport",
+            "container",
         ] {
             let mut bad = caps.clone();
             match mutation {
@@ -2053,7 +2076,8 @@ mod snapshot_catalog_regression {
                 }
                 "bitrate" => bad.video[0].max_bitrate_bps = Some(1),
                 "transfer" => bad.video[0].present.clear(),
-                "transport" => bad.dv_transport = Some("progressive".into()),
+                "transport" => bad.transports = vec!["progressive".into()],
+                "container" => bad.containers.clear(),
                 _ => unreachable!(),
             }
             assert!(

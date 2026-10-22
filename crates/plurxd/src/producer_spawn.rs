@@ -230,10 +230,18 @@ pub(crate) fn configure_ffmpeg_runtime(
     command: &mut tokio::process::Command,
     runtime_cache: &Path,
 ) {
-    command.env("XDG_CACHE_HOME", runtime_cache);
+    let driver_cache = runtime_cache.join("gpu-cache");
+    command.env("XDG_CACHE_HOME", &driver_cache);
     // CUDA's driver JIT cache does not follow XDG_CACHE_HOME. In a service
     // with HOME=/, its default is unwritable and every process recompiles.
-    command.env("CUDA_CACHE_PATH", runtime_cache);
+    command.env("CUDA_CACHE_PATH", &driver_cache);
+    command.env("CUDA_CACHE_MAXSIZE", "134217728");
+    command.env("MESA_SHADER_CACHE_MAX_SIZE", "128M");
+    // Driver writes happen below FFmpeg's output API and cannot participate
+    // in producer admission. Keep those unmanaged disk writers off; existing
+    // disposable GPU artifacts remain eligible for the shared LRU.
+    command.env("CUDA_CACHE_DISABLE", "1");
+    command.env("MESA_SHADER_CACHE_DISABLE", "true");
     command.env("AV_LOG_FORCE_NOCOLOR", "1");
 }
 
@@ -409,7 +417,10 @@ mod tests {
             .await
             .expect("stdout");
         assert!(spawned.child.wait().await.expect("wait").success());
-        assert!(stdout.contains(&format!("environment={}|1|present", cache.path().display())));
+        assert!(stdout.contains(&format!(
+            "environment={}|1|present",
+            cache.path().join("gpu-cache").display()
+        )));
     }
 
     #[test]

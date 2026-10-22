@@ -24,6 +24,138 @@ loader.exec_module(runtime)
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
+class MacosSourceToolchainTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.channel = "9.87.6"
+        (self.root / "rust-toolchain.toml").write_text(f'[toolchain]\nchannel = "{self.channel}"\n')
+        patch = mock.patch.object(runtime, "ROOT", self.root)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.rustc = self.root / "toolchain/bin/rustc"
+        self.rustup = str(self.root / "cargo/bin/rustup")
+        self.lookup = [self.rustup, "which", "--toolchain", self.channel, "rustc"]
+
+    def test_missing_pinned_toolchain_is_installed_then_selected(self):
+        with mock.patch.object(runtime, "ensure_rustup", return_value=self.rustup), \
+                mock.patch.object(runtime, "output", side_effect=[
+                    subprocess.CalledProcessError(1, self.lookup), str(self.rustc), f"rustc {self.channel} (fixture)",
+                ]) as output, mock.patch.object(runtime, "run") as run:
+            self.assertEqual(runtime.ensure_rust_toolchain(), self.rustc)
+        run.assert_called_once_with([
+            self.rustup, "toolchain", "install", self.channel, "--profile", "minimal", "--no-self-update",
+        ])
+        self.assertEqual([call.args[0] for call in output.call_args_list], [self.lookup, self.lookup, [self.rustc, "--version"]])
+        for call in output.call_args_list[:2]:
+            self.assertEqual(call.kwargs["env"]["RUSTUP_AUTO_INSTALL"], "0")
+
+    def test_installed_pin_needs_no_download_or_homebrew(self):
+        with mock.patch.object(runtime, "find_tool", return_value=self.rustup) as find, \
+                mock.patch.object(runtime, "output", side_effect=[str(self.rustc), f"rustc {self.channel} (fixture)"]), \
+                mock.patch.object(runtime, "run") as run:
+            self.assertEqual(runtime.ensure_rust_toolchain(), self.rustc)
+        self.assertEqual(find.call_count, 1)
+        run.assert_not_called()
+
+    def test_failed_toolchain_install_stops_without_retrying_lookup(self):
+        with mock.patch.object(runtime, "ensure_rustup", return_value=self.rustup), \
+                mock.patch.object(runtime, "output", side_effect=subprocess.CalledProcessError(1, self.lookup)) as output, \
+                mock.patch.object(runtime, "run", side_effect=subprocess.CalledProcessError(1, "install")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                runtime.ensure_rust_toolchain()
+        output.assert_called_once()
+
+    def test_pin_unavailable_after_install_has_actionable_error(self):
+        with mock.patch.object(runtime, "ensure_rustup", return_value=self.rustup), \
+                mock.patch.object(runtime, "output", side_effect=subprocess.CalledProcessError(1, self.lookup)), \
+                mock.patch.object(runtime, "run"):
+            with self.assertRaisesRegex(ValueError, f"installed Rust {self.channel} but cannot locate"):
+                runtime.ensure_rust_toolchain()
+
+    def test_wrong_compiler_is_rejected(self):
+        with mock.patch.object(runtime, "ensure_rustup", return_value=self.rustup), \
+                mock.patch.object(runtime, "output", side_effect=[str(self.rustc), "rustc 1.98.0 (fixture)"]), \
+                mock.patch.object(runtime, "run") as run:
+            with self.assertRaisesRegex(ValueError, "differs from rust-toolchain.toml"):
+                runtime.ensure_rust_toolchain()
+        run.assert_not_called()
+
+    def test_rustup_in_custom_cargo_home_is_found_without_path_or_brew(self):
+        rustup = Path(self.rustup)
+        rustup.parent.mkdir(parents=True)
+        rustup.write_text("fixture")
+        rustup.chmod(0o755)
+        with mock.patch.dict(os.environ, {"CARGO_HOME": str(rustup.parent.parent)}), \
+                mock.patch.object(runtime.shutil, "which", return_value=None) as which, \
+                mock.patch.object(runtime, "run") as run:
+            self.assertEqual(runtime.ensure_rustup(), self.rustup)
+        which.assert_called_once_with("rustup")
+        run.assert_not_called()
+
+    def rustup_formula(self):
+        formula = self.root / "brew rustup"
+        rustup = formula / "bin/rustup"
+        rustup.parent.mkdir(parents=True)
+        rustup.write_text("fixture")
+        rustup.chmod(0o755)
+        return formula
+
+    def test_existing_brew_installs_rustup_without_installing_homebrew(self):
+        formula = self.rustup_formula()
+        brew = str(self.root / "brew/bin/brew")
+        with mock.patch.object(runtime, "find_tool", side_effect=[None, brew]), \
+                mock.patch.object(runtime, "output", return_value=str(formula)) as output, \
+                mock.patch.object(runtime, "run") as run:
+            self.assertEqual(runtime.ensure_rustup(), str(formula / "bin/rustup"))
+        run.assert_called_once_with([brew, "install", "rustup"])
+        output.assert_called_once_with([brew, "--prefix", "rustup"])
+
+    def test_missing_brew_is_installed_before_rustup(self):
+        formula = self.rustup_formula()
+        brew = str(self.root / "brew/bin/brew")
+        with mock.patch.object(runtime, "find_tool", side_effect=[None, None, brew]) as find, \
+                mock.patch.object(runtime, "output", return_value=str(formula)), \
+                mock.patch.object(runtime, "run") as run:
+            self.assertEqual(runtime.ensure_rustup(), str(formula / "bin/rustup"))
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][0], "/usr/bin/curl")
+        self.assertEqual(commands[0][-1], "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh")
+        self.assertEqual(commands[1], ["/bin/bash", commands[0][-2]])
+        self.assertEqual(commands[2], [brew, "install", "rustup"])
+        for call in find.call_args_list[1:]:
+            self.assertEqual(call.args[1], [Path("/opt/homebrew/bin/brew"), Path("/usr/local/bin/brew")])
+
+    def test_failed_homebrew_download_never_executes_installer(self):
+        with mock.patch.object(runtime, "find_tool", return_value=None), \
+                mock.patch.object(runtime, "run", side_effect=subprocess.CalledProcessError(1, "curl")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                runtime.ensure_rustup()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/curl")
+
+    def test_build_uses_selected_cargo_and_rustc_even_with_homebrew_first(self):
+        args = mock.Mock(output=self.root / "target/runtime")
+        with mock.patch.object(runtime.platform, "system", return_value="Darwin"), \
+                mock.patch.object(runtime.platform, "machine", return_value="arm64"), \
+                mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/swift"), \
+                mock.patch.object(runtime, "output", side_effect=[COMMIT, ""]), \
+                mock.patch.object(runtime, "ensure_rust_toolchain", return_value=self.rustc) as ensure, \
+                mock.patch.dict(os.environ, {"PATH": "/opt/homebrew/bin:/usr/bin"}), \
+                mock.patch.object(runtime, "run", side_effect=RuntimeError("stop before actual build")) as run:
+            with self.assertRaisesRegex(RuntimeError, "stop before actual build"):
+                runtime.build(args)
+        ensure.assert_called_once_with()
+        self.assertEqual(run.call_args.args[0], [
+            self.rustc.parent / "cargo", "build", "--locked", "--release", "-p", "plurx-desktop-control", "--bins",
+        ])
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["RUSTC"], str(self.rustc))
+        self.assertEqual(env["PATH"], f"{self.rustc.parent}:/opt/homebrew/bin:/usr/bin")
+
+
 class MacosSourceRuntimeTests(unittest.TestCase):
     def test_source_closure_attests_native_identity_and_complete_files(self):
         with tempfile.TemporaryDirectory() as work:

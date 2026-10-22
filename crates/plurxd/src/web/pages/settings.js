@@ -109,7 +109,7 @@ const SETTINGS_MANIFEST={
   analysis:{required:["settings","analysis"],secondary:["developerReadiness"]},
   maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["settings","users"],secondary:[]},
-  system:{required:["sys"],secondary:["playbackEvents"]},
+  system:{required:["sys"],secondary:[]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness","settings"]},
   sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
@@ -198,10 +198,7 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
   }
-  if(tab==="system"&&key==="playbackEvents"){
-    const mount=document.getElementById("settings-playback-events");
-    if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
-  }
+
   if(tab==="cluster"&&key==="settings"){
     // The settings cards under the board need the saved settings; the health
     // board does not, so it never waits for them. Fill only their mount.
@@ -235,10 +232,7 @@ function patchSettingsSecondaryError(tab,key,error){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=`<div class="hint">Library context is unavailable: ${message}</div>`;
   }
-  if(tab==="system"&&key==="playbackEvents"){
-    const mount=document.getElementById("settings-playback-events");
-    if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
-  }
+
   if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
   }
@@ -282,7 +276,6 @@ async function loadSettingsTab(generation,tab){
       }
     });
   });
-  if(tab==="system") secondary.push(refreshLogs());
   if(tab==="cluster"&&settingsClusterEnabled()) secondary.push(refreshClusterLogs());
   await Promise.allSettled(secondary);
   if(settingsCurrent(generation,tab)) setPagePhase(route,generation,"settled");

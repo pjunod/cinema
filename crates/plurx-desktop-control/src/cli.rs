@@ -620,15 +620,27 @@ pub fn service_launch_entry() -> i32 {
                 .ok_or_else(|| Error::new(ErrorCode::InvalidInstallation, "daemon parent"))?;
             crate::secure_fs::open_dir(parent, i.owner_uid)?.open("plurxd")?;
             use std::os::unix::process::CommandExt;
-            let error = Command::new(&path)
+            let mut command = Command::new(&path);
+            command
                 .arg("run")
                 .env("PLURX_DESKTOP_INSTALLATION_ID", &i.installation_id)
                 .env("PLURX_DESKTOP_CONTROL_SOCKET", &i.paths.socket)
                 .env(
                     "PLURX_DESKTOP_RECEIPT_DIR",
                     i.paths.state.join("shutdown-receipts"),
-                )
-                .exec();
+                );
+            if i.method == InstallMethod::MacosNative {
+                for (key, tool) in [("PLURX_FFMPEG", "ffmpeg"), ("PLURX_FFPROBE", "ffprobe")] {
+                    if let Some(path) = native::packaged_media_override(
+                        &i.paths.runtime,
+                        tool,
+                        std::env::var_os(key).as_deref(),
+                    ) {
+                        command.env(key, path);
+                    }
+                }
+            }
+            let error = command.exec();
             Err(error.into())
         });
     match result {

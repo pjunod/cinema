@@ -96,6 +96,8 @@ pub(crate) struct PutSink {
 
 struct Shared {
     dir: PathBuf,
+    accounting_dir: PathBuf,
+    live_tv: bool,
     token: String,
     addr: SocketAddr,
     /// A duplicate of the accepting socket. A drain sweep accepts through
@@ -135,6 +137,8 @@ struct State {
     /// segment GC does not remove a name: the playlist still lists it, and
     /// it did land.
     committed: HashSet<String>,
+    /// Subset of committed names whose DELETE is deferred by response pins.
+    deferred_deletes: HashSet<String>,
     /// `(media entries, ENDLIST)` of the last playlist renamed into place in
     /// this lane. An EVENT playlist only grows, so a smaller one is stale.
     playlist_rank: Option<(usize, bool)>,
@@ -163,6 +167,7 @@ impl State {
         let writing = self.lane.take().unwrap_or(self.floor);
         self.floor = self.floor.max(writing.saturating_add(1));
         self.committed.clear();
+        self.deferred_deletes.clear();
         self.playlist_rank = None;
         self.failure = None;
         self.measurement = Default::default();
@@ -235,6 +240,29 @@ impl PutSink {
     /// `grants` is `None` only in tests of the transport itself; a rolling
     /// session always passes its ledger allocation.
     pub(crate) fn bind(dir: PathBuf, grants: Option<WriteGrants>) -> std::io::Result<PutSink> {
+        Self::bind_accounted(dir.clone(), dir, grants)
+    }
+
+    pub(crate) fn bind_live_tv(dir: PathBuf) -> std::io::Result<PutSink> {
+        Self::bind_mode(dir.clone(), dir, None, true)
+    }
+
+    /// The writer may use a held directory capability while accounting uses
+    /// the validated configured namespace, independent of descriptor names.
+    pub(crate) fn bind_accounted(
+        dir: PathBuf,
+        accounting_dir: PathBuf,
+        grants: Option<WriteGrants>,
+    ) -> std::io::Result<PutSink> {
+        Self::bind_mode(dir, accounting_dir, grants, false)
+    }
+
+    fn bind_mode(
+        dir: PathBuf,
+        accounting_dir: PathBuf,
+        grants: Option<WriteGrants>,
+        live_tv: bool,
+    ) -> std::io::Result<PutSink> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let drain_listener = listener.try_clone()?;
@@ -243,6 +271,8 @@ impl PutSink {
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let shared = Arc::new(Shared {
             dir,
+            accounting_dir,
+            live_tv,
             token: uuid::Uuid::new_v4().simple().to_string(),
             addr,
             drain_listener: Mutex::new(Some(drain_listener)),
@@ -495,7 +525,7 @@ impl Refused {
 async fn serve_connection(shared: &Arc<Shared>, stream: tokio::net::TcpStream) {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::with_capacity(PIECE_BYTES, read);
-    let status = match receive(shared, &mut reader).await {
+    let status = match receive(shared, &mut reader, &mut write).await {
         Ok(status) => status,
         Err(refused) => {
             tracing::debug!(reason = %refused.reason, "scratch upload refused");
@@ -514,6 +544,8 @@ async fn serve_connection(shared: &Arc<Shared>, stream: tokio::net::TcpStream) {
 }
 
 struct Request {
+    delete: bool,
+    expect_continue: bool,
     lane: u32,
     name: String,
     body: BodyMode,
@@ -525,9 +557,14 @@ enum BodyMode {
     Length(u64),
 }
 
-async fn receive<R>(shared: &Arc<Shared>, reader: &mut R) -> Result<&'static str, Refused>
+async fn receive<R, W>(
+    shared: &Arc<Shared>,
+    reader: &mut R,
+    write: &mut W,
+) -> Result<&'static str, Refused>
 where
     R: AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
 {
     let request = tokio::select! {
         request = tokio::time::timeout(REQUEST_HEAD_TIMEOUT, read_request(shared, reader)) => {
@@ -535,6 +572,44 @@ where
         }
         () = closed(shared) => return Err(Refused::gone("the session ended")),
     };
+    if request.expect_continue {
+        tokio::time::timeout(
+            REQUEST_HEAD_TIMEOUT,
+            write.write_all(b"HTTP/1.1 100 Continue\r\n\r\n"),
+        )
+        .await
+        .map_err(|_| Refused::new("408 Request Timeout", "could not continue request"))?
+        .map_err(|error| {
+            Refused::new(
+                "400 Bad Request",
+                format!("could not continue request: {error}"),
+            )
+        })?;
+    }
+    if request.delete {
+        // FFmpeg sends DELETE using chunked transfer coding, with a zero
+        // terminal chunk. Consume and prove that empty body before unlink:
+        // accepting its header alone would also authorize nonempty requests.
+        let mut body = Body::new(request.body);
+        let mut unexpected = [0_u8; 1];
+        let read = tokio::time::timeout(REQUEST_HEAD_TIMEOUT, body.read(reader, &mut unexpected))
+            .await
+            .map_err(|_| Refused::new("408 Request Timeout", "no DELETE body terminator"))?
+            .map_err(|error| {
+                Refused::new(
+                    "400 Bad Request",
+                    format!("invalid DELETE framing: {error}"),
+                )
+            })?;
+        if read != 0 {
+            return Err(Refused::new(
+                "400 Bad Request",
+                "Live TV DELETE body must be empty",
+            ));
+        }
+        enter_lane(shared, request.lane).await?;
+        return delete_live_segment(shared, &request).await;
+    }
     let playlist = request.name.ends_with(".m3u8");
     // Registration comes before the first byte and is held to the rename.
     // `None` means retirement fenced this allocation: its final inventory
@@ -547,6 +622,10 @@ where
         ),
         None => None,
     };
+    // Pin this object, not its entire generation: playlist promotion must
+    // still be able to retire expired segments under their own fences.
+    let _playback_pin = crate::playback_cache::pin(&shared.accounting_dir.join(&request.name))
+        .map_err(|error| Refused::new("507 Insufficient Storage", error.to_string()))?;
     enter_lane(shared, request.lane).await?;
     if shared.is_closed() {
         return Err(Refused::gone("the session ended"));
@@ -627,6 +706,7 @@ where
     let target = parts.next().unwrap_or_default().to_owned();
     let mut chunked = None;
     let mut length = None;
+    let mut expect_continue = false;
     loop {
         let header = read_line(reader, &mut line, &mut head).await?;
         if header.is_empty() {
@@ -636,7 +716,15 @@ where
             return Err(bad("malformed header"));
         };
         let value = value.trim();
-        if key.eq_ignore_ascii_case("transfer-encoding") {
+        if key.eq_ignore_ascii_case("expect") {
+            if !value.eq_ignore_ascii_case("100-continue") {
+                return Err(Refused::new(
+                    "417 Expectation Failed",
+                    "unsupported request expectation",
+                ));
+            }
+            expect_continue = true;
+        } else if key.eq_ignore_ascii_case("transfer-encoding") {
             if chunked.is_some() {
                 return Err(bad("more than one Transfer-Encoding"));
             }
@@ -655,7 +743,8 @@ where
             );
         }
     }
-    if method != "PUT" {
+    let delete = method == "DELETE" && shared.live_tv;
+    if method != "PUT" && !delete {
         return Err(Refused::new(
             "405 Method Not Allowed",
             format!("{method} is not an upload"),
@@ -681,7 +770,11 @@ where
     if !valid_object_name(name) {
         return Err(bad("not an HLS object name"));
     }
+    if delete && (!live_segment_name(name) || length.is_some_and(|n| n != 0)) {
+        return Err(bad("not an empty Live TV segment deletion"));
+    }
     let body = match (chunked, length) {
+        (None, None) if delete => BodyMode::Length(0),
         (Some(true), None) => BodyMode::Chunked,
         (None, Some(length)) => BodyMode::Length(length),
         (Some(_), Some(_)) => return Err(bad("both Transfer-Encoding and Content-Length")),
@@ -689,6 +782,8 @@ where
         (None, None) => return Err(Refused::new("411 Length Required", "no body framing")),
     };
     Ok(Request {
+        delete,
+        expect_continue,
         lane,
         name: name.to_owned(),
         body,
@@ -777,6 +872,16 @@ where
                 Some(grants) => Some(authorize(shared, grants, request, read_bytes).await?),
                 None => None,
             };
+            let playback_write = crate::playback_cache::reserve(
+                &shared.accounting_dir.join(&request.name),
+                read as u64,
+            )
+            .await
+            .map_err(|error| {
+                let refused = Refused::new("507 Insufficient Storage", error.to_string());
+                shared.fail_lane(request.lane, refused.reason.clone());
+                refused
+            })?;
             // Flushed before it is landed: a tokio file write returns before
             // the bytes reach the file, and a directory walk that started
             // after `landed` must be able to see them.
@@ -790,6 +895,9 @@ where
             // removes it and the next complete measurement subsumes it.
             if let Some(authorized) = authorized {
                 authorized.landed(read_bytes);
+            }
+            if let Some(write) = playback_write {
+                write.commit(read as u64);
             }
             if let Err(error) = written {
                 // A full disk is the one failure rolling retention can be
@@ -912,6 +1020,101 @@ async fn authorize(
     }
 }
 
+fn live_segment_name(name: &str) -> bool {
+    name.strip_prefix("segment-")
+        .and_then(|name| {
+            name.strip_suffix(".ts")
+                .or_else(|| name.strip_suffix(".m4s"))
+        })
+        .is_some_and(|number| number.len() >= 6 && number.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Only the token-owning live muxer can retire its sliding-window segments.
+/// Deletion never reaches init/playlists or an object still advertised by a
+/// current/pending playlist. Existing open descriptors remain readable.
+fn live_segment_referenced(state: &State, name: &str) -> bool {
+    state
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.named.iter().any(|entry| entry == name))
+        || state
+            .measured_playlist
+            .as_ref()
+            .and_then(|body| std::str::from_utf8(body).ok())
+            .is_some_and(|text| playlist_references(text).iter().any(|entry| entry == name))
+}
+
+/// Called under commit ownership. A held eviction fence excludes a new
+/// response pin until unlink settles; a busy response keeps its physical name.
+async fn unlink_live_segment(shared: &Shared, name: &str) -> Result<bool, Refused> {
+    let _eviction = match crate::playback_cache::begin_eviction(&shared.accounting_dir.join(name)) {
+        Ok(fence) => fence,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+        Err(error) => return Err(Refused::new("500 Internal Server Error", error.to_string())),
+    };
+    match tokio::fs::remove_file(shared.dir.join(name)).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Refused::new("500 Internal Server Error", error.to_string())),
+    }
+    let mut state = shared.lock();
+    state.committed.remove(name);
+    state.deferred_deletes.remove(name);
+    Ok(true)
+}
+
+async fn delete_live_segment(
+    shared: &Arc<Shared>,
+    request: &Request,
+) -> Result<&'static str, Refused> {
+    let _commit = shared.commit.lock().await;
+    shared.lane_is_current(request.lane)?;
+    if live_segment_referenced(&shared.lock(), &request.name) {
+        let mut state = shared.lock();
+        if state.committed.contains(&request.name) {
+            state.deferred_deletes.insert(request.name.clone());
+        }
+        return Err(Refused::new(
+            "409 Conflict",
+            "segment is still in the live playlist; deletion deferred",
+        ));
+    }
+    if unlink_live_segment(shared, &request.name).await? {
+        return Ok("200 OK");
+    }
+    let mut state = shared.lock();
+    // No muxer stall, and no manufactured retry names. The bounded retry
+    // set is a subset of physically committed members, still fully charged.
+    if state.committed.contains(&request.name) {
+        state.deferred_deletes.insert(request.name.clone());
+    }
+    Ok("202 Accepted")
+}
+
+/// FFmpeg does not retry a rejected DELETE. Every later playlist promotion
+/// retries the bounded subset, after checking its new references again.
+async fn retry_live_deletions(shared: &Shared) -> Result<(), Refused> {
+    if !shared.live_tv {
+        return Ok(());
+    }
+    let names = shared
+        .lock()
+        .deferred_deletes
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names {
+        let referenced = {
+            let state = shared.lock();
+            live_segment_referenced(&state, &name)
+        };
+        if !referenced {
+            unlink_live_segment(shared, &name).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn commit_object(
     shared: &Arc<Shared>,
     request: &Request,
@@ -944,7 +1147,9 @@ async fn commit_object(
         }
         let pending = {
             let mut state = shared.lock();
-            state.measurement.committed(&request.name, observed);
+            if !shared.live_tv {
+                state.measurement.committed(&request.name, observed);
+            }
             state.committed.insert(request.name.clone());
             let ready = state.pending.as_ref().is_some_and(|pending| {
                 pending
@@ -979,7 +1184,21 @@ async fn commit_playlist(
         name: request.name.clone(),
         temporary,
         named: playlist_references(text),
-        rank: playlist_rank(text),
+        rank: if shared.live_tv {
+            let sequence = text
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("#EXT-X-MEDIA-SEQUENCE:")?
+                        .parse::<usize>()
+                        .ok()
+                })
+                .unwrap_or(0);
+            let (entries, ended) = playlist_rank(text);
+            (sequence.saturating_add(entries), ended)
+        } else {
+            playlist_rank(text)
+        },
     };
     let _commit = shared.commit.lock().await;
     shared.lane_is_current(request.lane)?;
@@ -1048,12 +1267,14 @@ async fn promote(
         shared.fail_lane(lane, reason.clone());
         return Err(Refused::new("500 Internal Server Error", reason));
     }
-    let mut state = shared.lock();
-    state.measured_playlist = playlist.measured_body;
-    state.committed.insert(playlist.name);
-    state.playlist_rank = Some(playlist.rank);
-    state.published = true;
-    Ok(())
+    {
+        let mut state = shared.lock();
+        state.measured_playlist = playlist.measured_body;
+        state.committed.insert(playlist.name);
+        state.playlist_rank = Some(playlist.rank);
+        state.published = true;
+    }
+    retry_live_deletions(shared).await
 }
 
 /// Every object a playlist names: its media URIs and its `EXT-X-MAP` init.
@@ -1375,6 +1596,145 @@ mod tests {
         let mut stream = open_put(base, name, None).await;
         chunk(&mut stream, bytes).await;
         finish(stream).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_tv_deletes_only_expired_segments_and_keeps_current_playlist_members() {
+        let temporary = crate::test_tempdir().expect("temporary");
+        let sink = PutSink::bind_live_tv(temporary.path().to_owned()).expect("live sink");
+        let base = sink.base_url(0);
+        for name in ["segment-000000.ts", "segment-000001.ts"] {
+            assert!(put(&base, name, &[1; 128])
+                .await
+                .starts_with("HTTP/1.1 201"));
+        }
+        let playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\nsegment-000001.ts\n";
+        assert!(put(&base, "index.m3u8", playlist)
+            .await
+            .starts_with("HTTP/1.1 201"));
+        async fn delete(base: &str, name: &str) -> String {
+            let (host, path) = host_path(base);
+            let mut stream = tokio::net::TcpStream::connect(&host)
+                .await
+                .expect("connect");
+            stream
+                .write_all(
+                    format!("DELETE {path}/{name} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .expect("head");
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.expect("reply");
+            reply
+        }
+        assert!(delete(&base, "segment-000001.ts")
+            .await
+            .starts_with("HTTP/1.1 409"));
+        assert!(temporary.path().join("segment-000001.ts").exists());
+        assert!(delete(&base, "segment-000000.ts")
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(!temporary.path().join("segment-000000.ts").exists());
+        assert!(delete(&base, "index.m3u8")
+            .await
+            .starts_with("HTTP/1.1 400"));
+        assert!(temporary.path().join("index.m3u8").exists());
+        assert_eq!(sink.shared.lock().committed.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_tv_accepts_ffmpeg_empty_chunked_delete_and_rejects_payload() {
+        let temporary = crate::test_tempdir().expect("temporary");
+        let sink = PutSink::bind_live_tv(temporary.path().to_owned()).expect("live sink");
+        let base = sink.base_url(0);
+        for name in ["segment-000000.ts", "segment-000001.ts"] {
+            assert!(put(&base, name, &[1; 128])
+                .await
+                .starts_with("HTTP/1.1 201"));
+        }
+        async fn chunked_delete(base: &str, name: &str, body: &[u8]) -> String {
+            let (host, path) = host_path(base);
+            let mut stream = tokio::net::TcpStream::connect(&host)
+                .await
+                .expect("connect");
+            stream.write_all(format!("DELETE {path}/{name} HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\n\r\n").as_bytes()).await.expect("head");
+            let mut interim = [0_u8; 25];
+            stream
+                .read_exact(&mut interim)
+                .await
+                .expect("100 Continue before body");
+            assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+            if !body.is_empty() {
+                chunk(&mut stream, body).await;
+            }
+            finish(stream).await
+        }
+        assert!(chunked_delete(&base, "segment-000000.ts", &[])
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(!temporary.path().join("segment-000000.ts").exists());
+        assert!(chunked_delete(&base, "segment-000001.ts", b"unexpected")
+            .await
+            .starts_with("HTTP/1.1 400"));
+        assert_eq!(
+            tokio::fs::read(temporary.path().join("segment-000001.ts"))
+                .await
+                .expect("untouched"),
+            vec![1; 128]
+        );
+        // Malformed chunk syntax is refused before the same valid file can
+        // be removed by a subsequent empty request.
+        let (host, path) = host_path(&base);
+        let mut malformed = tokio::net::TcpStream::connect(&host)
+            .await
+            .expect("connect");
+        malformed.write_all(format!("DELETE {path}/segment-000001.ts HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\nnot-hex\r\n").as_bytes()).await.expect("malformed request");
+        let mut reply = Vec::new();
+        malformed
+            .read_to_end(&mut reply)
+            .await
+            .expect("malformed response");
+        assert!(String::from_utf8(reply)
+            .expect("HTTP")
+            .starts_with("HTTP/1.1 400"));
+        assert!(temporary.path().join("segment-000001.ts").exists());
+        assert!(chunked_delete(&base, "segment-000001.ts", &[])
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(!temporary.path().join("segment-000001.ts").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_playback_budget_gates_background_uploads_without_rolling_grants() {
+        let temporary = crate::test_tempdir().expect("temporary");
+        let root = std::fs::canonicalize(temporary.path()).expect("root");
+        let output = root.join("pretranscode");
+        std::fs::create_dir(&output).expect("output");
+        let subtitle = root.join("stored-subtitle");
+        std::fs::write(&subtitle, vec![1u8; 48 * 1024]).expect("subtitle");
+        let store: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let budget = crate::playback_cache::PlaybackCacheBudget::new(store, vec![root]);
+        budget.configure_for_test(64 * 1024);
+        let sink = PutSink::bind(output.clone(), None).expect("background sink");
+        let response = put(&sink.base_url(0), "seg00000.m4s", &vec![2u8; 32 * 1024]).await;
+        assert!(response.starts_with("HTTP/1.1 507"), "{response}");
+        assert!(!output.join("seg00000.m4s").exists());
+        assert!(std::fs::read_dir(&output)
+            .expect("entries")
+            .next()
+            .is_none());
+        let eviction = crate::playback_cache::begin_eviction(&subtitle).expect("fence");
+        std::fs::remove_file(&subtitle).expect("cleanup");
+        drop(eviction);
+        let response = put(&sink.base_url(1), "seg00000.m4s", &vec![2u8; 32 * 1024]).await;
+        assert!(response.starts_with("HTTP/1.1 201"), "{response}");
+        assert_eq!(
+            std::fs::metadata(output.join("seg00000.m4s"))
+                .expect("segment")
+                .len(),
+            32 * 1024
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

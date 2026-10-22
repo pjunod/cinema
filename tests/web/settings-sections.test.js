@@ -45,29 +45,67 @@ let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
 
+test("media support warning remains prominent for a working encoder with missing required Metal", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
+  const html=render({encoders:{videotoolbox:true},ffmpeg_support:{executable:'/operator/ffmpeg<wrong>',package_problems:[],rows:[
+    {label:"Metal HDR tone mapping",required:true,included:false},
+    {label:"NVENC",required:false,included:false}
+  ]}});
+  assert.match(html,/role="alert"/);
+  assert.match(html,/FFmpeg lacks required support/);
+  assert.match(html,/Metal HDR tone mapping/);
+  assert.doesNotMatch(html,/NVENC/);
+  assert.match(html,/ffmpeg&lt;wrong&gt;/);
+  assert.equal(render({ffmpeg_support:{executable:"ffmpeg",package_problems:[],rows:[{required:true,included:true}]}}),"");
+});
+
+test("media support matrix separates build inclusion from untested execution and unrelated hardware", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportCard")}\nreturn ffmpegSupportCard;`)(esc);
+  const html=render({ffmpeg_support:{executable:"ffmpeg",checked_at:1,package_verified:true,rows:[
+    {id:"metal",label:"Metal",applicable:true,required:true,included:true,runtime:"not_tested",missing:[]},
+    {id:"nvenc",label:"NVENC",applicable:false,required:false,included:false,runtime:"not_applicable",missing:["h264_nvenc"]}
+  ]}});
+  assert.match(html,/✓ Included/);
+  assert.match(html,/Not tested/);
+  assert.match(html,/Other hardware · not required on this node/);
+  assert.doesNotMatch(html,/>Passed</);
+  assert.doesNotMatch(html,/h264_nvenc/);
+});
+
+test("media support warns when a required included device fails execution", () => {
+  const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
+  const html=render({ffmpeg_support:{executable:"ffmpeg",package_problems:[],rows:[
+    {label:"VideoToolbox",required:true,included:true,runtime:"failed"}
+  ]}});
+  assert.match(html,/Required media hardware check failed/);
+  assert.match(html,/Execution failed for VideoToolbox/);
+  assert.doesNotMatch(html,/Install the complete/);
+});
+
+function renderTranscoder(sys){
+  const helpers=["systemCapabilityHtml","systemGraphicsHtml","systemToneMapDetails","transcoderCard"].map(shippedSource).join("\n");
+  return new Function("esc",`${helpers}\nreturn transcoderCard;`)(esc)(sys);
+}
 test("node transcoder selector hides unsupported backends and explains the unavailable saved choice", () => {
-  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
-  const html = render({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
+  const html = renderTranscoder({node_id:'rog"node', hwaccel_pref:"nvenc", hwaccel_requested:"qsv", encoder_selected:"NVIDIA NVENC", encoders:{nvenc:true,qsv:false}});
   assert.doesNotMatch(html, /value="qsv"/);
   assert.match(html, /saved backend is unavailable/);
   assert.match(html, /value="auto" selected/);
   assert.match(html, /waiting for this node to restart/);
   assert.match(html, /data-node-id="rog&quot;node"/);
-  assert.match(html, /Active: <b>NVIDIA NVENC/);
-  assert.doesNotMatch(html, /disabled/);
+  assert.doesNotMatch(html, / disabled/);
 });
 
-test("transcoder menu shows every measured speed against CPU and names Auto winner", () => {
-  const render = new Function("esc", `${shippedSource("toneMapHtml")}\n${shippedSource("transcoderCard")}\nreturn transcoderCard;`)(esc);
-  const html = render({node_id:"node",hwaccel_pref:"auto",encoder_selected:"Apple VideoToolbox",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{measured_at:1,results:[
-    {backend:"software",fps:120,relative_to_cpu:1},
-    {backend:"videotoolbox",fps:480,relative_to_cpu:4}
+test("transcoder preference keeps available hardware independent of synthetic speed results", () => {
+  const html = renderTranscoder({node_id:"node",hwaccel_pref:"auto",encoders:{nvenc:true,videotoolbox:true},transcoder_optimization:{report:{results:[
+    {backend:"software",fps:480,relative_to_cpu:1},
+    {backend:"videotoolbox",fps:120,relative_to_cpu:.25}
   ]}}});
-  assert.match(html, /Auto — Apple VideoToolbox · 480 fps · 4.00× CPU/);
-  assert.match(html, /CPU — 120 fps · 1.00× CPU/);
-  assert.match(html, /Apple VideoToolbox — 480 fps · 4.00× CPU/);
-  assert.doesNotMatch(html, /value="nvenc"/);
-  assert.match(html, />Optimize<\/button>/);
+  assert.match(html, /value="auto" selected>Auto/);
+  assert.match(html, /value="software">CPU \(software\)/);
+  assert.match(html, /value="videotoolbox">Apple VideoToolbox/);
+  assert.match(html, /value="nvenc">NVIDIA · NVENC/);
+  assert.doesNotMatch(html, /fps|fastest|benchmark on startup/);
 });
 
 test("transcoder polling discards a response from before leaving and reentering System", async () => {
@@ -247,7 +285,7 @@ test("every section is a route, grouped in the rail's order", () => {
     analysis: "analysisSettingsPanel(d.settings,d.analysis,d.developerReadiness)",
     maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
     users: "usersPanel(d.users,d.settings)",
-    system: "systemPanel(d.sys,d.playbackEvents)",
+    system: "systemPanel(d.sys)",
     cluster: "clusterPanel(d)",
     sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",

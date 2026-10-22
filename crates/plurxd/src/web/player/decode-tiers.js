@@ -735,9 +735,15 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
   const inputs=capturePlayInputs(fileId,meta,retryIntent);
   const attempt=Object.freeze({...beginning,...inputs,fileContext,fileId,title,resumeMs,knownDurMs,meta});
-  const {modal,playerWasOpen}=attempt;
+  const {modal,video,playerWasOpen}=attempt;
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
+  // WebKit grants media permission to the element, in the user gesture.
+  // Decision/session/readiness can outlast its transient activation window.
+  // Explicitly load the empty persistent element now; prepareForLoad in
+  // WebKit records the gesture even before a source is available. Never load
+  // an incumbent here: a refused replacement must retain its picture/position.
+  if(!video.getAttribute?.("src")&&!video.currentSrc&&!video.srcObject) video.load();
   if(!playerWasOpen){
     const app=document.getElementById("app"); if(app) app.inert=!WATCH;
     const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
@@ -882,7 +888,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
   const selection=retryIntent?.selection??playbackSelection(PLAYER, meta&&meta.fileContext||fileId);
-  const modal=document.getElementById("modal"), video=document.getElementById("video");
+  const modal=document.getElementById("modal"), video=/** @type {HTMLVideoElement} */ (document.getElementById("video"));
   const playerWasOpen=modal.classList.contains("open");
   const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
   const playerOpenerClick=playerWasOpen?(PLAYER&&PLAYER._openerClick):
@@ -1096,6 +1102,7 @@ function buildPlayer(attempt,decided,prepared){
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
     wantsPlayback:fullIntent.wantsPlayback,
     mediaPredecessor:outgoing,
+    qualityChrome:samePlaybackFile(outgoing,fileId,meta)?outgoing.qualityChrome:null,
     internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel,
     terminalStop:null, };
 }
@@ -1323,6 +1330,7 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   const {watchTicket,preparation,fullIntent,video,fileId}=attempt;
   const {applied}=prepared;
   if(!openIsAttached()) return;
+  if(applied.textSub!=null) openedPlayer.curSub=applied.textSub;
   openedPlayer.pendingOpenAttempt=null;
   watchAccept(watchTicket,openedPlayer);
   samplePlaybackPresentationClock(video,openedPlayer);
@@ -1331,12 +1339,14 @@ function finishPlayAttach(attempt,prepared,openedPlayer,openIsAttached){
   if(play.pendingIntent===fullIntent)play.pendingIntent=null;
 
   // A pre-play TEXT subtitle, applied to the stream that just attached. Here
-  // rather than before the route, because setSub() shifts the cues by
+  // rather than before the route, because subtitle attachment shifts cues by
   // `PLAYER.offset` and the route is what sets it. A <track> is not a stream
   // restart, so the choice arrives with the first frames.
-  if(applied.textSub!=null && openIsAttached()) setSub(applied.textSub);
+  if(applied.textSub!=null && openIsAttached()){
+    attachPlaybackSubtitle(video,openedPlayer,applied.textSub);
+  }
 
-  if(!openIsAttached()) return;
+  if(!openIsAttached()||openedPlayer.playPermissionDenied) return;
 
   // Once, per playback, as soon as the element knows what it is decoding.
   probeDecode();
@@ -1469,7 +1479,7 @@ async function executePlaybackMediaChange(p,change){
       if(change.from!=null) recordAutoSwitch(p,change.from,change.height||"transcode Auto",
         change.switchReason||change.reason,pos,p.sessionId);
     }
-    if(subtitle>=0&&p.burnedSub==null) await setSub(subtitle);
+    if(subtitle>=0&&p.burnedSub==null) await attachPlaybackSubtitle(v,p,subtitle);
     return true;
   }catch(e){
     if(!live()) return false;
@@ -1985,6 +1995,12 @@ function armHitchDetector(v){
       prev=null;rateWin.length=0;
       queuePlaybackFrame(v,p,step);return;
     }
+    // Callback delivery is presentation evidence even when its media timestamp
+    // is unusable. Keep the receipt clock independent of the hitch diagnostic
+    // filter; otherwise moving video can look stalled to playbackProgressTick.
+    // Seek settlement below still requires trustworthy timestamped evidence.
+    if(typeof recordFrameDropFrame==="function")recordFrameDropFrame(v,p,now,meta);
+    p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(!v.paused&&!v.seeking&&PlaybackPolicy.frameMetadataAheadOfClock(meta,{
       nowMs:now,currentTime:v.currentTime,playbackRate:v.playbackRate||1,nominalSeconds:nominal()||0
     })){
@@ -1994,11 +2010,12 @@ function armHitchDetector(v){
         current_time:v.currentTime,expected_display_time_ms:meta.expectedDisplayTime??null,
         presented_frames:meta.presentedFrames??null,session_id:p.sessionId||null});
       if(h.metadataFaults.length>16) h.metadataFaults.shift();
-      // Preserve the last trustworthy frame: the next callback still spans
-      // this interval and can reveal a real hold, backward step or late frame.
+      // Preserve the last trustworthy timestamp for hitch comparisons, while
+      // letting the element clock and this receipt prove ordinary playback.
+      // A pending seek still needs a valid target timestamp and cannot use it.
+      sampleStartupPresentation(v,p);
       queuePlaybackFrame(v,p,step);return;
     }
-    p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(epoch===(p.controlPresentationEpoch||0))
       settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames,observation);
     p.hitches.frames++;
