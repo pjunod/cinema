@@ -4,7 +4,7 @@ use super::*;
 impl ScratchFold {
     pub(super) fn arm_reader(
         &self,
-        plan: &ScratchPlanV2,
+        plan: OutputPlanView<'_>,
         io_id: Id,
         op: &AssetIoV1,
     ) -> Result<(), CustodyError> {

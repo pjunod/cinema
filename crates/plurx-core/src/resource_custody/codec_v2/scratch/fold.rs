@@ -10,12 +10,18 @@ pub(crate) struct ScratchFold {
     pending: Option<(Id, AssetIoV1)>,
 }
 impl ScratchFold {
+    pub(super) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
     pub(crate) fn empty(plan: &ScratchPlanV2) -> Result<Self, CustodyError> {
         validate_plan(plan)?;
-        Ok(Self {
+        Ok(Self::empty_output(plan.asset_id))
+    }
+    pub(super) fn empty_output(asset_id: Id) -> Self {
+        Self {
             state: ScratchStateV2 {
                 version: 2,
-                asset_id: plan.asset_id,
+                asset_id,
                 directory: None,
                 head: None,
                 revision: 0,
@@ -25,7 +31,7 @@ impl ScratchFold {
             files: Vec::new(),
             readers: Vec::new(),
             pending: None,
-        })
+        }
     }
     pub(crate) fn apply(
         mut self,
@@ -46,7 +52,7 @@ impl ScratchFold {
         }
         // Consume the transient fold on error rather than cloning the entire
         // movie inventory per event. A refused fold cannot be reused as state.
-        self.apply_event(plan, operation_id, &change.event)?;
+        self.apply_event(plan.output_view(), operation_id, &change.event)?;
         self.state.revision = self
             .state
             .revision
@@ -56,13 +62,13 @@ impl ScratchFold {
             operation_id,
             revision: self.state.revision,
         });
-        self.recount(plan)?;
+        self.recount(plan.output_view())?;
         validate_projection(plan, &self.state)?;
         Ok(self)
     }
-    fn apply_event(
+    pub(super) fn apply_event(
         &mut self,
-        plan: &ScratchPlanV2,
+        plan: OutputPlanView<'_>,
         operation_id: Id,
         event: &AssetEventV1,
     ) -> Result<(), CustodyError> {
@@ -85,7 +91,10 @@ impl ScratchFold {
                         self.arm_reader(plan, *io_id, operation)?;
                     }
                     AssetIoV1::CreateDirectory { copy_id } => {
-                        if self.state.directory.is_some() || self.copy_exists(*copy_id) {
+                        if plan.directory_mode.is_none()
+                            || self.state.directory.is_some()
+                            || self.copy_exists(*copy_id)
+                        {
                             return Err(codec::invalid());
                         }
                     }
@@ -166,10 +175,10 @@ impl ScratchFold {
                         // New identities are minted only after acquisition, using
                         // this globally unique observation record's UUID. Borrow
                         // needs the exact preexisting custodian, not a new identity.
-                        match &plan.directory.mode {
-                            DirectoryModeV1::CreateExclusive
+                        match plan.directory_mode {
+                            Some(DirectoryModeV1::CreateExclusive)
                                 if dir.directory_id == operation_id => {}
-                            DirectoryModeV1::BorrowExisting { asset_owner_ref }
+                            Some(DirectoryModeV1::BorrowExisting { asset_owner_ref })
                                 if dir.directory_id == asset_owner_ref.directory_id => {}
                             _ => return Err(codec::invalid()),
                         }
@@ -193,7 +202,7 @@ impl ScratchFold {
                             || f.slot_id != *slot_id
                             || f.creation_io_id != *io_id
                             || f.native_object.file_type != FileType::Regular
-                            || f.native_object.filesystem_domain != plan.filesystem_domain
+                            || &f.native_object.filesystem_domain != plan.filesystem_domain
                             || f.logical_len > *logical_end
                             || f.held_copy_ids.len() > 1
                             || f.held_copy_ids.iter().any(|c| *c != *copy_id)
@@ -312,7 +321,7 @@ impl ScratchFold {
             .is_some_and(|d| d.held_copy_ids.contains(&id))
             || self.files.iter().any(|f| f.held_copy_ids.contains(&id))
     }
-    fn recount(&mut self, plan: &ScratchPlanV2) -> Result<(), CustodyError> {
+    pub(super) fn recount(&mut self, plan: OutputPlanView<'_>) -> Result<(), CustodyError> {
         let mut totals = AssetTotalsV1::default();
         if let Some(dir) = &self.state.directory {
             totals.charged_storage_bytes = plan.limits.directory_charge();

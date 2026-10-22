@@ -1,8 +1,11 @@
 //! Growing finite output audit. The plan contains slots/bounds, never future
 //! native objects; the compact projection is checked against durable event rows.
 //! These serde values are audit data, NOT native acquisition/closure authority.
+pub(crate) mod bootstrap;
 mod fold;
+mod output_view;
 pub(crate) use fold::ScratchFold;
+use output_view::{validate_outputs_limits, OutputPlanView};
 #[cfg(test)]
 pub(in crate::resource_custody) mod tests;
 use super::*;
@@ -293,7 +296,6 @@ pub(crate) struct AssetChangeV2 {
 }
 
 pub(crate) fn validate_plan(plan: &ScratchPlanV2) -> Result<(), CustodyError> {
-    let l = &plan.limits;
     codec::text(&plan.rendition_id)?;
     codec::long_text(&plan.directory.protected_absolute_path)?;
     component(&plan.directory.child_component)?;
@@ -309,28 +311,10 @@ pub(crate) fn validate_plan(plan: &ScratchPlanV2) -> Result<(), CustodyError> {
         })
         || path.file_name().and_then(|s| s.to_str())
             != Some(plan.directory.child_component.as_str())
-        || plan.generation_epoch == 0
-        || plan.outputs.segment_end_exclusive > u64::from(u32::MAX) + 1
-        || plan.outputs.segment_end_exclusive < u64::from(plan.outputs.first_segment)
-        || (!plan.outputs.init
-            && plan.outputs.segment_end_exclusive == u64::from(plan.outputs.first_segment))
-        || l.resident_file_objects == 0
-        || l.resident_file_objects > 65536
-        || l.one_io_payload_bytes == 0
-        || l.one_io_payload_bytes > l.one_file_logical_bytes
-        || l.one_file_logical_bytes > l.resident_logical_bytes
-        || l.pending_native_jobs != 1
-        || l.reader_leases > 16
-        || l.live_handles < 2
-        || l.resident_memory_bytes < l.one_io_payload_bytes
-        || l.directory_charge() == 0
-        || l.storage_for(l.one_file_logical_bytes)?
-            .checked_add(l.directory_charge())
-            .is_none_or(|n| n > l.reserved_storage_bytes)
     {
         return Err(codec::invalid());
     }
-    Ok(())
+    validate_outputs_limits(plan.generation_epoch, &plan.outputs, &plan.limits)
 }
 fn component(value: &str) -> Result<(), CustodyError> {
     codec::text(value)?;
@@ -341,6 +325,12 @@ fn component(value: &str) -> Result<(), CustodyError> {
 }
 pub(crate) fn validate_projection(
     plan: &ScratchPlanV2,
+    state: &ScratchStateV2,
+) -> Result<(), CustodyError> {
+    validate_output_projection(plan.output_view(), state)
+}
+fn validate_output_projection(
+    plan: OutputPlanView<'_>,
     state: &ScratchStateV2,
 ) -> Result<(), CustodyError> {
     let t = &state.totals;
@@ -364,7 +354,7 @@ pub(crate) fn validate_projection(
     }
     if let Some(dir) = &state.directory {
         if dir.native_object.file_type != FileType::Directory
-            || dir.native_object.filesystem_domain != plan.filesystem_domain
+            || &dir.native_object.filesystem_domain != plan.filesystem_domain
             || dir.held_copy_ids.is_empty()
             || dir.held_copy_ids.len() > 16
             || dir.held_copy_ids.iter().collect::<BTreeSet<_>>().len() != dir.held_copy_ids.len()
