@@ -49,11 +49,13 @@ growth. It cannot be declared done by adding another private proof helper.
 | C3 — connect the existing VOD owner | Concrete actor/terminal/parent-source ownership and original moved-payload/registration latch remain. `1584a357c` adds actual Unix held-directory/no-follow/exclusive-temp/no-clobber publication and retained partial-object facts; `a4465e4b0` preserves drain errors, `521a6d5fb` authors actual-native cancellation. Next: already-charged prearmed storage-root/init bootstrap, scratch-v2 write-ahead/native outcomes, source/copy/HTTP leases, bounded native/index memory and current-cap/settings/shared-role demand. | The actual application request, not a fixture-only branch, reserves once, produces output, stops and returns its finite capacity. Admission STILL LEGACY; local native facts are not finite authority. C1/C2 and conserving R→S remain. |
 | C4 — restart availability and acceptance | Replace the all-startup pending refusal in `resource_runtime.rs` with protected selective reconciliation and applicable admission refusal; keep unrelated serving safe. Author exact normal/cancel/crash/restart/capacity-reuse cases now; execute the required behavioral cases only after complete candidate review/fixes. | First finite path can be marked source-complete only when its normal/recovery lifecycle is wired. It is accepted only with actual applicable post-review evidence. Other M3 adapters and M4–M6 remain separate table rows. |
 
-The final C1/SourceFile-v2/retained-output contract is delivered, not a blanket
-design gate. The actual actor and typed journal writer now exist, but no typed
-production settlement is claimed. Next source is actual source/sink/reader custody
-and atomic producer→retained-assets retirement. Detailed scratch-growth design is
-delivered; remaining native/protocol composition is source work, not another gate.
+The final C1/SourceFile-v2/retained-output and first-root bootstrap contracts are
+delivered, not blanket design gates. `bb4979850` binds source-copy/task plans to the
+actual runtime graph before prepare; `394498d0f` implements strict V3 first-root
+audit plus shared output-policy source. V3 is not yet wired into manifest/journal
+transactions or actual native acquisition. Next is that same-owner composition,
+then source/sink/readers and conserving atomic retirement; no typed production
+settlement or finite admission is claimed. These are source gaps, not test gates.
 Adaptive policy does NOT require a
 custom broker. Trusted owned-workload cleanup and crash accounting remain;
 completed exact PID-namespace teardown can close its process domain, but a restart

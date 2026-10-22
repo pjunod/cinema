@@ -24,22 +24,26 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`f51a5475f` connects typed journal preparation to the SAME retained runtime bundle
-and reservation/family/cancel/refund path. Real root/pipe adapters enrich matching
-typed envelopes; the old all-closed path refuses typed inventory before consuming
-proof. Scratch-directory member/ArmIo commands retain exact IDs/results, apply
-the local fold only after known commit, acknowledge without double application,
-and permit bounded local IO after outer seal without reopening members. No native
-parent/observation permit escapes. `5d12668d1` corrects a nontrial-only fixture.
+`bb4979850` binds process-local source-copy/recovery/VOD-task plans to the ACTUAL
+owned graph before original prepare/fingerprinting. No caller-supplied graph UUID
+or rewritten observed filesystem-domain owner is accepted. Same retained ledger,
+bundle and typed writer from `f51a5475f` remain; `5d12668d1` preserves nontrial scope.
+`394498d0f` implements the delivered first-root contract's strict V3 bootstrap
+plan/events/audit fold and shares a nonserialized output-policy view with V2;
+no fake parent/changed historical bytes. Traversal/base/child, partial/uncertain
+copy slots, one job, storage allowances and one output lineage are bounded.
+V3 is NOT YET registered in manifest/transaction inventory/runtime/native dispatch.
+Next source is that exact SAME-journal/owner integration, not another design gate.
 
-Pinned1.97.1 affected core all-target check PASS7.948s; preceding17.332s/10.759s/
-8.347s scopes were source-invalidated, retained without replay. Nine new bodies
-COMPILED NOT RUN; warnings, NOT strict Clippy. Unchanged daemon81.476s retained;
-controller reports exactb37d changed-daemon Windows PASS151.38s, not Unix execution.
+Pinned1.97.1 affected core all-target check PASS8.059s; preceding20.632s/7.686s/
+40.363s/30.622s/8.213s scopes were source-invalidated, retained without replay.
+Twelve NEW bodies COMPILED NOT RUN; warnings, NOT strict Clippy. Unchanged daemon
+81.476s retained; controller exact71da changed-core Windows43.601s and b37d daemon
+151.38s retained. Only newly changed core now needs targeted SDK compilation.
 `1584a357c`/`a4465e4b0`/`521a6d5fb` retain actual Unix no-follow/no-clobber native
 publication and partial-object/drain-error/cancellation ownership. Non-Unix is
 legacy. `3e9edcdf4`/`cdf580eb0` provide bounded event/reader audit; old codec/DDL
-unchanged. Admission STILL LEGACY. Missing: actual prearmed root/init and native
+unchanged. Admission STILL LEGACY. Missing: V3 journal integration, prearmed root/init and native
 outcome/manifest composition, source/copy/HTTP leases, bounded native/index memory,
 overage debt/fence, snapshot/RetainedAssetsV2/private-proof atomic R→S, positive
 old-domain restart and remaining M0–M7. No finite/physical-quota/behavior pass.
