@@ -27,14 +27,15 @@ class DocumentScore:
     judgment_digest: str | None
 
     def __post_init__(self) -> None:
-        if not self.scorer_id or not self.run_id:
+        if not isinstance(self.scorer_id, str) or not self.scorer_id or not isinstance(self.run_id, str) or not self.run_id:
             raise ValueError("scorer and run identities are required")
         for value in (self.expected_count, self.found_count, self.unsupported_claims):
             if type(value) is not int or value < 0:
                 raise ValueError("document score counts must be nonnegative integers")
         if self.found_count > self.expected_count:
             raise ValueError("found count exceeds expected count")
-        if self.judgment_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", self.judgment_digest):
+        if self.judgment_digest is not None and (not isinstance(self.judgment_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", self.judgment_digest)):
             raise ValueError("judgment digest must be a lowercase SHA-256 hex digest")
 
 
@@ -64,7 +65,7 @@ def _batch_layout(batch: BatchLog) -> tuple[dict[str, object], dict[str, object]
         raise ValueError("planned schedule is incomplete")
     runs_list = batch.runs
     runs = {run.spec.id: run for run in runs_list}
-    if len(runs) != RUN_COUNT or runs.keys() != planned.keys():
+    if len(runs_list) != RUN_COUNT or len(runs) != RUN_COUNT or runs.keys() != planned.keys():
         raise ValueError("run logs must match every planned identity exactly once")
     if any(run.spec != planned[identity] for identity, run in runs.items()):
         raise ValueError("run log identity drift")
@@ -192,7 +193,8 @@ def documentation_analysis(
     all_completed = all(run.status == "completed" for run in runs.values())
     full_agreement = len(consensus) == RUN_COUNT
     full_evidence = all_completed and full_agreement
-    cohorts = sorted(set(cohort_by_case.values()))
+    eligible = [case for case in cases if expected_by_case[case] > 0]
+    cohorts = sorted(set(cohort_by_case[case] for case in eligible))
     rng = random.Random(bootstrap_seed)
     comparisons: dict[str, dict[str, object]] = {}
     for before, after in (("A", "B"), ("B", "C")):
@@ -200,8 +202,8 @@ def documentation_analysis(
                   if case_recall[before][case] is not None and case_recall[after][case] is not None]
         differences = [case_recall[before][case] - case_recall[after][case] for case in paired]
         interval = None
-        if full_evidence and len(paired) == CASE_COUNT:
-            clusters = [[case for case in cases if cohort_by_case[case] == cohort] for cohort in cohorts]
+        if full_evidence and paired and set(paired) == set(eligible):
+            clusters = [[case for case in eligible if cohort_by_case[case] == cohort] for cohort in cohorts]
             samples = []
             for _ in range(bootstrap_samples):
                 sample = [case for cluster in clusters for case in rng.choices(cluster, k=len(cluster))]
@@ -211,8 +213,10 @@ def documentation_analysis(
         comparisons[f"{before}-{after}"] = {
             "before": before, "after": after,
             "paired_macro_case_recall_difference": statistics.mean(differences) if differences else None,
+            "difference_direction": "before minus after recall; negative favors after",
             "point_estimate_coverage": {"paired_cases": len(paired), "planned_cases": CASE_COUNT,
-                                         "complete": len(paired) == CASE_COUNT and full_evidence},
+                                         "eligible_nonempty_cases": len(eligible),
+                                         "complete": bool(eligible) and set(paired) == set(eligible) and full_evidence},
             "paired_difference_interval": interval,
             "interval_method": "case-clustered cohort-stratified percentile bootstrap" if interval else None,
         }
