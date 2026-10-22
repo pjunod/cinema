@@ -60,6 +60,18 @@ impl RootCell {
         // releases `enter`. If registration fails, no native call is entered.
         Ok((cell, enter))
     }
+    /// Await only the original root job already registered in this cell.
+    /// A joined audit/result remains retained here for the normal Observe path.
+    pub(super) async fn join_registered(&mut self) -> Result<(), OperationError> {
+        if self.failed_join {
+            return Err(OperationError::State);
+        }
+        if self.pending.is_some() {
+            self.join().await?;
+        }
+        Ok(())
+    }
+
     async fn join(&mut self) -> Result<&RootResult, OperationError> {
         if self.failed_join {
             return Err(OperationError::State);

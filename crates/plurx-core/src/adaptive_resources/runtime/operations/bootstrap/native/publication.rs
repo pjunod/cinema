@@ -31,6 +31,20 @@ impl Publication {
     pub(super) fn acknowledged(&self) -> bool {
         self.acknowledged
     }
+    /// Await only this cell's original registered worker. Preserve both the
+    /// native object and its I/O result for the ordinary Observe path.
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn join_registered(
+        &mut self,
+    ) -> Result<(), OperationError> {
+        if self.failed_join {
+            return Err(OperationError::State);
+        }
+        if self.pending.is_some() {
+            self.join().await?;
+        }
+        Ok(())
+    }
+
     async fn join(&mut self) -> Result<&PublicationResult, OperationError> {
         if self.failed_join {
             return Err(OperationError::State);

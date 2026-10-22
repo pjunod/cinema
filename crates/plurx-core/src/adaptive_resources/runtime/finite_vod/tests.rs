@@ -208,7 +208,7 @@ async fn finite_software_writer_waits_for_original_start_sender_before_reading()
         .expect("actual child root");
     let arm = DurableArm::adapter_fixture(binding, graph.identity().generation);
     let mut retained_pump = Some(pump);
-    let task = graph
+    let (task, _abort) = graph
         .spawn_durable_finite_vod(root, Uuid::new_v4(), arm, &mut retained_pump)
         .await
         .expect("retain concrete finite pump task");
@@ -236,15 +236,17 @@ async fn finite_software_writer_waits_for_original_start_sender_before_reading()
     ));
 
     start.send(()).expect("release same original task");
-    let terminal = sealed
+    let joined = sealed
         .join_finite_vod(task, false)
         .await
-        .expect("join original pump")
-        .expect("pump terminal result");
-    assert!(matches!(
-        terminal.outcome,
-        crate::vod_generation::Outcome::Failed(_)
-    ));
+        .expect("join original pump");
+    assert_eq!(joined.selection(), task);
+    let completion = joined.summary().expect("retained completion summary");
+    assert_eq!(
+        completion.outcome,
+        pump::FiniteWriterOutcome::Failed(pump::FiniteWriterFailureKind::Sink)
+    );
+    assert_eq!(joined.summary().expect("same retained summary"), completion);
     let _ = sealed.close().await;
     drop(cleanup);
     drop(ledger);
@@ -253,4 +255,61 @@ async fn finite_software_writer_waits_for_original_start_sender_before_reading()
         .expect("pump released runtime owner")
         .drain()
         .expect("drain actual journal worker");
+}
+
+#[tokio::test]
+async fn finite_stop_before_task_registration_aborts_the_late_original_task() {
+    let control = FiniteControl::new();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    let abort = task.abort_handle();
+    tokio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .expect("task start barrier")
+        .expect("original task started");
+
+    control.request().expect("record stop before registration");
+    control
+        .install_task(abort)
+        .expect("late registration aborts original task");
+    let joined = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("late task cancellation completes")
+        .expect_err("same original task was aborted");
+    assert!(joined.is_cancelled());
+}
+
+#[tokio::test]
+async fn finite_stop_aborts_original_task_while_join_mutex_is_held() {
+    let control = FiniteControl::new();
+    let join_mutex = Arc::new(tokio::sync::Mutex::new(()));
+    let guard = join_mutex.lock().await;
+    let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+    let waiting_mutex = Arc::clone(&join_mutex);
+    let task = tokio::spawn(async move {
+        let _ = waiting_tx.send(());
+        let _join_guard = waiting_mutex.lock().await;
+        std::future::pending::<()>().await;
+    });
+    let abort = task.abort_handle();
+    tokio::time::timeout(Duration::from_secs(5), waiting_rx)
+        .await
+        .expect("task reached held join mutex")
+        .expect("original task is waiting");
+    control
+        .install_task(abort)
+        .expect("retain original task control");
+
+    control
+        .request()
+        .expect("stop does not need the held join mutex");
+    let joined = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("original writer aborts despite held join mutex")
+        .expect_err("same original task was aborted");
+    assert!(joined.is_cancelled());
+    drop(guard);
 }

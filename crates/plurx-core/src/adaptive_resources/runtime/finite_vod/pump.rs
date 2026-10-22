@@ -168,6 +168,65 @@ pub(in crate::adaptive_resources) struct PumpFinished {
     pub completed_output: bool,
     pub kill_error: Option<io::ErrorKind>,
 }
+
+/// Copy-only classification retained by the graph after the original writer
+/// task is joined. It contains no owned diagnostic text or physical proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FiniteWriterOutcome {
+    NotStarted,
+    Ran,
+    Failed(FiniteWriterFailureKind),
+    TaskAbandoned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FiniteWriterFailureKind {
+    InitDrift,
+    Landing,
+    Unplaced,
+    Stream,
+    Sink,
+    EngineChanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FiniteWriterCompletion {
+    pub outcome: FiniteWriterOutcome,
+    pub produced_through: Option<u32>,
+    pub completed_output: bool,
+    pub diagnostic_bytes: usize,
+    pub diagnostics_truncated: bool,
+    pub diagnostic_read_error: Option<io::ErrorKind>,
+    pub kill_error: Option<io::ErrorKind>,
+}
+
+impl PumpFinished {
+    pub(in crate::adaptive_resources) fn summary(&self) -> FiniteWriterCompletion {
+        let (outcome, produced_through) = match &self.outcome {
+            Outcome::Ran { produced_through } => (FiniteWriterOutcome::Ran, *produced_through),
+            Outcome::Failed(failure) => {
+                let kind = match failure {
+                    Failure::InitDrift(_) => FiniteWriterFailureKind::InitDrift,
+                    Failure::Landing(_) => FiniteWriterFailureKind::Landing,
+                    Failure::Unplaced { .. } => FiniteWriterFailureKind::Unplaced,
+                    Failure::Stream(_) => FiniteWriterFailureKind::Stream,
+                    Failure::Sink(_) => FiniteWriterFailureKind::Sink,
+                    Failure::EngineChanged(_) => FiniteWriterFailureKind::EngineChanged,
+                };
+                (FiniteWriterOutcome::Failed(kind), None)
+            }
+        };
+        FiniteWriterCompletion {
+            outcome,
+            produced_through,
+            completed_output: self.completed_output,
+            diagnostic_bytes: self.diagnostics.bytes.len(),
+            diagnostics_truncated: self.diagnostics.truncated,
+            diagnostic_read_error: self.diagnostics.read_error,
+            kill_error: self.kill_error,
+        }
+    }
+}
 pub(in crate::adaptive_resources) struct Diagnostics {
     pub bytes: Vec<u8>,
     pub truncated: bool,

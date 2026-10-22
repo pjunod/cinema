@@ -746,6 +746,10 @@ impl SealedPhysicalGraph {
             }
             let abandoned = (&mut writer.task).await.is_err();
             writer.joined = true;
+            #[cfg(unix)]
+            if let Some(finite) = writer.finite.as_mut() {
+                finite.note_join(abandoned);
+            }
             members.joined_writers += 1;
             members.abandoned_writers += usize::from(abandoned);
         }

@@ -2,10 +2,12 @@
 //! This task adapter alone supplies no process, source, scratch, or refund proof.
 use super::finite_pipes::{resident_memory_bytes, PipeRecord};
 use super::*;
-use crate::adaptive_resources::runtime::finite_vod::pump::{PumpFinished, SoftwarePump};
+use crate::adaptive_resources::runtime::finite_vod::pump::{
+    FiniteWriterCompletion, FiniteWriterOutcome, PumpFinished, SoftwarePump,
+};
 use std::sync::Mutex as StdMutex;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::adaptive_resources) struct GraphFiniteVodTask {
     generation: Uuid,
     member: Uuid,
@@ -26,6 +28,7 @@ pub(super) struct FiniteRecord {
     finished: Arc<StdMutex<Option<PumpFinished>>>,
     minimum_memory: u64,
     start: Option<tokio::sync::oneshot::Sender<()>>,
+    joined_abandoned: bool,
 }
 impl FiniteRecord {
     pub(super) fn minimum_memory_bytes(&self) -> u64 {
@@ -37,6 +40,50 @@ impl FiniteRecord {
         }
         Ok(())
     }
+    pub(super) fn note_join(&mut self, abandoned: bool) {
+        self.joined_abandoned |= abandoned;
+    }
+}
+
+/// A joined task selection that keeps the graph's original terminal allocation
+/// alive. Repeated summaries read the same retained result without consuming it.
+pub(in crate::adaptive_resources) struct JoinedFiniteVod {
+    selection: GraphFiniteVodTask,
+    finished: Arc<StdMutex<Option<PumpFinished>>>,
+    abandoned: bool,
+}
+impl JoinedFiniteVod {
+    pub(in crate::adaptive_resources) fn selection(&self) -> GraphFiniteVodTask {
+        self.selection
+    }
+    pub(in crate::adaptive_resources) fn summary(&self) -> io::Result<FiniteWriterCompletion> {
+        if self.abandoned {
+            return Ok(FiniteWriterCompletion {
+                outcome: FiniteWriterOutcome::TaskAbandoned,
+                produced_through: None,
+                completed_output: false,
+                diagnostic_bytes: 0,
+                diagnostics_truncated: false,
+                diagnostic_read_error: None,
+                kill_error: None,
+            });
+        }
+        let finished = self.finished.lock().map_err(|_| {
+            io::Error::other("finite VOD terminal state retained in poisoned owner")
+        })?;
+        Ok(finished
+            .as_ref()
+            .map(PumpFinished::summary)
+            .unwrap_or(FiniteWriterCompletion {
+                outcome: FiniteWriterOutcome::NotStarted,
+                produced_through: None,
+                completed_output: false,
+                diagnostic_bytes: 0,
+                diagnostics_truncated: false,
+                diagnostic_read_error: None,
+                kill_error: None,
+            }))
+    }
 }
 
 impl OwnedPhysicalGraph {
@@ -46,7 +93,7 @@ impl OwnedPhysicalGraph {
         member: Uuid,
         arm: super::super::runtime::DurableArm,
         pump: &mut Option<SoftwarePump>,
-    ) -> io::Result<GraphFiniteVodTask> {
+    ) -> io::Result<(GraphFiniteVodTask, tokio::task::AbortHandle)> {
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let custody = self.custody();
         let mut members = custody.members.lock().await;
@@ -124,6 +171,7 @@ impl OwnedPhysicalGraph {
                 *result = Some(terminal);
             }
         });
+        let abort = task.abort_handle();
         members.writers.push(Writer {
             task,
             drain: None,
@@ -133,10 +181,11 @@ impl OwnedPhysicalGraph {
                 finished,
                 minimum_memory,
                 start: Some(start),
+                joined_abandoned: false,
             }),
             joined: false,
         });
-        Ok(selection)
+        Ok((selection, abort))
     }
 }
 
@@ -168,7 +217,7 @@ impl SealedPhysicalGraph {
         &self,
         task: GraphFiniteVodTask,
         abort: bool,
-    ) -> io::Result<Option<PumpFinished>> {
+    ) -> io::Result<JoinedFiniteVod> {
         let mut members = self.custody.members.lock().await;
         if !self.custody.sealed.load(Ordering::Acquire)
             || task.generation != self.custody.identity.generation
@@ -196,17 +245,21 @@ impl SealedPhysicalGraph {
             abandoned = (&mut writer.task).await.is_err();
             writer.joined = true;
         }
-        let record = writer.finite.as_ref().expect("validated concrete record");
-        record.close_joined_pipes()?;
-        let terminal = record
-            .finished
-            .lock()
-            .map_err(|_| io::Error::other("finite VOD terminal state retained in poisoned owner"))?
-            .take();
+        let record = writer.finite.as_mut().expect("validated concrete record");
+        if newly_joined {
+            record.note_join(abandoned);
+        }
+        let pipes_closed = record.close_joined_pipes();
+        let joined = JoinedFiniteVod {
+            selection: record.selection,
+            finished: Arc::clone(&record.finished),
+            abandoned: record.joined_abandoned,
+        };
         if newly_joined {
             members.joined_writers += 1;
             members.abandoned_writers += usize::from(abandoned);
         }
-        Ok(terminal)
+        pipes_closed?;
+        Ok(joined)
     }
 }

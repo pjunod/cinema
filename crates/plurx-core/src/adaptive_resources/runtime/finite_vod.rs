@@ -4,7 +4,19 @@ mod command;
 mod initial_unit;
 pub(in crate::adaptive_resources) mod pump;
 pub use command::SoftwareAvcCommand;
-pub use pump::{SoftwareAvcPumpPlan, SoftwareVodEvent};
+pub use pump::{
+    FiniteWriterCompletion, FiniteWriterFailureKind, FiniteWriterOutcome, SoftwareAvcPumpPlan,
+    SoftwareVodEvent,
+};
+
+/// Joined producer metadata only. Original native owners and the reservation
+/// remain in the runtime; this value cannot authorize transfer or refund.
+#[derive(Clone, Copy, Debug)]
+pub struct FiniteProducerCompletion {
+    pub writer: Option<FiniteWriterCompletion>,
+    pub root_status: Option<std::process::ExitStatus>,
+    pub parent_sources_closed: usize,
+}
 
 use super::operations::plans::{SourceCopyOwner, SourceCopyPlan, SourcePlan};
 use super::operations::source_files::SourceOpenSpec;
@@ -84,12 +96,14 @@ pub struct SoftwareVodRequest {
 pub(in crate::adaptive_resources::runtime) struct FiniteControl {
     requested: std::sync::atomic::AtomicBool,
     root: std::sync::Mutex<Option<crate::process::priority::RegisteredChildControl>>,
+    task: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 impl FiniteControl {
     fn new() -> Self {
         Self {
             requested: std::sync::atomic::AtomicBool::new(false),
             root: std::sync::Mutex::new(None),
+            task: std::sync::Mutex::new(None),
         }
     }
     pub(in crate::adaptive_resources::runtime) fn requested(&self) -> bool {
@@ -114,17 +128,45 @@ impl FiniteControl {
         }
         Ok(())
     }
+    pub(in crate::adaptive_resources::runtime) fn install_task(
+        &self,
+        abort: tokio::task::AbortHandle,
+    ) -> std::io::Result<()> {
+        let mut task = self
+            .task
+            .lock()
+            .map_err(|_| std::io::Error::other("finite task control unavailable"))?;
+        if task.is_some() {
+            return Err(std::io::Error::other(
+                "finite task control already installed",
+            ));
+        }
+        if self.requested() {
+            abort.abort();
+        }
+        *task = Some(abort);
+        Ok(())
+    }
     fn request(&self) -> std::io::Result<()> {
         self.requested
             .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(root) = *self
+        // Attempt both original controls even when signalling one fails. This
+        // path never waits on the graph mutex held by a concurrent join.
+        let task_result = self
+            .task
+            .lock()
+            .map(|task| {
+                if let Some(task) = task.as_ref() {
+                    task.abort();
+                }
+            })
+            .map_err(|_| std::io::Error::other("finite task control unavailable"));
+        let root_result = self
             .root
             .lock()
-            .map_err(|_| std::io::Error::other("finite root control unavailable"))?
-        {
-            root.start_kill()?;
-        }
-        Ok(())
+            .map_err(|_| std::io::Error::other("finite root control unavailable"))
+            .and_then(|root| root.as_ref().map_or(Ok(()), |root| root.start_kill()));
+        task_result.and(root_result)
     }
 }
 
@@ -374,6 +416,22 @@ impl SoftwareVodOwner {
             .start_finite_vod(&self.preparation, 0, deadline)
             .await?;
         Ok(())
+    }
+
+    /// Freeze new producer entry, join the original writer/root and registered
+    /// native jobs, then close observed parent source descriptors. Output assets,
+    /// inherited copies, task results and all charges remain owned in core.
+    /// Drain `take_events()` concurrently during normal production.
+    pub async fn join_producer(&self) -> Result<FiniteProducerCompletion, FiniteVodError> {
+        self.runtime
+            .join_finite_producer(&self.preparation, 0)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn stop_producer(&self) -> Result<FiniteProducerCompletion, FiniteVodError> {
+        self.request_stop()?;
+        self.join_producer().await
     }
 
     pub async fn cancel(&self, deadline: Instant) -> Result<(), FiniteVodError> {

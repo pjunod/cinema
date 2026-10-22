@@ -66,6 +66,20 @@ impl Sync {
         }));
         Ok(enter)
     }
+    /// Await only this cell's original registered worker. Its native object
+    /// and I/O result stay cached for the ordinary Observe path.
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn join_registered(
+        &mut self,
+    ) -> Result<(), OperationError> {
+        if self.failed_join {
+            return Err(OperationError::State);
+        }
+        if self.pending.is_some() {
+            self.join().await?;
+        }
+        Ok(())
+    }
+
     async fn join(&mut self) -> Result<(), OperationError> {
         if self.failed_join {
             return Err(OperationError::State);

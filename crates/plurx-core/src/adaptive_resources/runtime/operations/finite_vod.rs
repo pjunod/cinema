@@ -18,6 +18,7 @@ pub(super) struct FiniteLaunch {
     task: Option<GraphFiniteVodTask>,
     task_observation: Uuid,
     task_observed_committed: bool,
+    retiring: bool,
 }
 
 impl NodeResourceRuntime {
@@ -58,6 +59,7 @@ impl NodeResourceRuntime {
             task: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
+            retiring: false,
         });
         Ok(())
     }
@@ -83,7 +85,7 @@ impl NodeResourceRuntime {
             finite.acquisition_id,
         );
         let source_members = finite.source_members.clone();
-        if role.refunded {
+        if role.refunded || finite.retiring {
             return Err(OperationError::State);
         }
         // Resume the exact retained journal command, never submit replacement
@@ -247,11 +249,12 @@ impl NodeResourceRuntime {
                 generation: graph.identity().generation,
             };
             let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
-            let task = graph
+            let (task, abort) = graph
                 .spawn_durable_finite_vod(root, member, arm, &mut finite.pump)
                 .await?;
             finite.task = Some(task);
             role.invoked.insert(member);
+            finite.control.install_task(abort)?;
         }
         let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
         if finite.task.is_none() {
@@ -312,4 +315,102 @@ pub(super) fn acknowledge_task(
     }
     finite.task_observed_committed = true;
     Ok(())
+}
+
+impl NodeResourceRuntime {
+    /// This is quiescence over original owners, not a physical-close receipt.
+    /// In particular a waited leader does not close inherited source copies or
+    /// establish the fixed graph's descendant conclusion.
+    pub(in crate::adaptive_resources::runtime) async fn join_finite_producer(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<
+        crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion,
+        OperationError,
+    > {
+        self.validate_preparation(owner)?;
+        let (graph, task, root, control) = {
+            let mut bundle = owner.state.lock().await;
+            if !bundle.installed {
+                return Err(OperationError::State);
+            }
+            let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+            if role.refunded || (!finite.control.requested() && !finite.task_entered) {
+                return Err(OperationError::State);
+            }
+            // Seal only graph entry here. The admitted writer still needs its
+            // original runtime entry to finish queued publications and fsyncs.
+            finite.retiring = true;
+            let task = finite.task;
+            let root = role.roots.get(&finite.root_member).copied();
+            let control = Arc::clone(&finite.control);
+            if let Some(graph) = role.graph.take() {
+                role.sealed = Some(graph.seal());
+            }
+            let graph = role
+                .sealed
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .select_same();
+            (graph, task, root, control)
+        };
+        // No bundle lock is held while joining. The SAME task/result remain in
+        // graph custody if this waiter is cancelled before or after the join.
+        let writer = if let Some(task) = task {
+            let joined = graph.join_finite_vod(task, control.requested()).await?;
+            if joined.selection() != task {
+                return Err(OperationError::State);
+            }
+            Some(joined.summary()?)
+        } else {
+            None
+        };
+        let root_status = if let Some(root) = root {
+            Some(graph.wait_root(root).await?)
+        } else {
+            None
+        };
+        let mut bundle = owner.state.lock().await;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        // Once the writer has joined, fence later native entry through the SAME
+        // ledger. Existing native workers are joined without new Arm/Observe.
+        self.close_retained_entry(role.binding)?;
+        let mut first_error = None;
+        for bootstrap in role.bootstrap.values_mut() {
+            if let Err(error) = bootstrap.join_registered_native().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        for source in role.sources.values_mut() {
+            if let Err(error) = source.join_registered().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        // Only positively observed source parents can close here. Partial or
+        // ambiguous acquisition stays held for exact journal reconciliation.
+        for source in role.sources.values_mut() {
+            if let Err(error) = source.close_parent().await {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(
+            crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion {
+                writer,
+                root_status,
+                parent_sources_closed: role
+                    .sources
+                    .values()
+                    .filter(|source| source.parent_closed())
+                    .count(),
+            },
+        )
+    }
 }

@@ -75,6 +75,18 @@ struct SourceResult {
     observed: Option<v2::SourceObserved>,
 }
 impl SourceCell {
+    /// Await only the original source-open worker if it was registered. The
+    /// actual file/observation remain cached; this does not launch or observe it.
+    pub(super) async fn join_registered(&mut self) -> Result<(), OperationError> {
+        if self.failed_join {
+            return Err(OperationError::State);
+        }
+        if self.pending.is_some() {
+            self.join().await?;
+        }
+        Ok(())
+    }
+
     async fn join(&mut self) -> Result<&SourceResult, OperationError> {
         if self.failed_join {
             return Err(OperationError::State);

@@ -21,6 +21,36 @@ pub(super) struct BootstrapMember {
     sync: Option<native::sync::Sync>,
 }
 
+impl BootstrapMember {
+    /// Join already-registered native workers in their original cells. This
+    /// does not launch work or create journal Arm/Observe transitions.
+    pub(super) async fn join_registered_native(&mut self) -> Result<(), OperationError> {
+        #[cfg(unix)]
+        {
+            let mut first_error = None;
+            if let Some(root) = self.native_root.as_mut() {
+                if let Err(error) = root.join_registered().await {
+                    first_error = Some(error);
+                }
+            }
+            if let Some(publication) = self.publication.as_mut() {
+                if let Err(error) = publication.join_registered().await {
+                    first_error.get_or_insert(error);
+                }
+            }
+            if let Some(sync) = self.sync.as_mut() {
+                if let Err(error) = sync.join_registered().await {
+                    first_error.get_or_insert(error);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl NodeResourceRuntime {
     pub(crate) async fn arm_scratch_bootstrap(
         &self,
