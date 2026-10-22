@@ -577,6 +577,7 @@ pub(crate) fn source_mastering_metadata(
         u64::try_from((value + u128::from(denominator / 2)) / u128::from(denominator)).ok()
     }
     let mut result = None;
+    let mut previous_maximum = None;
     for record in records.iter().filter(|record| {
         record
             .get("side_data_type")
@@ -614,10 +615,13 @@ pub(crate) fn source_mastering_metadata(
             primaries_rgbw: xy,
             min_1e4_nits: minimum,
         };
-        if result.is_some_and(|old| old != next) {
+        if result.is_some_and(|old| old != next)
+            || previous_maximum.is_some_and(|old| old != maximum)
+        {
             return Err(invalid());
         }
         result = Some(next);
+        previous_maximum = Some(maximum);
     }
     Ok(result)
 }
@@ -2430,8 +2434,10 @@ mod output_metadata_tests {
                 "invalid {field}"
             );
         }
-        let mut conflicting = record.clone();
-        conflicting["red_x"] = "33000/50000".into();
-        assert!(source_mastering_metadata(&stream(vec![record, conflicting])).is_err());
+        for (field, value) in [("red_x", "33000/50000"), ("max_luminance", "1000/1")] {
+            let mut conflicting = record.clone();
+            conflicting[field] = value.into();
+            assert!(source_mastering_metadata(&stream(vec![record.clone(), conflicting])).is_err());
+        }
     }
 }
