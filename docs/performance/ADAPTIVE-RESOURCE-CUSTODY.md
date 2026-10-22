@@ -6,7 +6,7 @@ PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 
-## What exists through 83ec55303
+## What exists through f2ca25697
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -56,6 +56,17 @@ after their task completes until its result is consumed; audited drain buffers
 use the same charge. Unknown generic writer costs are not finite spare memory.
 This closes a local accounting gap, not process/containment kernel-overhead
 estimation, durable source-file recovery, a physical receipt or production demand.
+
+LIVE Windows process containment now requests termination and queries population
+through each original retained unnamed Job, including after its leader exits.
+Only the suspended-before-assignment launcher establishes descendant coverage;
+ordinary attach-after-execution Jobs cannot certify it. A sealed complete root
+inventory plus actual waits and native active-zero queries supplies private
+graph-bound PROCESS-ONLY evidence. Ambiguous launches, failed/active queries or
+unsupported platforms cannot become zero. No task/source/external settlement,
+whole-graph receipt/refund, same-boot restart or Windows durable admission follows.
+Exact native FFI source cross-compiles; full Windows graph/compiler qualification
+still lacks SDK C headers. New fixtures remain NOT RUN; see the current ledger.
 
 Private cleanup consumes the original nonclone proof, retains it on queue refusal
 or uncertain commit, and refunds only after exact durable settlement. A public

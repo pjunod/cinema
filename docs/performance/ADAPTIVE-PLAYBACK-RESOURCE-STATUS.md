@@ -24,43 +24,43 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`83ec55303` closes a mixed-adapter accounting gap: root pipe slots and source
-handles share one pre-acquisition ceiling; retained source reads and audited
-drain buffers share one memory charge. Cancelled or completed-unconsumed reads
-remain counted. Unknown legacy writer cost is not finite headroom. Checks run
-under the graph lock before native acquisition/task creation, without awaiting
-under the ledger lock. Nine new I/O/task bodies COMPILED NOT RUN; unit-only arm
-fixtures are NOT durable commit/recovery receipts.
+`f2ca25697` implements LIVE original Windows Job termination/population query.
+Suspended-entry provenance stays with the unnamed no-breakaway native object;
+sealed cleanup visits Jobs even after leaders exit. Actual zero after real root
+waits yields private graph-bound PROCESS-ONLY evidence. Failed/active/unsupported
+queries or ambiguous launch inventory cannot become zero. No physical receipt,
+refund, restart proof, Windows durable readiness or finite production switch.
 
-Actual pinned Rust1.97.1 core+daemon all-target Hiqlite-contract check PASS0
-45.319s, source-stable `evidence/compile-run71-194311.json` (nine source hashes).
-Initial test-arm privacy failure is preserved; only failed compilation retried.
-Current core38 library+3 libtest warnings remain; NO strict-Clippy
-or behavioral pass. Prior configuration receipts remain historical/scoped, not
-new unchanged checks. Combined bounds cover these concrete buffers/pipe slots,
-NOT arbitrary futures, process/containment kernel overhead or production demand.
+Pinned Rust1.97.1 core+daemon all-target Hiqlite-contract check PASS0 47.429s,
+`evidence/compile-run72-host-200122.json`, seven source hashes. Current core42
+library+5 libtest warnings remain; NOT strict Clippy. Initial stale fixture-field
+compile failure is retained; actual owner extraction invalidated the earlier host
+pass. Exact production native Job source plus two native tests cross-compiled
+for x86_64 Windows PASS0 .61s, NO stubs. Full Windows check FAILED in ring C
+(`assert.h` absent); native SDK/compiler/qualification remain owed. Four new graph
+bodies host-compiled, two native bodies cross-compiled, two Windows graph fixtures
+AUTHORED but not compiled. ALL behavior remains NOT RUN.
 
-Retained `92dd41a48` arms before concrete pipe-drain creation and retains actual
-JoinHandles through sealed abort+join. Its facts prove ONLY its pipes closed,
-never descendant extinction, physical settlement or refund. `66291c562` owns
-prepare/root/settle-before-refund; `c39c30542` opens the actual-lock-bound runtime
-before scratch/probes. Full recovered costs/epochs/edges/trials/paths remain
-cleanup-only UnknownHeld; interim startup refuses pending/unreadable authority
-before legacy competition. Selective recovery/unaffected serving is NOT done.
+Retained `83ec55303` shares root/source handle and read/drain memory bounds;
+cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
+audited task creation; actual abort+join proves ONLY those pipes. `66291c562`
+owns prepare/root/settle-before-refund; `c39c30542` opens the lock-bound runtime
+before scratch/probes. Full recovered costs/edges/epochs/trials/paths remain
+cleanup-only UnknownHeld. Pending startup refusal is safe interim behavior,
+NOT selective recovery or unaffected serving. These bounds do not estimate
+process/containment kernel overhead or production demand.
 
-Released M4 `6169e9b18` remains author-preserving integrated through `5d7eba0f1`:
-SQLite/Hiqlite installers, Source guards, claim/Prepared/winner/adoption/fence
-authority and29 compiled backend contracts. No worker RPC/advertisement or normal
-Closed writer. Prior38 new/integrated leaves remain NOT RUN; preserve all anchors
-and the child strict-default Clippy failure. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
+Released M4 `6169e9b18` remains integrated through `5d7eba0f1`: Store installers,
+Source guards and claim/Prepared/winner/adoption/fence authority, not worker RPC,
+advertisement or a normal Closed writer. Preserve ALL earlier anchors/receipts
+and the strict-default child failure. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
 
-R2/R3 do not prove host continuity, old-owner fencing or extinction. Positive
-containment/restart/typed closure, production/supervisor/shared transfer,
-learning/pacing/M4 runtime/M5 and remaining M0–M7 stay open. Ordinary production
-remains legacy; no unsupported trial/finite admission. Fresh unsupported Windows
-has NO ledger; platform/compiler acceptance is not waived. Draft PR1248 still
-requires full implementation, actual independent Fable review/fixes, once-only
-affected qualification/fast lane/authorized merge. No extra handoff/deployment.
+Whole-graph/positive restart/old-owner fencing/typed closure, production/supervisor/
+shared transfer, learning/pacing/M4 runtime/M5 and remaining M0–M7 stay open.
+Ordinary production remains legacy; no unsupported trial/finite admission.
+Draft PR1248 needs complete implementation, actual independent Fable review/fixes,
+once-only affected qualification/fast lane/authorized merge; no extra handoff or
+deployment. Fresh unsupported Windows has NO ledger, not zero measured usage.
 
 Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
 document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
