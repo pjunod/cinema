@@ -153,6 +153,7 @@ impl DvEffectiveProcessingReport {
 #[serde(rename_all = "snake_case")]
 pub enum DvDestination {
     Hdr10,
+    Sdr,
     Profile81,
 }
 
@@ -513,6 +514,7 @@ pub enum DvOperation {
     CreativeTrimApplication,
     MetadataAdaptation,
     Bt2020NclConversion,
+    Bt709Gamma24Conversion,
     Main10Encoding,
     P81ContainerSignaling,
 }
@@ -526,6 +528,7 @@ pub enum DvIntermediateDomain {
     ReconstructedBt2020PqRgb,
     TargetMappedBt2020PqRgb,
     LimitedBt2020NclYuv420P10,
+    LimitedBt709Gamma24Yuv420P10,
     EncodedMain10,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -957,7 +960,7 @@ pub fn dv_validate_encoded_window(
             "encoded DV window: output does not begin with an init segment",
         ));
     };
-    let facts = fmp4::hevc_hdr10_sample_entry_facts(&init)
+    let facts = fmp4::hevc_processed_sample_entry_facts(&init, destination == DvDestination::Sdr)
         .map_err(|_| invalid("encoded DV window: sample entry is not HEVC HDR10"))?;
     if (u32::from(facts.width), u32::from(facts.height)) != raster {
         return Err(invalid(
@@ -967,7 +970,7 @@ pub fn dv_validate_encoded_window(
     let config = fmp4::dolby_vision_record(&init)
         .map_err(|_| invalid("encoded DV window: unreadable Dolby Vision record"))?;
     match destination {
-        DvDestination::Hdr10 if config.is_some() => {
+        DvDestination::Hdr10 | DvDestination::Sdr if config.is_some() => {
             return Err(invalid(
                 "encoded DV window: HDR10 output carries a Dolby Vision record",
             ))
@@ -1086,7 +1089,7 @@ pub fn dv_validate_encoded_window(
                     ));
                 }
                 match destination {
-                    DvDestination::Hdr10 if rpu.is_some() => {
+                    DvDestination::Hdr10 | DvDestination::Sdr if rpu.is_some() => {
                         return Err(invalid("encoded DV window: HDR10 output carries an RPU"))
                     }
                     DvDestination::Profile81 => {
@@ -1419,12 +1422,13 @@ pub fn dv_plan_completed_window(
         ));
     }
     let full_fel = input.mode == DvProcessingMode::Fel;
-    if input.export_policy.display_target().is_some() && input.destination != DvDestination::Hdr10 {
+    if input.export_policy.display_target().is_some_and(|target| target.is_sdr() != (input.destination == DvDestination::Sdr))
+        || input.destination == DvDestination::Profile81 && input.export_policy.display_target().is_some() {
         return Err(invalid(
             "display targeting cannot change native/P8.1 delivery",
         ));
     }
-    if !full_fel && input.destination != DvDestination::Hdr10 {
+    if !full_fel && input.destination == DvDestination::Profile81 {
         return Err(invalid(
             "completed DV window: base-RPU mode has no Profile 8.1 destination",
         ));
@@ -1444,7 +1448,7 @@ pub fn dv_plan_completed_window(
     }
     if input.destination == DvDestination::Profile81 && !preferences.conversion_permitted
         || !(match input.destination {
-            DvDestination::Hdr10 => preferences.hdr_processing,
+            DvDestination::Hdr10 | DvDestination::Sdr => preferences.hdr_processing,
             DvDestination::Profile81 => preferences.fel_reencode,
         })
         || full_fel && input.source.catalog.profile != Some(7)
@@ -1546,8 +1550,8 @@ pub fn dv_plan_completed_window(
         input.destination,
     )?;
     let strategy = match input.destination {
-        DvDestination::Hdr10 if !full_fel => DvStrategy::BaseRpuToHdr10,
-        DvDestination::Hdr10 => DvStrategy::FelRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr if !full_fel => DvStrategy::BaseRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr => DvStrategy::FelRpuToHdr10,
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
     };
     let mut pixels = DvGraph::expected(strategy);
@@ -1611,6 +1615,16 @@ pub fn dv_plan_completed_window(
     } else {
         DvTargetPolicy::new(1, 10_000_000, 5, input.export_policy.target_parameters())?
     };
+    if input.destination == DvDestination::Sdr {
+        if !input.export_policy.display_target().is_some_and(DvDisplayTarget::is_sdr) {
+            return Err(invalid("SDR output requires an explicit title-qualified SDR export"));
+        }
+        for edge in &mut pixels {
+            if edge.operation == DvOperation::Bt2020NclConversion { edge.operation = DvOperation::Bt709Gamma24Conversion; }
+            if edge.input == DvIntermediateDomain::LimitedBt2020NclYuv420P10 { edge.input = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10; }
+            if edge.output == DvIntermediateDomain::LimitedBt2020NclYuv420P10 { edge.output = DvIntermediateDomain::LimitedBt709Gamma24Yuv420P10; }
+        }
+    }
     let graph = DvGraph {
         strategy,
         pixels,
@@ -1670,7 +1684,7 @@ pub fn dv_processing_preflight(
         return Ok(Some(R::ExistingDeliveryConstraint));
     }
     match destination {
-        DvDestination::Hdr10 if !prefs.hdr_processing => {
+        DvDestination::Hdr10 | DvDestination::Sdr if !prefs.hdr_processing => {
             return Ok(Some(R::PreferenceDisabled));
         }
         DvDestination::Profile81 if !prefs.conversion_permitted => {
@@ -1683,8 +1697,8 @@ pub fn dv_processing_preflight(
     }
     let supported = matches!(
         (destination, catalog.profile, catalog.bl_compat_id),
-        (DvDestination::Hdr10, Some(5), Some(0))
-            | (DvDestination::Hdr10, Some(8), Some(1))
+        (DvDestination::Hdr10 | DvDestination::Sdr, Some(5), Some(0))
+            | (DvDestination::Hdr10 | DvDestination::Sdr, Some(8), Some(1))
             | (_, Some(7), Some(1 | 6))
     );
     if !supported
@@ -1772,8 +1786,8 @@ fn resolve_inner(
             return unchanged(R::UnknownElKind)
         }
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
-        DvDestination::Hdr10 if source.el_kind == DvElKind::Fel => DvStrategy::FelRpuToHdr10,
-        DvDestination::Hdr10 => DvStrategy::BaseRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr if source.el_kind == DvElKind::Fel => DvStrategy::FelRpuToHdr10,
+        DvDestination::Hdr10 | DvDestination::Sdr => DvStrategy::BaseRpuToHdr10,
     };
     let graph = DvGraph::new(
         strategy,

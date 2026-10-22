@@ -2604,6 +2604,12 @@ pub struct HevcHdr10SampleEntryFacts {
 }
 
 pub fn hevc_hdr10_sample_entry_facts(init: &Init) -> Result<HevcHdr10SampleEntryFacts, Fmp4Error> {
+    hevc_processed_sample_entry_facts(init, false)
+}
+
+/// Processed SDR uses BT.709 signalling (1/1/1); the pixel EOTF is gamma 2.4.
+/// There is no distinct H.273 gamma-2.4 transfer code.
+pub fn hevc_processed_sample_entry_facts(init: &Init, sdr: bool) -> Result<HevcHdr10SampleEntryFacts, Fmp4Error> {
     validate_hevc_decoder_configuration(init)?;
     let video = init
         .video()
@@ -2657,11 +2663,12 @@ pub fn hevc_hdr10_sample_entry_facts(init: &Init) -> Result<HevcHdr10SampleEntry
     }
     let (at, color) = &colors[0];
     let color = &init.bytes[at.start + color.header_len..at.start + color.size];
+    let expected = if sdr { [1, 1, 1] } else { [9, 16, 9] };
     if color.len() != 11
         || color[..4] != *b"nclx"
-        || u16::from_be_bytes([color[4], color[5]]) != 9
-        || u16::from_be_bytes([color[6], color[7]]) != 16
-        || u16::from_be_bytes([color[8], color[9]]) != 9
+        || u16::from_be_bytes([color[4], color[5]]) != expected[0]
+        || u16::from_be_bytes([color[6], color[7]]) != expected[1]
+        || u16::from_be_bytes([color[8], color[9]]) != expected[2]
         || color[10] != 0
     {
         return Err(Fmp4Error::Unsupported(

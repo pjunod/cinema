@@ -12,6 +12,7 @@ pub const DISPLAY_TARGET_BUCKETS: [u32; 6] = [400, 600, 1000, 1600, 2000, 4000];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct DvDisplayTarget {
     nits: u32,
+    sdr: bool,
     mastering: MasteringLuminance,
     max_l1_pq: u16,
     mastering_luminance: TitleConstant<MasteringLuminance>,
@@ -53,7 +54,15 @@ impl DvDisplayTarget {
         nits: u32,
         stats: Option<DvTitleStats>,
     ) -> Result<DvDisplayTargetChoice, DvContractError> {
-        if !DISPLAY_TARGET_BUCKETS.contains(&nits) {
+        Self::choose(nits, false, stats)
+    }
+    /// SDR conversion is required even when the source peak fits 100 nits:
+    /// returning the HDR master would preserve the wrong transfer and gamut.
+    pub fn for_sdr_title(stats: Option<DvTitleStats>) -> Result<DvDisplayTargetChoice, DvContractError> {
+        Self::choose(100, true, stats)
+    }
+    fn choose(nits: u32, sdr: bool, stats: Option<DvTitleStats>) -> Result<DvDisplayTargetChoice, DvContractError> {
+        if !(sdr && nits == 100 || !sdr && DISPLAY_TARGET_BUCKETS.contains(&nits)) {
             return Err(DvContractError::Invalid("display target bucket"));
         }
         let Some(stats) = stats else {
@@ -68,13 +77,14 @@ impl DvDisplayTarget {
             });
         }
         let title_nits = pq_nits(stats.max_l1_pq.expect("eligible title has a maximum"));
-        if title_nits <= f64::from(nits) {
+        if !sdr && title_nits <= f64::from(nits) {
             return Ok(DvDisplayTargetChoice::Master {
                 reason: DvDisplayTargetDecline::TitleFits { nits },
             });
         }
         Ok(DvDisplayTargetChoice::Target(Self {
             nits,
+            sdr,
             mastering: stats.mastering_or_default(),
             max_l1_pq: stats.max_l1_pq.expect("eligible title maximum"),
             mastering_luminance: stats.mastering_luminance,
@@ -88,6 +98,7 @@ impl DvDisplayTarget {
     pub fn nits(self) -> u32 {
         self.nits
     }
+    pub fn is_sdr(self) -> bool { self.sdr }
     pub fn validate_rpu(self, raw: &[u8]) -> Result<(u16, u16), DvContractError> {
         use dolby_vision::rpu::{dovi_rpu::DoviRpu, extension_metadata::blocks::ExtMetadataBlock};
         let invalid = || {
@@ -109,8 +120,8 @@ impl DvDisplayTarget {
         self.mastering
     }
     pub fn needs_source_mastering(self) -> bool {
-        matches!(self.mastering_primaries, TitleConstant::Unknown)
-            || matches!(self.mastering_luminance, TitleConstant::Unknown)
+        !self.sdr && (matches!(self.mastering_primaries, TitleConstant::Unknown)
+            || matches!(self.mastering_luminance, TitleConstant::Unknown))
     }
 
     /// Source fallback must come from the same held, attested video stream.
@@ -119,6 +130,7 @@ impl DvDisplayTarget {
         self,
         source: Option<DvSourceMastering>,
     ) -> Result<crate::fmp4::Hdr10OutputMetadata, DvContractError> {
+        if self.sdr { return Err(DvContractError::Invalid("SDR export cannot carry HDR10 mastering metadata")); }
         let primaries =
             match self.mastering_primaries {
                 TitleConstant::Consistent(value) => l9_primaries(value)?,
@@ -155,7 +167,7 @@ impl DvDisplayTarget {
             .map_err(|_| DvContractError::Invalid("targeted HDR10 metadata cannot be represented"))
     }
     pub fn output_policy(self) -> String {
-        format!("bt2020-pq-target-{}", self.nits)
+        if self.sdr { "bt709-gamma24-target-100".into() } else { format!("bt2020-pq-target-{}", self.nits) }
     }
     pub fn endpoint_args(self) -> [String; 2] {
         [
