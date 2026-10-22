@@ -1,6 +1,6 @@
 # Full suite on every PR — audit, execution contract, and implementation plan
 
-**Status:** open — M0 measured; M1 Rust repairs qualified and merged; M2 focused improvements measured, full qualification pending ·
+**Status:** open — M0 measured; M1 Rust repairs qualified and merged; M2 qualified and merged; M3 parallel execution in progress ·
 **Requested:** 2026-10-20 · **Audit source:** `c1c344132` ·
 **Evidence captured:** 2026-10-20 14:21:12 UTC
 
@@ -32,9 +32,14 @@ also passed with complete accounting and qualified cleanup. Older run 5713
 qualifies its own source only. M2 is tracked in
 [the setup performance ledger](FULL-SUITE-SETUP-PERFORMANCE-2026-10-21.md):
 its implemented changes pass focused controls and two alternating local
-measurement pairs, preserving the recorded work and assertions. Fresh
-complete M2 native/doctest qualification remains pending. Other lanes and
-the automatic every-PR policy cutover remain unqualified.
+measurement pairs, preserving the recorded work and assertions. M2 full run 5765 passed on source `61801d85a`: 6,971 native passes, zero
+failures, 50 preserved ignores, one doctest and complete control/cleanup
+accounting. PR #1258 landed as `9b427b07d` with the qualified tree and all
+21 regression fields. The ordinary command took 36m23.741s versus M1
+44m47.031s; whole diagnostic time was 86m46s versus 87m30s. These single-run
+observations do not establish repeatability. The user authorized M3 in
+[the parallel execution ledger](FULL-SUITE-PARALLEL-EXECUTION-2026-10-22.md).
+Other lanes and the automatic every-PR policy cutover remain unqualified.
 
 ## 1. Outcome — every landing has complete, fresh test evidence
 

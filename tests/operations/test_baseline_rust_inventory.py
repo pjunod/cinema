@@ -1,7 +1,13 @@
 """No real Rust compilation/test execution: exercise artifact and listing boundaries."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
+import os
+import subprocess
+import threading
+import time
 import sys
 import shutil
 from pathlib import Path
@@ -183,6 +189,82 @@ class BaselineRustInventoryCase(unittest.TestCase):
             self.assertEqual(len(result["binaries"]), 2)
             self.assertIn("blocked", result["binaries"][1]["error"])
             self.assertTrue((root / "result/inventory.json").is_file())
+
+    def lease_fixture(self, root, descriptor, cancel_phase=None):
+        binary = root / "fixture-binary"
+        cargo = root / "cargo"
+        trace = root / "trace"
+        inode = os.fstat(descriptor).st_ino
+        prelude = (f"#!{sys.executable}\nimport fcntl,json,os,pathlib,sys,time\n"
+                   f"assert os.fstat({descriptor}).st_ino == {inode}\n"
+                   f"fcntl.flock({descriptor}, fcntl.LOCK_EX | fcntl.LOCK_NB)\n")
+        marker = (f"\nwith open({str(trace)!r},'a') as trace: trace.write(phase+'\\n')\n"
+                  f"if phase == {cancel_phase!r}:\n"
+                  f" pathlib.Path({str(root / 'cancel-ready')!r}).touch()\n time.sleep(60)\n")
+        binary.write_text(prelude + "assert '--list' in sys.argv\n"
+                          "phase = 'ignored' if '--ignored' in sys.argv else 'all'\n" + marker +
+                          "print('ignored_case: test' if phase == 'ignored' else 'ordinary: test\\nignored_case: test')\n")
+        binary.chmod(0o755)
+        artifact = dict(reason="compiler-artifact", package_id="fixture 0.1.0", executable=str(binary),
+                        target=dict(name="fixture", kind=["lib"], doctest=True),
+                        features=["hiqlite-store"], profile=dict(test=True, opt_level="0"))
+        cargo.write_text(prelude + "assert '--no-run' in sys.argv and '--message-format=json' in sys.argv\n"
+                         + "phase = 'compile'\n" + f"print({json.dumps(artifact)!r}, flush=True)\n" + marker)
+        cargo.chmod(0o755)
+        return cargo, trace
+
+    def lease_discover(self, root, cargo, descriptor, canceled):
+        with mock.patch.object(inventory, "git_identity", return_value=dict(commit="a" * 40, tree="b" * 40, tracked_clean=True)), \
+             mock.patch.object(inventory.subprocess, "check_output", return_value="rustc 1.97.1\nhost: x86_64-unknown-linux-gnu\n"):
+            return inventory.discover(root / 'result', [str(cargo), 'test', '--workspace'],
+                                      compile_timeout=8, list_timeout=8,
+                                      pass_fds=(descriptor,), cancel_event=canceled)
+
+    def test_compile_and_both_native_listings_inherit_the_actual_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor = os.open(root / 'lease', os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                cargo, trace = self.lease_fixture(root, descriptor)
+                result = self.lease_discover(root, cargo, descriptor, threading.Event())
+                self.assertTrue(result['discovery_complete'], result['errors'])
+                self.assertEqual(result['expected_cases'], 2)
+                self.assertEqual(result['ignored_cases'], 1)
+                self.assertEqual(trace.read_text().splitlines(), ['compile', 'all', 'ignored'])
+                self.assertTrue(result['compile']['cleanup_complete'])
+                self.assertTrue(all(row['cleanup_complete'] for row in result['binaries'][0]['listing'].values()))
+            finally:
+                os.close(descriptor)
+
+    def test_cancel_during_compile_or_listing_is_incomplete_and_stops_native_launches(self):
+        for phase in ('compile', 'all'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = os.open(root / 'lease', os.O_CREAT | os.O_RDWR, 0o600)
+                canceled = threading.Event()
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    cargo, trace = self.lease_fixture(root, descriptor, phase)
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(self.lease_discover, root, cargo, descriptor, canceled)
+                        try:
+                            deadline = time.monotonic() + 3
+                            while not (root / 'cancel-ready').exists() and time.monotonic() < deadline:
+                                time.sleep(0.01)
+                            self.assertTrue((root / 'cancel-ready').exists(), 'native phase did not acquire inherited lease')
+                        finally:
+                            canceled.set()
+                        result = future.result(timeout=5)
+                    self.assertFalse(result['discovery_complete'])
+                    self.assertTrue(result['errors'])
+                    observed = result['compile'] if phase == 'compile' else result['binaries'][0]['listing']['all']
+                    self.assertTrue(observed['canceled'])
+                    self.assertTrue(observed['cleanup_complete'])
+                    self.assertTrue(observed['leader_reaped_after_cleanup'])
+                    self.assertEqual(trace.read_text().splitlines(), ['compile'] if phase == 'compile' else ['compile', 'all'])
+                finally:
+                    os.close(descriptor)
 
     def test_nonfinite_timeouts_are_rejected_before_launch(self):
         for timeout in (0, -1, float("inf"), float("nan"), True):

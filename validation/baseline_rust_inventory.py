@@ -64,11 +64,11 @@ def artifact_inventory(path):
     return list(artifacts.values()), [dict(package_id=p, target=t) for p, t in sorted(doctest_targets)]
 
 
-def run_capture(command, stdout, stderr, timeout):
+def run_capture(command, stdout, stderr, timeout, *, pass_fds=(), cancel_event=None):
     # The JSON compiler stream must remain separate from diagnostics. Both
     # streams share the same bounded owned-process protocol as runtime cells.
     with Path(stdout).open("wb") as output, Path(stderr).open("wb") as errors:
-        result = run_process(command, output, errors, timeout)
+        result = run_process(command, output, errors, timeout, pass_fds=pass_fds, cancel_event=cancel_event)
     return dict(result, exit_code=result["returncode"])
 
 
@@ -82,7 +82,8 @@ def git_identity():
     return identity
 
 
-def discover(output, command, artifacts=None, compiler_exit_code=None, compile_timeout=7200, list_timeout=90):
+def discover(output, command, artifacts=None, compiler_exit_code=None, compile_timeout=7200, list_timeout=90,
+             *, pass_fds=(), cancel_event=None):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     report = dict(schema=1, cell="ordinary-rust-sqlite", discovery_complete=False,
@@ -90,6 +91,11 @@ def discover(output, command, artifacts=None, compiler_exit_code=None, compile_t
                   doctests=dict(status="not_discovered_or_executed", targets=[],
                                 reason="cargo test --no-run omits doctests; runtime doctest evidence remains separately required"))
     started = time.monotonic()
+    execution_options = {}
+    if pass_fds:
+        execution_options["pass_fds"] = pass_fds
+    if cancel_event is not None:
+        execution_options["cancel_event"] = cancel_event
 
     def persist():
         report["seconds"] = round(time.monotonic() - started, 3)
@@ -131,7 +137,7 @@ def discover(output, command, artifacts=None, compiler_exit_code=None, compile_t
         if artifacts is None:
             report["stage"] = "compiling"
             persist()
-            report["compile"] = run_capture(built_command, artifact_path, output / "compiler-stderr.log", compile_timeout)
+            report["compile"] = run_capture(built_command, artifact_path, output / "compiler-stderr.log", compile_timeout, **execution_options)
         else:
             if compiler_exit_code is None:
                 raise ValueError("ingested artifacts require --compiler-exit-code")
@@ -171,7 +177,7 @@ def discover(output, command, artifacts=None, compiler_exit_code=None, compile_t
                     stderr = output / f"binary-{index}-{selection}.stderr"
                     report["stage"] = f"listing:{artifact['target']['name']}:{selection}"
                     persist()
-                    result = run_capture([str(executable), "--list", "--format=terse", *flags], stdout, stderr, list_timeout)
+                    result = run_capture([str(executable), "--list", "--format=terse", *flags], stdout, stderr, list_timeout, **execution_options)
                     listings[selection] = result
                     binary["listing"] = listings
                     persist()

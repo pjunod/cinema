@@ -1,7 +1,7 @@
 # Full-suite setup performance — measure fixture cost before optimizing it
 
-**Status:** open — integrated candidate compiled; focused controls and matched
-local measurements passed; full M2 qualification pending ·
+**Status:** done — focused controls, paired measurements and complete exact-source
+Rust qualification passed; PR #1258 merged into the effort ·
 **Written:** 2026-10-21 · **Owner:** Codex · **Branch:** `codex/full-pr-suite-m2`
 
 Companion to the [canonical every-PR plan](FULL-SUITE-EVERY-PR-PLAN.md)
@@ -31,6 +31,22 @@ other platform lanes or automatic every-PR execution. M2 retains the older
 `3ce97c94e` measurements as bottleneck reconnaissance; only the new
 current-base pair is used to attribute the measured improvements. No history
 guard is weakened.
+
+M2 complete qualification subsequently passed in run 5765 on source
+`61801d85ae24bd79c336cbab0fc58e69590d88a5`, tree
+`cc4381fabf33d6316755d1a77661846d351d236f`. Development gate 5762 also passed.
+PR #1258 merged as `9b427b07d79b438f4f9e9d4863d44b064f404142`, preserving
+that tree and all 21 regression references. The ordinary command took
+36m23.741s: 6,971 native passes, zero failures and 50 preserved ignores,
+plus one actual doctest. All 36 binaries, 400 cohort bodies, 20 writer
+bodies and both serial cases qualified with no missing identities or unsafe
+cleanup. Exactly ten active controls were added; no cases were removed.
+The complete diagnostic job took 86m46s versus M1's 87m30s: slower
+compile/static phases offset most of the 18.7% ordinary-command improvement.
+These are single full-run observations, not a repeatability guarantee.
+Statements below that qualification was pending describe the frozen
+implementation/measurement stage; the completed run supersedes that status.
+[M3](FULL-SUITE-PARALLEL-EXECUTION-2026-10-22.md) owns further parallelization.
 
 ## 1. The merged M1 run supplies whole-suite context
 

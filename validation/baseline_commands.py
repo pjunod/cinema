@@ -158,7 +158,7 @@ def observe_group(pgid, proc_root=Path("/proc")):
     return result
 
 
-def wait_owned_leader(process, timeout, use_waitid=True):
+def wait_owned_leader(process, timeout, use_waitid=True, *, cancel_event=None):
     """Observe completion without reaping the child that anchors its process group.
 
     This executor is the sole waiter for its Popen child. WNOWAIT leaves the
@@ -166,12 +166,15 @@ def wait_owned_leader(process, timeout, use_waitid=True):
     """
     anchored = use_waitid and all(hasattr(os, name) for name in ("waitid", "P_PID", "WEXITED", "WNOWAIT", "WNOHANG"))
     deadline = time.monotonic() + timeout
+    canceled = lambda: cancel_event is not None and cancel_event.is_set()
     if anchored:
         while True:
             try:
                 observed = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG)
             except OSError as error:
                 if error.errno == errno.EINTR:
+                    if canceled():
+                        return dict(held=True, mechanism="waitid-WNOWAIT", timed_out=False, canceled=True, returncode=None)
                     if time.monotonic() >= deadline:
                         return dict(held=True, mechanism="waitid-WNOWAIT", timed_out=True, returncode=None)
                     continue
@@ -181,17 +184,24 @@ def wait_owned_leader(process, timeout, use_waitid=True):
                             error="owned leader wait observation failed", error_errno=error.errno)
             if observed is not None and observed.si_pid == process.pid:
                 code = observed.si_status if observed.si_code == os.CLD_EXITED else -observed.si_status
-                return dict(held=True, mechanism="waitid-WNOWAIT", timed_out=False, returncode=code)
+                return dict(held=True, mechanism="waitid-WNOWAIT", timed_out=False, canceled=canceled(), returncode=code)
+            if canceled():
+                return dict(held=True, mechanism="waitid-WNOWAIT", timed_out=False, canceled=True, returncode=None)
             if time.monotonic() >= deadline:
                 return dict(held=True, mechanism="waitid-WNOWAIT", timed_out=True, returncode=None)
             time.sleep(min(0.02, max(0, deadline - time.monotonic())))
-    try:
-        code = process.wait(timeout=max(0, deadline - time.monotonic()))
-        return dict(held=False, mechanism="reaped-fallback", timed_out=False, returncode=code)
-    except subprocess.TimeoutExpired:
-        # wait(timeout) did not reap the leader. No poll/wait occurs again until
-        # cleanup ends, so this owned running/exited child still anchors PGID.
-        return dict(held=True, mechanism="unreaped-timeout-fallback", timed_out=True, returncode=None)
+    while True:
+        try:
+            remaining = max(0, deadline - time.monotonic())
+            code = process.wait(timeout=remaining if cancel_event is None else min(0.02, remaining))
+            return dict(held=False, mechanism="reaped-fallback", timed_out=False, canceled=canceled(), returncode=code)
+        except subprocess.TimeoutExpired:
+            # wait(timeout) did not reap the leader. No further wait occurs
+            # after cancellation/timeout until anchored cleanup has finished.
+            if canceled():
+                return dict(held=True, mechanism="unreaped-cancel-fallback", timed_out=False, canceled=True, returncode=None)
+            if cancel_event is None or time.monotonic() >= deadline:
+                return dict(held=True, mechanism="unreaped-timeout-fallback", timed_out=True, returncode=None)
 
 
 def anchor_still_owned(process, anchor):
@@ -263,17 +273,22 @@ def record_cleanup(result, cleanup):
         result["cleanup_error_errno"] = cleanup.get("error_errno")
 
 
-def run_process(argv, stdout, stderr, timeout, *, cwd=None, grace=5.0):
+def run_process(argv, stdout, stderr, timeout, *, cwd=None, grace=5.0, pass_fds=(), cancel_event=None):
     """Run with bounded, anchored ownership while preserving separate streams."""
-    result = dict(started_utc=utc(), timed_out=False, returncode=None, success=False,
+    result = dict(started_utc=utc(), timed_out=False, canceled=False, returncode=None, success=False,
                   leaked_process_group=False, group_observations=[], cleanup_complete=False)
     started = time.monotonic()
     process = None
     anchor = None
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            result.update(canceled=True, cleanup_complete=True)
+            return result
         process = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=stderr,
-                                   start_new_session=True)
-        anchor = wait_owned_leader(process, timeout)
+                                   start_new_session=True, pass_fds=pass_fds)
+        anchor = (wait_owned_leader(process, timeout) if cancel_event is None else
+                  wait_owned_leader(process, timeout, cancel_event=cancel_event))
+        result["canceled"] = anchor.get("canceled", False) or (cancel_event is not None and cancel_event.is_set())
         result["leader_anchor"] = dict(pid=process.pid, **anchor)
         result["timed_out"] = anchor["timed_out"]
         result["returncode"] = anchor["returncode"]
@@ -284,14 +299,14 @@ def run_process(argv, stdout, stderr, timeout, *, cwd=None, grace=5.0):
         result["leaked_process_group"] = not result["timed_out"] and anchor["held"] and current["status"] == "live"
         result["cleanup_observation_unknown"] = (current["status"] == "unknown"
                                                  or (current["status"] == "live" and not anchor["held"]))
-        if result["timed_out"] or current["status"] in ("live", "unknown"):
+        if result["timed_out"] or result["canceled"] or current["status"] in ("live", "unknown"):
             record_cleanup(result, terminate_group(process, grace, anchor))
         else:
             result["cleanup_complete"] = True
         # The anchor is released only after the final group observation and
         # every signal. No further numeric process-group signal is issued.
         reap_owned_leader(process, result)
-        result["success"] = (result["returncode"] == 0 and not result["timed_out"]
+        result["success"] = (result["returncode"] == 0 and not result["timed_out"] and not result["canceled"]
                              and not result["leaked_process_group"] and not result.get("leader_wait_error")
                              and not result["cleanup_observation_unknown"] and result["cleanup_complete"])
     except (OSError, subprocess.SubprocessError) as error:
@@ -300,6 +315,8 @@ def run_process(argv, stdout, stderr, timeout, *, cwd=None, grace=5.0):
             record_cleanup(result, terminate_group(process, grace, anchor))
             reap_owned_leader(process, result)
     finally:
+        if cancel_event is not None and cancel_event.is_set():
+            result.update(canceled=True, success=False)
         result["finished_utc"] = utc()
         result["seconds"] = round(time.monotonic() - started, 3)
     return result

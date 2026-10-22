@@ -1,0 +1,34 @@
+# Advisory comparison only. Process-per-test execution cannot use the Source
+# fixture semaphore/port registry across cases. Serialize each heavy binary
+# until finer groups have actual isolation and capacity evidence.
+[profile.m3]
+retries = 0
+fail-fast = false
+test-threads = 4
+leak-timeout = { period = "500ms", result = "fail" }
+
+[profile.m3.junit]
+path = "m3-junit.xml"
+store-success-output = true
+store-failure-output = true
+
+[test-groups.m3-daemon]
+max-threads = 1
+
+[test-groups.m3-core]
+max-threads = 1
+
+[test-groups.m3-store]
+max-threads = 1
+
+[[profile.m3.overrides]]
+filter = 'binary(plurxd)'
+test-group = 'm3-daemon'
+
+[[profile.m3.overrides]]
+filter = 'binary(plurx_core)'
+test-group = 'm3-core'
+
+[[profile.m3.overrides]]
+filter = 'binary(store_contract)'
+test-group = 'm3-store'

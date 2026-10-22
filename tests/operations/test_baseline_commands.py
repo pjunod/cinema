@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 
 import json
 import errno
@@ -11,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -67,6 +70,132 @@ class BaselineCommandsCase(unittest.TestCase):
             self.assertEqual(result["source"], self.identity)
             self.assertTrue(result["manifest_sha256"])
             self.assertEqual((root / "manifest.json").read_bytes(), (root / "results/input-manifest.json").read_bytes())
+
+    def test_native_leader_inherits_lease_until_success_or_original_failure(self):
+        for returncode in (0, 7):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                lock = root / "admission.lock"
+                descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                contender = os.open(lock, os.O_RDWR)
+                expected_inode = os.fstat(descriptor).st_ino
+                child = ("import os,pathlib,sys,time;"
+                         f"assert os.fstat({descriptor}).st_ino == {expected_inode};"
+                         "pathlib.Path('ready').touch();deadline=time.monotonic()+5;"
+                         "\nwhile not pathlib.Path('release').exists() and time.monotonic()<deadline: time.sleep(0.01)"
+                         "\nassert pathlib.Path('release').exists(), 'controller did not release native leader'"
+                         f"\nraise SystemExit({returncode})")
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(commands.run_process, [sys.executable, "-c", child],
+                                             subprocess.DEVNULL, subprocess.DEVNULL, 8,
+                                             cwd=root, grace=0.2, pass_fds=(descriptor,))
+                        try:
+                            deadline = time.monotonic() + 3
+                            while not (root / "ready").exists() and time.monotonic() < deadline:
+                                time.sleep(0.01)
+                            self.assertTrue((root / "ready").exists(), "native child did not inherit the lease")
+                            os.close(descriptor)
+                            descriptor = None
+                            # Only the running native leader now retains the
+                            # open-file-description lock; controller close is safe.
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        finally:
+                            (root / "release").touch()
+                        result = future.result(timeout=5)
+                    self.assertEqual(result["returncode"], returncode)
+                    self.assertEqual(result["success"], returncode == 0)
+                    self.assertTrue(result["cleanup_complete"], result)
+                    self.assertFalse(result["timed_out"])
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    os.close(contender)
+
+    def test_cancel_terminates_owned_descendant_reaps_leader_and_retains_child_lease(self):
+        original_wait = commands.wait_owned_leader
+        for use_waitid in (True, False):
+            with self.subTest(use_waitid=use_waitid), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = os.open(root / "admission.lock", os.O_CREAT | os.O_RDWR, 0o600)
+                contender = os.open(root / "admission.lock", os.O_RDWR)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                canceled = threading.Event()
+                descendant = ("import pathlib,signal,time;"
+                              "signal.signal(signal.SIGTERM,lambda *_: pathlib.Path('term-seen').touch());"
+                              "pathlib.Path('descendant-ready').touch();time.sleep(30)")
+                leader = ("import pathlib,subprocess,sys,time;"
+                          f"subprocess.Popen([sys.executable,'-c',{descendant!r}],pass_fds=({descriptor},));"
+                          "deadline=time.monotonic()+5;"
+                          "\nwhile not pathlib.Path('descendant-ready').exists() and time.monotonic()<deadline: time.sleep(0.01)"
+                          "\nassert pathlib.Path('descendant-ready').exists()"
+                          "\npathlib.Path('ready').touch();time.sleep(30)")
+                def wait(process, timeout, **kwargs):
+                    return original_wait(process, timeout, use_waitid=use_waitid, **kwargs)
+                try:
+                    with mock.patch.object(commands, 'wait_owned_leader', side_effect=wait), ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(commands.run_process, [sys.executable, '-c', leader],
+                                             subprocess.DEVNULL, subprocess.DEVNULL, 8, cwd=root,
+                                             grace=1, pass_fds=(descriptor,), cancel_event=canceled)
+                        try:
+                            deadline = time.monotonic() + 3
+                            while not (root / 'ready').exists() and time.monotonic() < deadline:
+                                time.sleep(0.01)
+                            self.assertTrue((root / 'ready').exists(), 'owned leader/descendant not ready')
+                            os.close(descriptor)
+                            descriptor = None
+                            canceled.set()
+                            deadline = time.monotonic() + 2
+                            while not (root / 'term-seen').exists() and time.monotonic() < deadline:
+                                time.sleep(0.01)
+                            self.assertTrue((root / 'term-seen').exists(), 'group cancellation did not reach descendant')
+                            # The TERM-resistant native descendant still holds
+                            # its explicitly inherited lease during cleanup.
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        finally:
+                            canceled.set()
+                        result = future.result(timeout=5)
+                    self.assertTrue(result['canceled'])
+                    self.assertFalse(result['timed_out'])
+                    self.assertFalse(result['success'])
+                    self.assertEqual(result['returncode'], -signal.SIGTERM)
+                    self.assertIn('SIGKILL', result['cleanup_signals'])
+                    self.assertTrue(result['cleanup_complete'], result)
+                    self.assertTrue(result['leader_reaped_after_cleanup'])
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    os.close(contender)
+
+    def test_cancellation_before_spawn_never_starts_a_command(self):
+        canceled = threading.Event()
+        canceled.set()
+        with mock.patch.object(commands.subprocess, 'Popen') as spawn:
+            result = commands.run_process(['must-not-start'], None, None, 1, cancel_event=canceled)
+        spawn.assert_not_called()
+        self.assertTrue(result['canceled'])
+        self.assertFalse(result['success'])
+        self.assertTrue(result['cleanup_complete'])
+        self.assertIsNone(result['returncode'])
+
+    def test_cancel_with_already_observed_failure_preserves_original_exit(self):
+        canceled = threading.Event()
+        def wait(process, timeout, **kwargs):
+            canceled.set()
+            return dict(held=True, mechanism='waitid-WNOWAIT', timed_out=False,
+                        canceled=True, returncode=7)
+        with mocked_anchored_process(returncode=7), mock.patch.object(commands, 'wait_owned_leader', side_effect=wait), mock.patch.object(commands, 'observe_group', return_value=dict(status='nonexecuting')):
+            result = commands.run_process(['native'], None, None, 1, cancel_event=canceled)
+        self.assertTrue(result['canceled'])
+        self.assertEqual(result['returncode'], 7)
+        self.assertFalse(result['success'])
+        self.assertTrue(result['cleanup_complete'])
+        self.assertTrue(result['leader_reaped_after_cleanup'])
 
     def test_invalid_missing_or_duplicate_identity_prevents_every_command(self):
         with tempfile.TemporaryDirectory() as directory:
