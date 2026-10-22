@@ -45,15 +45,19 @@ growth. It cannot be declared done by adding another private proof helper.
 | Step | Exact source work still required | Completion condition / dependency |
 |---|---|---|
 | C1 — positive supported process backend and recovery | Extend the core launcher/`physical_graph` with the approved protected Linux pre-entry containment, retained original-object identity and nonescape validation. Journal the recovery locator before acquisition; rebind original containment after restart and prove old owner fenced. Preserve Unsupported when the already-authorized environment cannot uphold those premises; no permission/security setup is implied. | Normal and crash/restart cleanup have a real process-extinction route in the declared domain, not PID/path absence or a writable same-UID cgroup. Controller determines existing environment capability; a concrete missing contract goes to the coordinator, not the human by default. |
-| C2 — real graph/member settlement | In `adaptive_resources/runtime/operations.rs`, compose actual root/task/resource selections and the matching graph proof into exact manifest facts; retain the original proof through queue refusal/unknown commit, settle once, then refund once. Add only the typed source/output/scratch recovery identity contract needed by this existing VOD path; current SourceFile disk codec is absent, not implicitly Scratch. | Successful normal retirement and restart reconciliation preserve member identity/costs; uncertain acquisition/commit remains held. Depends on C1 and concrete audited adapters, not serialized success fields. |
+| C2 — real graph/member settlement | `feb5c2fdf` now composes exact actual root/discard-task selections plus original live receipt into the retained journal transition, preserving queue refusal/unknown commit and durable-settle-before-once-refund. Still missing: typed SourceFile/output/scratch members and recovery identities for real VOD; no omitted source handle or relabeling as Scratch is accepted. | Root/task slice is host-compiled NOT RUN, not C2 accepted. Successful normal retirement/restart must cover all actual typed owners; uncertainty remains held. Depends on C1 and concrete audited adapters, not serialized success fields. |
 | C3 — connect the existing VOD owner | Wire the one software finite path through `vodencode.rs`, `producer_spawn.rs`, `prodrun/owned.rs` and its actual output/diagnostic supervisor. Replace generic writer closure assumptions with audited owned source/output/scratch lifetimes; prepare/arm before acquisition, retire after real joins. Compose current cap/settings demand and shared role pins, without bypassing held legacy competitors. | The actual application request, not a fixture-only branch, reserves once, produces output, stops and returns its finite capacity. Depends on C1/C2 plus the necessary M1/M2 demand wiring. |
 | C4 — restart availability and acceptance | Replace the all-startup pending refusal in `resource_runtime.rs` with protected selective reconciliation and applicable admission refusal; keep unrelated serving safe. Author exact normal/cancel/crash/restart/capacity-reuse cases now; execute the required behavioral cases only after complete candidate review/fixes. | First finite path can be marked source-complete only when its normal/recovery lifecycle is wired. It is accepted only with actual applicable post-review evidence. Other M3 adapters and M4–M6 remain separate table rows. |
 
-The immediate source seam after the current checkpoint is C2's exact retained
-runtime-member settlement composition, while the coordinator confirms C1's
-existing environment premises. That seam advances the vertical target but does
-not by itself close C1/C3/C4 or make ordinary playback finite. A blocker in C1
-must identify the precise missing premise, not trigger another general inventory.
+The root/discard-task settlement slice is now source-implemented (`feb5c2fdf`),
+not positive end-to-end evidence. Next C2/C3 source is actual source/output/scratch
+ownership; existing concrete components do not supply those durable contracts.
+Current Linux environment has no protected containment authority. Astra selected
+a restricted host broker proposal: new privileged component/configuration and
+isolated qualification need security/installation review before host setup, not
+an implementation pause for independent C2 work. No setup/deployment is implied.
+Same-host restart target means same-kernel-boot daemon restart with proven original
+object/owner continuity; reboot/rollback/foreign-domain recovery remains unsupported.
 
 ## Why Windows LIVE advanced before Linux/restart
 

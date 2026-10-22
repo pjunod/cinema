@@ -24,20 +24,23 @@ SHA-256 respectively:
 
 ## Current source and compiler receipt
 
-`35f0d8715`/`6dc165309` compose a private single-use LIVE local-graph receipt:
-original Windows Job extinction, root waits, audited joins, source closes and
-full native-owner disposal. Ambiguous launches, generic factory handoffs (even
-factory panic), escaped source buffers and hardware/tuner/scratch costs refuse.
-Public close remains UnknownHeld; no restart proof, Windows durable readiness,
-production switch or runtime exact-manifest settlement is claimed.
+`feb5c2fdf` composes exact acquired root/discard-task facts with the original
+single-use live receipt into retained journal settlement. Same bundle lock,
+retained-user fence and original graph generation/counts are checked before
+cleanup; omitted sources/unsupported members refuse. No await/fallible lookup
+between receipt and retained mutation. Existing rejection/unknown-commit retry
+and matching durable-settle-before-once-refund remain. Seven Unix bodies are
+host-COMPILED NOT RUN; no positive end-to-end settlement/recovery is claimed.
 
-Pinned1.97.1 combined all-target host check PASS125.139s; two changed core files
-then rechecked PASS47.42s (`compile-run73-host-202323.json`). Seven source hashes;
-core46 library+3 libtest warnings; NOT strict Clippy. Twelve new bodies:
-nine host-compiled; all twelve Windows-compiled on `35f0d8715` (135.763s).
-Two changed core paths rechecked PASS73.591s on `6dc165309`; ALL behavior NOT RUN.
-Earlier Windows fixture repair `2726df816` PASS96.023s and failures retained.
-Native/restart acceptance remains owed.
+Pinned1.97.1 changed-core all-target Hiqlite-contract PASS10.075s, four source
+hashes (`compile-run75-host-204823.json`); initial helper compile errors repaired.
+Prior host125.139s+47.42s and Windows135.763s+73.591s remain scoped to unchanged
+source. New runtime composition not yet Windows-compiled; ALL behavior NOT RUN,
+NOT strict Clippy. `35f0d8715`/`6dc165309` still provide restricted Windows LIVE
+proof after real native-owner disposal, not Windows durable/restart support.
+Current Linux deployment has no protected cgroup authority. Astra's restricted
+host-broker proposal requires security/installation review, not inferred setup
+permission. Source/output/scratch adapters and normal finite playback remain open.
 
 Retained `83ec55303` shares root/source handle and read/drain memory bounds;
 cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
@@ -65,17 +68,11 @@ Approved plan SHA-256 `be993867c7b1db568663f9d793fefbf87c9679e027f67064b7884d281
 and acceptance SHA-256 `16868e4e3eca9d870f3f32e3bff5d47aa11d89ef8c00eecbed18d2c1fe55d6e0`
 were verified against the clone before work.
 
-Historical prerequisite repair: initial successful `rustup run` checks had
-unverified subprocess provenance; Clippy later reached Homebrew 1.98.0. These
-are NOT pinned receipts. A pristine baseline archive was then checked with
-explicit toolchain-bin PATH/RUSTC/RUSTDOC/cargo (170s), followed by current
-check (2s) and core Hiqlite Clippy (72s). No unrelated lints/tests were run.
-Corrected private `evidence/compiler-pinned.json` supersedes
-`evidence/compiler-baseline.json`; full logs `212528`, `212837`, `212839` remain
-under `repo/target/quiet`. Pinned rustc1.97.1 commit
-`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, Clippy0.1.97, macOS aarch64 only.
-Task-owned build/scratch remain durable. Ripwire refused (binary absent);
-bounded symbol search/outline are fallback, not an absence proof.
+Historical `rustup run` receipts lacked subprocess provenance and are NOT pinned.
+Corrected `evidence/compiler-pinned.json` supersedes `compiler-baseline.json`;
+baseline170s/current2s/Clippy72s and logs212528/212837/212839 remain retained.
+Current checks use explicit toolchain-bin PATH/RUSTC/RUSTDOC/cargo1.97.1. Durable
+build/scratch only. Ripwire absent; bounded source fallback is not absence proof.
 
 ## M0 current anchors and coverage
 

@@ -6,7 +6,7 @@ PR1248. The [implementation ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) is the
 current source/evidence and remaining M0–M7 authority. Nothing here authorizes
 deployment, a device operation or deletion of unresolved accounting.
 
-## What exists through 6dc165309
+## What exists through feb5c2fdf
 
 The node-local authority is separate from replicated Store, recovery catalogue,
 telemetry and caches:
@@ -72,6 +72,18 @@ handoff (including panic before task registration) and returned copied source
 buffers permanently disqualify the graph: their downstream ownership is unaudited.
 Hardware/tuner/scratch costs also refuse because no external adapter closes them.
 Public close remains UnknownHeld. No restart proof or Windows durable admission.
+
+`feb5c2fdf` adds exact live runtime-member composition: every manifest slot must
+be an actual armed/invoked root or named discard task. The sealed original graph's
+generation/counts must match, with no omitted source handle. Facts are captured
+before native disposal; the real single-use receipt enters the existing retained
+journal mutation synchronously. A rejected queue/unknown commit retains original
+proof, while only a matching durable settlement permits the existing once-refund.
+Seven new Unix fixtures host-compile (10.075s); none ran. This does not supply the
+missing source/output/scratch codecs, positive Linux/restart backend or production
+finite path. The current deployment lacks protected cgroup authority; a proposed
+restricted host broker is a new security/install boundary, not existing support
+or permission to install/restart it.
 
 The controller's genuine SDK-bound core+daemon all-target Windows compile passes
 on fixture repair2726df816 (96.023s); prior failures remain evidence. New live-close
