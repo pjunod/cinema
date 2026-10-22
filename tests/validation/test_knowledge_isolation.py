@@ -20,9 +20,20 @@ from unittest.mock import patch
 from validation.knowledge import evaluation_isolation as isolation
 
 
+def synthetic_guest_errno():
+    # Explicit Linux guest values: tests must not inherit their host's errno ABI.
+    return {"schema_version": 1, "platform": "linux", "codes": {
+        "EPERM": 1, "ENOENT": 2, "EACCES": 13, "EROFS": 30, "ENETUNREACH": 101, "EHOSTUNREACH": 113}}
+
+
+def synthetic_guest_error(code):
+    names = {value: key for key, value in synthetic_guest_errno()["codes"].items()}
+    return {"errno": code, "error": "OK" if type(code) is int and code == 0 else names.get(code, "UNKNOWN")}
+
+
 def synthetic_closed_network():
     return {"interfaces": ["lo"], "links": {"lo": {"flags": 0x9, "operstate": "unknown"}},
-            "ipv4_routes": [], "ipv6_routes": [], "errno": errno.ENETUNREACH}
+            "ipv4_routes": [], "ipv6_routes": [], **synthetic_guest_error(101)}
 
 
 class SyntheticEngine:
@@ -32,6 +43,8 @@ class SyntheticEngine:
         self.alive = set()
         self.network = "none"
         self.network_observation = None
+        self.guest_errno = synthetic_guest_errno()
+        self.mutate_probe = None
         self.cleanup_fails = False
         self.image_available = True
         self.image_id = "sha256:" + "b" * 64
@@ -86,17 +99,20 @@ class SyntheticEngine:
         if arguments[0] == "exec" and isolation._RESOURCE_CODE in arguments:
             return result(json.dumps({"memory.events": {"oom": 0, "oom_kill": 0, "max": 0}, "pids.events": {"max": 0}}).encode())
         if arguments[0] == "exec" and isolation._PROBE_CODE in arguments:
-            data = {"outside": {"readable": self.sentinel_readable, "errno": errno.ENOENT},
+            data = {"outside": {"readable": self.sentinel_readable, **synthetic_guest_error(0 if self.sentinel_readable else 2)},
+                    "guest_errno": self.guest_errno,
                     "network": synthetic_closed_network() if self.network_observation is None else self.network_observation,
-                    "filesystem": {"candidate": {"writable": not config.candidate_readonly, "errno": errno.EROFS if config.candidate_readonly else 0},
-                                   "runtime": {"writable": True, "errno": 0},
-                                   "grader": {"writable": False, "errno": errno.EROFS},
+                    "filesystem": {"candidate": {"writable": not config.candidate_readonly, **synthetic_guest_error(30 if config.candidate_readonly else 0)},
+                                   "runtime": {"writable": True, **synthetic_guest_error(0)},
+                                   "grader": {"writable": False, **synthetic_guest_error(30)},
                                    "quiet_logs": {"writable": isolation._quiet_log_mount(config) if self.quiet_writable_override is None else self.quiet_writable_override,
-                                                  "errno": 0 if isolation._quiet_log_mount(config) else errno.ENOENT}},
+                                                  **synthetic_guest_error(0 if isolation._quiet_log_mount(config) else 2)}},
                     "build_environment": {"CARGO_BUILD_JOBS": self.build_jobs_override or isolation._environment(config)["CARGO_BUILD_JOBS"]} if config.require_rust else {},
                     "versions": {"python": "3.13.0", "python_executable": config.python_executable,
                                  "rustc": {"returncode": 0, "output": self.rust_version},
                                  "cargo": {"returncode": 0, "output": "cargo 1.97.1 (synthetic fixture)"}}}
+            if self.mutate_probe is not None:
+                self.mutate_probe(data)
             return result(json.dumps(data).encode())
         if arguments[0] == "exec" and isolation._OUTCOME_CONTROLLER in arguments:
             self.callback_count += 1
@@ -305,10 +321,10 @@ class KnowledgeIsolationTests(unittest.TestCase):
 
     def test_dormant_kernel_links_prove_denial_by_state_without_name_exceptions(self):
         value = self.dormant_network()
-        self.assertTrue(isolation._network_denied(value))
+        self.assertTrue(isolation._network_denied(value, synthetic_guest_errno()))
         value["ipv6_routes"] = [{"interface": "lo", "destination": "0" * 31 + "1", "destination_prefix": 128,
                                  "source": "0" * 32, "source_prefix": 0, "gateway": "0" * 32, "flags": 0x80200001}]
-        self.assertTrue(isolation._network_denied(value))
+        self.assertTrue(isolation._network_denied(value, synthetic_guest_errno()))
         self.engine.network_observation = value
         receipt = isolation.probe(self.config)
         self.assertEqual(receipt.status, "verified")
@@ -321,23 +337,71 @@ class KnowledgeIsolationTests(unittest.TestCase):
             value = self.dormant_network()
             value["links"]["tunnel0"] = {"flags": flags, "operstate": operstate}
             with self.subTest(flags=flags, operstate=operstate):
-                self.assertFalse(isolation._network_denied(value))
+                self.assertFalse(isolation._network_denied(value, synthetic_guest_errno()))
         value = self.dormant_network(); del value["links"]["tunnel0"]["operstate"]
-        self.assertFalse(isolation._network_denied(value))
+        self.assertFalse(isolation._network_denied(value, synthetic_guest_errno()))
         for family, row in (("ipv4_routes", {"interface": "tunnel0", "destination": "00000000",
                 "gateway": "00000000", "mask": "00000000", "flags": 1}),
                 ("ipv6_routes", {"interface": "tunnel0", "destination": "0" * 32, "destination_prefix": 0,
                 "source": "0" * 32, "source_prefix": 0, "gateway": "0" * 32, "flags": 1})):
             value = self.dormant_network(); value[family] = [row]
-            with self.subTest(family=family): self.assertFalse(isolation._network_denied(value))
+            with self.subTest(family=family): self.assertFalse(isolation._network_denied(value, synthetic_guest_errno()))
         for field in ("links", "ipv4_routes", "ipv6_routes"):
             value = self.dormant_network(); del value[field]
-            with self.subTest(missing=field): self.assertFalse(isolation._network_denied(value))
-        value = self.dormant_network(); value["errno"] = 0
-        self.assertFalse(isolation._network_denied(value))
+            with self.subTest(missing=field): self.assertFalse(isolation._network_denied(value, synthetic_guest_errno()))
+        value = self.dormant_network(); value.update(synthetic_guest_error(0))
+        self.assertFalse(isolation._network_denied(value, synthetic_guest_errno()))
         self.engine.network_observation = value
         self.assertEqual(isolation.probe(self.config).status, "unavailable")
         self.assertEqual(self.engine.alive, set())
+
+    def test_linux_guest_errors_remain_valid_when_host_errno_uses_darwin_numbers(self):
+        with patch.object(errno, "ENETUNREACH", 51), patch.object(errno, "EHOSTUNREACH", 65):
+            self.assertNotEqual(errno.ENETUNREACH, synthetic_guest_errno()["codes"]["ENETUNREACH"])
+            for readonly in (False, True):
+                config = replace(self.config, candidate_readonly=readonly)
+                proof = isolation.probe(config)
+                self.assertEqual(proof.status, "verified")
+                observed = json.loads(proof.private_path.read_bytes())["observations"]["observed_probes"]
+                self.assertEqual(observed["network"]["errno"], 101)
+                self.assertEqual(observed["network"]["error"], "ENETUNREACH")
+                self.assertEqual(observed["outside"]["error"], "ENOENT")
+                self.assertEqual(observed["filesystem"]["runtime"]["error"], "OK")
+                self.assertEqual(observed["filesystem"]["grader"]["error"], "EROFS")
+                self.assertEqual(observed["filesystem"]["candidate"]["error"], "EROFS" if readonly else "OK")
+                self.assertEqual(observed["filesystem"]["quiet_logs"]["error"], "ENOENT")
+
+    def test_guest_errno_table_and_label_number_consistency_fail_closed(self):
+        protocol = synthetic_guest_errno()
+        allowed = {"ENETUNREACH", "EHOSTUNREACH", "EACCES", "EPERM"}
+        for observation in ({"errno": 0, "error": "ENETUNREACH"}, {"errno": 101, "error": "OK"},
+                            {"errno": 101, "error": "EACCES"}, {"errno": 101, "error": "UNKNOWN"},
+                            {"errno": True, "error": "EPERM"}, {"errno": "101", "error": "ENETUNREACH"},
+                            {"errno": 101}, {"error": "ENETUNREACH"}, {"errno": 30, "error": "EROFS"}):
+            with self.subTest(observation=observation):
+                self.assertFalse(isolation._guest_error_matches(observation, protocol, allowed))
+        self.assertFalse(isolation._guest_error_matches({"errno": 101, "error": "OK"}, protocol, {"OK"}))
+        for changed in ({}, {**protocol, "schema_version": True}, {**protocol, "platform": "darwin"},
+                        {**protocol, "extra": "uncontrolled"}, {**protocol, "codes": {**protocol["codes"], "ENETUNREACH": 51}},
+                        {**protocol, "codes": {**protocol["codes"], "EHOSTUNREACH": 101}},
+                        {**protocol, "codes": {key: value for key, value in protocol["codes"].items() if key != "EROFS"}}):
+            with self.subTest(protocol=changed):
+                self.assertFalse(isolation._guest_error_matches(synthetic_guest_error(101), changed, allowed))
+        network = self.dormant_network(); network.update(synthetic_guest_error(0))
+        self.assertFalse(isolation._network_denied(network, protocol))
+
+    def test_every_guest_boundary_rejects_missing_or_inconsistent_error_labels(self):
+        config = replace(self.config, candidate_readonly=True)
+        for boundary in ("outside", "network", "candidate", "runtime", "grader", "quiet_logs"):
+            def corrupt(body, boundary=boundary):
+                observation = body[boundary] if boundary in {"outside", "network"} else body["filesystem"][boundary]
+                observation["error"] = "EROFS" if boundary == "runtime" else "OK"
+            self.engine.mutate_probe = corrupt
+            with self.subTest(boundary=boundary):
+                self.assertEqual(isolation.probe(config).status, "unavailable")
+                self.assertEqual(self.engine.alive, set())
+        self.engine.mutate_probe = lambda body: body.pop("guest_errno")
+        self.assertEqual(isolation.probe(config).status, "unavailable")
 
     def test_rust_jobs_default_preserves_and_probes_explicit_frozen_extra(self):
         config = replace(self.config, require_rust=True)

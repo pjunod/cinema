@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import base64
-import errno
 import hashlib
 import hmac
 import json
@@ -277,6 +276,11 @@ sys.path.insert(0,source_root)
 _PROBE_CODE = r'''
 import errno,json,os,platform,socket,subprocess,sys
 sentinel, rustc, cargo, rust_required = sys.argv[1:]
+guest_codes={name:getattr(errno,name) for name in ("EPERM","ENOENT","EACCES","EROFS","ENETUNREACH","EHOSTUNREACH")}
+if any(errno.errorcode.get(code)!=name for name,code in guest_codes.items()):raise RuntimeError("guest errno namespace inconsistent")
+guest_errno={"schema_version":1,"platform":sys.platform,"codes":guest_codes}
+def error_observation(code):
+    return {"errno":code,"error":"OK" if type(code) is int and code==0 else errno.errorcode.get(code,"UNKNOWN")}
 filesystem={}
 for label,directory in (("candidate","/work"),("runtime","/work/.runtime/tmp"),("grader","/grader"),("quiet_logs","/work/target/quiet")):
     path=directory+"/.isolation-write-probe-"+str(os.getpid())
@@ -285,15 +289,15 @@ for label,directory in (("candidate","/work"),("runtime","/work/.runtime/tmp"),(
         os.write(descriptor,b"probe")
         os.close(descriptor)
         os.unlink(path)
-        filesystem[label]={"writable":True,"errno":0}
+        filesystem[label]={"writable":True,**error_observation(0)}
     except OSError as error:
-        filesystem[label]={"writable":False,"errno":error.errno}
+        filesystem[label]={"writable":False,**error_observation(error.errno)}
 try:
     with open(sentinel,"rb") as stream:
         stream.read(1)
-    outside = {"readable":True,"errno":0}
+    outside = {"readable":True,**error_observation(0)}
 except OSError as error:
-    outside = {"readable":False,"errno":error.errno}
+    outside = {"readable":False,**error_observation(error.errno)}
 sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
 sock.settimeout(1)
 try:
@@ -340,7 +344,7 @@ if rust_required == "yes":
         outcome=subprocess.run([path,"--version"],cwd="/",stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         versions[name]={"returncode":outcome.returncode,"output":outcome.stdout.decode("utf-8","replace").strip()}
 build_environment={"CARGO_BUILD_JOBS":os.environ.get("CARGO_BUILD_JOBS")} if rust_required=="yes" else {}
-print(json.dumps({"outside":outside,"network":{"interfaces":interfaces,"links":links,"ipv4_routes":ipv4_routes,"ipv6_routes":ipv6_routes,"errno":network_errno},"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
+print(json.dumps({"outside":outside,"network":{"interfaces":interfaces,"links":links,"ipv4_routes":ipv4_routes,"ipv6_routes":ipv6_routes,**error_observation(network_errno)},"guest_errno":guest_errno,"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
 '''
 
 
@@ -896,9 +900,38 @@ def _cleanup(config, name):
     return _Cleanup(proved, observed)
 
 
-def _network_denied(network):
+_GUEST_ERRNO_LABELS = frozenset({"EPERM", "ENOENT", "EACCES", "EROFS", "ENETUNREACH", "EHOSTUNREACH"})
+
+
+def _guest_errno_valid(protocol):
+    """Interpret only the hash-pinned isolated probe's guest builtin namespace."""
+    if (not isinstance(protocol, dict) or set(protocol) != {"schema_version", "platform", "codes"}
+            or type(protocol["schema_version"]) is not int or protocol["schema_version"] != 1
+            or protocol["platform"] != "linux"):
+        return False
+    codes = protocol["codes"]
+    return (isinstance(codes, dict) and set(codes) == _GUEST_ERRNO_LABELS
+            and all(type(value) is int and 0 < value <= 4095 for value in codes.values())
+            and len(set(codes.values())) == len(codes))
+
+
+def _guest_error_matches(observation, protocol, allowed):
+    # Raw numbers are checked against the guest's own builtin table, never the
+    # host's errno module. This table has authority only through _configuration_probe.
+    if (not _guest_errno_valid(protocol) or not isinstance(observation, dict)
+            or type(observation.get("errno")) is not int or not isinstance(observation.get("error"), str)):
+        return False
+    code, label = observation["errno"], observation["error"]
+    if label not in allowed:
+        return False
+    if label == "OK":
+        return code == 0
+    return code > 0 and label in protocol["codes"] and protocol["codes"][label] == code
+
+
+def _network_denied(network, guest_errno):
     """Prove inactive external topology, rather than assuming device names."""
-    if not isinstance(network, dict) or set(network) != {"interfaces", "links", "ipv4_routes", "ipv6_routes", "errno"}:
+    if not isinstance(network, dict) or set(network) != {"interfaces", "links", "ipv4_routes", "ipv6_routes", "errno", "error"}:
         return False
     links = network.get("links")
     if (not isinstance(links, dict) or not 0 < len(links) <= 256 or "lo" not in links
@@ -936,7 +969,7 @@ def _network_denied(network):
                 return False
             if family == "ipv6_routes" and any(type(row[key]) is not int or not 0 <= row[key] <= 128 for key in ("destination_prefix", "source_prefix")):
                 return False
-    return type(network.get("errno")) is int and network["errno"] in {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EACCES, errno.EPERM}
+    return _guest_error_matches(network, guest_errno, {"ENETUNREACH", "EHOSTUNREACH", "EACCES", "EPERM"})
 
 
 def _configuration_probe(config, private):
@@ -967,15 +1000,21 @@ def _configuration_probe(config, private):
                             str(sentinel), config.rustc_executable, config.cargo_executable, "yes" if config.require_rust else "no"])
         _require(checked.returncode == 0 and not checked.timed_out and not checked.output_limited, "isolation probes unavailable")
         observed = json.loads(checked.stdout)
-        _require(observed["outside"]["readable"] is False and observed["outside"]["errno"] in {errno.ENOENT, errno.EACCES}, "outside sentinel readable")
-        _require(_network_denied(observed["network"]), "network denial unproved")
+        guest_errno = observed["guest_errno"]
+        _require(_guest_errno_valid(guest_errno), "guest errno protocol unproved")
+        _require(observed["outside"]["readable"] is False and
+                 _guest_error_matches(observed["outside"], guest_errno, {"ENOENT", "EACCES"}), "outside sentinel readable")
+        _require(_network_denied(observed["network"], guest_errno), "network denial unproved")
         _require(observed["filesystem"]["candidate"]["writable"] is (not config.candidate_readonly)
-                 and (not config.candidate_readonly or observed["filesystem"]["candidate"]["errno"] in {errno.EROFS, errno.EACCES})
+                 and _guest_error_matches(observed["filesystem"]["candidate"], guest_errno,
+                                          {"EROFS", "EACCES"} if config.candidate_readonly else {"OK"})
                  and observed["filesystem"]["runtime"]["writable"] is True
-                 and observed["filesystem"]["grader"]["writable"] is False and observed["filesystem"]["grader"]["errno"] in {errno.EROFS, errno.EACCES}, "filesystem permissions unproved")
+                 and _guest_error_matches(observed["filesystem"]["runtime"], guest_errno, {"OK"})
+                 and observed["filesystem"]["grader"]["writable"] is False
+                 and _guest_error_matches(observed["filesystem"]["grader"], guest_errno, {"EROFS", "EACCES"}), "filesystem permissions unproved")
         quiet = observed["filesystem"]["quiet_logs"]
         _require(quiet["writable"] is _quiet_log_mount(config) and
-                 (_quiet_log_mount(config) or quiet["errno"] in {errno.EROFS, errno.EACCES, errno.ENOENT}),
+                 _guest_error_matches(quiet, guest_errno, {"OK"} if _quiet_log_mount(config) else {"EROFS", "EACCES", "ENOENT"}),
                  "protected quiet log write boundary unproved")
         _require(bool(re.fullmatch(r"3\.[0-9]+\.[0-9]+", observed["versions"]["python"])), "Python runtime unavailable")
         if config.require_rust:
