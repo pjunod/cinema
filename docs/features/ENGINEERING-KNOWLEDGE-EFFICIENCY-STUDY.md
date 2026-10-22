@@ -25,7 +25,7 @@ enter this document or the record-author context.
 | Arm B | Same corpus/tools plus curated records at traversal depth zero |
 | Arm C | Same corpus/tools plus curated records at traversal depth six |
 | Scoring | Two independent fresh blind contexts for every answer: 216 scorer contexts |
-| Model | Existing-account Sonnet 5.5, thinking disabled; identical pinned model/settings in every arm |
+| Model | Existing-account Sonnet 5, thinking disabled; identical pinned model/settings in every arm |
 | Budget | Existing hard ceiling of 3,000,000 aggregate tokens, including calibration, solver and scoring use; final split must be calibrated and sealed before scored runs |
 | Schedule | Seeded randomized order; repeats are independent contexts, without invented deterministic sampling seeds |
 | Analysis | Frozen missed-obligation and correctness rules; task-clustered, cohort-stratified uncertainty; failed, exhausted, unscored and incomplete runs remain visible |
@@ -37,6 +37,11 @@ request. Missing or uncertain usage retains its reservation and halts the
 batch; it never becomes zero consumption. Scoring receives an allocation
 before the solver share is assigned. No model switch, budget increase or
 case replacement follows an unfavorable outcome.
+
+The initial Sonnet 5.5 nomination was corrected before calibration or answers:
+account capability metadata reports that model cannot disable thinking, which
+the current transcript adapter requires. Sonnet 5 supports that mode. This
+compatibility correction precedes outcomes and applies to every context.
 
 ## Every arm receives actual Ripwire over the same visible corpus
 
