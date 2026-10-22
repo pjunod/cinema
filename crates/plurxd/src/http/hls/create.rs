@@ -828,6 +828,23 @@ pub(super) fn processing_declined_note(reason: &str) -> String {
     format!("Dolby Vision processing declined: {reason}")
 }
 
+/// Finish response notes from the request that dispatch actually served.
+/// Qualification may be declined at admission or degraded by the worker, so
+/// its display explanation must not escape before those choices are final.
+pub(super) fn delivered_plan_notes(
+    mut notes: Vec<String>,
+    request: &crate::transcode::SessionRequest,
+) -> Vec<String> {
+    if let Some(note) = request
+        .candidate_context
+        .as_ref()
+        .and_then(|context| context.display_target_note.as_ref())
+    {
+        notes.push(note.clone());
+    }
+    notes
+}
+
 /// Put the reconciled plan onto the request that will actually be built, and
 /// hand back the notes that explain it.
 ///
@@ -3643,13 +3660,6 @@ async fn create_with_purpose_inner(
             .await
         {
             Ok(Some((mut processed, candidate))) => {
-                if let Some(note) = processed
-                    .candidate_context
-                    .as_ref()
-                    .and_then(|context| context.display_target_note.as_ref())
-                {
-                    plan_notes.push(note.clone());
-                }
                 if let Some(source) = source.as_ref() {
                     // A distinct, strict processed-recipe check stays inside
                     // the original create deadline. Ordinary catalog/advisory
@@ -4433,7 +4443,7 @@ async fn create_with_purpose_inner(
             )
             .expect("new media-session owner epochs begin at one")
         }),
-        plan_notes,
+        plan_notes: delivered_plan_notes(plan_notes, &request),
     };
     // `response_json` is the canonical durable session recipe/response. Keep
     // channel purpose in that row so restart and owner takeover cannot turn a

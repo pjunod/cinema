@@ -6385,3 +6385,144 @@ fn acquisition_relay_sends_extension_only_to_proven_peer() {
     assert!(serde_json::from_value::<LegacyResource>(updated.clone()).is_err(),"must never send extension to an old strict peer");
     assert!(matches!(serde_json::from_value::<RelayResource>(updated).expect("updated owner"),RelayResource::Playlist{acquisition_start_ms:Some(296_065),..}));
 }
+
+mod delivered_plan_note_tests {
+    use super::*;
+    use crate::transcode::{SessionRequest, TranscodeManager};
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    use plurx_core::playback::caps::DisplayCaps;
+    use plurx_core::scan::dv_title::{
+        DvTitleStats, MasteringPrimaries, TitleConstant, PROBE_FIELD, SCHEMA,
+    };
+
+    fn qualified_request() -> (SessionRequest, SessionRequest, String) {
+        let mut ordinary = staged_candidate_request();
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let probe = serde_json::json!({PROBE_FIELD: stats}).to_string();
+        let (target, note) = TranscodeManager::display_target_policy(
+            true,
+            Some(&DisplayCaps {
+                max_nits: Some(1600),
+                ..Default::default()
+            }),
+            Some(&probe),
+        )
+        .expect("eligible display policy");
+        assert_eq!(target.expect("frozen target").nits(), 1600);
+        let note = note.expect("target explanation");
+        let candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest([0x16; 32]),
+            recipe_digest: [0x16; 32],
+            route: CandidateRoute::Encode,
+            planned_codec: Some("hevc".into()),
+            processed_hdr10: true,
+            normalized_geometry: true,
+            width: 1920,
+            height: 1080,
+            target_height: 1080,
+            average_bps: Some(8_000_000),
+            peak_bps: Some(12_000_000),
+            grade: plurx_core::transcode::OutputGrade::Hdr10,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let ordinary_candidate = QualityCandidate {
+            id: CandidateId::for_recipe_digest([0x0a; 32]),
+            recipe_digest: [0x0a; 32],
+            processed_hdr10: false,
+            ..candidate.clone()
+        };
+        ordinary.candidate_context = Some(Box::new(TranscodeManager::candidate_context(
+            &ordinary_candidate,
+        )));
+        let mut context = TranscodeManager::candidate_context(&candidate);
+        context.display_target = target;
+        context.display_target_note = Some(note.clone());
+        context.ordinary_request = Some(Box::new(ordinary.clone()));
+        let mut processed = ordinary.clone();
+        processed.candidate_context = Some(Box::new(context));
+        (ordinary, processed, note)
+    }
+
+    #[test]
+    fn admission_refusal_does_not_publish_qualified_display_target_notes() {
+        let (ordinary, processed, target_note) = qualified_request();
+        let initial = vec!["ordinary negotiated plan".to_owned()];
+        // Control: the very same qualified request reports targeting when it
+        // is the delivered request, proving this is not blanket suppression.
+        assert_eq!(
+            delivered_plan_notes(initial.clone(), &processed),
+            vec![initial[0].clone(), target_note]
+        );
+        // Recovery/link/catalog admission left the ordinary request selected.
+        let mut declined = initial;
+        declined.push(processing_declined_note(
+            "Auto link evidence rejects the candidate",
+        ));
+        assert_eq!(delivered_plan_notes(declined.clone(), &ordinary), declined);
+        assert!(
+            !ordinary
+                .candidate_context
+                .as_ref()
+                .expect("ordinary candidate")
+                .selected_candidate
+                .processed_hdr10
+        );
+    }
+
+    #[test]
+    fn dispatch_degradation_does_not_publish_adopted_display_target_notes() {
+        let (_, processed, target_note) = qualified_request();
+        let context = processed
+            .candidate_context
+            .as_ref()
+            .expect("qualified context");
+        let frozen = context.display_target;
+        // Dispatch restores the exact ordinary request retained by qualification.
+        let delivered = context
+            .ordinary_request
+            .as_deref()
+            .expect("ordinary fallback");
+        let declined = vec![processing_declined_note("prepared processing unavailable")];
+        assert_eq!(delivered_plan_notes(declined.clone(), delivered), declined);
+        assert_eq!(
+            delivered_plan_notes(Vec::new(), &processed),
+            vec![target_note]
+        );
+        assert_eq!(
+            context.display_target, frozen,
+            "reporting cannot change the target"
+        );
+    }
+
+    #[test]
+    fn processed_delivery_keeps_master_grade_display_explanations() {
+        let (_, mut processed, _) = qualified_request();
+        let context = processed
+            .candidate_context
+            .as_mut()
+            .expect("qualified context");
+        context.display_target = None;
+        let explanation = "display peak unavailable; the master grade is sent".to_owned();
+        context.display_target_note = Some(explanation.clone());
+        let notes = vec!["ordinary negotiated plan".to_owned()];
+        assert_eq!(
+            delivered_plan_notes(notes.clone(), &processed),
+            vec![notes[0].clone(), explanation]
+        );
+    }
+}
