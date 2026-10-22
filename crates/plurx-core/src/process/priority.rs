@@ -346,6 +346,81 @@ pub struct Registration {
     key: u64,
 }
 
+/// A signal capability for exactly one registered child. It carries only the
+/// registry key: the registration remains owned by `ChildJob`, and dropping
+/// that job removes the row even when this value was copied elsewhere.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RegisteredChildControl {
+    key: u64,
+}
+
+impl Registration {
+    pub(crate) fn control(&self) -> RegisteredChildControl {
+        RegisteredChildControl { key: self.key }
+    }
+}
+
+impl RegisteredChildControl {
+    /// Request SIGKILL through the pidfd opened for this registration.
+    /// A removed registration is already gone; a missing pidfd is a refusal.
+    pub(crate) fn start_kill(self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let registry = registry();
+            let Some(entry) = registry.entries.get(&self.key) else {
+                return Ok(());
+            };
+            let pidfd = entry.pidfd.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "this registered child has no pidfd for safe control",
+                )
+            })?;
+            linux::pidfd_signal(pidfd, libc::SIGKILL).map(|_| ())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "registered child control requires Linux pidfd support",
+            ))
+        }
+    }
+
+    /// Signal this registration only. `false` means its registration was
+    /// removed or its original process has exited.
+    pub(crate) fn signal(self, signal: super::ProcessSignal) -> io::Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            let registry = registry();
+            let Some(entry) = registry.entries.get(&self.key) else {
+                return Ok(false);
+            };
+            let pidfd = entry.pidfd.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "this registered child has no pidfd for safe control",
+                )
+            })?;
+            let native = match signal {
+                super::ProcessSignal::Suspend => libc::SIGSTOP,
+                super::ProcessSignal::Resume => libc::SIGCONT,
+                super::ProcessSignal::Terminate => libc::SIGTERM,
+            };
+            linux::pidfd_signal(pidfd, native)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (self, signal);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "registered child control requires Linux pidfd support",
+            ))
+        }
+    }
+}
+
 impl Drop for Registration {
     fn drop(&mut self) {
         registry().entries.remove(&self.key);
@@ -709,27 +784,30 @@ mod linux {
         Some(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
-    pub(super) fn pidfd_kill(pidfd: &OwnedFd) -> std::io::Result<()> {
-        // SAFETY: the descriptor is a live pidfd owned by the registry.
+    pub(super) fn pidfd_signal(pidfd: &OwnedFd, signal: libc::c_int) -> std::io::Result<bool> {
+        // SAFETY: the descriptor is the original pidfd owned by the registry.
         let result = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
                 pidfd.as_raw_fd(),
-                libc::SIGKILL,
+                signal,
                 std::ptr::null::<libc::siginfo_t>(),
                 0,
             )
         };
         if result == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let error = std::io::Error::last_os_error();
-        // The child exited between the listing and the stop: already done.
         if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
+            Ok(false)
         } else {
             Err(error)
         }
+    }
+
+    pub(super) fn pidfd_kill(pidfd: &OwnedFd) -> std::io::Result<()> {
+        pidfd_signal(pidfd, libc::SIGKILL).map(|_| ())
     }
 }
 
@@ -1089,6 +1167,73 @@ mod tests {
         drop(job);
         assert!(!running().iter().any(|row| row.pid == pid));
         assert!(!stop(pid).expect("an unlisted pid is not an error"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removed_control_never_selects_another_row_with_the_same_pid() {
+        let work = ChildWork::background("exact registration control test");
+        // This impossible pid has no pidfd. Two rows deliberately share its
+        // number so any accidental PID search would select the second row.
+        let first = register(Some(u32::MAX), std::ffi::OsStr::new("fixture"), work)
+            .expect("first registration");
+        let second = register(Some(u32::MAX), std::ffi::OsStr::new("fixture"), work)
+            .expect("second registration");
+        let stale = first.control();
+        assert_ne!(first.key, second.key);
+        drop(first);
+        assert!(!stale.signal(super::super::ProcessSignal::Resume).unwrap());
+        stale.start_kill().expect("a removed key is already gone");
+        assert!(registry().entries.contains_key(&second.key));
+        drop(second);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_control_without_original_pidfd_refuses_signals() {
+        let registration = register(
+            Some(u32::MAX),
+            std::ffi::OsStr::new("fixture"),
+            ChildWork::background("missing pidfd control test"),
+        )
+        .expect("registration");
+        let control = registration.control();
+        assert_eq!(
+            control.start_kill().unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            control
+                .signal(super::super::ProcessSignal::Terminate)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        drop(registration);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn registered_control_kills_root_while_waiter_owns_child() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (mut child, job) = spawn_job_owned(
+            &mut sleeper(),
+            ChildWork::background("registered root kill test"),
+        )
+        .expect("spawn owned child");
+        let control = job.registered_control().expect("actual registration");
+        let waiter = tokio::spawn(async move { child.wait().await });
+        tokio::task::yield_now().await;
+        control.start_kill().expect("kill original pidfd");
+        let status = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("waiter completes")
+            .expect("waiter task")
+            .expect("child wait");
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        drop(job);
+        assert!(!control.signal(super::super::ProcessSignal::Resume).unwrap());
     }
 
     #[cfg(target_os = "linux")]

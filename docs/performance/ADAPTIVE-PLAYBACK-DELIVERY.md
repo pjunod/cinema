@@ -1,6 +1,6 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `ffd7f58379856a3ad31ff9789aff3520cf26cf6e`.
+**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `4c84b1e4ea558e3e4be3ea38ffe11ac3e4a157bc`.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -12,21 +12,22 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at `772370540`. The immediate target is one ordinary
+All five items are **OPEN** at `4c84b1e4e`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
 | V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
-| V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The uncommitted core slice adds explicit `PublishMetadata` for opted-in `identity.json` and software-transcode `encoded-process` output (copy omits the marker), plus same-child native `Sync` with original-job Arm/Observe and batches ≤16. The daemon finite metadata/`make_durable` adapter is present. Ordinary `renditiondir` still needs its first marker-creation caller and must persist each real outcome before manifests/readers, with bounded memory/index/overage. No ordinary request connection is closed. |
+| V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The core slice adds explicit `PublishMetadata` for opted-in `identity.json` and software-transcode `encoded-process` output (copy omits the marker), same-child native `Sync` with original-job Arm/Observe and batches ≤16, parser preflight limits, and measured/bounded init, fragment and segmenter storage. The daemon finite metadata/`make_durable` adapter is present. Ordinary `renditiondir` still needs its first marker-creation caller and must persist each real outcome before manifests/readers; full task/parser merge/transform/plan/process memory partition and durable overage/index accounting remain incomplete. No ordinary request connection is closed. |
 | V3 — producer/stop — OPEN | Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
 | V4 — retained output — OPEN | Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
-Current sequence: complete the held-directory, metadata/first-marker,
-same-child sync/`make_durable` and startup-runtime bridge, then ordinary V1/V3
-composition → V4 serving/transfer → V5 settlement/reuse. All V1–V5 remain OPEN; no source item has newly closed. The
+Current sequence: complete the held-directory/known `PublishNew` and core/daemon
+bridge, including first-marker durability, then ordinary V1/V3 composition → V4
+serving/transfer → V5 settlement/reuse. All V1–V5 remain OPEN; no source item
+has newly closed. The
 detailed execution artifact remains the existing
 `operator/FIRST-VOD-DELIVERY-CHECKLIST.md` under
 `~/.hermes/hdr-collaboration/workspaces/adaptive-playback-parallel-20261021/`,
@@ -52,17 +53,25 @@ Core exposes a concrete
 [`finite_vod` runtime interface](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
 `SoftwareVodOwner` reserves the whole role before source or output acquisition;
 nonserde `FiniteOutput` selects that same custodian and returns opaque tickets
-for retained publications. Explicit `PublishMetadata` records opted-in
-`identity.json` and software-transcode marker output; copy omits the marker. A
-same-child sync cell keeps its original job through known Arm/Observe and limits
-batches to 16. Existing
+for retained publications. The core-owned VOD generation engine now includes
+identity and conversion modules; the daemon re-exports it while keeping its
+existing test bodies. The explicit `PublishMetadata` operation records
+opted-in `identity.json` and software-transcode marker output; copy omits the
+marker. A same-child sync cell keeps its original job through known
+Arm/Observe and limits batches to 16. Parser input is preflighted against
+track/run/sample limits; `Init`, `Fragment` and `Segmenter` capacities and
+bounded-generation accumulation/transfer are accounted. Exact registered-child
+signals use the original registration and pidfd, not a numeric PID lookup, and
+introduce no root-wait-lock dependency. Guarded core-pipe readers are not yet
+connected to the generation ownership graph. Existing
 [`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) can hold the
 core source lease without reopening the legacy pathname. The daemon
 [`PendingWrites` adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
 contains finite metadata/`make_durable` wiring, and startup passes the same open
 runtime Arc to `VodServe::Shared`. The first metadata-marker creation caller is
 not fully wired, and the first statement in ordinary
-`build_rendition_with_storage` still selects legacy admission. This remains a
+`build_rendition_with_storage` still selects legacy admission. Full task/parser
+merge/transform/plan/process memory partitioning remains incomplete. This is a
 core/runtime bridge, not ordinary source closure.
 
 All V1–V5 remain OPEN. Ordinary request preparation and root producer
@@ -71,10 +80,17 @@ index and durable-debt accounting, actual reader leases, retained-output
 transfer, conserving retirement and exact settlement/capacity reuse still lack
 their production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
-records the exact limits. Ten new sync/metadata regression bodies are authored
-and host-compiled, not run. The corrected host all-target source checks passed
-core 50.486s and daemon 139.073s, EXIT 0 each with stable source. Review and
-qualification wait for the complete integrated candidate.
+records the exact limits. Ten prior sync/metadata regression bodies were
+compiled on an earlier source snapshot, not run. Nine new bounded-reader, registered-child-control and finite-pipe bodies are
+authored. The current frozen source passed pinned Rust 1.97.1 host core+daemon
+all-target compilation in 132.329s (EXIT 0, `source_stable: true`), receipt
+`direct-check-20261022-182501.json`, log SHA-256
+`463a74f135ad92e6ff6dc15dc521d8dd7bb91b186c3c4bf0f0a899d9e4392d2c`. This
+was warning-level compilation, not strict Clippy, and no tests ran; the two
+Linux-only registered-child-control bodies were not compiled by the host check.
+Prior 50.486s core and 139.073s daemon receipts remain tied to their earlier
+stable source. Review and qualification wait for the complete integrated
+candidate.
 
 ## Actual distance to usable playback
 

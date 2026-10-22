@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · M0/M1 partial; M2 capacity and M3 custody slices compiled.
-**Updated:** 2026-10-22 at committed checkpoint `ffd7f58379856a3ad31ff9789aff3520cf26cf6e`.
+**Status:** open · implementation incomplete; current source compiled, tests not run.
+**Updated:** 2026-10-22 at committed checkpoint `4c84b1e4ea558e3e4be3ea38ffe11ac3e4a157bc`.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -47,16 +47,29 @@ The prearmed source adapter retains the actual file and original native job,
 checks scanner and `s1` identity using shared core code, and exports a nonclone
 counted lease only after the exact acquisition observation. Existing
 [`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) can hold that
-lease without reopening the legacy pathname. The finite-output slice following that checkpoint
-adds an explicit `PublishMetadata` journal operation for opted-in
-`identity.json` and `encoded-process` outputs; the software-transcode profile
-requires its marker, while copy omits it. The same-child native sync cell retains
-the original job through known Arm/Observe and bounds each batch to 16 files.
-The daemon [`PendingWrites` finite adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
+lease without reopening the legacy pathname. The finite-output slice adds an
+explicit `PublishMetadata` journal operation for opted-in `identity.json` and
+`encoded-process` outputs; the software-transcode profile requires its marker,
+while copy omits it. The same-child native sync cell retains the original job
+through known Arm/Observe and bounds each batch to 16 files. The daemon
+[`PendingWrites` finite adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
 connects metadata durability, and startup passes the already-open runtime Arc to
-`VodServe::Shared`. These are bridge components: ordinary
-`build_rendition_with_storage` still starts with legacy admission, and the
-first metadata-marker creation caller is not fully wired.
+`VodServe::Shared`.
+
+The VOD generation engine, identity check and conversion are now core-owned and
+the daemon re-exports that engine while retaining its existing test bodies. The
+fragment parser now preflights track/run/sample limits before parsing; actual
+`Init`, `Fragment` and `Segmenter` capacities are measured, and generation
+accumulation/transfer paths have explicit bounds. Exact registered-child
+control signals only through the original registration and pidfd; it does not
+select by numeric PID and adds no root-wait-lock dependency. Guarded core-pipe
+readers exist as a bounded primitive but are not connected to the generation
+ownership graph.
+
+These remain bridge and bound components. Ordinary
+`build_rendition_with_storage` still starts with legacy admission, and the first
+metadata-marker creation caller is not fully wired. Full task/parser
+merge/transform/plan/process memory partitioning is incomplete.
 
 All V1–V5 remain **OPEN**. Still missing: ordinary entry and root producer
 ownership/task composition; the first metadata-marker caller; complete
@@ -64,16 +77,18 @@ memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
 The latest committed/pushed checkpoint
-`ffd7f58379856a3ad31ff9789aff3520cf26cf6e` passed pinned Rust 1.97.1 host
-core+daemon all-target compilation in 28.406s (EXIT 0, stable source). Static
-bookkeeping and 326 regression anchors resolve against that candidate; draft PR
-#1248 is updated. The next source slice adds ten authored sync/metadata
-regressions, not run. Its corrected pinned host all-target checks passed core
-in 50.486s and daemon in 139.073s (EXIT 0 each, stable source hashes). The
-receipts are `direct-check-20261022-180814.json` and
-`direct-check-20261022-180506.json` in the task evidence directory. Earlier
-compiler failures and their fixes remain retained. No behavioral tests, final independent review, qualification, fast lane
-or merge have run. Linux/Windows current-source compilation, strict Clippy,
+`4c84b1e4ea558e3e4be3ea38ffe11ac3e4a157bc` remains the candidate base. The
+current frozen source passed pinned Rust 1.97.1 host core+daemon all-target
+compilation in 132.329s (EXIT 0, `source_stable: true`). Receipt:
+`direct-check-20261022-182501.json`, log SHA-256
+`463a74f135ad92e6ff6dc15dc521d8dd7bb91b186c3c4bf0f0a899d9e4392d2c`. This
+was a warning-level compile, not strict Clippy; no tests ran. The two Linux-only
+registered-child-control bodies were not compiled by this host check. The prior
+50.486s core and 139.073s daemon receipts remain evidence for their earlier
+stable source snapshot. The durable candidate PR-body draft now has 345 unique anchors (336 previous,
+plus nine new source-confirmed lines); the durable regression list has 38. Static
+bookkeeping was not rerun for this slice. No final independent review, qualification, fast lane
+or merge has run. Linux/Windows current-source compilation, strict Clippy,
 restart evidence and behavior qualification remain open.
 
 ## Current source and compiler receipt
@@ -88,14 +103,15 @@ existing native publisher to consume a moved held directory and selected I/O ID,
 with no path fallback/local UUID; actual ordinary caller still uses legacy input.
 These mechanisms are NOT permission/proof constructors or completed V2 closure.
 
-Pinned1.97.1 current host core all-target check PASS11.885s; combined core/daemon
-108.631s retains unchanged daemon source. Seven new host bodies COMPILED NOT RUN;
-two Linux-only bodies compiled by controller Linux check, NOT host. No bodies run.
-Warnings, NOT strict Clippy; initial closure-type failure preserved/fixed.
-Controller exact7b783effa Linux117.758s and Windows132.363s checks PASS; unchanged
-native step/statx/test sources retain those scopes. Later common guards and held
-publisher have host checks above, not claimed exact7b Linux/Windows coverage.
-No behavior/restart qualification. Earlier source/evidence remains retained.
+Historical pinned 1.97.1 receipts for the earlier `7b783effa` source snapshot:
+host core all-target PASS in 11.885s; combined core/daemon PASS in 108.631s,
+with unchanged daemon source. Seven host bodies compiled, NOT RUN; two Linux-only
+bodies for that snapshot compiled by controller Linux check, NOT host. These
+were warning-level checks, not strict Clippy; the initial closure-type failure
+and fix remain retained. Controller Linux 117.758s and Windows 132.363s checks
+also cover only the exact `7b783effa` scope and unchanged native step/statx/test
+sources. They do not qualify the current source. No behavior/restart
+qualification. Earlier source/evidence remains retained.
 
 The authoritative [V1–V5 checklist](ADAPTIVE-PLAYBACK-DELIVERY.md#authoritative-first-ordinary-vod-source-checklist)
 has ALL FIVE OPEN. Missing: ordinary pre-acquisition/source/producer composition,

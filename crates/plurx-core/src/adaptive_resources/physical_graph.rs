@@ -25,6 +25,7 @@ use crate::process::observation::{Metric, ProcessIdentity, ProcessObserver, Unkn
 use crate::process::{spawn_job_custodied, ChildJob, ChildWork, OwnedSpawnFailure};
 
 mod budgets;
+pub(super) mod finite_pipes;
 mod live_close;
 mod live_jobs;
 mod source_files;

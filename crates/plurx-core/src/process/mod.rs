@@ -64,6 +64,16 @@ pub struct ChildJob {
     _registration: Option<priority::Registration>,
 }
 
+impl ChildJob {
+    /// Control the actual registered root while another task holds the Child
+    /// for `wait()`. This does not extend the registration's lifetime.
+    pub(crate) fn registered_control(&self) -> Option<priority::RegisteredChildControl> {
+        self._registration
+            .as_ref()
+            .map(priority::Registration::control)
+    }
+}
+
 /// The one launcher every production child goes through.
 ///
 /// Spawn without giving the child a chance to create descendants before its

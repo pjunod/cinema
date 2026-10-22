@@ -77,3 +77,4 @@ pub mod testfixtures;
 pub mod tracks;
 pub mod trakt;
 pub mod transcode;
+pub mod vod_generation;

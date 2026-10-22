@@ -605,6 +605,10 @@ pub struct FragmentReader {
     reject_reinitialization: bool,
 }
 
+mod bounded_reader;
+mod memory;
+pub use bounded_reader::{BoundedFragmentReader, FragmentReaderBounds};
+
 impl FragmentReader {
     pub fn new() -> FragmentReader {
         FragmentReader::default()
@@ -633,10 +637,24 @@ impl FragmentReader {
     /// session's last partial fragment is not an error to report, it is a
     /// fragment that will never finish.
     pub fn next_unit(&mut self) -> Result<Option<Unit>, Fmp4Error> {
+        self.next_unit_with_bounds(None)
+    }
+
+    fn next_unit_with_bounds(
+        &mut self,
+        bounds: Option<&FragmentReaderBounds>,
+    ) -> Result<Option<Unit>, Fmp4Error> {
         loop {
             let Some(hdr) = peek_box(&self.buf, self.pos)? else {
                 return Ok(None);
             };
+            if let Some(bounds) = bounds {
+                bounded_reader::check_box_size(&hdr, bounds)?;
+                if !self.init_done && hdr.kind() == b"moov" {
+                    let start = self.init_start.unwrap_or(self.pos);
+                    bounded_reader::check_unit_size(self.pos - start, hdr.size, bounds)?;
+                }
+            }
             if !self.have(&hdr) {
                 return Ok(None);
             }
@@ -652,6 +670,12 @@ impl FragmentReader {
                     b"moov" => {
                         let start = self.init_start.unwrap_or(self.pos);
                         let end = self.pos + hdr.size;
+                        if let Some(bounds) = bounds {
+                            bounded_reader::preflight_moov(
+                                &self.buf[self.pos + hdr.header_len..end],
+                                bounds,
+                            )?;
+                        }
                         let tracks = parse_moov(&self.buf[self.pos + hdr.header_len..end])?;
                         let bytes = self.buf[start..end].to_vec();
                         self.pos = end;
@@ -673,10 +697,20 @@ impl FragmentReader {
                     return malformed("guarded stream replaced its initialization segment");
                 }
                 b"moof" => {
+                    if let Some(bounds) = bounds {
+                        bounded_reader::preflight_moof(
+                            &self.buf[self.pos + hdr.header_len..self.pos + hdr.size],
+                            bounds,
+                        )?;
+                    }
                     let mdat_pos = self.pos + hdr.size;
                     let Some(mdat) = peek_box(&self.buf, mdat_pos)? else {
                         return Ok(None);
                     };
+                    if let Some(bounds) = bounds {
+                        bounded_reader::check_box_size(&mdat, bounds)?;
+                        bounded_reader::check_unit_size(hdr.size, mdat.size, bounds)?;
+                    }
                     if mdat.kind() != b"mdat" {
                         return malformed(format!(
                             "expected mdat after moof, found {}",

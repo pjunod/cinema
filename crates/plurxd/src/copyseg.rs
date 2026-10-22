@@ -1147,27 +1147,7 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     finish(segmenter, &mut out, session_id, complete).await
 }
 
-/// Remove a Dolby Vision file-type claim after ffmpeg has removed the Dolby
-/// configuration and RPUs from the video sample entry.
-///
-/// ffmpeg 7.1's `dovi_rpu=strip=1` correctly removes `dvcC`/`dvvC` and the RPU
-/// NALs, but movenc has already copied `dby1` into `ftyp` by the time the
-/// bitstream filter's output parameters reach it. AVPlayer treats that as a
-/// contradictory initialization segment and fails the item immediately. The
-/// base layer is ordinary `hvc1` HDR10, so replace only the stale file-type
-/// brand with the ISO fragmented-MP4 brand already used by this muxer. A real
-/// Dolby Vision sample entry keeps its brand untouched.
-pub(crate) fn sanitize_stale_dolby_brand(init: &mut Init) -> bool {
-    if init.video().is_none_or(|video| video.dolby_vision_config) {
-        return false;
-    }
-
-    // The rewrite itself lives in `fmp4` because a second caller needs it:
-    // `remove_dolby_vision_record` creates this same contradiction when it
-    // deletes a record the muxer had written, and it has to fix the brand in
-    // the same call rather than depending on this one running again.
-    fmp4::replace_dolby_file_type_brand(&mut init.bytes)
-}
+pub(crate) use plurx_core::vod_generation::sanitize_stale_dolby_brand;
 
 async fn finish(
     segmenter: Option<Segmenter>,
