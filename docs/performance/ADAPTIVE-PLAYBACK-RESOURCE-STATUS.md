@@ -1,15 +1,15 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; published checkpoint
-`ee2815c009bc54d535a3d1b5f01e16100c3ffad7` passed exact native Linux core+daemon
-compilation on Rust 1.97.1 (225.501 seconds; log SHA-256
-`a28c6d54629587faae74c3391f3a149b44521d8e7c2e74c8af14bf897b044ff7`). A host
-compile passed in 84.422 seconds (stable log SHA-256
-`5f86c11bc15c0d3e4e790259e49a3e310787517be8a865645546104cbc5b42e2`). The
-published source has 428 authored regression anchors; tests are NOT RUN. Current
-cold-cache caller and cleanup-guard changes are outside those compile receipts;
-root inventory integration is in progress. All V1–V5 and R1/M0–M7 remain OPEN.
-Final review and qualification have not run.
+**Status:** open · implementation incomplete. Source checkpoint
+`c816041edb6425722013d11e4a24bcbbefa9a5d9` passed exact native Linux core+daemon
+all-target compilation on Rust 1.97.1 (190.849 seconds; log SHA-256
+`2cf5c0896760d4293a55a93d139ee5f9924ab2875fbfcc6d1cc6f17b40d4a1d0`).
+It includes the ordinary cold-cache caller, protected legacy cleanup and counted
+recovered-S metadata lifetime. The 428 published regression anchors are authored,
+NOT RUN. Later PID-namespace/root-exit proof, native lifecycle fixture, producer
+telemetry, task-unit accounting and active-R recovery are under implementation
+outside that receipt. All V1–V5 and R1/M0–M7 remain OPEN. Final review,
+qualification and merge have not run.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker

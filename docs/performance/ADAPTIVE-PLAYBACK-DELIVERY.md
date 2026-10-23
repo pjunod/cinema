@@ -1,15 +1,16 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · published checkpoint
-`ee2815c009bc54d535a3d1b5f01e16100c3ffad7` passed exact native Linux core+daemon
-compilation on Rust 1.97.1 (225.501 seconds; log SHA-256
-`a28c6d54629587faae74c3391f3a149b44521d8e7c2e74c8af14bf897b044ff7`). A host
-compile passed in 84.422 seconds (stable log SHA-256
-`5f86c11bc15c0d3e4e790259e49a3e310787517be8a865645546104cbc5b42e2`). The
-published source has 428 authored regression anchors; tests are NOT RUN. Current
-cold-cache caller and cleanup-guard changes are outside those compile receipts;
-root inventory integration is in progress. All V1–V5 and R1/M0–M7 remain OPEN.
-Final review and qualification have not run. Primary owner: direct Codex harness
+**Status:** open · implementation incomplete. Source checkpoint
+`c816041edb6425722013d11e4a24bcbbefa9a5d9` passed exact native Linux core+daemon
+all-target compilation on Rust 1.97.1 (190.849 seconds; log SHA-256
+`2cf5c0896760d4293a55a93d139ee5f9924ab2875fbfcc6d1cc6f17b40d4a1d0`).
+It includes the ordinary cold-cache caller, protected legacy cleanup and counted
+recovered-S metadata lifetime. The 428 published regression anchors are authored,
+NOT RUN. Later PID-namespace/root-exit proof, native lifecycle fixture, producer
+telemetry, task-unit accounting and active-R recovery are under implementation
+outside that receipt. All V1–V5 and R1/M0–M7 remain OPEN. Final review,
+qualification and merge have not run.
+Primary owner: direct Codex harness
 (`/root`; actual model unspecified), sole integration writer. Work remains on
 `effort/adaptive-playback-resources`, draft PR #1248. This is a delivery
 breakdown of the existing
@@ -19,14 +20,11 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at published checkpoint
-`ee2815c009bc54d535a3d1b5f01e16100c3ffad7`. The selected Linux ordinary
-software-transcode branch connects producer/source custody, counted HTTP,
-cleanup and R→S transfer. Cold-cache caller integration and broader cleanup
-protection are being added outside the published compile receipts; root
-inventory integration is in progress. This branch is not behavior-verified or
-qualified. Full memory accounting, partial-start handling and broader recipe
-selection remain open.
+All five items remain **OPEN**. The selected Linux ordinary software-transcode
+branch connects producer/source custody, counted HTTP, cleanup, R→S transfer,
+positively adopted cold-cache reuse and protection from legacy deletion. The
+complete allocation profile and remaining restart/task contracts are unfinished;
+this path is not behavior-verified or qualified.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
@@ -62,18 +60,15 @@ independent actual Fable review/fixes → once-only affected qualification/fast 
 
 ## Active integration — 2026-10-23
 
-The selected Linux ordinary software-transcode branch now connects counted
-HTTP serving, native S cleanup and one R→S transfer. Published checkpoint
-`ee2815c009bc54d535a3d1b5f01e16100c3ffad7` passed native Linux core+daemon
-compilation in 225.501 seconds (log SHA-256
-`a28c6d54629587faae74c3391f3a149b44521d8e7c2e74c8af14bf897b044ff7`); the host
-compile passed in 84.422 seconds (log SHA-256
-`5f86c11bc15c0d3e4e790259e49a3e310787517be8a865645546104cbc5b42e2`). The
-428 authored regression anchors are NOT RUN. Uncommitted cold-cache caller and
-cleanup-guard integration is outside those receipts; root inventory integration
-is in progress. All V1–V5/R1/M0–M7 remain OPEN. Full memory accounting,
-partial-start handling, cold restart/cache adoption and broader recipe selection
-remain open; final review and qualification have not run.
+Checkpoint `c816041edb6425722013d11e4a24bcbbefa9a5d9` has exact native Linux
+compilation evidence described above. The recovered cache caller verifies current
+source/plan compatibility before serving through the same counted S owner.
+Unknown or mismatched output stays held and refuses reuse. Automatic obsolete
+cache eviction is pending an owner decision following an automatic approval
+review rejection; no live cleanup or rejected source edit was performed.
+Forward PID-namespace/root-exit proof and an actual ordinary lifecycle regression
+are authored outside that receipt; the latter has not run. Active-R recovery,
+production history sampling and distinct kernel-task accounting are in progress.
 
 Core exposes a concrete
 [`finite_vod` runtime interface](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
@@ -195,3 +190,33 @@ and close every actual helper/task/FD/sink. Windows' unnamed Job and unsupported
 durable-storage path do not prove restart recovery. The Windows slice remains a
 source prerequisite, not usable finite playback or a milestone.
 C1–C4 remain the explicit route to the first usable finite path.
+
+## Decision — process instances and kernel tasks
+
+**Status:** accepted implementation direction, 2026-10-23; source integration and
+qualification pending. The primary integration owner selected this within the
+approved plan's separate thread-limit and CPU-use contract (§4.1).
+
+Linux pids limits, threads-max and RLIMIT_NPROC constrain kernel tasks. A fixed
+FFmpeg root is one process instance, but encoder thread options do not bound all
+its decoder, filter, demuxer and runtime threads. Charging one process against
+these limits therefore supplies a known minimum, not a known task peak.
+
+Keep process-instance charge and kernel-task capacity separate. Every current
+producer with a persisted positive process count has an explicit derived unknown
+task-peak claim; process-free retained output has none. This derives from the
+existing durable vector and does not fabricate a numeric peak or rewrite frozen
+journal formats. No current adapter has an enforced total task bound. Unknown
+task producers serialize against all other active process producers in either
+insertion order, with minimum root count checked against task headroom. Existing
+physical retirement/settlement is still required before that claim disappears.
+
+This is the conservative cold-producer policy, like the approved unknown-memory
+path. It permits one producer without promising that the producer cannot exhaust
+the kernel limit; task peak and managed peak remain Unknown in diagnostics.
+A hard total-task guarantee requires an enforceable execution bound, not a
+thread-count guess, a watchdog or a fabricated zero. A future known task claim
+must carry that bound and durable evidence before it can relax serialization.
+Reserving an arbitrary count, treating encoder threads as total tasks, and using
+a memory claim to label task uncertainty were rejected because their units or
+evidence do not support admission. No feature switch is introduced.
