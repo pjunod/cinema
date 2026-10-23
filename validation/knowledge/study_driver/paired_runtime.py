@@ -10,7 +10,6 @@ import json
 import os
 import re
 from pathlib import Path
-import shutil
 import stat
 import uuid
 
@@ -141,16 +140,43 @@ def measure_tree(root, *, candidate=False, max_bytes=512 * 1024**2):
     return _manifest(rows)
 
 
-def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 1024**3):
-    """Copy a stopped, issued qualified runtime with content/mode/race checks."""
+def _remove_captured_runtime(parent, name, expected_identity):
+    """Remove contents only through the captured, authority-checked root FD."""
+    directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        require(_identity(os.fstat(directory))[:2] == expected_identity, "CapturedRuntimeRootChanged")
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                info = os.stat(entry.name, dir_fd=directory, follow_symlinks=False)
+                require(info.st_dev == expected_identity[0], "CapturedRuntimeDeviceChanged")
+                if stat.S_ISDIR(info.st_mode):
+                    _remove_captured_runtime(directory, entry.name, _identity(info)[:2])
+                else:
+                    # Unlink aliases themselves; never follow a child symlink.
+                    os.unlink(entry.name, dir_fd=directory)
+        require(_identity(os.stat(name, dir_fd=parent, follow_symlinks=False))[:2] == expected_identity,
+                "CapturedRuntimeRootChanged")
+        os.rmdir(name, dir_fd=parent)
+    finally:
+        os.close(directory)
+
+
+def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 1024**3,
+                           expected_target_identity=None, expected_parent_identity=None):
+    """Copy qualified bytes; capture the authorized old root before removal."""
     source, target = no_links(source), no_links(target)
     require(source != target and source.is_dir() and target.is_dir()
             and not source.is_relative_to(target) and not target.is_relative_to(source),
             "DistinctQualifiedRuntimes")
+    expected_target_identity = expected_target_identity or _identity(target.lstat())[:2]
+    expected_parent_identity = expected_parent_identity or _identity(target.parent.lstat())[:2]
+    parent = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     staging = target.parent / ("runtime-copy-" + uuid.uuid4().hex)
-    staging.mkdir(mode=0o700)
     rows, identities, count = [], {}, 0
     try:
+        require(_identity(os.fstat(parent))[:2] == expected_parent_identity
+                and _identity(target.lstat())[:2] == expected_target_identity, "RuntimeReplacementAuthorityChanged")
+        os.mkdir(staging.name, mode=0o700, dir_fd=parent)
         for directory, folders, files in os.walk(source, followlinks=False):
             directory = no_links(directory)
             rel = directory.relative_to(source)
@@ -195,17 +221,43 @@ def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 10
         verified_identity=_identity(no_links(staging).lstat())[:2]
         require(measure_tree(staging,max_bytes=max_bytes)==expected_sha256,"CopiedRuntimeIdentityMismatch")
         require(_identity(no_links(staging).lstat())[:2]==verified_identity,"CopiedRuntimeRootChanged")
-        # The target is fresh stage-owned state, never another writer's cache.
-        no_links(target)
-        shutil.rmtree(target)
-        os.replace(staging, target)
-        require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
-        runtime_layout(target)
-        require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
+        require(_identity(os.fstat(parent))[:2] == expected_parent_identity
+                and _identity(no_links(target.parent).lstat())[:2] == expected_parent_identity,
+                "RuntimeReplacementParentChanged")
+        quarantine = "runtime-capture-" + uuid.uuid4().hex
+        os.mkdir(quarantine, mode=0o700, dir_fd=parent)
+        capture = os.open(quarantine, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            # Capture is atomic relative to the verified parent, not a path precheck
+            # followed by recursive deletion. Mismatches stay intact for diagnosis.
+            os.rename(target.name, "old", src_dir_fd=parent, dst_dir_fd=capture)
+            require(_identity(os.stat("old", dir_fd=capture, follow_symlinks=False))[:2]
+                    == expected_target_identity, "CapturedRuntimeRootChanged")
+            require(_identity(no_links(target.parent).lstat())[:2] == expected_parent_identity,
+                    "RuntimeReplacementParentChanged")
+            try:
+                os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                require(False, "RuntimeReplacementTargetReappeared")
+            # The stage parent is controller-owned 0700, outside both guest
+            # mounts. No guest writer can enter the capture/install interval.
+            # Python has no portable exclusive directory rename: refuse an
+            # observed reappearance rather than recursively consuming it.
+            os.rename(staging.name, target.name, src_dir_fd=parent, dst_dir_fd=parent)
+            require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
+            runtime_layout(target)
+            require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
+            _remove_captured_runtime(capture, "old", expected_target_identity)
+        finally:
+            os.close(capture)
+        os.rmdir(quarantine, dir_fd=parent)
+        os.fsync(parent)
         return verified_identity
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        # Failed adoption retains staging/capture evidence and poisons the stage.
+        os.close(parent)
 
 
 def family_identity(plan):
@@ -286,10 +338,11 @@ class PairedRoleStager:
                     role.max_requests, role.max_total_bytes)
         return replace(plan, worker=worker)
 
-    def adopt(self, stage, baseline, body):
+    def adopt(self, stage, baseline, body, *, expected_target_identity=None, expected_parent_identity=None):
         require(stage.paired_role == baseline.paired_role and body["initial_protected_source"] ==
                 self.owner.source_manifest(stage.candidate), "PristineProtectedViewRequired")
-        verified_identity=copy_qualified_runtime(baseline.worker_runtime, stage.worker_runtime, body["after"]["worker_runtime"])
+        verified_identity=copy_qualified_runtime(baseline.worker_runtime, stage.worker_runtime, body["after"]["worker_runtime"],
+            expected_target_identity=expected_target_identity, expected_parent_identity=expected_parent_identity)
         # Rebind to this stage, never the baseline candidate/worker configuration.
         stage.family_v2 = self.bind_plan(stage, stage.family_v2)
         return verified_identity

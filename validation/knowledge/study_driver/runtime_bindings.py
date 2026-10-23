@@ -464,12 +464,14 @@ class SourceStager:
         try:
             # copy_qualified_runtime checks the issued source/copy manifest before
             # replacing a target. No arbitrary current inode is adopted as truth.
-            replacements["runtime"]=copy_qualified_runtime(baseline_stage.runtime,handle.runtime,body["after"]["runtime"])
+            replacements["runtime"]=copy_qualified_runtime(baseline_stage.runtime,handle.runtime,body["after"]["runtime"],
+                expected_target_identity=record["children"]["runtime"],expected_parent_identity=record["root"])
             require(self._directory_identity(handle.runtime)==replacements["runtime"],"StageChildIdentityChanged")
             if handle.paired_role is not None:
                 require(self.paired is not None,"PairedRuntimeBindingRequired")
                 require(self._directory_identity(handle.worker_runtime)==record["children"]["worker-runtime"],"StageChildIdentityChanged")
-                replacements["worker-runtime"]=self.paired.adopt(handle,baseline_stage,body)
+                replacements["worker-runtime"]=self.paired.adopt(handle,baseline_stage,body,
+                    expected_target_identity=record["children"]["worker-runtime"],expected_parent_identity=record["root"])
                 require(self._directory_identity(handle.worker_runtime)==replacements["worker-runtime"],"StageChildIdentityChanged")
             # A copied baseline target must rebuild against this stage's source.
             now=time.time_ns()

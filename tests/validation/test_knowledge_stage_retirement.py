@@ -215,6 +215,78 @@ class StageRetirementTests(unittest.TestCase):
         self.assertTrue(self.stager._stages[id(current)]["adoption_failed"])
         self.assertTrue((current.root/"unexpected-original-grader").exists());self.assertFalse(current.retired)
 
+    def _assert_late_runtime_swap_is_preserved(self, *, worker):
+        current,baseline,prerequisite=self.registered_pair()
+        old=dict(self.stager._stage_record(current)["children"])
+        target=current.worker_runtime if worker else current.runtime
+        displaced=current.root/("displaced-"+target.name)
+        actual_copy,actual_measure=paired.copy_qualified_runtime,paired.measure_tree
+        active_target=None;swapped=False
+        def measure_then_swap(root,**kwargs):
+            nonlocal swapped
+            result=actual_measure(root,**kwargs)
+            # This runs inside the real copy after its entry checks and byte
+            # verification, immediately before its destructive-boundary logic.
+            if active_target==target and Path(root).name.startswith("runtime-copy-") and not swapped:
+                target.rename(displaced);target.mkdir(mode=0o700)
+                (target/"unrelated-sentinel").write_bytes(b"must survive")
+                swapped=True
+            return result
+        def actual_copy_for_role(source,destination,expected,**kwargs):
+            nonlocal active_target
+            active_target=destination
+            return actual_copy(source,destination,expected,**kwargs)
+        with patch.object(paired,"copy_qualified_runtime",side_effect=actual_copy_for_role), \
+             patch.object(paired,"measure_tree",side_effect=measure_then_swap):
+            with self.assertRaisesRegex(bindings.BindingRefusal,"CapturedRuntimeRootChanged"):
+                self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+        self.assertTrue(swapped);self.assertTrue(displaced.is_dir())
+        self.assertEqual(self.stager._directory_identity(displaced),old[target.name])
+        captures=list(current.root.glob("runtime-capture-*/old/unrelated-sentinel"))
+        self.assertEqual(len(captures),1);self.assertEqual(captures[0].read_bytes(),b"must survive")
+        self.assertTrue(list(current.root.glob("runtime-copy-*")))
+        record=self.stager._stages[id(current)]
+        self.assertEqual(record["children"],old);self.assertTrue(record["adoption_failed"])
+        self.assertNotIn("runtime_adoption",record)
+        proof=self.issued_tuple_probe(current)
+        for operation in (lambda:self.stager.record_receipt(current,proof),lambda:self.stager.close(current),
+                          lambda:self.stager.retire(current,{"receipt_sha256":"a"*64,"checkpoint_sha256":"b"*64,"event":"acceptance_finished"})):
+            with self.assertRaisesRegex(bindings.BindingRefusal,"StageAdoptionUnproved"):operation()
+        self.assertFalse(current.closed);self.assertFalse(current.retired)
+        self.assertTrue(current.candidate.exists());self.assertTrue(baseline.runtime.exists())
+        self.assertEqual(captures[0].read_bytes(),b"must survive")
+
+    def test_late_protected_runtime_swap_preserves_unrelated_root_and_poisons_pair(self):
+        self._assert_late_runtime_swap_is_preserved(worker=False)
+
+    def test_late_worker_runtime_swap_preserves_unrelated_root_and_poisons_pair(self):
+        self._assert_late_runtime_swap_is_preserved(worker=True)
+
+    def test_target_reappearing_after_capture_is_preserved_without_install_or_commit(self):
+        current,baseline,prerequisite=self.registered_pair()
+        old=dict(self.stager._stage_record(current)["children"])
+        actual_rename=paired.os.rename;reappeared=False
+        def rename_then_reappear(source,destination,**kwargs):
+            nonlocal reappeared
+            result=actual_rename(source,destination,**kwargs)
+            if source==current.runtime.name and destination=="old" and not reappeared:
+                current.runtime.mkdir(mode=0o700)
+                (current.runtime/"unrelated-sentinel").write_bytes(b"must survive")
+                reappeared=True
+            return result
+        with patch.object(paired.os,"rename",side_effect=rename_then_reappear):
+            with self.assertRaisesRegex(bindings.BindingRefusal,"RuntimeReplacementTargetReappeared"):
+                self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+        self.assertTrue(reappeared)
+        self.assertEqual((current.runtime/"unrelated-sentinel").read_bytes(),b"must survive")
+        captures=list(current.root.glob("runtime-capture-*/old"))
+        self.assertEqual(len(captures),1)
+        self.assertEqual(self.stager._directory_identity(captures[0]),old["runtime"])
+        self.assertTrue(list(current.root.glob("runtime-copy-*")))
+        record=self.stager._stages[id(current)]
+        self.assertEqual(record["children"],old);self.assertTrue(record["adoption_failed"])
+        self.assertNotIn("runtime_adoption",record);self.assertFalse(current.retired)
+
     def test_adoption_requires_original_roots_issued_prerequisite_and_qualified_bytes(self):
         for attack in ("root","runtime-bytes","receipt-bytes","issued-body","forged"):
             with self.subTest(attack=attack):
