@@ -2950,6 +2950,68 @@ fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
     }
 }
 
+async fn display_target_hdr10(
+    state: &AppState,
+    settings: &std::collections::BTreeMap<String, String>,
+) -> DeveloperEnableItem {
+    use plurx_core::store::{keys, stored_switch};
+    let enabled = stored_switch(
+        settings.get(keys::DV_DISPLAY_TARGET).map(String::as_str),
+        false,
+    );
+    let processing = stored_switch(
+        settings.get(keys::DV_HDR_PROCESSING).map(String::as_str),
+        false,
+    );
+    #[cfg(target_os = "linux")]
+    let helper = crate::vodencode::dv_runtime::ToolSet::capture()
+        .await
+        .map(|tools| tools.is_some())
+        .map_err(|error| error.to_string());
+    #[cfg(not(target_os = "linux"))]
+    let helper: Result<bool, String> = Ok(false);
+    let (reports, buckets) = state.transcode.display_target_usage().await;
+    let scans = state.store.dv_title_readiness().await;
+    let cache = [100]
+        .iter()
+        .chain(plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS.iter())
+        .map(|bucket| {
+            let live = match buckets.get(bucket) {
+                Some(Some(bytes)) => format!("{bytes} live materialized media bytes"),
+                Some(None) => "live bytes unavailable (producer busy)".into(),
+                None => "0 live materialized media bytes".into(),
+            };
+            format!("{bucket} nits: 0 retained cache bytes, {live}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    DeveloperEnableItem {
+        id: "dolby_vision_display_target", title: "Display-targeted HDR10-E / SDR",
+        enabled: Some(enabled), setting: Some("dolby_vision_display_target"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "dv_target_helper", title: "Helper installed and HDR10-E enabled",
+                status: match &helper { Ok(true) if processing => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
+                evidence: format!("HDR10-E preference: {}. Processing helper: {}. These readings never change the saved targeting choice.", if processing { "on" } else { "off" }, match helper { Ok(true) => "installed".into(), Ok(false) => "unavailable on this node".into(), Err(reason) => reason }),
+            },
+            DeveloperRequirement {
+                id: "dv_target_peak", title: "Client peak reports",
+                status: if reports > 0 { RequirementStatus::Met } else { RequirementStatus::Unobservable },
+                evidence: format!("{reports} active processed roots report a valid peak. This node cannot infer peaks for inactive or other-node clients."),
+            },
+            DeveloperRequirement {
+                id: "dv_target_scan", title: "Complete-title L1 scan",
+                status: match &scans { Ok(count) if count.eligible > 0 => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
+                evidence: match scans { Ok(count) => format!("{} current-schema title scans; {} eligible for L1 targeting. Unknown/incomplete scans keep the HDR master or ordinary SDR route.", count.scanned,count.eligible), Err(error) => format!("Title scan reading unavailable: {error}") },
+            },
+            DeveloperRequirement {
+                id: "dv_target_cache", title: "Bucket storage on this node", status: RequirementStatus::Met,
+                evidence: format!("{cache}. Targeted output renders live in private roots, never retained VOD storage; active readers/reservations keep their existing lifetime fences. No reusable bucket cache exists to evict."),
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3194,67 +3256,5 @@ mod tests {
                 }
             }
         }
-    }
-}
-
-async fn display_target_hdr10(
-    state: &AppState,
-    settings: &std::collections::BTreeMap<String, String>,
-) -> DeveloperEnableItem {
-    use plurx_core::store::{keys, stored_switch};
-    let enabled = stored_switch(
-        settings.get(keys::DV_DISPLAY_TARGET).map(String::as_str),
-        false,
-    );
-    let processing = stored_switch(
-        settings.get(keys::DV_HDR_PROCESSING).map(String::as_str),
-        false,
-    );
-    #[cfg(target_os = "linux")]
-    let helper = crate::vodencode::dv_runtime::ToolSet::capture()
-        .await
-        .map(|tools| tools.is_some())
-        .map_err(|error| error.to_string());
-    #[cfg(not(target_os = "linux"))]
-    let helper: Result<bool, String> = Ok(false);
-    let (reports, buckets) = state.transcode.display_target_usage().await;
-    let scans = state.store.dv_title_readiness().await;
-    let cache = [100]
-        .iter()
-        .chain(plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS.iter())
-        .map(|bucket| {
-            let live = match buckets.get(bucket) {
-                Some(Some(bytes)) => format!("{bytes} live materialized media bytes"),
-                Some(None) => "live bytes unavailable (producer busy)".into(),
-                None => "0 live materialized media bytes".into(),
-            };
-            format!("{bucket} nits: 0 retained cache bytes, {live}")
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    DeveloperEnableItem {
-        id: "dolby_vision_display_target", title: "Display-targeted HDR10-E / SDR",
-        enabled: Some(enabled), setting: Some("dolby_vision_display_target"),
-        requirements: vec![
-            DeveloperRequirement {
-                id: "dv_target_helper", title: "Helper installed and HDR10-E enabled",
-                status: match &helper { Ok(true) if processing => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
-                evidence: format!("HDR10-E preference: {}. Processing helper: {}. These readings never change the saved targeting choice.", if processing { "on" } else { "off" }, match helper { Ok(true) => "installed".into(), Ok(false) => "unavailable on this node".into(), Err(reason) => reason }),
-            },
-            DeveloperRequirement {
-                id: "dv_target_peak", title: "Client peak reports",
-                status: if reports > 0 { RequirementStatus::Met } else { RequirementStatus::Unobservable },
-                evidence: format!("{reports} active processed roots report a valid peak. This node cannot infer peaks for inactive or other-node clients."),
-            },
-            DeveloperRequirement {
-                id: "dv_target_scan", title: "Complete-title L1 scan",
-                status: match &scans { Ok(count) if count.eligible > 0 => RequirementStatus::Met, Ok(_) => RequirementStatus::Unmet, Err(_) => RequirementStatus::Unavailable },
-                evidence: match scans { Ok(count) => format!("{} current-schema title scans; {} eligible for L1 targeting. Unknown/incomplete scans keep the HDR master or ordinary SDR route.", count.scanned,count.eligible), Err(error) => format!("Title scan reading unavailable: {error}") },
-            },
-            DeveloperRequirement {
-                id: "dv_target_cache", title: "Bucket storage on this node", status: RequirementStatus::Met,
-                evidence: format!("{cache}. Targeted output renders live in private roots, never retained VOD storage; active readers/reservations keep their existing lifetime fences. No reusable bucket cache exists to evict."),
-            },
-        ],
     }
 }
