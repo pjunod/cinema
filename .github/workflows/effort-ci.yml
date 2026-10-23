@@ -271,7 +271,7 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
     runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
-    timeout-minutes: 10
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -297,10 +297,10 @@ jobs:
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
-          key: effort-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
+          key: effort-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
           restore-keys: |
-            effort-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
-            apple-dd-
+            effort-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
+            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true'
         run: make apple-build

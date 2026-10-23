@@ -18,6 +18,14 @@ The toolchain column records the required pin. The standby was observed on
 was unreachable during that inventory and must match the same pin before it
 can serve Apple jobs. This source change does not install or restart either runner.
 
+DerivedData cache keys and restore prefixes include the Xcode build and both
+mobile SDK versions. A different toolchain starts cold; its cache is saved only
+after success. The Effort Apple compile budget is 45 minutes because it also
+builds both macOS tray architectures before generic iOS and tvOS simulators.
+Run 5877 exhausted the old 10-minute budget during the first iOS cold build;
+that failure establishes neither iOS nor tvOS compilation. Full CI and main
+promotion retain their separate 60/120-minute Apple budgets.
+
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.
 Forgejo matches labels; those last two labels describe the roles and do not

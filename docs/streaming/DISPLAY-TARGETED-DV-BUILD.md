@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A/#1216 is merged; B–F implementation and evidence remain on `effort/display-targeted-dv`, with the single main promotion still open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
+**Status:** A/#1216 is merged into `effort/display-targeted-dv`; B–F are batched in integration PR #1269, with main promotion and E creative accuracy open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 The matrix below is the current qualification record. Dated implementation
@@ -13,14 +13,16 @@ new source head.
 | Phase | Qualified evidence and source | Still open |
 |---|---|---|
 | A · title scan and HDR10-E | PR #1216 merged into the effort at `3fbb3f669`; compile-only gate5863 and paperwork5862 PASS. Actual P7 driver348 passed both1000/1600 on source503619eb, with retained frame/audio/cadence/seek evidence. | Final integrated P8 adoption, EOF follow-up and main promotion remain separate. |
-| B · output metadata | PR #1266 draft; seven Rust312 cases on e53a221b and compiler361 on f57d0071 PASS. Runtime input bytes remain unchanged. Gate5870 exposed the installed Xcode27.1 pin drift before Apple compilation; repaired at23b131dc, new compile-only gate379. | Current-candidate effort gate and encoder/device acceptance. |
-| C · server controls | PR #1267 draft; ten Rust cases on a43fcf20, fourteen badge and72 settings cases, compiler362 PASS with source attribution retained. | Own effort gate and integrated acceptance; readiness never overrides saved choices. |
-| D · client presentation | PR #1268 draft;27 web cases and compiler363 PASS with original attribution. | Own effort gate and physical display acceptance. |
+| B · output metadata | PR #1266 folded into #1269; seven Rust312 cases on e53a221b and compiler361 on f57d0071 PASS. Runtime input bytes remain unchanged. Gate5870 exposed the installed Xcode27.1 pin drift before Apple compilation; repaired at23b131dc, gate5877 then exceeded the cold Apple budget; integration fixes retain full architectures and use toolchain-specific caches. | Current-candidate effort gate and encoder/device acceptance. |
+| C · server controls | PR #1267 folded into #1269; ten Rust cases on a43fcf20, fourteen badge and72 settings cases, compiler362 PASS with source attribution retained. | Own effort gate and integrated acceptance; readiness never overrides saved choices. |
+| D · client presentation | PR #1268 folded into #1269;27 web cases and compiler363 PASS with original attribution. | Own effort gate and physical display acceptance. |
 | Client builds | Android30 and Apple13 cases plus test-build passed on F7eed; client source closure unchanged through F6d48d4c. | Current Xcode27.1 compiler gate and physical acceptance. |
 | E · L2/L8 trims | Public L2 and explicitly assumed L8 prototype07c36ec; neutral-L3 provenance928407c. Fourteen comparisons353 completed; baseline PQ error.110077 and trim-delta errors~.44/.49 remain. | Supported CM4/L8 rendering contract and creative accuracy; vendor contact declined. Tooling passes do not establish creative support. |
-| F · SDR target | PR #1269 draft. Source6d48d4c retains ten Rust, two web, compiler326/Clippy324 and independent pixel325 passes (61440 samples, max1code/limit2). Current repair shares fresh FEL admission and conditional receipts across HDR10/SDR, preserving BT.709 conversion and100-nit mapping. | New repair compilation and final-candidate regression pending; prior evidence does not qualify the changed factory. Own effort gate, main promotion and physical acceptance remain open. |
+| F · SDR target | PR #1269 draft. Source6d48d4c retains ten Rust, two web, compiler326/Clippy324 and independent pixel325 passes (61440 samples, max1code/limit2). Current repair shares fresh FEL admission and conditional receipts across HDR10/SDR, preserving BT.709 conversion and100-nit mapping. | Repair ba8df0e7 passed pinned fmt/check/Clippy382; final-candidate regression remains unrun. Production C link384 is separate. Own effort gate, main promotion and physical acceptance remain open. |
 
 Only A has merged, into `effort/display-targeted-dv`; main is unchanged.
+Remaining stage commits are batched into #1269 to avoid repeated broad compiler gates;
+#1266/#1267/#1268/#1270 retain their evidence as folded stage records.
 Results remain tied to their named sources or verified unchanged input closures.
 The final main candidate still requires adversarial review, once-only applicable
 fast-lane evidence and the Main promotion gate. No physical display acceptance
