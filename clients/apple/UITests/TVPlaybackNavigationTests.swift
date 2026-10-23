@@ -50,6 +50,92 @@ final class TVPlaybackNavigationTests: TVNavigationTestCase {
         XCTAssertTrue(app.buttons["detail:about"].waitForExistence(timeout: 10), app.debugDescription)
     }
 
+    func testLocalMovieTimelineSelectCommitsForwardAndBackwardPreview() throws {
+        let server = try TVNavigationServer(playableTitles: true)
+        let origin = try server.start()
+        defer { server.stop() }
+        let app = openLibrary(origin: origin)
+        defer { app.terminate() }
+        let movie = app.buttons["item:1"]
+        reachForSetup(movie, in: app, limit: 8)
+        assertFocus(movie, in: app, context: "Timeline movie opener")
+        remote.press(.select)
+        let play = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "Play")).firstMatch
+        reachForSetup(play, in: app, limit: 8)
+        assertFocus(play, in: app, context: "Timeline movie Play")
+        remote.press(.select)
+        let pause = app.buttons["player-play-pause"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 20), app.debugDescription)
+        reachForSetup(pause, in: app, limit: 8)
+        assertFocus(pause, in: app, context: "Pause before scrubbing")
+        remote.press(.select)
+        waitUntil("Playback paused", app: app, timeout: 5) { pause.label == "Play" }
+
+        let timeline = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@ AND hasFocus == true", "Playback position")).firstMatch
+        remote.press(.up)
+        assertFocus(timeline, in: app, context: "Timeline receives Up from transport")
+        let position = app.staticTexts["player-position"]
+        let initial = try timelineSeconds(position)
+        remote.press(.right)
+        remote.press(.right)
+        waitUntil("Forward preview", app: app, timeout: 5) {
+            (timeline.value as? String)?.hasPrefix("Previewing ") == true
+        }
+        let forward = try timelineSeconds(position)
+        XCTAssertGreaterThanOrEqual(forward, initial + 20)
+        remote.press(.select)
+        waitUntil("Select commits forward preview", app: app, timeout: 5) {
+            timeline.value as? String == "Timeline"
+        }
+        XCTAssertEqual(try timelineSeconds(position), forward, accuracy: 1)
+        XCTAssertEqual(pause.label, "Play", "Commit must preserve paused playback")
+
+        remote.press(.left)
+        waitUntil("Backward preview", app: app, timeout: 5) {
+            (timeline.value as? String)?.hasPrefix("Previewing ") == true
+        }
+        let backward = try timelineSeconds(position)
+        XCTAssertLessThanOrEqual(backward, forward - 10)
+        remote.press(.select)
+        waitUntil("Select commits backward preview", app: app, timeout: 5) {
+            timeline.value as? String == "Timeline"
+        }
+        XCTAssertEqual(try timelineSeconds(position), backward, accuracy: 1)
+        XCTAssertEqual(pause.label, "Play")
+        remote.press(.right)
+        remote.press(.menu)
+        waitUntil("Menu cancels preview", app: app, timeout: 5) {
+            timeline.value as? String == "Timeline"
+        }
+        XCTAssertEqual(try timelineSeconds(position), backward, accuracy: 1)
+        remote.press(.playPause)
+        waitUntil("Committed seek resumes advancing playback", app: app, timeout: 5) {
+            guard position.exists else { return false }
+            return (try? self.timelineSeconds(position)) ?? 0 >= backward + 2
+        }
+        XCTAssertEqual(pause.label, "Pause")
+        remote.press(.right)
+        let playingPreview = try timelineSeconds(position)
+        remote.press(.select)
+        waitUntil("Select commits while playing", app: app, timeout: 3) {
+            timeline.value as? String == "Timeline"
+        }
+        XCTAssertEqual(pause.label, "Pause", "Commit must preserve playing playback")
+        XCTAssertEqual(try timelineSeconds(position), playingPreview, accuracy: 2)
+        let capture = XCTAttachment(screenshot: app.screenshot())
+        capture.name = "timeline-select-forward-backward"
+        capture.lifetime = .keepAlways
+        add(capture)
+    }
+
+    private func timelineSeconds(_ element: XCUIElement) throws -> Double {
+        let label = element.label
+        let parts = label.split(separator: ":").compactMap { Double($0) }
+        XCTAssertTrue(parts.count == 2 || parts.count == 3, "Unexpected timeline: \(label)")
+        return parts.reduce(0) { $0 * 60 + $1 }
+    }
+
     func testLibraryChannelHiddenRevealMoreReportAndCloseRetainSession() throws {
         let server = try TVNavigationServer()
         let origin = try server.start()
