@@ -1,4 +1,5 @@
 """Host-side checks for the bounded native guest-stage protocol."""
+import base64
 import unittest
 from types import SimpleNamespace
 
@@ -106,7 +107,7 @@ class GuestOutsideChallengeBindingTests(unittest.TestCase):
 
         self.assertEqual(removed["removed"], True)
         self.assertEqual([call[0] for call in fake.calls], ["outside_sentinel", "outside_sentinel"])
-        self.assertEqual(fake.calls[0][1]["content_base64"], "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=")
+        self.assertEqual(fake.calls[0][1]["content_base64"], base64.b64encode(challenge).decode("ascii"))
         self.assertEqual(fake.calls[1][1]["expected"], issued)
 
     def test_begin_and_end_reject_forged_or_incomplete_receipts(self):
