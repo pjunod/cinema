@@ -95,7 +95,7 @@ class ReviewContractTests(unittest.TestCase):
             stager.root=Path(directory);stager.admission=NS(assert_current=Mock())
             stager.baseline=NS(commit="a"*40,tree="b"*40,materialize=lambda destination:None)
             stager.family_recipes=None;stager.byte_driver_api=byte_driver;stager.python="/usr/bin/python3"
-            stager.driver_path=Path(byte_driver.__file__);stager.driver_sha256=hashlib.sha256(stager.driver_path.read_bytes()).hexdigest();stager.seeder=None;stager.paired=None;stager.execution_options={}
+            stager.driver_path=Path(byte_driver.__file__);stager.driver_sha256=hashlib.sha256(stager.driver_path.read_bytes()).hexdigest();stager.seeder=None;stager.paired=None;stager.execution_options={};stager.native_store=None
             stager.api=NS(TrustedSourceFile=lambda path,digest:NS(path=path,sha256=digest),FamilyPlan=lambda **values:NS(**values))
             spec={"id":"synthetic","source_commit":"a"*40,"source_tree":"b"*40,"source_projections":{},"source_transform":None,"source_transform_target":None,"allowed_edit_paths":[]}
             handle=stager.prepare(spec,{},layout)
