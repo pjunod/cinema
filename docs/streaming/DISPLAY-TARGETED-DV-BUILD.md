@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** #1216 and batched #1269 merged into `effort/display-targeted-dv`; HDR/SDR promotion qualification and E creative accuracy remain open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
+**Status:** #1216 and batched #1269 merged into `effort/display-targeted-dv`; HDR/SDR promotion qualification and E creative accuracy remain open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (promotion #1271 and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 The matrix below is the current qualification record. Dated implementation
@@ -14,7 +14,7 @@ new source head.
 |---|---|---|
 | A · title scan/HDR10-E | #1216 merged into the effort at `3fbb3f669`. P7 driver348 passed1000/1600 on source503619eb, with frame/audio/cadence/geometry/seek receipts. | Integrated P7/P8 adoption after changed C inputs; earlier P8 passes retain their sources. |
 | B–D · metadata, controls, clients | #1266/#1267/#1268 are closed folded records in #1269. Seven Rust312, ten Rust316,14 badge/72 settings,27 web and compiler361/362/363 passes retain their sources. | Final behavior checks only where failed/materially invalidated, plus applicable final-gate requirements. |
-| Clients | Android30 and Apple13 plus test-build passed on F7eed; client inputs were unchanged through83c; review398 now repairs SDR identities. Current compile-only gate5889 passed Android and Xcode27.1 Apple builds. | Physical-device acceptance. |
+| Clients | Android30 and Apple13 plus test-build passed on F7eed; review398 repairs SDR identities; new client cases await final qualification. Current compile-only gate5889 passed Android and Xcode27.1 Apple builds. | Physical-device acceptance. |
 | E · trims | Reference349 completed42 vendor commands with exit0. Comparison353 completed14 observations; baseline PQ error.110077 and trim-delta errors.44085/.48964 fail creative acceptance. | Full CM4/L8 implementation/contract and creative accuracy remain unfinished; no vendor contact authorized. |
 | F · SDR | Source6d48d4c retains ten Rust, two web and pixel325 (61440 samples, max1code/limit2). Repairba8df0e7 shares fresh FEL admission/receipts with SDR, preserving BT.709 gamma2.4 and100-nit mapping. | Changed factory regression and integrated delivery acceptance. |
 
@@ -22,8 +22,7 @@ A/#1216 and integration#1269 are merged into `effort/display-targeted-dv`;
 #1269 landed `3cc264068` with all78 regression fields. Its tree matches gated
 candidatee6473332f. Compile-only gate5889 passed all8 jobs. Actual sourceba8df0e7
 passed pinned Rust1.97.1 fmt/check/all-target Clippy382, production C link384
-and final-input trim-candidate link393. At83c all1237 protected inputs matched that source; review fixes need new compilation. These compiler runs executed zero product tests, controls,
-media or GPU work; tooling compilation establishes no trim accuracy.
+and final-input trim-candidate link393. Review fixes at a7642100 pass pinned fmt/check/all-target Clippy403. These compiler runs execute no product tests, controls or media; compilation establishes no trim accuracy.
 
 Root chose to qualify/promote completed HDR/SDR under the user's standing
 instruction to use judgment while away. E remains explicitly unfinished;
@@ -570,16 +569,16 @@ original regression fields. The [current matrix](#current-qualification--source-
 owns source-bound evidence. Root's delivery decision covers HDR/SDR with E
 unfinished, not all A–F completion.
 
-Review398 requested four repairs: resolved SDR presentation/replay grade with
-Main10 codec facts preserved; L6/L9 contradictions across missing blocks;
-native processed-SDR identity; activitySDR100 bounds. Fixes and focused cases
-are authored, uncompiled/unexecuted; the same reviewer must confirm closure
-before tests. The bounded native harness adds SDR through real title policy,
-fresh durable admission and normal lease/source validation, not HTTP/full-app
-EOF. The original two-destination reuse test remains; a new SDR-only case avoids
-replaying valid cases. Both source digests include the scanner accumulator;
-existing scanner-binding rotation clears prior title facts.
-Qualification facts publish through the claimed-job fence; ordinary upserts still invalidate aggregates.
+Review398 closed all four production findings and the qualification-fixture
+follow-up at a7642100: actual SDR grade/Main10 facts, L6/L9 contradictions across
+gaps, native SDR identity and activity100 bounds. Pinned Rust403 fmt/check/Clippy
+pass; new scanner regression405 passes40 gap cases plus controls. Other changed
+cases and current native HDR/SDR adoption remain unrun. The bounded native harness
+uses real title policy, claimed-job publication, fresh durable admission and
+normal lease/source checks; it does not prove HTTP/full-app EOF. The old two-case
+reuse test remains; a separate SDR-only case avoids repeating valid cases.
+Both scanner digests include the accumulator; binding rotation clears old facts.
+Two formal producer hashes refresh only reviewed source identity; fences unchanged.
 Main qualification and promotion-test policy reconciliation remain open.
 
 ### Stage PRs target one effort branch
