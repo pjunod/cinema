@@ -246,12 +246,14 @@ os = "macOS"
 arch = "ARM64"
 labels = ["lab", "apple", "xcode-27", "primary"]
 
+# Backup Xcode 27.1/build 27A9275 was verified on 2026-10-23; persistent
+# xcode-27.1 label deployment is pending. The unverified primary stays excluded.
 [[runners]]
 name = "gha-macb-apple-01"
 host = "macb"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27", "backup"]
+labels = ["lab", "apple", "xcode-27", "xcode-27.1", "backup"]
 
 # This VM also runs a Forgejo runner carrying `release-arm64`: the release
 # image's arm64 leg builds there natively instead of under QEMU on X64.
