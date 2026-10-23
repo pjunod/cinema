@@ -7,7 +7,7 @@
     "tables": [
       {
         "anchor": "name = \"hiqlite\"\nversion = \"0.14.0\"",
-        "sha256": "89a14d94492150e41b3975c189657f4e13949a0be285831258742087bf7820bb",
+        "sha256": "8cfcdf3b90e30d364851d55b6bcd5a54e6a27fc68a76587f8d3ab396fa01fdd1",
         "source": "Cargo.lock",
         "table": "proposal \u00a74.2 lockfile runtime dependency pin"
       },
@@ -505,7 +505,7 @@
       },
       {
         "anchor": "struct JobFence",
-        "sha256": "2b8f49a5206f1b44da2a9869cbe3521ff3d486ed37643af8d110b75a53963d0b",
+        "sha256": "2f35b5600e9d404d05f6f9436e4e41a3efc7b90f222623438e2a4ee8bf4a2394",
         "source": "crates/plurxd/src/background_jobs.rs",
         "table": "proposal \u00a74.1 runtime fence"
       },
@@ -592,9 +592,33 @@
         "source": "crates/plurx-worker-control/src/library_lifecycle.rs",
         "anchor": "pub fn step(state: State, event: Event)",
         "sha256": "57a2633266f673a89b22d97763f4538f30a1a8bbd07f45820a28dedd68103ba0"
+      },
+      {
+        "table": "source dependency closure: core test-only worker-control dependency (not a model/runtime premise)",
+        "source": "crates/plurx-core/Cargo.toml",
+        "anchor": "plurx-worker-control = { path = \"../plurx-worker-control\" }",
+        "sha256": "5df066d2324e433f1eba1d7ef9028299a00d6c9fba0572c73a393fb91d7891a6"
+      },
+      {
+        "table": "shared retry policy module export; numeric schedule remains abstracted by the legacy model",
+        "source": "crates/plurx-worker-control/src/lib.rs",
+        "anchor": "pub mod retry_policy;",
+        "sha256": "cfcb0dd04d32b305f6cb22272d69477acfcfbc4107847e16a01987f2e277cf4a"
+      },
+      {
+        "table": "shared retry policy helper; numeric schedule remains abstracted by the legacy model",
+        "source": "crates/plurx-worker-control/src/retry_policy.rs",
+        "anchor": "pub fn retry_delay_ms(id: &str, failed_attempts: i64) -> i64 {",
+        "sha256": "d3ffbeacdebb3214128870c24f244d97f815fef013ec20b466ad2f0dfcf2b395"
+      },
+      {
+        "table": "daemon retry settlement delegates to the shared worker-control helper",
+        "source": "crates/plurxd/src/background_jobs.rs",
+        "anchor": "pub(crate) use plurx_worker_control::retry_policy::retry_delay_ms;",
+        "sha256": "2f35b5600e9d404d05f6f9436e4e41a3efc7b90f222623438e2a4ee8bf4a2394"
       }
     ],
-    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed."
+    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed. Source-pin refresh at 12dcb179c: the daemon now re-exports and calls the shared worker-control retry_delay_ms helper, whose module export and implementation are pinned below. The core worker-control dependency is test-only and is recorded as package-test closure, not a runtime premise. These legacy models continue to abstract the numeric retry schedule as an input; the new source pins do not claim that either model proves the helper arithmetic. Only source hashes for the changed lockfile/daemon file and these directly related dependency/helper inputs are refreshed; model/configuration identities and prior review provenance remain unchanged."
   },
   "configs": {
     "baseline.cfg": {
