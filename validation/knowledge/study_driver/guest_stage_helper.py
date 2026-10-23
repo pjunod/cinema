@@ -690,6 +690,9 @@ def serve(filesystem, binding, source_hashes, input_stream, output_stream):
 
 
 def main():
+    # -I ignores PYTHONDONTWRITEBYTECODE. Keep this verified source pack
+    # immutable during normal imports as well as refusing pre-existing bytecode.
+    sys.dont_write_bytecode = True
     import argparse
     parser = argparse.ArgumentParser()
     for name in ("alias", "physical-work", "control", "filesystem-uuid", "boot-id", "session", "pack-manifest", "pack-sha256"):
