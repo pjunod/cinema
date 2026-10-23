@@ -1,21 +1,18 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation incomplete · published checkpoint
-`4d094726a55f14f3f236085d348b2a079bb0321d` passed exact native Linux core+daemon
-compilation on Rust 1.97.1 (218.172 seconds; log SHA-256
-`02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`). The
-published source has 415 authored regression anchors, not run. The current
-parser/metadata/strict-import prototype passed a host compile in 87.870 seconds
-(stable source log SHA-256
-`ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
-`../evidence/direct-check-20261023-141059.json`). Later early-bootstrap cleanup
-and journal-holder overlay work is not covered. There are 423 local authored
-anchors; tests are NOT RUN. Final Fable review and qualification have not run.
-Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
-Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
-paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
-Primary is the sole integration writer; lower-model assistants may take bounded,
-non-overlapping tasks. This is a delivery breakdown of the existing
+`ee2815c009bc54d535a3d1b5f01e16100c3ffad7` passed exact native Linux core+daemon
+compilation on Rust 1.97.1 (225.501 seconds; log SHA-256
+`a28c6d54629587faae74c3391f3a149b44521d8e7c2e74c8af14bf897b044ff7`). A host
+compile passed in 84.422 seconds (stable log SHA-256
+`5f86c11bc15c0d3e4e790259e49a3e310787517be8a865645546104cbc5b42e2`). The
+published source has 428 authored regression anchors; tests are NOT RUN. Current
+cold-cache caller and cleanup-guard changes are outside those compile receipts;
+root inventory integration is in progress. All V1–V5 and R1/M0–M7 remain OPEN.
+Final review and qualification have not run. Primary owner: direct Codex harness
+(`/root`; actual model unspecified), sole integration writer. Work remains on
+`effort/adaptive-playback-resources`, draft PR #1248. This is a delivery
+breakdown of the existing
 [approved M0–M7 plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md#10-delivery-sequence--integrate-one-effort-prove-each-seam),
 not new design, feature scope, a framework or another review gate.
 The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
@@ -23,23 +20,13 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 ## Authoritative first ordinary VOD source checklist
 
 All five items are **OPEN** at published checkpoint
-`4d094726a55f14f3f236085d348b2a079bb0321d`. The immediate target is one ordinary
-local-file software VOD request on supported Linux, using a fresh rendition in
-the existing configured root. Source-complete is not behavior-verified.
-
-Published checkpoint `4d094726a55f14f3f236085d348b2a079bb0321d` passed exact
-native Linux core+daemon compilation with Rust 1.97.1 (EXIT 0, 218.172 seconds;
-log SHA-256 `02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`);
-its 415 authored regression anchors were not run. A later parser/metadata/strict-
-import prototype passed a host compile in 87.870 seconds (stable source log SHA-
-256 `ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
-`../evidence/direct-check-20261023-141059.json`). Subsequent early-bootstrap
-cleanup/journal-holder overlay work is not covered. There are 423 local authored
-anchors and tests are NOT RUN. The selected Linux ordinary software-transcode
-branch is connected; other recipes remain legacy. Counted HTTP, S cleanup and
-native R→S transfer are connected. Full memory accounting, partial-start
-closure, cold restart/cache adoption and broader selection remain open. All
-V1–V5/R1/M0–M7 remain OPEN; final review and qualification have not run.
+`ee2815c009bc54d535a3d1b5f01e16100c3ffad7`. The selected Linux ordinary
+software-transcode branch connects producer/source custody, counted HTTP,
+cleanup and R→S transfer. Cold-cache caller integration and broader cleanup
+protection are being added outside the published compile receipts; root
+inventory integration is in progress. This branch is not behavior-verified or
+qualified. Full memory accounting, partial-start handling and broader recipe
+selection remain open.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
@@ -73,34 +60,20 @@ platforms and operations below. Acceptance-only remains complete integration →
 independent actual Fable review/fixes → once-only affected qualification/fast lane
 → authorized merge. No pre-review behavioral tests or deployment.
 
-## Active integration — 2026-10-22
+## Active integration — 2026-10-23
 
-The current runtime reader path owns actual descriptor-relative open/read/close
-jobs and a recycled fixed buffer. Only known durable observation releases an
-opaque chunk; Drop requests closure for the same retained owner. Active reader
-cells/leases now transfer with the same native bootstrap owner across R→S. The
-actual prepare-bundle ledger tag is explicitly retained separately from journal
-obligation identity. S cleanup execution, typed settlement and dormant eviction
-are connected; HTTP counted-range selection and native-error causality are in
-the published source. Image verification now reuses only prior successful
-full-S1/digest/ELF attestations on the same rechecked held file. Published
-checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe` passed exact native Linux
-core+daemon all-targets compilation (230.430 seconds). Current cancellation and
-diagnostic integration is compiling on the host; that check is pending.
-Behavioral tests are NOT RUN and no V item closes from this checkpoint.
-
-The current source binds a hashed native ELF held in the same source custodian
-to fd-based fixed launch. A process-only graph witness now requires original
-wait/join/pipe closes and disposal of Child/ChildJob, retaining compact completion.
-Source-copy audits and staged same-owner frozen-bootstrap transfer are authored;
-the private retirement adapter now installs the same native output in provisional
-S before its receipt/command, preserves full R over unknown results, then performs
-one post-COMMIT ledger swap and role rebinding. S retains the whole R nonproducer
-allowance. Published checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe`
-passed native Linux core+daemon all-targets compilation in 230.430 seconds;
-current cancellation and diagnostic integration is compiling on the host. Actual serving,
-complete quotas, S cleanup and ordinary wiring remain open. No behavioral tests
-have run. This does not close any V item.
+The selected Linux ordinary software-transcode branch now connects counted
+HTTP serving, native S cleanup and one R→S transfer. Published checkpoint
+`ee2815c009bc54d535a3d1b5f01e16100c3ffad7` passed native Linux core+daemon
+compilation in 225.501 seconds (log SHA-256
+`a28c6d54629587faae74c3391f3a149b44521d8e7c2e74c8af14bf897b044ff7`); the host
+compile passed in 84.422 seconds (log SHA-256
+`5f86c11bc15c0d3e4e790259e49a3e310787517be8a865645546104cbc5b42e2`). The
+428 authored regression anchors are NOT RUN. Uncommitted cold-cache caller and
+cleanup-guard integration is outside those receipts; root inventory integration
+is in progress. All V1–V5/R1/M0–M7 remain OPEN. Full memory accounting,
+partial-start handling, cold restart/cache adoption and broader recipe selection
+remain open; final review and qualification have not run.
 
 Core exposes a concrete
 [`finite_vod` runtime interface](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
@@ -136,7 +109,7 @@ partial-start ownership and cold restart/cache adoption remain incomplete.
 All V1–V5 remain OPEN. Same-process seeks reuse one rendition owner and its
 full-plan producer; cold-cache reuse remains an R1 gap. Full memory profile,
 partial-start handling and broader recipe selection remain incomplete. The
-[source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
+[source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#implementation-history-through-2026-10-22)
 records the limits. The latest published checkpoint is
 `dd0a5b4cb068abb051678186648d5968488c67fe`; its native Linux core+daemon
 all-target Rust 1.97.1 compile passed in 230.430 seconds (EXIT 0). The current

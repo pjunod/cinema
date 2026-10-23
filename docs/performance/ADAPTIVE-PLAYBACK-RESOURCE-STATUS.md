@@ -1,18 +1,15 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete; published checkpoint
-`4d094726a55f14f3f236085d348b2a079bb0321d` passed exact native Linux core+daemon
-compilation on Rust 1.97.1 (218.172 seconds; log SHA-256
-`02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`). Its 415
-published regression anchors were not run. The parser/metadata/strict-import
-prototype passed a host compile in 87.870 seconds (stable source log SHA-256
-`ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
-`../evidence/direct-check-20261023-141059.json`); later early-bootstrap cleanup
-and journal-holder overlay are not covered. There are 423 local authored
-anchors; tests are NOT RUN. Final Fable review and qualification have not run.
-**Updated:** 2026-10-23 at published checkpoint
-`4d094726a55f14f3f236085d348b2a079bb0321d`; current overlay work is not covered
-by the host compile.
+`ee2815c009bc54d535a3d1b5f01e16100c3ffad7` passed exact native Linux core+daemon
+compilation on Rust 1.97.1 (225.501 seconds; log SHA-256
+`a28c6d54629587faae74c3391f3a149b44521d8e7c2e74c8af14bf897b044ff7`). A host
+compile passed in 84.422 seconds (stable log SHA-256
+`5f86c11bc15c0d3e4e790259e49a3e310787517be8a865645546104cbc5b42e2`). The
+published source has 428 authored regression anchors; tests are NOT RUN. Current
+cold-cache caller and cleanup-guard changes are outside those compile receipts;
+root inventory integration is in progress. All V1–V5 and R1/M0–M7 remain OPEN.
+Final review and qualification have not run.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -36,7 +33,16 @@ Historical M0 proposals and manager direction are kept in the
 [contract history](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md); current source and
 acceptance status are recorded here.
 
-## Direct harness integration — 2026-10-22
+## Implementation history through 2026-10-22
+
+Earlier published checkpoint `4d094726a55f14f3f236085d348b2a079bb0321d`
+passed native Linux core+daemon compilation in 218.172 seconds (log SHA-256
+`02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`); its
+415 authored anchors were not run. The parser/metadata/strict-import prototype
+then passed host compilation in 87.870 seconds (log SHA-256
+`ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
+`../evidence/direct-check-20261023-141059.json`); 423 local anchors at that point
+were not run. These receipts predate the published source below.
 
 Published checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe` passed exact
 native Linux core+daemon all-targets compilation with pinned Rust 1.97.1 (EXIT
