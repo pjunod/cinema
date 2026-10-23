@@ -183,20 +183,22 @@ class ReuseIdentities(OwnedScratch):
 
     def test_retry_policy_leaf_units_are_scheduled_once_with_exact_attribution(self):
         expected = {
-          'driver-retry-policy-bases':'retry_policy::tests::retry_bases_preserve_attempt_thresholds',
-          'driver-retry-policy-jitter':'retry_policy::tests::raw_id_bytes_and_wrapping_signed_seed_preserve_jitter',
+          'driver-retry-policy-bases':('retry_policy::tests::retry_bases_preserve_attempt_thresholds',
+            'retry_policy::tests::retry_bases_preserve_attempt_thresholds'),
+          'driver-retry-policy-jitter':('retry_policy::tests::raw_id_bytes_and_wrapping_signed_seed_preserve_jitter',
+            'retry_policy::tests::raw_id_bytes_and_wrapping_signed_seed_preserve_jitter'),
           'daemon-ordinary_settlement_local_guards_and_validation_preserve_owner':
-            'background_jobs::tests::ordinary_settlement_local_guards_and_validation_preserve_owner',
+            ('background_jobs::tests::ordinary_settlement_local_guards_and_validation_preserve_owner',
+             'ordinary_settlement_local_guards_and_validation_preserve_owner'),
         }
-        for name,test_name in expected.items():
+        for name,(test_name,result_class) in expected.items():
             with self.subTest(name=name):
                 argv = runner.CASES[name]
                 self.assertEqual(sum(test_name in command for command in runner.CASES.values()),1)
                 self.assertEqual(argv[-4:], [test_name,'--','--exact','--nocapture'])
                 output = f'test {test_name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
                 evidence = runner.case_evidence(name,output,0)
-                self.assertEqual(evidence,{'test_count':1,'result_class':test_name})
-
+                self.assertEqual(evidence,{'test_count':1,'result_class':result_class})
     def test_ordinary_settlement_boundary_closes_only_in_complete_receipt(self):
         partial = runner.settlement_receipt_boundary(False)
         complete = runner.settlement_receipt_boundary(True)
