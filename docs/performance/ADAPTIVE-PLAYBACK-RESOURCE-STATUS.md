@@ -45,7 +45,7 @@ budget clarification now changes their bytes; review §6 records that delta
 without inventing new independent approval. The coverage map and implementation header now describe current owners; this
 administrative refresh does not change the approved requirements. Current
 plan/acceptance/review SHA-256 respectively:
-`1a8b49498043582343668df38150abf2a048fd48e5b628f73a0fc2430eb1a4fe`,
+`272cacf853c54cf4126ea939e31f4fc1949240e565febced7a5b58bed91ac4d5`,
 `73067de47ac10b0855637540e0e3d84724e0361aa72340de9c867bd4cf1159fd`,
 `3c5a4b08f83617e73273e520aa4a9a78a60e69ab550618c97f2966756898e8ed`.
 

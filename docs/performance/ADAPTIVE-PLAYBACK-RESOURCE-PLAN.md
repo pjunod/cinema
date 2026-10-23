@@ -64,18 +64,21 @@ being integrated; each remaining adapter below is still open. Workload-specific
 deadlines and recovery actions remain distinct; one generic “speed above 1×”
 test is wrong.
 
-| Work | Construct, terminal owner and current admission | Adaptive adapter still needed |
-|---|---|---|
-| Direct play, byte ranges and cached segments | HTTP handlers; selected VOD serves materialized files through its retained producer owner. Direct/range source paths use `SourceFence` / source actors; response bodies retain their reader owners. | Selected finite VOD is connected. Direct/range adapters still need to bind source reads, response body lifetime and egress to the same runtime claim. |
-| Progressive/HLS copy and remux | [`produce_copy_output_job`](../../crates/plurxd/src/transcode/manager/produce.rs) opens the source; [`spawn_copy_reader_owner`](../../crates/plurxd/src/transcode/producer/prepublication_executor.rs) owns stdout and the scratch writer. Rolling retirement owns child reap and scratch cleanup. | [`EncodePermit::admit_source_copy`](../../crates/plurxd/src/vodencode.rs) estimates CPU/decoder capacity; copy preparation also uses `admit_fragment`. A runtime adapter must join source, child, reader, package/scratch and egress through retirement. |
-| Software and hardware transcode | Rolling start constructs session and child in [`manager/start.rs`](../../crates/plurxd/src/transcode/manager/start.rs) / [`rolling/session.rs`](../../crates/plurxd/src/transcode/rolling/session.rs); `RollingRetirementSettlement` owns reap and scratch convergence. | Existing `Admissions` bundles and rolling settlement remain separate from whole-graph runtime accounting, including helper processes and response delivery. |
-| HDR/DV/HLG/tone mapping, scaling and deinterlacing | DV runtime, Mac processing and ordinary filtered encode construct distinct processing graphs and helper children. | Adapter must account the complete graph, transfers, authoring and helper-child terminal ownership; an encoder-only claim does not cover this row. |
-| Audio-only and subtitle work | Playback owns audio-only processes; [`subtitle_work::run_subtitle_work`](../../crates/plurxd/src/subtitle_work.rs) owns the durable job fence and cancellation through settlement. | Subtitle queue work uses [`admit_fragment`](../../crates/plurxd/src/transcode/manager/construct.rs); foreground self-claim has a separate one-CPU admission. Join extraction/source I/O, decoder process, memory and realtime output to a common runtime owner. |
-| Continuous/adaptive VOD | `rolling::Session` owns producer state; its retirement settlement retains admission, child and scratch cleanup. | Existing encoder admission and scratch ledger do not account successor overlap, source reads, retained reader memory and response egress as one family. |
-| Live TV and timeshift | [`DvrTransport::spawn_transport_worker`](../../crates/plurxd/src/live_tv/dvr.rs) owns tuner ingress; `LiveTvProcess` retains child/job and optional video admission. | Transport lease and `admit_live_tv` cover distinct pieces; add a runtime claim spanning tuner, process, fanout, ring buffers and latency. Copy/audio-only paths have no video permit. |
-| DVR recording | [`DvrSink`](../../crates/plurxd/src/live_tv/dvr.rs) owns a bounded queue and writer task through `sync_all`/close; transport fans bytes out to attached sinks. | Sink queue and writer lifecycle need recording storage, write deadlines and transport resources joined under one durable runtime owner. |
-| Background indexing, previews, pretranscode and probes | [`admit_fragment`](../../crates/plurxd/src/transcode/manager/construct.rs), [`produce_pretranscode_job`](../../crates/plurxd/src/transcode/manager/produce.rs), and [`start_source_probe`](../../crates/plurxd/src/transcode/source_preparation.rs) have separate owners; probe settlement retains source, child/pipe cleanup and permit. | Preserve each existing job fence while unifying source, scratch/result memory, child and yield/reap accounting with foreground priority. |
-| Cluster relay and remote source read | [`relay_if_remote`](../../crates/plurxd/src/http/hls/relay.rs) resolves the owner; [`relay_response_with_limits_observed`](../../crates/plurxd/src/media_sessions.rs) owns upstream stream and bounded body-channel pump. | Relay limits and durable routing do not create local adaptive claims for ingress, network/egress or remote worker/source resources. Add worker-owned preparation and per-node accounting; do not infer capacity from peer booleans. |
+| Work | Resources and service obligation |
+|---|---|
+| Direct play, byte ranges and cached segments | Read throughput, open handles, memory, egress; requested bytes by response deadline |
+| Progressive/HLS copy and remux | Demux CPU, source I/O, audio work, packaging, scratch and egress |
+| Software and hardware transcode | Decode/filter/encode engines, CPU time, RAM/VRAM, I/O; playable media by deadline |
+| HDR/DV/HLG/tone mapping, scaling and deinterlacing | Whole graph, including helper children, transfers and authoring |
+| Audio-only and subtitle work | CPU, decoder processes, extraction I/O and memory; preparation deadline or realtime output |
+| Continuous/adaptive VOD | Audio/video rendition family, successor overlap and startup peaks |
+| Live TV and timeshift | Tuner/source limits, paced input, decode/encode, ring buffers and transport latency |
+| DVR recording | Committed capture and write deadlines, bounded queues, storage capacity |
+| Background indexing, previews, pretranscode and probes | Accounted, bounded work that yields to foreground and capture |
+| Cluster relay and remote source read | Worker, source node and ingress resource domains; network in both directions |
+
+The [current production-owner map](ADAPTIVE-PLAYBACK-DELIVERY.md#production-owner-map--open-adapters)
+records concrete constructors, terminal owners and missing runtime adapters.
 
 Count a shared producer once, each actual sink separately, and retained memory
 or devices even while the producer is paced. Cached output consumes delivery
