@@ -142,10 +142,25 @@ Authored regression anchors (not executed):
   from the held probe into absolute source windows, helper receipt validation
   and both output-grid mappings. Original BL/EL/RPU keys and the soundtrack's
   held FORMAT offset stay intact. Missing, negative, producer-default or
-  differing FORMAT/video origins still refuse explicitly. Candidate source,
-  authored regressions and the [origin contract](DV_PROCESSING_TOOLS.md#three-clocks-share-one-observed-common-origin)
-  await independent delta review, native helper rebuild/daemon relink and
-  focused qualification. No test or native success is inferred from source.
+  differing FORMAT/video origins still refuse explicitly. Actual new-daemon
+  P7 continuation276 with bundle275 reached the same complete17,983 valid L1
+  observations, then1000 nits failed with true exit101 at the helper's
+  observed-origin validity guard;1600 was unrun and no new mapped P7 cell passed.
+
+  Bounded CPU diagnostic308 found the root cause: after find_stream_info both
+  FORMAT and selected-stream start times were unknown; after four reordered
+  packet reads the stream start changed to208ms. Early versus deferred discard
+  produced identical results. That mutable partial-demux field cannot represent
+  the held common125ms epoch. The next candidate passes the already validated
+  typed held origin explicitly to the helper, reports honest held-probe
+  provenance and uses that epoch for declared-duration EOF. It preserves all
+  probe/packet/frame/byte bounds, original PTS/DTS and soundtrack offset.
+  The authored protocol/EOF regressions and updated
+  [origin contract](DV_PROCESSING_TOOLS.md#three-clocks-share-one-observed-common-origin)
+  await independent completed-delta review before any build or execution.
+  Native helper rebuild/bundle/daemon linkage and first-window qualification
+  precede only the missing P7 cells. No new test or native success is inferred
+  from this candidate's source.
 
   Current-main source integration is `a316`, plus test-only missing scanner
   fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.
