@@ -10,6 +10,35 @@ struct OverlayRecord {
     inventory: ObligationInventory,
 }
 
+fn next_holder_matches_previous(
+    previous: Option<&RecoveredRHolder>,
+    original_owner: Uuid,
+    next: &RecoveredRHolder,
+) -> bool {
+    match previous {
+        None => next.previous_owner_id == original_owner,
+        Some(previous) => {
+            next.obligation_id == previous.obligation_id
+                && next.previous_owner_id == previous.current_owner_id
+                && next.adoption_sequence > previous.adoption_sequence
+                && next.original_r_sequence == previous.original_r_sequence
+                && next.head == previous.head
+                && next.root_member_id == previous.root_member_id
+                && next.root_pid == previous.root_pid
+                && next.root_creation_marker == previous.root_creation_marker
+        }
+    }
+}
+
+fn predecessor_unchanged_since_adoption(
+    previous: &RecoveredRHolder,
+    last_data_sequence: i64,
+    last_operation_sequence: i64,
+) -> bool {
+    last_data_sequence == previous.original_r_sequence
+        && last_operation_sequence == previous.adoption_sequence
+}
+
 pub(super) fn load_overlay(
     connection: &Connection,
     schema_version: i64,
@@ -25,7 +54,7 @@ pub(super) fn load_overlay(
     )?;
     let mut rows = statement.query([])?;
     let mut holders = Vec::new();
-    let mut effective = BTreeMap::<Uuid, (Uuid, i64)>::new();
+    let mut effective = BTreeMap::<Uuid, RecoveredRHolder>::new();
     let mut recovered = BTreeMap::<Uuid, OverlayRecord>::new();
     while let Some(row) = rows.next()? {
         if holders.len() >= codec::ACTIVE_LIMIT {
@@ -89,11 +118,7 @@ pub(super) fn load_overlay(
             recovered.insert(obligation_id, record);
         }
         let record = recovered.get(&obligation_id).ok_or_else(codec::invalid)?;
-        if effective.contains_key(&obligation_id) {
-            // This version supports one exact old-domain handoff, not a chain
-            // of reconstructed producer owners.
-            return Err(codec::invalid());
-        }
+        let previous = effective.get(&obligation_id);
         let ObligationInventory::TypedV2 { manifest, members } = &record.inventory else {
             return Err(codec::invalid());
         };
@@ -124,9 +149,21 @@ pub(super) fn load_overlay(
                 _ => None,
             })
             .ok_or_else(codec::invalid)?;
+        let holder = RecoveredRHolder {
+            obligation_id,
+            adoption_sequence,
+            operation_id,
+            previous_owner_id,
+            current_owner_id,
+            original_r_sequence,
+            head,
+            root_member_id,
+            root_pid,
+            root_creation_marker,
+        };
         if !owners.contains(&previous_owner_id)
             || !owners.contains(&current_owner_id)
-            || record.owner_id != previous_owner_id
+            || !next_holder_matches_previous(previous, record.owner_id, &holder)
             || previous_owner_id == current_owner_id
             || adoption_sequence <= original_r_sequence
             || adoption_sequence > next
@@ -147,18 +184,6 @@ pub(super) fn load_overlay(
             return Err(codec::invalid());
         }
         let _current_head = scratch_head;
-        let holder = RecoveredRHolder {
-            obligation_id,
-            adoption_sequence,
-            operation_id,
-            previous_owner_id,
-            current_owner_id,
-            original_r_sequence,
-            head,
-            root_member_id,
-            root_pid,
-            root_creation_marker,
-        };
         if record.phase == Phase::Settled {
             validate_settled_holder(connection, &holder, record)?;
         }
@@ -178,7 +203,7 @@ pub(super) fn load_overlay(
         {
             return Err(codec::invalid());
         }
-        effective.insert(obligation_id, (current_owner_id, adoption_sequence));
+        effective.insert(obligation_id, holder.clone());
         holders.push(holder);
     }
     validate_overlay_history(connection, &holders, &recovered, next)?;
@@ -202,7 +227,18 @@ fn validate_settled_holder(
     let ObligationInventory::TypedV2 { manifest, .. } = &record.inventory else {
         return Err(codec::invalid());
     };
+    validate_settled_dispositions(manifest, &settlement, holder)
+}
+
+fn validate_settled_dispositions(
+    manifest: &v2::Manifest,
+    settlement: &v2::Settlement,
+    holder: &RecoveredRHolder,
+) -> Result<(), CustodyError> {
     if settlement.owner_id != manifest.owner_id || settlement.graph_id != manifest.graph_id {
+        return Err(codec::invalid());
+    }
+    if settlement.members.len() != manifest.members.len() {
         return Err(codec::invalid());
     }
     let mut roots = 0;
@@ -216,8 +252,9 @@ fn validate_settled_holder(
             return Err(codec::invalid());
         }
         match (plan, fact) {
-            (v2::MemberPlan::SourceV1 { source, .. }, v2::ClosedFact::SourceV1 { copies, .. })
-                if copies.len() == source.planned_copies.len()
+            (v2::MemberPlan::SourceV1 { source, .. }, v2::ClosedFact::SourceV1 { holder_id, copies })
+                if holder_id == &source.holder_id
+                    && copies.len() == source.planned_copies.len()
                     && copies.iter().all(|copy| matches!(copy,
                         v2::CopyClosed::DomainExtinct { domain, .. } if domain == &source.filesystem_domain)) => {}
             (v2::MemberPlan::LegacyV1 { planned }, v2::ClosedFact::LegacyV1 { fact })
@@ -233,7 +270,8 @@ fn validate_settled_holder(
                 && *root_creation_marker == holder.root_creation_marker => {
                 tasks += 1;
             }
-            (v2::MemberPlan::ScratchAssetsV3 { .. }, v2::ClosedFact::ScratchAssetsV3 { .. }) => {
+            (v2::MemberPlan::ScratchAssetsV3 { plan, .. }, v2::ClosedFact::ScratchAssetsV3 { plan: closed, .. })
+                if plan == closed => {
                 scratch += 1;
             }
             _ => return Err(codec::invalid()),
@@ -256,23 +294,19 @@ fn validate_overlay_history(
     if holders.is_empty() {
         return Ok(());
     }
-    let mut tracked = BTreeMap::<Uuid, (i64, i64, AssetEventRefV1, bool, bool)>::new();
+    let mut chains = BTreeMap::<Uuid, Vec<&RecoveredRHolder>>::new();
     for holder in holders {
-        if tracked
-            .insert(
-                holder.obligation_id,
-                (
-                    holder.original_r_sequence,
-                    holder.adoption_sequence,
-                    holder.head.clone(),
-                    false,
-                    false,
-                ),
-            )
-            .is_some()
-        {
-            return Err(codec::invalid());
-        }
+        let chain = chains.entry(holder.obligation_id).or_default();
+        chain.try_reserve(1).map_err(|_| codec::invalid())?;
+        chain.push(holder);
+    }
+    let mut tracked = BTreeMap::<Uuid, (i64, i64, AssetEventRefV1, usize, bool)>::new();
+    for (id, chain) in &chains {
+        let first = chain.first().ok_or_else(codec::invalid)?;
+        tracked.insert(
+            *id,
+            (first.original_r_sequence, 0, first.head.clone(), 0, false),
+        );
     }
     let mut sequence = 0_i64;
     let mut rows =
@@ -297,21 +331,28 @@ fn validate_overlay_history(
         }
         match result {
             DiskResult::RecoveredRAdoption(ack) if tracked.contains_key(&ack.obligation_id) => {
-                let holder = holders
-                    .iter()
-                    .find(|holder| holder.obligation_id == ack.obligation_id)
-                    .ok_or_else(codec::invalid)?;
                 let state = tracked
                     .get_mut(&ack.obligation_id)
                     .ok_or_else(codec::invalid)?;
-                if state.3
+                let chain = chains.get(&ack.obligation_id).ok_or_else(codec::invalid)?;
+                let holder = chain.get(state.3).ok_or_else(codec::invalid)?;
+                if state.4
+                    || (state.3 > 0
+                        && !predecessor_unchanged_since_adoption(
+                            chain[state.3 - 1],
+                            state.0,
+                            state.1,
+                        ))
                     || operation_id != holder.operation_id
                     || ack.sequence != holder.adoption_sequence
                     || ack.obligation_id != holder.obligation_id
+                    || ack.previous_owner_id != holder.previous_owner_id
+                    || ack.current_owner_id != holder.current_owner_id
                 {
                     return Err(codec::invalid());
                 }
-                state.3 = true;
+                state.1 = ack.sequence;
+                state.3 += 1;
             }
             DiskResult::AssetChangedV3(record)
                 if tracked.contains_key(&record.ack.obligation_id) =>
@@ -319,8 +360,20 @@ fn validate_overlay_history(
                 let state = tracked
                     .get_mut(&record.ack.obligation_id)
                     .ok_or_else(codec::invalid)?;
-                if record.ack.sequence > state.1 {
-                    if !state.3 || state.4 || record.change.previous.as_ref() != Some(&state.2) {
+                let first = chains
+                    .get(&record.ack.obligation_id)
+                    .and_then(|chain| chain.first())
+                    .ok_or_else(codec::invalid)?;
+                if record.ack.sequence > first.adoption_sequence {
+                    if state.3 == 0
+                        || state.3
+                            != chains
+                                .get(&record.ack.obligation_id)
+                                .ok_or_else(codec::invalid)?
+                                .len()
+                        || state.4
+                        || record.change.previous.as_ref() != Some(&state.2)
+                    {
                         return Err(codec::invalid());
                     }
                     state.0 = record.ack.sequence;
@@ -329,12 +382,22 @@ fn validate_overlay_history(
                 }
             }
             DiskResult::Changed(ack)
-                if tracked.get(&ack.obligation_id).is_some_and(|state| state.3) =>
+                if tracked
+                    .get(&ack.obligation_id)
+                    .is_some_and(|state| state.3 > 0) =>
             {
                 let state = tracked
                     .get_mut(&ack.obligation_id)
                     .ok_or_else(codec::invalid)?;
-                if state.4 || ack.phase != Phase::Settled || ack.sequence <= state.1 {
+                if state.4
+                    || state.3
+                        != chains
+                            .get(&ack.obligation_id)
+                            .ok_or_else(codec::invalid)?
+                            .len()
+                    || ack.phase != Phase::Settled
+                    || ack.sequence <= state.1
+                {
                     return Err(codec::invalid());
                 }
                 state.0 = ack.sequence;
@@ -344,14 +407,14 @@ fn validate_overlay_history(
             DiskResult::RetiredWithAssets(ack)
                 if tracked
                     .get(&ack.source_obligation_id.uuid())
-                    .is_some_and(|state| state.3) =>
+                    .is_some_and(|state| state.3 > 0) =>
             {
                 return Err(codec::invalid())
             }
             DiskResult::AssetChangedV2(record)
                 if tracked
                     .get(&record.ack.obligation_id)
-                    .is_some_and(|state| state.3) =>
+                    .is_some_and(|state| state.3 > 0) =>
             {
                 return Err(codec::invalid())
             }
@@ -361,13 +424,9 @@ fn validate_overlay_history(
     if sequence != next {
         return Err(codec::invalid());
     }
-    for holder in holders {
-        let (last_data, _, head, adopted, settled) = tracked
-            .get(&holder.obligation_id)
-            .ok_or_else(codec::invalid)?;
-        let record = obligations
-            .get(&holder.obligation_id)
-            .ok_or_else(codec::invalid)?;
+    for (id, chain) in &chains {
+        let (last_data, _, head, adopted, settled) = tracked.get(id).ok_or_else(codec::invalid)?;
+        let record = obligations.get(id).ok_or_else(codec::invalid)?;
         let ObligationInventory::TypedV2 { members, .. } = &record.inventory else {
             return Err(codec::invalid());
         };
@@ -378,7 +437,7 @@ fn validate_overlay_history(
                 _ => None,
             })
             .ok_or_else(codec::invalid)?;
-        if !*adopted
+        if *adopted != chain.len()
             || *last_data != record.sequence
             || *settled != (record.phase == Phase::Settled)
             || head != current_head
@@ -425,6 +484,7 @@ pub(super) fn adopt(
         || proof.installation_id() != witness.installation_id
         || proof.current_owner_id() != owner
         || proof.previous_owner_id() != effective
+        || proof.original_owner_id() != record.owner_id
         || proof.original_sequence() != record.sequence
         || claim.graph_id() != record.graph_id
         || claim.resources() != record.resources
@@ -446,6 +506,7 @@ pub(super) fn adopt(
     )?;
     if chosen.obligation_id() != claim.obligation_id()
         || chosen.old_owner_id() != claim.old_owner_id()
+        || chosen.original_owner_id() != claim.original_owner_id()
         || chosen.sequence() != claim.sequence()
         || chosen.state_head() != claim.state_head()
         || chosen.scratch_member_id() != claim.scratch_member_id()
@@ -508,7 +569,7 @@ pub(super) fn change(
     )?;
     if row.0 != authority.adoption_sequence()
         || codec::uuid_from_bytes(&row.1)? != authority.adoption_operation_id()
-        || codec::uuid_from_bytes(&row.2)? != authority.original_owner_id()
+        || codec::uuid_from_bytes(&row.2)? != authority.previous_owner_id()
         || codec::uuid_from_bytes(&row.3)? != owner
         || codec::uuid_from_bytes(&row.4)? != authority.state_head().operation_id.uuid()
         || u64::try_from(row.5).map_err(|_| codec::invalid())? != authority.state_head().revision
@@ -703,4 +764,177 @@ fn settle(
         sequence,
         phase: Phase::Settled,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovered_r_overlay_requires_exact_root_task_and_scratch_dispositions() {
+        let (manifest, _, mut settlement) = v2::tests::never_acquired_v3_fixture();
+        let v2::MemberPlan::LegacyV1 { planned: root } = &manifest.members[0] else {
+            unreachable!()
+        };
+        let v2::MemberPlan::SourceV1 { source, .. } = &manifest.members[1] else {
+            unreachable!()
+        };
+        let v2::MemberPlan::ScratchAssetsV3 { plan: scratch, .. } = &manifest.members[2] else {
+            unreachable!()
+        };
+        let v2::MemberPlan::VodOutputTaskV1 { task, .. } = &manifest.members[3] else {
+            unreachable!()
+        };
+        let operation_id = settlement.operation_id;
+        let head = AssetEventRefV1 {
+            operation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+            revision: 1,
+        };
+        settlement.members[0] = v2::MemberDisposition::Closed {
+            member_id: v2::Id::new(root.member_id).unwrap(),
+            fact: v2::ClosedFact::LegacyV1 {
+                fact: crate::resource_custody::ClosedMemberFact {
+                    member_id: root.member_id,
+                    adapter: root.adapter.clone(),
+                    adapter_version: root.adapter_version,
+                    domain: root.domain.clone(),
+                    object_identity: "123:456".into(),
+                    evidence: "typed overlay fixture only".into(),
+                },
+            },
+        };
+        settlement.members[1] = v2::MemberDisposition::Closed {
+            member_id: source.member_id,
+            fact: v2::ClosedFact::SourceV1 {
+                holder_id: source.holder_id,
+                copies: source
+                    .planned_copies
+                    .iter()
+                    .cloned()
+                    .map(|copy| v2::CopyClosed::DomainExtinct {
+                        copy,
+                        operation_id,
+                        domain: source.filesystem_domain.clone(),
+                    })
+                    .collect(),
+            },
+        };
+        settlement.members[2] = v2::MemberDisposition::Closed {
+            member_id: v2::Id::new(manifest.members[2].member_id()).unwrap(),
+            fact: v2::ClosedFact::ScratchAssetsV3 {
+                plan: scratch.clone(),
+                exact_head: head.clone(),
+                operation_id: head.operation_id,
+            },
+        };
+        settlement.members[3] = v2::MemberDisposition::Closed {
+            member_id: task.member_id,
+            fact: v2::ClosedFact::VodOutputTaskDomainExtinctV1 {
+                task: task.clone(),
+                root_member_id: task.root_member_id,
+                root_pid: 123,
+                root_creation_marker: 456,
+                operation_id,
+            },
+        };
+        let holder = RecoveredRHolder {
+            obligation_id: Uuid::new_v4(),
+            adoption_sequence: 2,
+            operation_id: Uuid::new_v4(),
+            previous_owner_id: manifest.owner_id.uuid(),
+            current_owner_id: Uuid::new_v4(),
+            original_r_sequence: 1,
+            head,
+            root_member_id: root.member_id,
+            root_pid: 123,
+            root_creation_marker: 456,
+        };
+        // This is an audit-overlay shape test; it creates no native exit proof.
+        validate_settled_dispositions(&manifest, &settlement, &holder).unwrap();
+
+        let mut wrong_root = holder.clone();
+        wrong_root.root_pid = 124;
+        assert!(validate_settled_dispositions(&manifest, &settlement, &wrong_root).is_err());
+
+        let mut wrong_scratch = settlement.clone();
+        let v2::MemberDisposition::Closed {
+            fact: v2::ClosedFact::ScratchAssetsV3 { plan, .. },
+            ..
+        } = &mut wrong_scratch.members[2]
+        else {
+            unreachable!()
+        };
+        plan.asset_id = v2::Id::new(Uuid::new_v4()).unwrap();
+        assert!(validate_settled_dispositions(&manifest, &wrong_scratch, &holder).is_err());
+
+        let mut wrong_task = settlement;
+        let v2::MemberDisposition::Closed {
+            fact: v2::ClosedFact::VodOutputTaskDomainExtinctV1 { root_member_id, .. },
+            ..
+        } = &mut wrong_task.members[3]
+        else {
+            unreachable!()
+        };
+        *root_member_id = v2::Id::new(Uuid::new_v4()).unwrap();
+        assert!(validate_settled_dispositions(&manifest, &wrong_task, &holder).is_err());
+    }
+
+    #[test]
+    fn recovered_r_handoff_requires_contiguous_owner_and_unchanged_fold() {
+        let original = Uuid::new_v4();
+        let obligation_id = Uuid::new_v4();
+        let head = AssetEventRefV1 {
+            operation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+            revision: 1,
+        };
+        let first = RecoveredRHolder {
+            obligation_id,
+            adoption_sequence: 11,
+            operation_id: Uuid::new_v4(),
+            previous_owner_id: original,
+            current_owner_id: Uuid::new_v4(),
+            original_r_sequence: 5,
+            head: head.clone(),
+            root_member_id: Uuid::new_v4(),
+            root_pid: 123,
+            root_creation_marker: 456,
+        };
+        let second = RecoveredRHolder {
+            adoption_sequence: 12,
+            operation_id: Uuid::new_v4(),
+            previous_owner_id: first.current_owner_id,
+            current_owner_id: Uuid::new_v4(),
+            ..first.clone()
+        };
+        assert!(next_holder_matches_previous(None, original, &first));
+        assert!(next_holder_matches_previous(
+            Some(&first),
+            original,
+            &second
+        ));
+        assert!(predecessor_unchanged_since_adoption(&first, 5, 11));
+        assert!(!predecessor_unchanged_since_adoption(&first, 12, 12));
+
+        let mut skipped_owner = second.clone();
+        skipped_owner.previous_owner_id = original;
+        assert!(!next_holder_matches_previous(
+            Some(&first),
+            original,
+            &skipped_owner
+        ));
+        let mut changed_head = second.clone();
+        changed_head.head.revision = 2;
+        assert!(!next_holder_matches_previous(
+            Some(&first),
+            original,
+            &changed_head
+        ));
+        let mut changed_root = second;
+        changed_root.root_creation_marker += 1;
+        assert!(!next_holder_matches_previous(
+            Some(&first),
+            original,
+            &changed_root
+        ));
+    }
 }

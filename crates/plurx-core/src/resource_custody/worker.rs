@@ -141,22 +141,36 @@ impl CustodyJournal {
             if !matches!(
                 record.phase,
                 Phase::AcquisitionPossible | Phase::Sealed | Phase::UnknownHeld
-            ) || snapshot
-                .recovered_r_holders
-                .iter()
-                .any(|holder| holder.obligation_id == record.obligation_id)
-            {
+            ) {
                 continue;
             }
+            let previous_holder = snapshot
+                .recovered_r_holders
+                .iter()
+                .filter(|holder| holder.obligation_id == record.obligation_id)
+                .max_by_key(|holder| holder.adoption_sequence);
             let Ok(daemon_exit) =
                 recovery::prove_previous_daemon_exit(&options, &snapshot, record.owner_id)
             else {
                 continue;
             };
+            let previous_holder_exit = if let Some(holder) = previous_holder {
+                let Ok(exit) = recovery::prove_previous_daemon_exit(
+                    &options,
+                    &snapshot,
+                    holder.current_owner_id,
+                ) else {
+                    continue;
+                };
+                Some(exit)
+            } else {
+                None
+            };
             let Ok(root_exit) = recovery::prove_previous_fixed_root_exit(
                 &options,
                 &snapshot,
                 &daemon_exit,
+                previous_holder_exit,
                 record.obligation_id,
             ) else {
                 continue;

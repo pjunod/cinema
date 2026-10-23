@@ -21,7 +21,8 @@ impl ImportedActiveR {
         authority.binding() == binding
             && authority.obligation_id() == self.claim.obligation_id()
             && authority.graph_id() == self.claim.graph_id()
-            && authority.original_owner_id() == self.claim.old_owner_id()
+            && authority.original_owner_id() == self.claim.original_owner_id()
+            && authority.previous_owner_id() == self.claim.old_owner_id()
             && authority.root_member_id() == self.root_exit.root_member_id()
             && authority.root_pid() == self.root_exit.pid()
             && authority.root_creation_marker() == self.root_exit.creation_marker()
@@ -129,6 +130,7 @@ pub(crate) struct RecoveredRAuthority {
     obligation_id: Uuid,
     graph_id: Uuid,
     original_owner_id: Uuid,
+    previous_owner_id: Uuid,
     current_owner_id: Uuid,
     binding: ReservationBinding,
     adoption_operation_id: Uuid,
@@ -154,6 +156,9 @@ impl RecoveredRAuthority {
     }
     pub(crate) fn original_owner_id(&self) -> Uuid {
         self.original_owner_id
+    }
+    pub(crate) fn previous_owner_id(&self) -> Uuid {
+        self.previous_owner_id
     }
     pub(crate) fn current_owner_id(&self) -> Uuid {
         self.current_owner_id
@@ -206,6 +211,9 @@ impl NativeActiveRImportProof {
     pub(crate) fn previous_owner_id(&self) -> Uuid {
         self.owner.claim.old_owner_id()
     }
+    pub(crate) fn original_owner_id(&self) -> Uuid {
+        self.owner.claim.original_owner_id()
+    }
     pub(crate) fn current_owner_id(&self) -> Uuid {
         self.current_owner_id
     }
@@ -235,7 +243,8 @@ impl NativeActiveRImportProof {
             installation_id: self.installation_id(),
             obligation_id: self.obligation_id(),
             graph_id: self.graph_id(),
-            original_owner_id: self.previous_owner_id(),
+            original_owner_id: self.original_owner_id(),
+            previous_owner_id: self.previous_owner_id(),
             current_owner_id: self.current_owner_id(),
             binding: self.binding,
             adoption_operation_id: ack.operation_id,
@@ -271,7 +280,8 @@ impl RecoveredRAuthority {
             || claim.installation_id() != self.installation_id
             || claim.obligation_id() != self.obligation_id
             || claim.graph_id() != self.graph_id
-            || claim.old_owner_id() != self.original_owner_id
+            || claim.original_owner_id() != self.original_owner_id
+            || claim.old_owner_id() != self.previous_owner_id
             || claim.state_head() != &self.state_head
             || claim.scratch_member_id().uuid() != self.scratch_member_id
             || imported.root_exit.root_member_id() != self.root_member_id
@@ -497,7 +507,7 @@ impl NodeResourceRuntime {
         if self.rendition_root.as_deref()
             != Some(Path::new(&bootstrap.authority.resolved_absolute_root))
             || bootstrap.authority.installation_id.uuid() != self.recovered.installation_id
-            || plan.filesystem_domain.daemon_owner_id.uuid() != claim.old_owner_id()
+            || plan.filesystem_domain.daemon_owner_id.uuid() != claim.original_owner_id()
             || plan.filesystem_domain.os_boot != self.owner.os_boot
             || !matches!(&plan.filesystem_domain.mount_namespace, v2::NativeValue::Known { value }
                 if std::fs::metadata("/proc/self/ns/mnt").is_ok_and(|m| m.ino() == *value))

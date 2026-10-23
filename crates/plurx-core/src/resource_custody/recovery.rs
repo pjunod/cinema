@@ -202,6 +202,20 @@ pub(crate) struct PositivePreviousRootExit {
     creation_marker: u64,
     pid_namespace: String,
     executable_binding: String,
+    previous_holder: Option<RecoveredRHolder>,
+    previous_holder_exit: Option<PositivePreviousOwnerExit>,
+}
+
+fn exact_latest_r_holder(
+    holders: &[RecoveredRHolder],
+    obligation_id: Uuid,
+    expected: &RecoveredRHolder,
+) -> bool {
+    holders
+        .iter()
+        .filter(|holder| holder.obligation_id == obligation_id)
+        .max_by_key(|holder| holder.adoption_sequence)
+        == Some(expected)
 }
 
 impl PositivePreviousRootExit {
@@ -213,6 +227,11 @@ impl PositivePreviousRootExit {
     }
     pub(crate) fn creation_marker(&self) -> u64 {
         self.creation_marker
+    }
+    pub(crate) fn effective_previous_owner_id(&self) -> Uuid {
+        self.previous_holder
+            .as_ref()
+            .map_or(self.old_owner.owner_id, |holder| holder.current_owner_id)
     }
     pub(crate) fn matches(
         &self,
@@ -252,6 +271,18 @@ impl PositivePreviousRootExit {
                     && record.graph_id == graph_id
                     && record.owner_id == self.old_owner.owner_id
             })
+            && match (&self.previous_holder, &self.previous_holder_exit) {
+                (None, None) => !recovered
+                    .recovered_r_holders
+                    .iter()
+                    .any(|holder| holder.obligation_id == obligation_id),
+                (Some(expected), Some(exit)) => {
+                    exact_latest_r_holder(&recovered.recovered_r_holders, obligation_id, expected)
+                        && expected.current_owner_id == exit.owner_id()
+                        && exit.matches(recovered, current, expected.current_owner_id)
+                }
+                _ => false,
+            }
     }
 }
 
@@ -299,6 +330,7 @@ pub(crate) fn prove_previous_fixed_root_exit(
     options: &OpenOptions,
     recovered: &RecoverySnapshot,
     daemon_exit: &PositivePreviousOwnerExit,
+    previous_holder_exit: Option<PositivePreviousOwnerExit>,
     obligation_id: Uuid,
 ) -> Result<PositivePreviousRootExit, CustodyError> {
     let unavailable = || {
@@ -309,6 +341,19 @@ pub(crate) fn prove_previous_fixed_root_exit(
     };
     if !daemon_exit.matches(recovered, &options.owner, daemon_exit.owner_id()) {
         return Err(unavailable());
+    }
+    let previous_holder = recovered
+        .recovered_r_holders
+        .iter()
+        .filter(|holder| holder.obligation_id == obligation_id)
+        .max_by_key(|holder| holder.adoption_sequence)
+        .cloned();
+    match (&previous_holder, &previous_holder_exit) {
+        (None, None) => {}
+        (Some(holder), Some(exit))
+            if holder.current_owner_id == exit.owner_id()
+                && exit.matches(recovered, &options.owner, holder.current_owner_id) => {}
+        _ => return Err(unavailable()),
     }
     let _held_installation_lock = &options.daemon_lock;
     let record = recovered
@@ -514,6 +559,8 @@ pub(crate) fn prove_previous_fixed_root_exit(
         creation_marker,
         pid_namespace: pid_namespace.clone(),
         executable_binding: executable_binding.clone(),
+        previous_holder,
+        previous_holder_exit,
     })
 }
 
@@ -523,6 +570,7 @@ pub(crate) fn prove_previous_fixed_root_exit(
 pub(crate) struct ActiveFiniteRImportClaim {
     obligation_id: Uuid,
     graph_id: Uuid,
+    original_owner_id: Uuid,
     old_owner_id: Uuid,
     journal_id: Uuid,
     installation_id: Uuid,
@@ -544,6 +592,9 @@ impl ActiveFiniteRImportClaim {
     }
     pub(crate) fn old_owner_id(&self) -> Uuid {
         self.old_owner_id
+    }
+    pub(crate) fn original_owner_id(&self) -> Uuid {
+        self.original_owner_id
     }
     pub(crate) fn journal_id(&self) -> Uuid {
         self.journal_id
@@ -640,6 +691,21 @@ pub(crate) fn select_active_finite_r(
     let Some(v2::Observed::ScratchAssetsV3 { state }) = &member.envelope.observed else {
         return Err(unavailable());
     };
+    let previous_holder = recovered
+        .recovered_r_holders
+        .iter()
+        .filter(|holder| holder.obligation_id == record.obligation_id)
+        .max_by_key(|holder| holder.adoption_sequence);
+    if previous_holder.is_some_and(|holder| {
+        holder.original_r_sequence != record.sequence
+            || state.asset.head.as_ref() != Some(&holder.head)
+            || holder.root_member_id != exit.root_member_id
+            || holder.root_pid != exit.pid
+            || holder.root_creation_marker != exit.creation_marker
+            || holder.current_owner_id != exit.effective_previous_owner_id()
+    }) {
+        return Err(unavailable());
+    }
     if member.phase != "acquired"
         || state.asset.lifecycle != ScratchLifecycleV1::Open
         || state.bootstrap.phase != BootstrapPhase::SinkReady
@@ -673,7 +739,8 @@ pub(crate) fn select_active_finite_r(
     Ok(ActiveFiniteRImportClaim {
         obligation_id: record.obligation_id,
         graph_id: record.graph_id,
-        old_owner_id: record.owner_id,
+        original_owner_id: record.owner_id,
+        old_owner_id: exit.effective_previous_owner_id(),
         journal_id: recovered.journal_id,
         installation_id: recovered.installation_id,
         resources: record.resources,
@@ -975,6 +1042,48 @@ pub(crate) fn select_dormant_retained_s(
 mod namespace_tests {
     use super::*;
     use crate::adaptive_resources::ResourceVector;
+
+    #[test]
+    fn prior_r_exit_proof_cannot_follow_a_drifted_latest_holder() {
+        let obligation_id = Uuid::new_v4();
+        let first = RecoveredRHolder {
+            obligation_id,
+            adoption_sequence: 4,
+            operation_id: Uuid::new_v4(),
+            previous_owner_id: Uuid::new_v4(),
+            current_owner_id: Uuid::new_v4(),
+            original_r_sequence: 2,
+            head: v2::scratch::AssetEventRefV1 {
+                operation_id: v2::Id::new(Uuid::new_v4()).unwrap(),
+                revision: 1,
+            },
+            root_member_id: Uuid::new_v4(),
+            root_pid: 123,
+            root_creation_marker: 456,
+        };
+        assert!(exact_latest_r_holder(
+            &[first.clone()],
+            obligation_id,
+            &first
+        ));
+        let newer = RecoveredRHolder {
+            adoption_sequence: 5,
+            operation_id: Uuid::new_v4(),
+            previous_owner_id: first.current_owner_id,
+            current_owner_id: Uuid::new_v4(),
+            ..first.clone()
+        };
+        assert!(!exact_latest_r_holder(
+            &[first.clone(), newer.clone()],
+            obligation_id,
+            &first
+        ));
+        assert!(exact_latest_r_holder(
+            &[first, newer.clone()],
+            obligation_id,
+            &newer
+        ));
+    }
 
     fn owner(owner_id: Uuid, pid: u32, boot: Uuid, namespace: Option<String>) -> OwnerIdentity {
         OwnerIdentity {

@@ -168,11 +168,6 @@ impl NodeResourceRuntime {
             operation_id,
             members: facts,
         };
-        let key = TransitionKey {
-            handle,
-            operation_id: operation_id.uuid(),
-            expected_sequence: role.sequence,
-        };
         // The original imported manifest/fold can exceed the settled R charge
         // once that charge is refunded. Move only its constructor-born compact
         // old-domain proof into a separate retained owner before native take.
@@ -230,6 +225,11 @@ impl NodeResourceRuntime {
         drop(domains);
         let closure = RecoveredRClosure::from_validated_native(native, domain);
         let receipt = PhysicalCloseReceipt::from_recovered_r(closure);
+        let key = TransitionKey {
+            handle,
+            operation_id: operation_id.uuid(),
+            expected_sequence: role.sequence,
+        };
         role.bootstrap.clear();
         role.response_budget = None;
         role.transition = Some(Transition {

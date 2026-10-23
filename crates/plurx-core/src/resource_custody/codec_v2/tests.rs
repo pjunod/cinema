@@ -334,7 +334,8 @@ fn pending_output_io_cannot_be_reclassified_as_retired_assets() {
     assert!(retained_minimum_resources(&manifest).is_err());
 }
 
-fn never_acquired_v3_fixture() -> (Manifest, Vec<Envelope>, Settlement) {
+pub(in crate::resource_custody) fn never_acquired_v3_fixture(
+) -> (Manifest, Vec<Envelope>, Settlement) {
     use scratch::bootstrap::*;
     let mut manifest = fixture();
     let old = scratch::tests::plan();
@@ -525,4 +526,61 @@ fn never_acquired_settlement_requires_exact_unobserved_plans() {
     };
     task.member_id = id();
     assert!(validate_settlement(&manifest, &envelopes, &foreign_task).is_err());
+}
+
+#[test]
+fn old_task_domain_extinction_requires_exact_root_and_process_identity() {
+    let (manifest, envelopes, mut settlement) = never_acquired_v3_fixture();
+    let MemberPlan::VodOutputTaskV1 { task, .. } = &manifest.members[3] else {
+        unreachable!()
+    };
+    let task = task.clone();
+    settlement.members[3] = MemberDisposition::Closed {
+        member_id: task.member_id,
+        fact: ClosedFact::VodOutputTaskDomainExtinctV1 {
+            root_member_id: task.root_member_id,
+            task,
+            root_pid: 123,
+            root_creation_marker: 456,
+            operation_id: id(),
+        },
+    };
+    // This checks the audit shape only. No native exit proof is minted here.
+    validate_settlement(&manifest, &envelopes, &settlement).unwrap();
+    let mut wrong_root = settlement.clone();
+    let MemberDisposition::Closed {
+        fact: ClosedFact::VodOutputTaskDomainExtinctV1 { root_member_id, .. },
+        ..
+    } = &mut wrong_root.members[3]
+    else {
+        unreachable!()
+    };
+    *root_member_id = id();
+    assert!(validate_settlement(&manifest, &envelopes, &wrong_root).is_err());
+
+    let mut zero_pid = settlement.clone();
+    let MemberDisposition::Closed {
+        fact: ClosedFact::VodOutputTaskDomainExtinctV1 { root_pid, .. },
+        ..
+    } = &mut zero_pid.members[3]
+    else {
+        unreachable!()
+    };
+    *root_pid = 0;
+    assert!(validate_settlement(&manifest, &envelopes, &zero_pid).is_err());
+
+    let mut zero_marker = settlement;
+    let MemberDisposition::Closed {
+        fact:
+            ClosedFact::VodOutputTaskDomainExtinctV1 {
+                root_creation_marker,
+                ..
+            },
+        ..
+    } = &mut zero_marker.members[3]
+    else {
+        unreachable!()
+    };
+    *root_creation_marker = 0;
+    assert!(validate_settlement(&manifest, &envelopes, &zero_marker).is_err());
 }
