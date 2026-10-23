@@ -2063,9 +2063,8 @@ impl DvFelMetadata {
                         return Err(invalid());
                     }
                     for piece in 0..segments {
-                        let count = usize::try_from(p.poly_order_minus1[piece])
-                            .map_err(|_| invalid())?
-                            + 2;
+                        let count =
+                            usize::try_from(p.poly_order_minus1[piece]).map_err(|_| invalid())? + 2;
                         if !coefficients(&p.poly_coef_int[piece], &p.poly_coef[piece], count) {
                             return Err(invalid());
                         }
@@ -2623,39 +2622,38 @@ pub fn dv_receipt_completed_window(
         {
             return Err(invalid());
         }
-        let (mut operations, retained_levels) = if requires_el
-            && plan.destination == DvDestination::Hdr10
-        {
-            if plan.source.el_kind != DvElKind::Fel {
-                return Err(invalid());
-            }
-            let shape = plan.capability.bl_shape;
-            let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
-            (parsed.applied_operations, parsed.metadata_levels)
-        } else if requires_el {
-            let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
-            if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
-                return Err(invalid());
-            }
-            (
-                plan.graph.required_operations(),
-                parsed
-                    .other_metadata_levels
-                    .union(&parsed.creative_trim_levels)
-                    .copied()
-                    .collect(),
-            )
-        } else {
-            let shape = plan.capability.bl_shape;
-            let parsed = DvBaseMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
-            if Some(i64::from(parsed.profile)) != plan.source.catalog.profile
-                || parsed.source_el_kind != plan.source.el_kind
-                || plan.capability.el_shape.is_some()
-            {
-                return Err(invalid());
-            }
-            (parsed.applied_operations, parsed.metadata_levels)
-        };
+        let (mut operations, retained_levels) =
+            if requires_el && plan.destination == DvDestination::Hdr10 {
+                if plan.source.el_kind != DvElKind::Fel {
+                    return Err(invalid());
+                }
+                let shape = plan.capability.bl_shape;
+                let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+                (parsed.applied_operations, parsed.metadata_levels)
+            } else if requires_el {
+                let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
+                if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
+                    return Err(invalid());
+                }
+                (
+                    plan.graph.required_operations(),
+                    parsed
+                        .other_metadata_levels
+                        .union(&parsed.creative_trim_levels)
+                        .copied()
+                        .collect(),
+                )
+            } else {
+                let shape = plan.capability.bl_shape;
+                let parsed = DvBaseMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+                if Some(i64::from(parsed.profile)) != plan.source.catalog.profile
+                    || parsed.source_el_kind != plan.source.el_kind
+                    || plan.capability.el_shape.is_some()
+                {
+                    return Err(invalid());
+                }
+                (parsed.applied_operations, parsed.metadata_levels)
+            };
         if !requires_el || plan.destination == DvDestination::Hdr10 {
             // Source metadata determines conditional reshaping, not the
             // post-reconstruction export already verified by the daemon.

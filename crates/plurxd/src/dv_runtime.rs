@@ -1885,8 +1885,10 @@ mod fel_mapping_tests {
             "width": 64, "height": 64, "el_bound": true,
             "nlq_active": true, "render_errors": 0,
             "polynomial_segments": 3, "mmr_segments": 0
-        })).expect("bounded render trace fixture");
-        row.validate_fel_curves(raw, (64, 64)).expect("raw curves agree");
+        }))
+        .expect("bounded render trace fixture");
+        row.validate_fel_curves(raw, (64, 64))
+            .expect("raw curves agree");
         row.polynomial_segments = None;
         assert!(row.validate_fel_curves(raw, (64, 64)).is_err());
         row.polynomial_segments = Some(3);
