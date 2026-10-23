@@ -107,6 +107,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn recovered_obligations_preserve_both_managed_scratch_layouts() {
+        for explicit in [false, true] {
+            let root = crate::test_tempdir().expect("scratch fixture");
+            let mut storage = plurx_core::config::StorageConfig {
+                data_dir: root.path().join("data"),
+                ..Default::default()
+            };
+            if explicit {
+                storage.transcode_dir = root.path().join("scratch");
+            }
+            let dirs = crate::create_dirs_for_storage_with_protected_policy(
+                &storage,
+                &[],
+                &[],
+                crate::StartupScratchCleanup::Clear,
+            )
+            .expect("initial clean scratch claim");
+            let retained = dirs.transcode.join("retained-native-entry");
+            std::fs::write(&retained, b"original native bytes").expect("retained fixture");
+            crate::create_dirs_for_storage_with_protected_policy(
+                &storage,
+                &[],
+                &[],
+                crate::StartupScratchCleanup::PreserveRecovered,
+            )
+            .expect("preserve scratch with old obligations");
+            assert_eq!(
+                std::fs::read(&retained).expect("original entry remains"),
+                b"original native bytes"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn dangling_namespace_symlink_is_not_absent_authority() {

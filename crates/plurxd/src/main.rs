@@ -1837,7 +1837,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let catalogue = selected.catalogue_reader();
         let resource_runtime =
             resource_runtime::open_before_cleanup(&mut selected, &config).await?;
-        let dirs = create_dirs_for_config(&config)?;
+        let dirs = create_dirs_for_config_with_runtime(&config, resource_runtime.as_deref())?;
         // Probing only measures ffmpeg and the host, so cancelling it leaves
         // nothing half-written. Racing it is what keeps `docker stop` during a
         // slow probe from waiting out its grace period while this process
@@ -2781,12 +2781,13 @@ fn spawn_gdm_responder(
     });
 }
 
-/// Lay out the configured storage roots, and clear exactly the one directory
-/// that must not survive a restart.
+/// Lay out the configured storage roots. Clear session scratch only when no
+/// restored resource obligation can still own an entry under it.
 ///
-/// Which of these persists is load-bearing. The session scratch is cleared at
-/// every boot, because a half-written segment from a killed process is worse
-/// than no segment. Finished transcodes, extracted subtitles, ffmpeg runtime
+/// Which of these persists is load-bearing. A fresh startup clears partial
+/// session scratch; recovered custody preserves the whole scratch root until
+/// the original native owners can prove what may be removed. Finished
+/// transcodes, extracted subtitles, ffmpeg runtime
 /// data, and persistent VOD renditions are explicit siblings so each path is
 /// canonicalized and fenced before scratch cleanup. In particular, never
 /// derive siblings from the resolved target of a legacy transcode-cache
@@ -2883,7 +2884,29 @@ fn create_dirs_for_storage(storage: &StorageConfig) -> anyhow::Result<crate::sta
     create_dirs_for_storage_with_protected(storage, &[], &[])
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupScratchCleanup {
+    Clear,
+    PreserveRecovered,
+}
+
+#[cfg(test)]
 fn create_dirs_for_config(config: &Config) -> anyhow::Result<crate::state::Dirs> {
+    create_dirs_for_config_with_runtime(config, None)
+}
+
+fn create_dirs_for_config_with_runtime(
+    config: &Config,
+    runtime: Option<&plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+) -> anyhow::Result<crate::state::Dirs> {
+    // The recovered inventory's path strings are advisory for this decision:
+    // even one unknown native effect can share an alias with scratch. Keep the
+    // entire managed scratch root until its original obligation is settled.
+    let cleanup = if runtime.is_some_and(|runtime| runtime.has_recovered_obligations()) {
+        StartupScratchCleanup::PreserveRecovered
+    } else {
+        StartupScratchCleanup::Clear
+    };
     let key_path = config.cluster.credential_key_path(&config.storage.data_dir);
     let key_identity = plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&key_path)
         .with_context(|| {
@@ -2893,13 +2916,33 @@ fn create_dirs_for_config(config: &Config) -> anyhow::Result<crate::state::Dirs>
             )
         })?;
     let shared_cache = existing_shared_cache_roots(config);
-    create_dirs_for_storage_with_protected(&config.storage, &shared_cache, &[key_identity])
+    create_dirs_for_storage_with_protected_policy(
+        &config.storage,
+        &shared_cache,
+        &[key_identity],
+        cleanup,
+    )
 }
 
+#[cfg(test)]
 fn create_dirs_for_storage_with_protected(
     storage: &StorageConfig,
     extra_persistent: &[(&str, &std::path::Path)],
     extra_protected: &[plurx_core::fs_secure::FileIdentity],
+) -> anyhow::Result<crate::state::Dirs> {
+    create_dirs_for_storage_with_protected_policy(
+        storage,
+        extra_persistent,
+        extra_protected,
+        StartupScratchCleanup::Clear,
+    )
+}
+
+fn create_dirs_for_storage_with_protected_policy(
+    storage: &StorageConfig,
+    extra_persistent: &[(&str, &std::path::Path)],
+    extra_protected: &[plurx_core::fs_secure::FileIdentity],
+    cleanup: StartupScratchCleanup,
 ) -> anyhow::Result<crate::state::Dirs> {
     let mut normalized = storage.clone();
     canonicalize_configured_dir(&mut normalized.data_dir, "data")?;
@@ -2921,8 +2964,12 @@ fn create_dirs_for_storage_with_protected(
     // `run` calls this only after `select_daemon_store` has acquired and
     // retained the data-directory daemon lock, so this is the single startup
     // point authorized to clear scratch.
-    let (dirs, protected) =
-        prepare_storage_dirs(&normalized, true, extra_persistent, extra_protected)?;
+    let (dirs, protected) = prepare_storage_dirs(
+        &normalized,
+        cleanup == StartupScratchCleanup::Clear,
+        extra_persistent,
+        extra_protected,
+    )?;
     let crate::state::Dirs {
         artwork,
         transcode,
@@ -2931,10 +2978,11 @@ fn create_dirs_for_storage_with_protected(
         runtime_cache,
         renditions,
     } = dirs;
-    // Explicit scratch was claimed and cleared by `prepare_storage_dirs`
-    // through one retained no-follow descriptor. Legacy scratch has no marker,
-    // but receives the same descriptor-relative, rename-resistant cleanup.
-    if normalized.transcode_dir.as_os_str().is_empty() {
+    // On a clean start, explicit scratch was claimed and cleared by
+    // `prepare_storage_dirs` through one retained no-follow descriptor.
+    // Legacy scratch receives the same descriptor-relative cleanup. Recovered
+    // obligations preserve both scratch layouts without unlinking any entry.
+    if cleanup == StartupScratchCleanup::Clear && normalized.transcode_dir.as_os_str().is_empty() {
         plurx_core::fs_secure::clear_scratch_with_protected_blocking(&transcode, &protected)
             .with_context(|| {
                 format!(
