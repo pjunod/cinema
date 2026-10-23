@@ -1,11 +1,12 @@
 use super::*;
+use crate::adaptive_resources::PhysicalRetirementReceipt;
 use crate::adaptive_resources::{
     FamilyDemand, FamilyRole, FamilyRoleDemand, MemoryClaim, ReservationBinding, ReservationState,
     ResourceLedger, ResourceReservation, ResourceVector, WorkloadDemand,
 };
 use crate::process::observation::Metric;
 use crate::process::observation::ProcessIdentity;
-use crate::resource_custody::{CommittedRetirementReceipt, PhysicalRetirementReceipt};
+use crate::resource_custody::CommittedRetirementReceipt;
 use uuid::Uuid;
 
 fn baseline(at: Instant, pid: u32, start_marker: u64, cpu_ns: u64, epoch: u64) -> Baseline {

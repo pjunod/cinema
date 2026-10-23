@@ -3,7 +3,6 @@
 use super::super::response_memory::ResponseBudget;
 use super::bootstrap::retirement::ProducerFiniteClosure;
 use super::*;
-use crate::adaptive_resources::runtime::recovery::RecoveredRAuthority;
 use crate::resource_custody::recovery::PositivePreviousRootExit;
 
 /// Nonclone closure of the imported scratch plus the exact old fixed process
