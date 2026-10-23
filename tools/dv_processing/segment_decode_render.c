@@ -549,12 +549,13 @@ static void render_pairs(void) {
     struct base_mapping base_mapped;
     if (base_only)
       base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
+    struct pl_dovi_metadata fel_mapped;
+    if (!base_only)
+      map_fel_rpu(bl, nalu, raw->size + 2, &fel_mapped,
+                  !window_mode || compare_window(bl->pts, window_start) >= 0,
+                  bl->width, bl->height);
     if (window_mode) {
       if (compare_window(bl->pts, window_start) < 0) {
-        struct pl_dovi_metadata guarded;
-        if (!base_only)
-          map_parsed_rpu(nalu, raw->size + 2, &guarded, false,
-                         bl->width, bl->height);
         last_pts = bl->pts;
         need(++preroll <= preroll_cap, "bounded preroll exhausted");
         drop_pair();
@@ -626,9 +627,9 @@ static void render_pairs(void) {
     if (base_only)
       base_gpu_render(bl, &base_mapped, emitted, pts, duration, write_rgb, diagnostic_hashes);
     else
-      gpu_render(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
+      gpu_render_mapped(native, mapped ? hardware : NULL, nalu, raw->size + 2, emitted, pts, duration,
                  chroma(bl->chroma_location), chroma(el->chroma_location),
-                 write_rgb, NULL, debug_frames);
+                 write_rgb, NULL, debug_frames, &fel_mapped);
     if (EXPORT_YUV10 && dv_yuv10_context.frame_buf)
       hold_rendered_pair();
     char rpu_path[64];

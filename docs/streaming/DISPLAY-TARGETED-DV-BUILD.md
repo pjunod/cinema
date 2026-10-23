@@ -36,12 +36,40 @@
   typed held origin explicitly to the helper, reports honest held-probe
   provenance and uses that epoch for declared-duration EOF. It preserves all
   probe/packet/frame/byte bounds, original PTS/DTS and soundtrack offset.
-  The authored protocol/EOF regressions and updated
-  [origin contract](DV_PROCESSING_TOOLS.md#three-clocks-share-one-observed-common-origin)
-  await independent completed-delta review before any build or execution.
-  Native helper rebuild/bundle/daemon linkage and first-window qualification
-  precede only the missing P7 cells. No new test or native success is inferred
-  from this candidate's source.
+  Exact-source native318 subsequently passed warnings-denied Clippy, daemon
+  linkage and the two changed/new protocol regressions. Short actual P7
+  first-window323 passed the origin protocol and paired the original first
+  picture, then refused at `single identity polynomial segment`; it is a real
+  helper failure, not a mapped-P7 pass. The original timing fixes stay intact.
+
+  Bounded public ffprobe327 classified all 16 returned decoded metadata views:
+  eight nonidentity first-order luma polynomial pieces and one third-order MMR
+  piece for each chroma component, with varying coefficients. Header, matrices
+  and NLQ shape remain consistent across those views; each has raw-RPU and
+  decoded metadata side data. The first packet hash matches the helper's
+  independent coded AU. NLQ offset 512/slope 2048/threshold 0 with maximum 1048576
+  satisfies the unchanged nonbinding-clipping guard. Separate bounded public
+  libdovi inspection329 parsed the 16 original NALs (first-NAL hash also matches):
+  all are fresh P7/FEL, with DM present, residuals enabled and use_prev=false.
+  Those 16 observations do not establish later-title metadata support; the
+  existing raw-parser refusal remains in force.
+
+  The source candidate extracts one shared bounded decoder-metadata validator
+  for base and FEL and calls the public libplacebo mapper. It retains every
+  signalled polynomial/MMR piece, pivot clamp and source color transform,
+  with original coded/RPU association and the actual paired EL. Production
+  preroll uses the same path; direct synthetic controls retain their manual
+  identity projection. Independent Rust fresh-RPU validation reuses the general
+  base-curve predicate plus FEL/NLQ guards at the daemon and completed HDR10
+  factory/receipt boundaries; actual polynomial/MMR counts and conditional
+  operations are bound to each original RPU. Synthetic predicates and P8.1
+  authoring retain their narrower gates. A metadata-only numeric fixture and
+  CPU mapping/grid, typed factory/receipt, NLQ and malformed-input contracts
+  are authored but unrun. The completed delta
+  requires independent review before any build or execution. Native helper
+  rebuild, new 12-source bundle identity and daemon linkage precede a short P7
+  control and only the missing P7 cells. No new mapped-P7 or accuracy pass is
+  inferred from source or the public probe.
 
   Current-main source integration is `a316`, plus test-only missing scanner
   fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.
@@ -54,9 +82,10 @@
   141 shader cases / 866,304 samples, 70 helper results, and P8 passes with
   their original source attribution; do not replay or relabel them.
 
-  Separate FEL comparison/interpreter work is excluded from PR A: no reviewed
-  production fix is available to integrate (the original contract, §§113–115,
-  permits this separation). Full-app C1 still has a final source-EOF failure;
+  Separate FEL comparison/interpreter work remains outside PR A; the bounded
+  shared public mapping correction above addresses the observed renderer
+  refusal and does not establish general FEL accuracy (the original contract,
+  §§113–115, permits separate reference qualification). Full-app C1 still has a final source-EOF failure;
   full-clip and general FEL accuracy remain unclaimed. PR #1216 is owned by
   direct GPT/root; existing full and delta reviews remain retained. Narrow
   integration review, completed P7 evidence, current fast lane, and API merge

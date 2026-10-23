@@ -28,6 +28,12 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Processed P7 FEL rendering uses the same bounded public decoder-metadata
+  mapper as base/RPU rendering, preserving real piecewise polynomial and MMR
+  reshaping instead of requiring the synthetic identity subset. Fresh raw-RPU
+  association, paired enhancement-layer contribution and nonbinding residual
+  clipping checks remain required.
+
 - Processed Dolby Vision windows support an observed nonnegative common
   source origin instead of requiring literal zero. Absolute picture keys,
   soundtrack offset and bounded membership checks stay intact; missing or

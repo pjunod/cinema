@@ -1566,7 +1566,9 @@ pub fn dv_plan_completed_window(
             target.validate_rpu(raw)?;
         }
         if full_fel {
-            if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
+            if input.destination == DvDestination::Hdr10 {
+                DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
+            } else if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
                 return Err(invalid(
                     "completed DV window: RPU outside the renderer's supported subset",
                 ));
@@ -1598,7 +1600,7 @@ pub fn dv_plan_completed_window(
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
     };
     let mut pixels = DvGraph::expected(strategy);
-    if !full_fel {
+    if !full_fel || input.destination == DvDestination::Hdr10 {
         // The graph identifies the supported conditional renderer policy,
         // independent of which curve methods occur in this window. Actual
         // operations and segment counts belong to each fresh frame receipt.
@@ -2006,6 +2008,133 @@ impl DvBaseMetadata {
             polynomial_segments,
             mmr_segments,
             metadata_levels: levels,
+        })
+    }
+}
+
+/// Fresh raw-RPU predicate for the bounded public P7/FEL HDR10 renderer.
+/// Synthetic scalar evidence and P8.1 authoring retain their narrower types.
+#[derive(Debug, Clone)]
+pub struct DvFelMetadata {
+    pub polynomial_segments: u32,
+    pub mmr_segments: u32,
+    pub applied_operations: Vec<DvOperation>,
+    pub metadata_levels: BTreeSet<u8>,
+}
+impl DvFelMetadata {
+    pub fn from_raw_rpu(raw: &[u8], raster: (u32, u32)) -> Result<Self, DvContractError> {
+        use dolby_vision::rpu::{
+            dovi_rpu::DoviRpu,
+            rpu_data_mapping::{DoviMappingMethod, DoviNlqMethod},
+        };
+        let invalid = || DvContractError::Invalid("unsupported fresh FEL RPU");
+        // Reuse general curves, normalization, representation and active area.
+        // This projection cannot award a completed-renderer capability.
+        let base = DvBaseMetadata::from_raw_rpu(raw, raster)?;
+        if base.profile != 7 || base.source_el_kind != DvElKind::Fel {
+            return Err(invalid());
+        }
+        let rpu = DoviRpu::parse_unspec62_nalu(raw).map_err(|_| invalid())?;
+        let h = &rpu.header;
+        let mapping = rpu.rpu_data_mapping.as_ref().ok_or_else(invalid)?;
+        if h.el_bit_depth_minus8 != 2
+            || h.disable_residual_flag
+            || h.reserved_zero_3bits != 0
+            || !h.el_spatial_resampling_filter_flag
+            || mapping.nlq_method_idc != Some(DoviNlqMethod::LinearDeadzone)
+            || mapping.nlq_num_pivots_minus2 != Some(0)
+        {
+            return Err(invalid());
+        }
+        fn coefficients(integer: &[i64], fraction: &[u64], count: usize) -> bool {
+            integer.len() == count
+                && fraction.len() == count
+                && integer
+                    .iter()
+                    .all(|value| (-(1_i64 << 31)..(1_i64 << 31)).contains(value))
+                && fraction.iter().all(|value| *value < 8_388_608)
+        }
+        for curve in &mapping.curves {
+            let segments = curve.pivots.len() - 1;
+            match curve.mapping_idc {
+                DoviMappingMethod::Polynomial => {
+                    let p = curve.polynomial.as_ref().ok_or_else(invalid)?;
+                    if p.poly_coef_int.len() != segments || p.poly_coef.len() != segments {
+                        return Err(invalid());
+                    }
+                    for piece in 0..segments {
+                        let count = usize::try_from(p.poly_order_minus1[piece])
+                            .map_err(|_| invalid())?
+                            + 2;
+                        if !coefficients(&p.poly_coef_int[piece], &p.poly_coef[piece], count) {
+                            return Err(invalid());
+                        }
+                    }
+                }
+                DoviMappingMethod::MMR => {
+                    let m = curve.mmr.as_ref().ok_or_else(invalid)?;
+                    if !coefficients(&m.mmr_constant_int, &m.mmr_constant, segments)
+                        || m.mmr_coef_int.len() != segments
+                        || m.mmr_coef.len() != segments
+                    {
+                        return Err(invalid());
+                    }
+                    for piece in 0..segments {
+                        let orders = usize::from(m.mmr_order_minus1[piece]) + 1;
+                        if m.mmr_coef_int[piece].len() != orders
+                            || m.mmr_coef[piece].len() != orders
+                        {
+                            return Err(invalid());
+                        }
+                        for order in 0..orders {
+                            if !coefficients(
+                                &m.mmr_coef_int[piece][order],
+                                &m.mmr_coef[piece][order],
+                                7,
+                            ) {
+                                return Err(invalid());
+                            }
+                        }
+                    }
+                }
+                _ => return Err(invalid()),
+            }
+        }
+        let nlq = mapping.nlq.as_ref().ok_or_else(invalid)?;
+        for comp in 0..3 {
+            let offset = u64::from(nlq.nlq_offset[comp]);
+            let slope = nlq.linear_deadzone_slope[comp];
+            let threshold = nlq.linear_deadzone_threshold[comp];
+            let maximum_integer = nlq.vdr_in_max_int[comp];
+            let maximum_fraction = nlq.vdr_in_max[comp];
+            if nlq.linear_deadzone_slope_int[comp] != 0
+                || nlq.linear_deadzone_threshold_int[comp] != 0
+                || offset > 1023
+                || slope >= 8_388_608
+                || threshold >= 8_388_608
+                || maximum_integer > 1
+                || maximum_fraction >= 8_388_608
+            {
+                return Err(invalid());
+            }
+            let worst = (2 * offset.max(1023 - offset) - 1) * slope + 2 * threshold;
+            let maximum = maximum_integer * 8_388_608 + maximum_fraction;
+            // Same all-code bound and binary32 rounding reserve as C NLQ.
+            if worst > 2 * 8_388_608 || worst != 0 && worst + 256 > 2 * maximum {
+                return Err(invalid());
+            }
+        }
+        let mut operations = base.applied_operations;
+        let color = operations
+            .iter()
+            .position(|op| *op == DvOperation::RpuColorConversion)
+            .ok_or_else(invalid)?;
+        operations.insert(color, DvOperation::LinearNlqResidual);
+        Ok(Self {
+            polynomial_segments: base.polynomial_segments,
+            mmr_segments: base.mmr_segments,
+            applied_operations: operations,
+            metadata_levels: base.metadata_levels,
         })
     }
 }
@@ -2494,7 +2623,16 @@ pub fn dv_receipt_completed_window(
         {
             return Err(invalid());
         }
-        let (mut operations, retained_levels) = if requires_el {
+        let (mut operations, retained_levels) = if requires_el
+            && plan.destination == DvDestination::Hdr10
+        {
+            if plan.source.el_kind != DvElKind::Fel {
+                return Err(invalid());
+            }
+            let shape = plan.capability.bl_shape;
+            let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+            (parsed.applied_operations, parsed.metadata_levels)
+        } else if requires_el {
             let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
             if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
                 return Err(invalid());
@@ -2518,7 +2656,7 @@ pub fn dv_receipt_completed_window(
             }
             (parsed.applied_operations, parsed.metadata_levels)
         };
-        if !requires_el {
+        if !requires_el || plan.destination == DvDestination::Hdr10 {
             // Source metadata determines conditional reshaping, not the
             // post-reconstruction export already verified by the daemon.
             operations.extend(
