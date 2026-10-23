@@ -6431,7 +6431,7 @@ mod delivered_plan_note_tests {
             recipe_digest: [0x16; 32],
             route: CandidateRoute::Encode,
             planned_codec: Some("hevc".into()),
-            processed_hdr10: true,
+            processed_dv: true,
             normalized_geometry: true,
             width: 1920,
             height: 1080,
@@ -6446,7 +6446,7 @@ mod delivered_plan_note_tests {
         let ordinary_candidate = QualityCandidate {
             id: CandidateId::for_recipe_digest([0x0a; 32]),
             recipe_digest: [0x0a; 32],
-            processed_hdr10: false,
+            processed_dv: false,
             ..candidate.clone()
         };
         ordinary.candidate_context = Some(Box::new(TranscodeManager::candidate_context(
@@ -6483,7 +6483,7 @@ mod delivered_plan_note_tests {
                 .as_ref()
                 .expect("ordinary candidate")
                 .selected_candidate
-                .processed_hdr10
+                .processed_dv
         );
     }
 
