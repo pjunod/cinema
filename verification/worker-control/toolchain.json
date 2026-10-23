@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "kani": "0.68.0",
+  "cbmc": "6.11.0",
+  "nightly": "nightly-2026-08-21",
+  "rustc": "rustc 1.100.0-nightly (8925ea358 2026-08-20)",
+  "release": "https://github.com/model-checking/kani/releases/tag/kani-0.68.0",
+  "digest_source": "https://github.com/model-checking/kani/releases/expanded_assets/kani-0.68.0",
+  "platforms": {
+    "Darwin-arm64": {
+      "target": "aarch64-apple-darwin",
+      "archive": "kani-0.68.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "a5d39a5d5e748253a553aa62f295c6c397287927a28e5e32691d7ff2eda0c398"
+    },
+    "Linux-x86_64": {
+      "target": "x86_64-unknown-linux-gnu",
+      "archive": "kani-0.68.0-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3"
+    }
+  },
+  "fmt_stdlib_sha256": "54596bb5eb43b6f24c4815543c486c997ccac39f9b6dadefb4c98ddd106317c3"
+}

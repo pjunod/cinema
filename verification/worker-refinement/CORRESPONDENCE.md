@@ -148,3 +148,7 @@ including the Hiqlite contract backend. Neither unit command nor any model
 configuration has been run in this phase. The source tests and model configs
 are conformance evidence for selected schedules and assumptions; they do not
 establish mathematical refinement of Rust.
+
+## Production lifecycle extraction
+
+The driver now executes effects from the actual shared Rust controller; [its table](../worker-control/CORRESPONDENCE.md) records the local proof boundary and related existing actions. The current source mappings include that controller body. The older model/schedule receipts remain attributable to their actual candidates; a refreshed source hash is not a new execution of a historical schedule. New driver ordering qualification is recorded by the current [admission ledger](../../docs/cluster/RUST-ADMISSION-REFINEMENT-STATUS.md).
