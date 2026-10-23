@@ -1077,6 +1077,7 @@ paths = [
   "docs/evidence/ffmpeg-hls-write-boundary-*.md",
   "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
+  "scripts/generate-hdr-peak-pattern",
   "scripts/generate-macos-video-fixtures",
   "scripts/generate-macos-video-extensions",
   "scripts/generate-macos-p5-fixtures",
