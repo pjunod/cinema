@@ -1387,6 +1387,71 @@ async fn schema_bindings(fixture: &Fixture) -> Value {
         "schema_inventory": serde_json::from_str::<Value>(&rows[0]).expect("installed schema JSON")})
 }
 
+// Failure-only telemetry: no raw rows, opaque strings, or unbounded trace.
+const CAP_DIAGNOSTIC_TRACE_ACTIONS: usize = 8;
+const CAP_DIAGNOSTIC_ACTION_BYTES: usize = 256;
+const CAP_DIAGNOSTIC_MAX_BYTES: usize = 8_192;
+
+struct CapDiagnostic<'a> {
+    counts: [usize; 4], // retained states, recorded edges, pending frontier, expanded states
+    from: usize,
+    trace: &'a [Action],
+    predecessor: (&'a Episode, &'a str),
+    rejected: (&'a Episode, &'a str, &'a Action),
+}
+
+fn diagnostic_action(encoded: String) -> Value {
+    let bytes = encoded.len();
+    json!({
+        "sha256": format!("{:x}", Sha256::digest(encoded.as_bytes())),
+        "encoded_bytes": bytes,
+        "action": if bytes <= CAP_DIAGNOSTIC_ACTION_BYTES {
+            Some(serde_json::from_str::<Value>(&encoded).expect("serialized action JSON"))
+        } else { None },
+    })
+}
+
+fn state_cap_diagnostic(input: &CapDiagnostic<'_>) -> String {
+    fn dimensions(episode: &Episode) -> Value {
+        json!({
+            "now": episode.now, "claims": episode.claims,
+            "captured_tokens": episode.tokens.each_ref().map(Vec::len),
+            "renewed_claims": episode.renewed_claims.len(),
+            "captured_leases": episode.leases.len(),
+            "domain_acquired": episode.domain_acquired, "removed": episode.removed,
+        })
+    }
+    let start = input
+        .trace
+        .len()
+        .saturating_sub(CAP_DIAGNOSTIC_TRACE_ACTIONS);
+    let tail: Vec<Value> = input.trace[start..]
+        .iter()
+        .map(|action| diagnostic_action(serde_json::to_string(action).expect("action JSON")))
+        .collect();
+    let record = json!({
+        "result_class": "domain_state_cap_diagnostic", "complete": false,
+        "state_cap": STATE_CAP,
+        "retained_state_count": input.counts[0], "recorded_edge_count": input.counts[1],
+        "pending_frontier_count": input.counts[2], "fully_expanded_state_count": input.counts[3],
+        "predecessor_id": input.from,
+        "predecessor_sha256": format!("{:x}", Sha256::digest(input.predecessor.1.as_bytes())),
+        "rejected_successor_sha256": format!("{:x}", Sha256::digest(input.rejected.1.as_bytes())),
+        "rejected_action": diagnostic_action(serde_json::to_string(input.rejected.2).expect("action JSON")),
+        "predecessor_depth": input.trace.len(), "rejected_depth": input.trace.len() + 1,
+        "trace_tail_start": start, "trace_complete": start == 0,
+        "trace_scope": "predecessor trace tail; rejected action is separate",
+        "trace_tail": tail,
+        "dimensions": {"predecessor": dimensions(input.predecessor.0), "rejected": dimensions(input.rejected.0)},
+    });
+    let encoded = serde_json::to_string(&record).expect("cap diagnostic JSON");
+    // At most nine action records, each carrying <=256 action bytes plus a
+    // digest/length, two fixed-shape numeric summaries, and fixed-size keys.
+    // Oversized action payloads retain only their digest/length; rows never leak.
+    debug_assert!(encoded.len() <= CAP_DIAGNOSTIC_MAX_BYTES);
+    encoded
+}
+
 async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String> {
     let fixture = Fixture::new().await;
     if let Some(mutation) = mutation {
@@ -1400,6 +1465,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
     let mut edges = Vec::new();
     let mut by_op = BTreeMap::<String, usize>::new();
     let mut by_result = BTreeMap::<String, usize>::new();
+    let mut expanded_states = 0usize;
     while let Some((from, trace)) = frontier.pop_front() {
         fixture
             .store
@@ -1444,6 +1510,16 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
                 *to
             } else {
                 if states.len() >= STATE_CAP {
+                    eprintln!(
+                        "async_store_cap_diagnostic={}",
+                        state_cap_diagnostic(&CapDiagnostic {
+                            counts: [states.len(), edges.len(), frontier.len(), expanded_states],
+                            from,
+                            trace: &trace,
+                            predecessor: (&episode, &key),
+                            rejected: (&successor, &next, &action),
+                        })
+                    );
                     return Err(format!("DomainStateCap: closure exceeded {STATE_CAP} concrete states; no closed relation emitted"));
                 }
                 invariants(&fixture, &successor).await?;
@@ -1508,6 +1584,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
         if canonical(&fixture, &initial).await != first {
             return Err("RollbackRoundTrip: materialization rollback changed Init".into());
         }
+        expanded_states += 1;
     }
     for op in [
         "claim",
@@ -2221,4 +2298,60 @@ async fn refusal_snapshot_guard_detects_mutation_in_apply() {
         "async_store_refusal_guard={}",
         json!({"named_failure": failure, "detected_in": "apply"})
     );
+}
+
+#[test]
+fn state_cap_diagnostic_is_bounded_and_marks_partial_trace() {
+    let mut episode = Episode::initial();
+    episode.now = i64::MAX;
+    let action = Action::Complete {
+        job: usize::MAX,
+        token: usize::MAX,
+        lease: usize::MAX,
+    };
+    let trace = vec![action.clone(); CAP_DIAGNOSTIC_TRACE_ACTIONS + 1];
+    let predecessor_key = "private-row-value".repeat(1_000);
+    let rejected_key = "different-private-row-value".repeat(1_000);
+    let input = CapDiagnostic {
+        counts: [usize::MAX; 4],
+        from: usize::MAX,
+        trace: &trace,
+        predecessor: (&episode, &predecessor_key),
+        rejected: (&episode, &rejected_key, &action),
+    };
+    let encoded = state_cap_diagnostic(&input);
+    assert!(encoded.len() <= CAP_DIAGNOSTIC_MAX_BYTES);
+    assert!(!encoded.contains("private-row-value"));
+    let record: Value = serde_json::from_str(&encoded).expect("structured cap diagnostic");
+    assert_eq!(record["complete"], false);
+    assert_eq!(record["state_cap"], STATE_CAP);
+    assert_eq!(record["retained_state_count"], usize::MAX);
+    assert_eq!(
+        record["trace_tail"].as_array().expect("tail").len(),
+        CAP_DIAGNOSTIC_TRACE_ACTIONS
+    );
+    assert_eq!(record["trace_complete"], false);
+    assert_eq!(record["trace_tail_start"], 1);
+    assert_eq!(record["predecessor_depth"], trace.len());
+    assert_eq!(record["rejected_depth"], trace.len() + 1);
+    assert_eq!(record["rejected_action"]["action"]["op"], "complete");
+    for field in ["predecessor_sha256", "rejected_successor_sha256"] {
+        assert_eq!(record[field].as_str().expect("digest").len(), 64);
+    }
+    let short = CapDiagnostic {
+        trace: &trace[..1],
+        ..input
+    };
+    let short: Value = serde_json::from_str(&state_cap_diagnostic(&short)).expect("short trace");
+    assert_eq!(short["trace_complete"], true);
+    assert_eq!(short["trace_tail_start"], 0);
+    let oversized = diagnostic_action(
+        serde_json::to_string(&"x".repeat(CAP_DIAGNOSTIC_ACTION_BYTES + 1))
+            .expect("oversized action JSON"),
+    );
+    assert!(oversized["action"].is_null());
+    assert!(
+        oversized["encoded_bytes"].as_u64().expect("length") > CAP_DIAGNOSTIC_ACTION_BYTES as u64
+    );
+    assert_eq!(oversized["sha256"].as_str().expect("digest").len(), 64);
 }

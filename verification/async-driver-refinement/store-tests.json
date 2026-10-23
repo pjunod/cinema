@@ -16,7 +16,8 @@
     "store::async_driver_refinement::protocol_excluded_domain_owner_and_terminal_settlements_are_conformance_only",
     "store::async_driver_refinement::snapshot_table_registry_matches_producer",
     "store::async_driver_refinement::retirement_settle_and_resolution_primitives_preserve_identity_and_rows",
-    "store::async_driver_refinement::refusal_snapshot_guard_detects_mutation_in_apply"
+    "store::async_driver_refinement::refusal_snapshot_guard_detects_mutation_in_apply",
+    "store::async_driver_refinement::state_cap_diagnostic_is_bounded_and_marks_partial_trace"
   ],
   "graph_export_test": "store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed",
   "graph_export_env": "PLURX_ASYNC_STORE_GRAPH",

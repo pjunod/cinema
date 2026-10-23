@@ -177,10 +177,19 @@ class WorkerControlResumeFixtures(unittest.TestCase):
                 self.assertIsNotNone(candidate)
                 self.assertEqual(candidate[1]["status"], status)
 
+    @staticmethod
+    def proof_archive(*members: tuple[str, bytes]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, body in members:
+                archive.writestr(name, body)
+        return buffer.getvalue()
+
     def test_run_selection_records_forgejo_job_status(self) -> None:
         from validation import worker_control_resume as resume
 
-        archive = b"archive bytes"
+        archive = self.proof_archive(("t1_example.json", b"{}"),
+                                     ("t1_example.log", b"VERIFICATION: SUCCESSFUL\n"))
         artifact = dict(self.artifact, size_in_bytes=len(archive))
         api = self.api(artifact=artifact, upload_sha=hashlib.sha256(archive).hexdigest())
         with patch.object(resume, "archive_bytes", return_value=archive):
@@ -192,7 +201,8 @@ class WorkerControlResumeFixtures(unittest.TestCase):
     def test_minimal_main_context_resolves_canonical_pr_before_selection(self) -> None:
         from validation import worker_control_resume as resume
 
-        archive = b"context fixture archive"
+        archive = self.proof_archive(("t1_example.json", b"{}"),
+                                     ("t1_example.log", b"VERIFICATION: SUCCESSFUL\n"))
         artifact = dict(self.artifact, size_in_bytes=len(archive))
         api = self.api(artifact=artifact, upload_sha=hashlib.sha256(archive).hexdigest())
         api.repository = {"id": 1}
@@ -216,6 +226,76 @@ class WorkerControlResumeFixtures(unittest.TestCase):
             candidate = resume.find_prior(resolved_api, scope, current_run, commit, ROOT)
         self.assertEqual(candidate["artifact_id"], 7811)
         self.assertEqual(candidate["job_result"], "failure")
+
+    def test_legacy_candidate_requires_a_same_path_json_log_pair(self) -> None:
+        from validation import worker_control_resume as resume
+
+        for members in (
+            (("t1_example.json", b"{}"),),
+            (("t1_example.log", b"VERIFICATION: SUCCESSFUL\n"),),
+            (("t1_example.json", b"{}"), ("t2_example.log", b"log")),
+            (("source/Cargo.toml", b"[package]\n"),),
+        ):
+            with self.subTest(members=tuple(name for name, _ in members)):
+                self.assertFalse(resume.legacy_archive_has_target_pair(
+                    self.proof_archive(*members)))
+        control_pair = self.proof_archive(
+            ("control-cleanup-order/t3_example.json", b"{}"),
+            ("control-cleanup-order/t3_example.log", b"VERIFICATION: SUCCESSFUL\n"),
+        )
+        self.assertTrue(resume.legacy_archive_has_target_pair(control_pair))
+
+    def test_find_prior_skips_newest_source_only_archive_for_older_proof_pair(self) -> None:
+        from validation import worker_control_resume as resume
+
+        older = self.run
+        newer = dict(self.run, id=5812)
+        source_only = self.proof_archive(("receipt.json", b"{}"),
+                                         ("source/Cargo.toml", b"[package]\n"))
+        complete_pair = self.proof_archive(("t1_example.json", b"{}"),
+                                           ("t1_example.log", b"VERIFICATION: SUCCESSFUL\n"))
+        run_artifacts = {
+            newer["id"]: {"id": 7812, "name": "worker-control-proof-5812-1",
+                           "run_id": newer["id"], "size_in_bytes": len(source_only), "expired": False},
+            older["id"]: {"id": 7811, "name": "worker-control-proof-5811-1",
+                           "run_id": older["id"], "size_in_bytes": len(complete_pair), "expired": False},
+        }
+        archives = {7812: source_only, 7811: complete_pair}
+
+        class HistoryApi:
+            def pages(self, path, query=None, field=None):
+                if path != "/actions/runs":
+                    raise AssertionError(f"unexpected API path: {path}")
+                return [newer, older]
+
+        def candidate(_api, _scope, run, _current_run, _commit, _workspace):
+            artifact = run_artifacts[run["id"]]
+            job = dict(self.job, run_id=run["id"])
+            data = archives[artifact["id"]]
+            return artifact, job, run, 1, hashlib.sha256(data).hexdigest(), {"decision": "fixture"}
+
+        with patch.object(resume, "artifact_for_run", side_effect=candidate), \
+                patch.object(resume, "archive_bytes", side_effect=lambda _api, artifact_id: archives[artifact_id]):
+            result = resume.find_prior(HistoryApi(), self.scope, 5900,
+                                       self.run["commit_sha"], ROOT)
+        self.assertEqual(result["artifact_id"], 7811)
+        self.assertEqual(result["run_id"], 5811)
+        self.assertEqual(result["data"], complete_pair)
+
+    def test_legacy_pair_filter_refuses_unsafe_and_oversized_zip_headers(self) -> None:
+        from validation import python_unit_receipts as receipts
+        from validation import worker_control_resume as resume
+
+        unsafe = self.proof_archive(("../t1_example.json", b"{}"),
+                                    ("../t1_example.log", b"log"))
+        with self.assertRaises(receipts.ReceiptError):
+            resume.legacy_archive_has_target_pair(unsafe)
+        oversized_member = self.proof_archive(
+            ("t1_example.json", b"x" * (resume.MAX_MEMBER_BYTES + 1)),
+            ("t1_example.log", b"log"),
+        )
+        with self.assertRaises(receipts.ReceiptError):
+            resume.legacy_archive_has_target_pair(oversized_member)
 
     def test_current_run_wrong_pr_and_unassigned_jobs_are_rejected(self) -> None:
         from validation import python_unit_receipts as receipts

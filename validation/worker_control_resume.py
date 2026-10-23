@@ -50,6 +50,7 @@ class TransportSpec:
     trust: object = None
     max_archive_bytes: int = MAX_ARCHIVE_BYTES
     label: str = "worker proof"
+    eligible_archive: object = None
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,8 @@ class ExtractionSpec:
 def legacy_transport_spec():
     # Resolve module constants at call time, retaining legacy fixture seams.
     return TransportSpec(workflow=WORKFLOW,proof_job=PROOF_JOB,
-      artifact_prefix='worker-control-proof',max_archive_bytes=MAX_ARCHIVE_BYTES)
+      artifact_prefix='worker-control-proof',max_archive_bytes=MAX_ARCHIVE_BYTES,
+      eligible_archive=legacy_archive_has_target_pair)
 
 
 def legacy_extraction_spec():
@@ -189,6 +191,52 @@ def selected_path(parts: tuple[str, ...], is_dir: bool) -> bool:
                 or relative == "source/Cargo.toml"
                 or SOURCE_FILE.fullmatch(relative) is not None)
     return False
+
+
+def legacy_archive_has_target_pair(data: bytes) -> bool:
+    """Select only archives with a complete case file pair for legacy resume.
+
+    This is transport usefulness, not proof acceptance. The runner still
+    reparses each exact JSON/log pair against its current source and tools.
+    """
+    receipts.require(len(data) <= MAX_ARCHIVE_BYTES, "Proof archive exceeds download limit")
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        members = archive.infolist()
+        receipts.require(0 < len(members) <= MAX_ARCHIVE_FILES,
+                         "Proof archive member count is invalid")
+        total = hydrated = count = 0
+        seen: set[str] = set()
+        pairs: dict[tuple[tuple[str, ...], str], set[str]] = {}
+        for member in members:
+            parts = safe_member(member.filename.rstrip("/") if member.is_dir() else member.filename)
+            canonical = "/".join(parts)
+            receipts.require(canonical not in seen, "Proof archive contains duplicate paths")
+            seen.add(canonical)
+            mode = member.external_attr >> 16
+            receipts.require(not stat.S_ISLNK(mode) and not member.flag_bits & 1,
+                             "Proof archive contains a link or encrypted entry")
+            receipts.require(member.file_size <= MAX_MEMBER_BYTES,
+                             "Proof archive member exceeds size limit")
+            total += member.file_size
+            receipts.require(total <= MAX_TOTAL_BYTES,
+                             "Proof archive expanded size exceeds limit")
+            receipts.require(not (member.file_size and member.compress_size == 0),
+                             "Proof archive has invalid compression metadata")
+            receipts.require(not (member.compress_size
+                                  and member.file_size / member.compress_size > 250),
+                             "Proof archive compression ratio exceeds limit")
+            if member.is_dir() or not selected_path(parts, False):
+                continue
+            receipts.require(member.file_size <= MAX_HYDRATED_BYTES - hydrated
+                             and count < MAX_HYDRATED_FILES,
+                             "Selected proof evidence exceeds hydration limit")
+            hydrated += member.file_size
+            count += 1
+            match = PROOF_FILE.fullmatch(parts[-1])
+            if match:
+                stem, suffix = parts[-1].rsplit(".", 1)
+                pairs.setdefault((parts[:-1], stem), set()).add(suffix)
+    return any(suffixes == {"json", "log"} for suffixes in pairs.values())
 
 
 def extract_evidence(data: bytes, destination: Path, *, spec=None) -> tuple[int, int]:
@@ -340,6 +388,9 @@ def find_prior(api: receipts.API, scope: dict, current_run: int, current_commit:
             archive_sha256 = hashlib.sha256(data).hexdigest()
             receipts.require(archive_sha256 == uploaded_sha256,
                             "downloaded proof archive SHA differs from its upload receipt")
+            if policy.eligible_archive is not None and not policy.eligible_archive(data):
+                print(f"Prior {policy.label} artifact has no complete reusable target pair; checking older evidence")
+                continue
             return {
                 "data": data,
                 "artifact_id": receipts.positive(artifact["id"]),
