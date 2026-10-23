@@ -818,7 +818,10 @@ fn activity_candidates_bounded(
     let mut candidates = transcodes
         .into_iter()
         .map(ActivityCandidate::Transcode)
-        .chain(vod.into_iter().map(|session| ActivityCandidate::Vod(Box::new(session))))
+        .chain(
+            vod.into_iter()
+                .map(|session| ActivityCandidate::Vod(Box::new(session))),
+        )
         .chain(remuxes.into_iter().map(ActivityCandidate::Remux))
         .chain(direct.into_iter().map(ActivityCandidate::Direct))
         .collect::<Vec<_>>();
