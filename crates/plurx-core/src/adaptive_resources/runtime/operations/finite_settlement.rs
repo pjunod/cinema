@@ -103,6 +103,11 @@ impl NodeResourceRuntime {
             operation_id: operation_id.uuid(),
             expected_sequence: role.sequence,
         };
+        #[cfg(target_os = "linux")]
+        if handle.recovery_authority().is_some() {
+            self.retire_recovered_metadata(handle.obligation_id())
+                .map_err(|_| OperationError::State)?;
+        }
         let closure = role
             .bootstrap
             .get_mut(&member)

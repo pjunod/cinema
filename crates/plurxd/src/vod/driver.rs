@@ -8,6 +8,12 @@ pub(super) fn spawn_driver(
     if let Some(producer) = rendition.dir.finite_producer() {
         return tokio::spawn(finite_software::run(shared, rendition, producer));
     }
+    #[cfg(target_os = "linux")]
+    if rendition.dir.is_finite() {
+        // A recovered retained S is complete and has no producer slot to
+        // drive. Its counted output remains owned by the rendition directory.
+        return tokio::spawn(async {});
+    }
     #[cfg(test)]
     if let Some(driver) = controlled_driver::spawn(&rendition) {
         return driver;
@@ -220,6 +226,12 @@ pub(super) async fn perform_driver_step(
         let performed = producer.perform(step).await?;
         rendition.kick();
         return Ok(performed);
+    }
+    #[cfg(target_os = "linux")]
+    if rendition.dir.is_finite() {
+        return Err(std::io::Error::other(
+            "recovered finite output has no producer to control",
+        ));
     }
     let performed = rendition.slot.perform(step, || {}).await?;
     record_performed_step(shared, rendition, step);
@@ -549,8 +561,10 @@ fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
 /// One pass: demand → decide → step → carry it out.
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     #[cfg(target_os = "linux")]
-    if rendition.dir.finite_producer().is_some() {
-        rendition.kick();
+    if rendition.dir.is_finite() {
+        if rendition.dir.finite_producer().is_some() {
+            rendition.kick();
+        }
         return;
     }
 

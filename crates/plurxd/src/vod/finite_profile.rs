@@ -37,6 +37,24 @@ const CHILD_DIRECTORY_RESERVE_BYTES: u64 = 64 * 1024;
 const PARENT_ENTRY_RESERVE_BYTES: u64 = 64 * 1024;
 
 #[cfg(target_os = "linux")]
+pub(super) fn source_version(recipe: &Recipe) -> Result<String, String> {
+    let encoding = recipe
+        .encoding
+        .as_ref()
+        .ok_or_else(|| "finite software profile requires a frozen encoding".to_owned())?;
+    match (
+        recipe.source_object_version.as_deref(),
+        Some(encoding.source_object_version.as_str()),
+    ) {
+        (Some(recipe_version), Some(encoding_version)) if recipe_version != encoding_version => {
+            Err("recipe and encoding source versions differ".into())
+        }
+        (Some(version), _) | (None, Some(version)) if !version.is_empty() => Ok(version.to_owned()),
+        _ => Err("finite software source requires an exact object version".into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn compile(
     shared: &Shared,
     key: &str,
@@ -53,16 +71,7 @@ pub(super) fn compile(
         return Err("finite software profile requires a nonempty plan and rendition key".into());
     }
 
-    let object_version = match (
-        recipe.source_object_version.as_deref(),
-        Some(encoding.source_object_version.as_str()),
-    ) {
-        (Some(recipe_version), Some(encoding_version)) if recipe_version != encoding_version => {
-            return Err("recipe and encoding source versions differ".into());
-        }
-        (Some(version), _) | (None, Some(version)) if !version.is_empty() => version.to_owned(),
-        _ => return Err("finite software source requires an exact object version".into()),
-    };
+    let object_version = source_version(recipe)?;
     if recipe.file.size < 0 || recipe.file.mtime < 0 {
         return Err("finite software source has invalid scanner facts".into());
     }

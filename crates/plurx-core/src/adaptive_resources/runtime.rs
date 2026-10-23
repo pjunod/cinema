@@ -117,6 +117,8 @@ impl NodeResourceRuntime {
     ) -> Result<Self, RuntimeOpenError> {
         let mut runtime = Self::open(options)?;
         runtime.rendition_root = Some(root);
+        #[cfg(target_os = "linux")]
+        runtime.begin_recovered_s_imports(Instant::now() + std::time::Duration::from_secs(30))?;
         Ok(runtime)
     }
 
@@ -151,6 +153,20 @@ impl NodeResourceRuntime {
 
     pub fn has_recovered_obligations(&self) -> bool {
         !self.recovered_bindings.is_empty()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn has_unreconciled_custody(&self) -> bool {
+        self.has_recovered_obligations()
+    }
+
+    /// Complete only the supported exact recovery operations before ordinary
+    /// cleanup/serving. Unknown old domains remain fully held and refuse startup.
+    pub async fn reconcile_startup_recovery(&self) -> Result<(), RuntimeOpenError> {
+        #[cfg(target_os = "linux")]
+        self.reconcile_recovered_s_imports(Instant::now() + std::time::Duration::from_secs(30))
+            .await?;
+        Ok(())
     }
 
     pub fn protected_paths(&self) -> impl Iterator<Item = &Path> {

@@ -1,4 +1,4 @@
-//! Startup composition only. This does not enable finite production demands.
+//! Startup custody composition precedes generic cleanup and ordinary serving.
 use std::path::Path;
 use std::sync::Arc;
 
@@ -63,18 +63,20 @@ pub(crate) async fn open_before_cleanup(
     .await
     .context("resource custody startup owner failed")?
     .context("opening authoritative resource custody before cleanup")?;
+    runtime
+        .reconcile_startup_recovery()
+        .await
+        .context("reconciling exact recovered resource custody")?;
     require_no_unreconciled_custody(&runtime)?;
     Ok(Some(Arc::new(runtime)))
 }
 
 fn require_no_unreconciled_custody(runtime: &NodeResourceRuntime) -> anyhow::Result<()> {
-    // Interim conservative startup refusal: no positive former-owner/platform
-    // recovery backend is implemented yet. Do NOT clear protected paths, probe,
-    // launch competitors or call legacy admission around these full holds.
-    // This is not final production recovery: the existing cleanup owner still
-    // needs positive adapter reconciliation before this restriction can narrow.
+    // Only exact positively imported/committed dormant S can re-enter serving.
+    // Unknown producers, partial effects and unsupported old domains still
+    // retain every charge and cannot be bypassed through legacy startup.
     anyhow::ensure!(
-        !runtime.has_recovered_obligations(),
+        !runtime.has_unreconciled_custody(),
         "unreconciled physical resource custody prevents cleanup and competing startup work"
     );
     Ok(())

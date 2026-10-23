@@ -509,17 +509,10 @@ impl NodeResourceRuntime {
         rendition_id: &str,
         media_file_id: &str,
         object_version: &str,
-        source_members: usize,
         segment_count: u32,
     ) -> Result<Option<FiniteOutput>, FiniteVodError> {
         let selection = self
-            .recovered_finite_selection(
-                rendition_id,
-                media_file_id,
-                object_version,
-                source_members,
-                segment_count,
-            )
+            .recovered_finite_selection(rendition_id, media_file_id, object_version, segment_count)
             .await
             .map_err(|_| OperationError::State)?;
         Ok(selection.map(

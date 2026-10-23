@@ -11,7 +11,14 @@ impl NodeResourceRuntime {
     ) -> Result<OwnedPreparation, OperationError> {
         let authority = handle.recovery_authority().ok_or(OperationError::State)?;
         let binding = authority.binding();
-        let claim = authority.claim();
+        let imported = self
+            .recovered_s
+            .lock()
+            .map_err(|_| OperationError::State)?
+            .get(&handle.obligation_id())
+            .cloned()
+            .ok_or(OperationError::State)?;
+        let claim = imported.claim();
         let manifest = claim.manifest().clone();
         let member = claim.member_id().uuid();
         let id = handle.obligation_id();
@@ -23,7 +30,7 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
-        let resources = {
+        let (resources, ledger_state) = {
             let state = self
                 .ledger
                 .inner
@@ -36,21 +43,15 @@ impl NodeResourceRuntime {
             if entry.binding != binding
                 || entry.durable != Some(id)
                 || entry.resources != claim.resources()
-                || entry.state != ReservationState::UnknownHeld
+                || !matches!(
+                    entry.state,
+                    ReservationState::UnknownHeld | ReservationState::Reaping
+                )
             {
                 return Err(OperationError::State);
             }
-            entry.resources
+            (entry.resources, entry.state)
         };
-        {
-            let book = self.operations.lock().map_err(|_| OperationError::State)?;
-            if book.draining
-                || book.bundles.contains_key(&id)
-                || book.bindings.contains_key(&binding)
-            {
-                return Err(OperationError::State);
-            }
-        }
         // The original S retains the whole nonproducer allowance. Native
         // metadata/bootstrap stay in their recorded partitions; body buffers
         // use only the remaining already-charged memory, never fresh credit.
@@ -67,17 +68,13 @@ impl NodeResourceRuntime {
             .and_then(|n| usize::try_from(n).ok())
             .ok_or(OperationError::State)?;
         let response_budget = ResponseBudget::new(response_memory)?;
-        let parts = authority.take_native().map_err(|_| OperationError::State)?;
-        // Infallible same-File move. The native importer/claim checked every
-        // constructor invariant before either the fold or Files left its map.
-        let bootstrap = bootstrap::BootstrapMember::from_recovered(parts);
         let role = OwnedRole {
             binding,
             durable_tag: id,
             members: Vec::new(),
             typed_members: Some(manifest.members),
             scratch: BTreeMap::new(),
-            bootstrap: BTreeMap::from([(member, bootstrap)]),
+            bootstrap: BTreeMap::new(),
             sources: BTreeMap::new(),
             finite_vod: None,
             retirement: None,
@@ -105,7 +102,8 @@ impl NodeResourceRuntime {
             family_ids: Vec::new(),
             retained: BTreeSet::new(),
             // Recovery has a known adoption, not a fabricated prepare result.
-            // installed=true means resolve_preparation never consumes this slot.
+            // installed stays false until the actual Files have moved into
+            // this already-registered runtime owner.
             prepare: JournalOperation {
                 id: authority.adoption_operation_id(),
                 pending: None,
@@ -113,17 +111,87 @@ impl NodeResourceRuntime {
                 rejected: None,
                 acknowledged: true,
             },
-            installed: true,
+            installed: false,
             roles: vec![role],
         };
-        let state = Arc::new(AsyncMutex::new(bundle));
-        let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
-        book.bindings.insert(binding, handle);
-        book.bundles.insert(id, state.clone());
-        Ok(OwnedPreparation {
+        let state = {
+            let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
+            if let Some(existing) = book.bundles.get(&id) {
+                let bound = book.bindings.get(&binding).ok_or(OperationError::State)?;
+                if bound.obligation_id() != id
+                    || bound.graph_id() != handle.graph_id()
+                    || bound.recovery_authority().is_none_or(|saved| {
+                        saved.binding() != binding
+                            || saved.adoption_operation_id() != authority.adoption_operation_id()
+                            || saved.current_owner_id() != authority.current_owner_id()
+                    })
+                {
+                    return Err(OperationError::State);
+                }
+                existing.clone()
+            } else {
+                if book.draining
+                    || book.bindings.contains_key(&binding)
+                    || ledger_state != ReservationState::UnknownHeld
+                    || resources.peak_memory_bytes == 0
+                {
+                    return Err(OperationError::State);
+                }
+                let state = Arc::new(AsyncMutex::new(bundle));
+                book.bindings.insert(binding, handle.clone());
+                book.bundles.insert(id, state.clone());
+                state
+            }
+        };
+        let owner = OwnedPreparation {
             ledger: self.ledger.id,
             id,
-            state,
-        })
+            state: state.clone(),
+        };
+        let mut bundle = state.try_lock().map_err(|_| OperationError::State)?;
+        if bundle.id != id || bundle.roles.len() != 1 {
+            return Err(OperationError::State);
+        }
+        let installed = bundle.installed;
+        let role = bundle.roles.get_mut(0).ok_or(OperationError::State)?;
+        if role.binding != binding
+            || role.durable_tag != id
+            || role.handle.as_ref().is_none_or(|held| {
+                held.obligation_id() != id
+                    || held.graph_id() != handle.graph_id()
+                    || held.recovery_authority().is_none_or(|saved| {
+                        saved.binding() != binding
+                            || saved.adoption_operation_id() != authority.adoption_operation_id()
+                            || saved.current_owner_id() != authority.current_owner_id()
+                    })
+            })
+            || role.sequence != sequence
+            || role.phase != Phase::Sealed
+            || role.refunded
+            || role.transition.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        if !installed {
+            if !role.bootstrap.is_empty() {
+                return Err(OperationError::State);
+            }
+            // The role and its cleanup authority are registered before this
+            // sole-file take. A native validation failure keeps both Files in
+            // the imported owner, and retries select this exact placeholder.
+            let parts = authority
+                .take_native(&imported)
+                .map_err(|_| OperationError::State)?;
+            let bootstrap = bootstrap::BootstrapMember::from_recovered(parts);
+            role.bootstrap.insert(member, bootstrap);
+        } else if role.bootstrap.len() != 1 || !role.bootstrap.contains_key(&member) {
+            return Err(OperationError::State);
+        }
+        bundle.installed = true;
+        bundle.roles[0]
+            ._cleanup
+            .mark_reaping()
+            .map_err(|_| OperationError::State)?;
+        Ok(owner)
     }
 }

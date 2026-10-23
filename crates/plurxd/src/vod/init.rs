@@ -241,7 +241,13 @@ struct StoredIdentity {
 
 pub(super) async fn load_identity(path: &Path) -> Option<InitIdentity> {
     let bytes = tokio::fs::read(path).await.ok()?;
-    let stored: StoredIdentity = serde_json::from_slice(&bytes).ok()?;
+    decode_identity(&bytes)
+}
+
+/// Parse an already owned, bounded metadata payload. Finite recovery obtains
+/// these bytes through its counted retained reader, never a pathname reopen.
+pub(super) fn decode_identity(bytes: &[u8]) -> Option<InitIdentity> {
+    let stored: StoredIdentity = serde_json::from_slice(bytes).ok()?;
     Some(InitIdentity {
         muxer_init: stored.muxer_init,
         served_init: stored.served_init,

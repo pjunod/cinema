@@ -21,6 +21,9 @@ pub(crate) struct ImportedRetainedS {
 }
 
 impl ImportedRetainedS {
+    pub(super) fn claim(&self) -> &RetainedSImportClaim {
+        &self.claim
+    }
     pub(crate) fn obligation_id(&self) -> Uuid {
         self.claim.obligation_id()
     }
@@ -71,16 +74,22 @@ impl NativeRetainedSImportProof {
     }
 }
 
-/// Known current custody after durable adoption. The original imported owner
-/// remains retained while its actual Files move into the ordinary S adapter.
-/// This authorizes only the selected recovered S writer, never a new producer.
+/// Compact current-holder authority after durable adoption. Actual imported
+/// Files move into the runtime S adapter; this capability retains only the
+/// exact lineage needed by its journal writer, never an uncharged inventory.
 #[derive(Clone)]
 pub(crate) struct RecoveredSAuthority {
-    owner: Arc<ImportedRetainedS>,
+    journal_id: Uuid,
+    installation_id: Uuid,
+    obligation_id: Uuid,
+    original_owner_id: Uuid,
+    previous_owner_id: Uuid,
     current_owner_id: Uuid,
     binding: ReservationBinding,
     adoption_operation_id: Uuid,
     adoption_sequence: i64,
+    state_head: v2::scratch::AssetEventRefV1,
+    frozen_digest: String,
 }
 impl std::fmt::Debug for RecoveredSAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -91,23 +100,20 @@ impl std::fmt::Debug for RecoveredSAuthority {
     }
 }
 impl RecoveredSAuthority {
-    pub(super) fn claim(&self) -> &RetainedSImportClaim {
-        &self.owner.claim
-    }
     pub(crate) fn journal_id(&self) -> Uuid {
-        self.owner.claim.journal_id()
+        self.journal_id
     }
     pub(crate) fn installation_id(&self) -> Uuid {
-        self.owner.claim.installation_id()
+        self.installation_id
     }
     pub(crate) fn obligation_id(&self) -> Uuid {
-        self.owner.claim.obligation_id()
+        self.obligation_id
     }
     pub(crate) fn original_owner_id(&self) -> Uuid {
-        self.owner.claim.original_owner_id()
+        self.original_owner_id
     }
     pub(crate) fn previous_owner_id(&self) -> Uuid {
-        self.owner.claim.old_owner_id()
+        self.previous_owner_id
     }
     pub(crate) fn current_owner_id(&self) -> Uuid {
         self.current_owner_id
@@ -122,10 +128,10 @@ impl RecoveredSAuthority {
         self.adoption_sequence
     }
     pub(crate) fn state_head(&self) -> &v2::scratch::AssetEventRefV1 {
-        self.owner.claim.current_head()
+        &self.state_head
     }
     pub(crate) fn frozen_digest(&self) -> &str {
-        self.owner.claim.inventory_sha256()
+        &self.frozen_digest
     }
 }
 impl NativeRetainedSImportProof {
@@ -142,7 +148,13 @@ impl NativeRetainedSImportProof {
             return None;
         }
         Some(RecoveredSAuthority {
-            owner: self.owner.clone(),
+            journal_id: self.journal_id(),
+            installation_id: self.installation_id(),
+            obligation_id: self.obligation_id(),
+            original_owner_id: self.owner.claim.original_owner_id(),
+            previous_owner_id: self.previous_owner_id(),
+            state_head: self.state_head().clone(),
+            frozen_digest: self.frozen_digest().to_owned(),
             current_owner_id: self.current_owner_id,
             binding: self.binding,
             adoption_operation_id: ack.operation_id,
@@ -163,8 +175,21 @@ pub(super) struct RecoveredNativeParts {
     pub(super) adoption_id: v2::Id,
 }
 impl RecoveredSAuthority {
-    pub(super) fn take_native(&self) -> Result<RecoveredNativeParts, RuntimeOpenError> {
-        let claim = &self.owner.claim;
+    pub(super) fn take_native(
+        &self,
+        owner: &ImportedRetainedS,
+    ) -> Result<RecoveredNativeParts, RuntimeOpenError> {
+        let claim = &owner.claim;
+        if claim.journal_id() != self.journal_id
+            || claim.installation_id() != self.installation_id
+            || claim.obligation_id() != self.obligation_id
+            || claim.old_owner_id() != self.previous_owner_id
+            || claim.original_owner_id() != self.original_owner_id
+            || claim.current_head() != &self.state_head
+            || claim.inventory_sha256() != self.frozen_digest
+        {
+            return Err(unavailable());
+        }
         let full = claim.full();
         let plan = claim.plan().clone();
         let parent_observed = full
@@ -189,7 +214,7 @@ impl RecoveredSAuthority {
             return Err(unavailable());
         }
         let adoption_id = v2::Id::new(self.adoption_operation_id)?;
-        let mut directories = self.owner.directories.lock().map_err(|_| unavailable())?;
+        let mut directories = owner.directories.lock().map_err(|_| unavailable())?;
         let (parent, child) = directories.as_ref().ok_or_else(unavailable)?;
         if !native_matches(
             parent,
@@ -575,7 +600,6 @@ impl NodeResourceRuntime {
         rendition_id: &str,
         media_file_id: &str,
         object_version: &str,
-        source_members: usize,
         segment_count: u32,
     ) -> Result<Option<(super::operations::OwnedPreparation, Uuid, PathBuf, bool)>, RuntimeOpenError>
     {
@@ -597,6 +621,13 @@ impl NodeResourceRuntime {
         let [id] = ids.as_slice() else {
             return Err(unavailable());
         };
+        {
+            let state = self.ledger.inner.lock().map_err(|_| unavailable())?;
+            let binding = self.recovered_bindings.get(id).ok_or_else(unavailable)?;
+            if !state.entries.contains_key(&binding.reservation) {
+                return Ok(None);
+            }
+        }
         let (member, path, marker) = {
             let owners = self.recovered_s.lock().map_err(|_| unavailable())?;
             let owner = owners.get(id).ok_or_else(unavailable)?;
@@ -607,7 +638,7 @@ impl NodeResourceRuntime {
             if source.media_file_id != media_file_id
                 || source.object_version != object_version
                 || source.recipe_source_binding != rendition_id
-                || claim.media_source_member_count() != source_members
+                || claim.media_source_member_count() == 0
                 || segment_count == 0
             {
                 return Err(unavailable());
@@ -653,6 +684,61 @@ impl NodeResourceRuntime {
         }
         let preparation = operation.preparation.clone().ok_or_else(unavailable)?;
         Ok(Some((preparation, member, path, marker)))
+    }
+
+    /// Called under the actual S role lock only after native closed-head
+    /// validation and before its proof-bearing settlement can refund memory.
+    pub(super) fn retire_recovered_metadata(
+        &self,
+        obligation: Uuid,
+    ) -> Result<(), RuntimeOpenError> {
+        let mut owners = self.recovered_s.lock().map_err(|_| unavailable())?;
+        if let Some(owner) = owners.get(&obligation) {
+            if owner
+                .directories
+                .lock()
+                .map_err(|_| unavailable())?
+                .is_some()
+            {
+                return Err(unavailable());
+            }
+        }
+        owners.remove(&obligation);
+        Ok(())
+    }
+
+    /// A known native holder and committed adoption replace only that exact
+    /// restored S's uncertainty. Every other original obligation remains held.
+    pub fn has_unreconciled_custody(&self) -> bool {
+        let Ok(state) = self.ledger.inner.lock() else {
+            return true;
+        };
+        if state.invalid || state.native_overage_fenced {
+            return true;
+        }
+        let active: Vec<_> = self
+            .recovered_bindings
+            .iter()
+            .filter_map(|(id, binding)| {
+                state
+                    .entries
+                    .contains_key(&binding.reservation)
+                    .then_some(*id)
+            })
+            .collect();
+        drop(state);
+        let Ok(adoptions) = self.recovered_adoptions.lock() else {
+            return true;
+        };
+        active.iter().any(|id| {
+            let Some(operation) = adoptions.get(id) else {
+                return true;
+            };
+            let Ok(operation) = operation.try_lock() else {
+                return true;
+            };
+            !operation.acknowledged || operation.preparation.is_none()
+        })
     }
 
     /// Synchronous registration retains actual reopened owners before any

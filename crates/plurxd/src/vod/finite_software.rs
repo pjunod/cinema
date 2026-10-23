@@ -3,7 +3,7 @@
 //! the daemon manifest is only a serving index, never settlement authority.
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
+    FiniteFile, FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
 };
 use plurx_core::transcode::{DecodeBackend, Encoder};
 use std::sync::atomic::AtomicU8;
@@ -15,6 +15,8 @@ const RETAINED: u8 = 3;
 const FAILED: u8 = 4;
 const SETTLED: u8 = 5;
 const PREPARING: u8 = 6;
+const IDENTITY_METADATA_BYTES: u64 = 64 * 1024;
+const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 
 /// Persistent application owner. Stage is diagnostic/control serialization;
 /// only core's original receipts and known journal commits release resources.
@@ -146,6 +148,92 @@ pub(super) async fn build(
         .resource_runtime
         .as_ref()
         .ok_or("finite resource runtime unavailable")?;
+    if plan.timescale == 0 || plan.entries.is_empty() || key.is_empty() {
+        return Err("finite software profile requires a nonempty plan and rendition key".into());
+    }
+    let object_version = finite_profile::source_version(&recipe)?;
+    let segment_count = u32::try_from(plan.len())
+        .map_err(|_| "finite software segment count overflows".to_owned())?;
+    let media_file_id = recipe.file.id.to_string();
+    let recovered = runtime
+        .recovered_software_output(key, &media_file_id, &object_version, segment_count)
+        .await
+        .map_err(|error| format!("recovered finite software output is unresolved: {error}"))?;
+    if let Some(output) = recovered {
+        let deadline = Instant::now() + settings.materialize_budget;
+        let identity_len = output
+            .file_len(FiniteFile::IdentityMetadata)
+            .await
+            .map_err(|error| format!("reading recovered finite identity length: {error}"))?
+            .ok_or("recovered finite identity is missing")?;
+        let mut identity_file = ReadyFile::Finite {
+            output: output.clone(),
+            file: FiniteFile::IdentityMetadata,
+            len: identity_len,
+        };
+        let identity_bytes = identity_file
+            .read_all_bounded(IDENTITY_METADATA_BYTES, deadline)
+            .await
+            .map_err(|error| format!("reading recovered finite identity: {error}"))?;
+        let identity = init::decode_identity(&identity_bytes)
+            .ok_or("recovered finite identity is malformed")?;
+        drop(identity_bytes);
+        if !output.has_encoded_process_metadata() {
+            return Err("recovered finite process marker is absent".into());
+        }
+        let marker_len = output
+            .file_len(FiniteFile::EncodedProcessMetadata)
+            .await
+            .map_err(|error| format!("reading recovered finite marker length: {error}"))?
+            .ok_or("recovered finite process marker is missing")?;
+        let mut marker_file = ReadyFile::Finite {
+            output: output.clone(),
+            file: FiniteFile::EncodedProcessMetadata,
+            len: marker_len,
+        };
+        let marker = marker_file
+            .read_all_bounded(ENCODED_MARKER_BYTES, deadline)
+            .await
+            .map_err(|error| format!("reading recovered finite process marker: {error}"))?;
+        let current = recipe
+            .encoding
+            .as_ref()
+            .ok_or("recovered finite encoding is missing")?
+            .engine
+            .process_identity();
+        if std::str::from_utf8(&marker).ok().map(str::trim) != Some(current) {
+            return Err("recovered finite output belongs to an earlier encoder process".into());
+        }
+        let mut manifest = Manifest::new(plan.clone());
+        for entry in 0..segment_count {
+            let len = output
+                .file_len(FiniteFile::Segment(entry))
+                .await
+                .map_err(|error| format!("reading recovered finite segment {entry}: {error}"))?
+                .ok_or_else(|| format!("recovered finite segment {entry} is missing"))?;
+            if !manifest.materialize(entry, len, now_ms()) {
+                return Err("recovered finite segment is outside the immutable plan".into());
+            }
+        }
+        let dir = RenditionDir::from_finite(output);
+        return Ok(Shared::construct_rendition(
+            key,
+            dir,
+            recipe,
+            None,
+            plan,
+            index,
+            settings,
+            None,
+            false,
+            None,
+            manifest,
+            IdentityState {
+                identity: Some(identity),
+                from_disk: true,
+            },
+        ));
+    }
     let observed_runtime = Arc::clone(runtime);
     let epoch = tokio::task::spawn_blocking(move || observed_runtime.observe_admission_capacity())
         .await

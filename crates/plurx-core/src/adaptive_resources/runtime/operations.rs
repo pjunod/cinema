@@ -29,6 +29,7 @@ mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
 pub(super) mod plans;
+mod protection;
 #[cfg(target_os = "linux")]
 mod recovered;
 #[cfg(unix)]

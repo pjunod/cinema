@@ -39,7 +39,17 @@ impl Shared {
             })
             .await
             {
-                Ok(discovered) => pending.extend(discovered),
+                Ok(discovered) => {
+                    // A recovered/live finite owner can protect a child before
+                    // the per-key maintenance pass reaches it. Do not enqueue
+                    // those paths for legacy recursive deletion.
+                    pending.extend(discovered.into_iter().filter(|candidate| {
+                        !self
+                            .resource_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| runtime.protects_output_path(&candidate.path))
+                    }));
+                }
                 Err(error) => tracing::warn!(
                     target: "plurxd::vodserve",
                     %error, "encoded VOD generation discovery failed"
@@ -60,6 +70,19 @@ impl Shared {
                 }
                 continue;
             };
+            // Protection is a negative guard, not authority to clean or adopt
+            // the rendition. Recheck after taking the exact-key gate because
+            // a protected owner may have appeared since discovery.
+            if self
+                .resource_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.protects_output_path(&candidate.path))
+            {
+                if let Some(candidate) = pending.pop_front() {
+                    pending.push_back(candidate);
+                }
+                continue;
+            }
             match super::preparation_storage::has_private_marker(&candidate.path).await {
                 Ok(false) => {}
                 Ok(true) => {
@@ -97,9 +120,21 @@ impl Shared {
                 break;
             }
             let path = candidate.path.clone();
-            let removal = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await;
+            let resource_runtime = self.resource_runtime.clone();
+            let removal = tokio::task::spawn_blocking(move || {
+                // This final check runs in the same blocking closure as the
+                // recursive unlink, closing the gap after the async checks.
+                if resource_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.protects_output_path(&path))
+                {
+                    return Ok(false);
+                }
+                std::fs::remove_dir_all(path).map(|()| true)
+            })
+            .await;
             let gone = match removal {
-                Ok(Ok(())) => true,
+                Ok(Ok(gone)) => gone,
                 Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => true,
                 Ok(Err(error)) => {
                     tracing::warn!(
@@ -688,6 +723,16 @@ impl Shared {
         ) {
             return finite_software::build(self, key, index, recipe, plan, settings).await;
         }
+        let output_path = self.base.join(key);
+        if self
+            .resource_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.protects_output_path(&output_path))
+        {
+            // Protection only prevents this legacy path from touching an
+            // existing native-owned child. It does not reconcile or adopt it.
+            return Err("rendition path is protected by physical resource custody".into());
+        }
         let source = if key.starts_with("source-") {
             crate::fragment_index_cluster::open_source_playback_fence(
                 &recipe.file,
@@ -701,7 +746,7 @@ impl Shared {
             )
             .await?
         };
-        let dir = RenditionDir::new(self.base.join(key));
+        let dir = RenditionDir::new(output_path);
         let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
         if let Some(storage) = private_storage.as_ref() {
             if existed {
@@ -1152,6 +1197,16 @@ impl Shared {
         let counted_finite = rendition.dir.is_finite();
         #[cfg(not(unix))]
         let counted_finite = false;
+        if !counted_finite
+            && self
+                .resource_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.protects_output_path(&rendition.dir.path()))
+        {
+            // Keep the rendition registered until its physical owner clears
+            // the protection; legacy purge would bypass native cleanup.
+            return;
+        }
         let removed = {
             let mut renditions = self.renditions.lock().await;
             let exact = renditions
