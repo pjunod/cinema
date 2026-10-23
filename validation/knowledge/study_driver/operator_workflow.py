@@ -247,7 +247,7 @@ class PreparedStudy:
                         and set(native["transport"])=={"executable","executable_sha256","arguments","environment","timeout_seconds"},
                         "closed native operator configuration required")
                 transport=guest_store.GuestTransportSpec(**native["transport"],expected_binding=native["expected_binding"],
-                    source_hashes={name:row["sha256"] for name,row in closure.modules.items()})
+                    source_hashes={name:closure.modules[name]["sha256"] for name in guest_store.GUEST_MODULES})
                 self.native_store=guest_store.NativeGuestStageStore(transport,owned_root=r["owned_root"],baseline=self.baseline,
                     mirror_max_bytes=native["mirror_max_bytes"],admission=self.admission,receipt_root=native["receipt_root"])
             self.stager=runtime.SourceStager(baseline=self.baseline,isolation_api=isolation,owned_root=r["owned_root"],engine=r["engine"],endpoint=r["endpoint"],image=r["image"],python_executable=spec["executables"]["python"],rustc_executable=spec["executables"]["rustc"],cargo_executable=spec["executables"]["cargo"],admission=self.admission,registry_seeder=seed,byte_driver_api=byte_driver,outcome_driver_path=family["byte_driver"]["path"],outcome_driver_sha256=family["byte_driver"]["sha256"],family_recipes=self.recipes,paired_roles=roles,execution_options=r["execution_options"],native_store=self.native_store)

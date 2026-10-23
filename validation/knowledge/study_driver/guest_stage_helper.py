@@ -24,6 +24,15 @@ CHUNK_BYTES = 32768
 RESPONSE_BYTES = 64 * 1024**2
 
 
+# Exact import closure for the helper's supported operations. In particular,
+# host provider/launcher modules never enter the guest pack.
+GUEST_MODULES = frozenset({
+    "validation", "validation.knowledge", "validation.knowledge.model", "validation.knowledge.study_driver",
+    "validation.knowledge.study_driver.runtime_bindings", "validation.knowledge.study_driver.paired_runtime",
+    "validation.knowledge.study_driver.guest_stage_helper",
+})
+
+
 class GuestStageError(RuntimeError):
     pass
 
@@ -578,7 +587,7 @@ def _verified_pack(manifest_path, expected_sha):
         _require(len(raw) <= FRAME_BYTES and _sha(raw) == expected_sha, "HelperPackManifestChanged")
         manifest = json.loads(raw)
         _require(set(manifest) == {"schema_version", "modules"} and manifest["schema_version"] == 1
-                 and type(manifest["modules"]) is dict and 1 <= len(manifest["modules"]) <= 64, "ClosedHelperPackRequired")
+                 and type(manifest["modules"]) is dict and set(manifest["modules"]) == GUEST_MODULES, "ClosedHelperPackRequired")
         expected_files = set()
         for name, row in manifest["modules"].items():
             _require(type(name) is str and (name == "validation" or name.startswith("validation."))

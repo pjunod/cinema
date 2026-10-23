@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import uuid
 
 from .guest_stage_helper import (CHUNK_BYTES, FRAME_BYTES, MEMBERS, RESPONSE_BYTES,
-    ROOTS, SOURCE_BYTES, TRANSFER_BYTES, _fingerprint, _identity, _json, _relative, _sha, _tree_digest)
+    ROOTS, SOURCE_BYTES, TRANSFER_BYTES, GUEST_MODULES, _fingerprint, _identity, _json, _relative, _sha, _tree_digest)
 
 
 class NativeGuestError(ValueError):
@@ -77,7 +77,7 @@ class GuestTransportSpec:
                  and all(type(value) is str and "\0" not in value and len(value) <= 4096 for value in environment.values()),
                  "ClosedGuestTransportEnvironment")
         _require(type(self.timeout_seconds) is int and 1 <= self.timeout_seconds <= 1800
-                 and type(self.source_hashes) is dict and 1 <= len(self.source_hashes) <= 64
+                 and type(self.source_hashes) is dict and set(self.source_hashes) == GUEST_MODULES
                  and all(re.fullmatch(r"[a-f0-9]{64}", value) for value in self.source_hashes.values()), "BoundedGuestTransportRequired")
         _require(set(self.expected_binding) == {"filesystem_uuid", "boot_id", "identities", "ancestry", "mounts", "alias", "physical_work", "control"},
                  "ExactNativeBindingRequired")
