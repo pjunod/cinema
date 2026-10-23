@@ -9,8 +9,10 @@
 #include <math.h>
 #include <libdovi/rpu_parser.h>
 
-#define DV_TRIM_METHOD "candidate-b3-linear-rgb-sop-l2-chroma-v3"
-#define DV_TRIM_BRIDGE_METHOD "public-us20210076042-sop-v1"
+#define DV_TRIM_METHOD "candidate-b3-linear-rgb-sop-l2-chroma-v4"
+#define DV_TRIM_BRIDGE_METHOD "public-rescaling-l8-raw4096-assumed-v2"
+#define DV_TRIM_L2_RAW_METHOD "etsi-ts103572-1.3.1-l2-sop-raw-v1"
+#define DV_TRIM_L8_RAW_METHOD "l8-centered-raw4096-engineering-assumption-v1"
 #define DV_TRIM_DIRECT_METHOD "direct-b3-parameters-v1"
 #define DV_TRIM_B3_METHOD "st2094-10-2021-b3-eq8-linear-rgb-v1"
 #define DV_TRIM_BOUNDARY_METHOD "b3-unit-clamp-zero-power-one-v1"
@@ -158,10 +160,11 @@ static inline bool dv_trim_sop_neutral(const struct dv_trim_selection *x) {
   return x->word[DT_SLOPE] == 2048 && x->word[DT_OFFSET] == 2048 &&
          x->word[DT_POWER] == 2048;
 }
-// Public embodiment: US20210076042A1, SOP rescaling following eq(4).
-// Centered raw deltas use the /4096 encoding described in US10701399B2 A4.2.
-// L2 uses (1+s,o,1+p); L8 uses (1+2s,2o,1+2p). This parameter bridge does
-// not establish that the separate B.3 linear-RGB candidate implements Dolby DM.
+// US20210076042A1 explicitly rescales SOP after eq(4): L2 (1+s,o,1+p),
+// L8 (1+2s,2o,1+2p). ETSI TS103572 v1.3.1 eq(4)-(6) defines the L2 raw
+// normalization. Applying the same centered /4096 raw units to L8 is a FIXED
+// ENGINEERING ASSUMPTION, not defined by that L2 standard or proved by libdovi's
+// XML importer. Neither this interpretation nor B.3 RGB establishes Dolby DM.
 static inline bool dv_trim_public_sop(const struct dv_trim_selection *x,
                                       float sop[3]) {
   unsigned level = x->word[DT_LEVEL];
@@ -174,7 +177,7 @@ static inline bool dv_trim_public_sop(const struct dv_trim_selection *x,
   sop[2] = 1.0f + scale * ((int)x->word[DT_POWER] - 2048) / 4096.0f;
   return true;
 }
-// Full encoded L8 envelope; direct controls may use finite fractional values
+// Envelope under the fixed L8 normalization assumption; direct controls use values
 // within it. Parameters are rejected, never silently narrowed or clamped.
 static inline bool dv_trim_b3_parameters_valid(const float sop[3], float target) {
   return isfinite(sop[0]) && sop[0] >= 0 && sop[0] < 2 &&

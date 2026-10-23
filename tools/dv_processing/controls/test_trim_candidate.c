@@ -20,7 +20,7 @@ static DoviExtMetadataBlockLevel2 neutral_l2(unsigned target) {
 }
 static void test_public_level_sop_and_boundaries(void) {
   // Same encoded values must yield distinct actual L2/L8 parameters. Expected
-  // fractions are exact binary values from the published rescaling, not a fit.
+  // fractions lock the named raw-unit interpretation plus public rescaling; no fit.
   const unsigned raw[] = {0, 1, 2047, 2048, 2049, 4095};
   const float gain2[] = {0.5f, 0.500244140625f, 0.999755859375f, 1,
                          1.000244140625f, 1.499755859375f};
@@ -56,6 +56,20 @@ static void test_public_level_sop_and_boundaries(void) {
   assert(dv_trim_b3_component(0, 1000, 0, -1, 0) == 1000); // explicit 0^0 policy
   assert(dv_trim_b3_component(0, 1000, 0, -1, 1.0/2048) == 0);
   assert(dv_trim_b3_component(1000, 1000, 1.75, -0.75, 0.25) == 1000);
+}
+static void test_l8_xml_normalization_assumption(void) {
+  // Independent pinned libdovi XML-import expression (parser.rs L673-L687).
+  // It establishes serialized raw values, not the rendering meaning of L8.
+  double xml_gain = 0.5, xml_lift = 0;
+  unsigned raw = (unsigned)lround(((xml_gain + 2) * (1 - xml_lift/2) - 2) * 2048 + 2048);
+  assert(raw == 3072);
+  struct dv_trim_selection trim; dv_trim_neutral(&trim);
+  trim.word[DT_LEVEL] = 8; trim.word[DT_SLOPE] = raw;
+  float sop[3]; assert(dv_trim_public_sop(&trim, sop));
+  assert(sop[0] == 1.5f && sop[1] == 0 && sop[2] == 1);
+  // The previously documented 1.25 is the L2 interpretation of this raw code.
+  trim.word[DT_LEVEL] = 2; assert(dv_trim_public_sop(&trim, sop));
+  assert(sop[0] == 1.25f);
 }
 static void test_selection_and_identity(void) {
   DoviExtMetadataBlockLevel1 l1 = {.min_pq = 0, .max_pq = 4095, .avg_pq = 2048};
@@ -295,7 +309,8 @@ static void test_l2_chroma_native_cache(void) {
   pl_vulkan_destroy(&vk); pl_log_destroy(&log);
 }
 int main(void) {
-  test_public_level_sop_and_boundaries(); test_l2_chroma_equation();
+  test_public_level_sop_and_boundaries(); test_l8_xml_normalization_assumption();
+  test_l2_chroma_equation();
   test_selection_and_identity();
   test_only_trim_changes_native_output(); test_l2_chroma_native_cache();
   // This control tests SOP and the separate L2 chroma pass; the L1 path is covered

@@ -80,7 +80,7 @@ def observe(packet_path, candidate, output):
     candidate = candidate.resolve(strict=True)
     argv = [str(candidate), f'bt2020-pq-target-{target}',
             str(packet['title_min_1e4']), str(packet['title_peak']), str(width),
-            str(height), 'public-us20210076042-sop-v1', str(output / 'native')]
+            str(height), 'public-rescaling-l8-raw4096-assumed-v2', str(output / 'native')]
     seen, frame_bindings = set(), []
     for frame in frames:
         frame_id = frame['frame_id']
@@ -130,7 +130,7 @@ def observe(packet_path, candidate, output):
     report = {'schema': 'e-trim-observations-v1',
         'status': 'observations-only-not-acceptance', 'creative_trims_applied': False,
         'limitations': ['B.3 RGB candidate includes L2 chroma/saturation; L8 chroma/saturation and L3/detail/extended trims unapplied',
-                        'public level-specific SOP bridge; separate B.3 RGB candidate is not Dolby rendering conformance',
+                        'public SOP rescaling with assumed L8 raw units; B.3 RGB is not Dolby rendering conformance',
                         'capture provenance and frame registration are declared, not authenticated',
                         'luminance patches do not establish color/chroma fidelity'],
         'declared_capture_provenance': provenance,

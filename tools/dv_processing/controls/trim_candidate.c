@@ -77,6 +77,10 @@ int main(int argc, char **argv) {
     else memcpy(sop, direct, sizeof(sop));
     struct dv_trim_chroma chroma;
     require(dv_trim_l2_chroma(&trim, public_bridge, &chroma), "L2 chroma encoding");
+    const char *raw_method = !public_bridge ? DV_TRIM_DIRECT_METHOD :
+        trim.word[DT_LEVEL] == 8 ? DV_TRIM_L8_RAW_METHOD :
+        trim.word[DT_LEVEL] == 2 ? DV_TRIM_L2_RAW_METHOD : "neutral-no-trim";
+    bool raw_assumed = public_bridge && trim.word[DT_LEVEL] == 8;
     char key[65];
     dv_trim_identity(&trim, dm->dm_data.level1, sop, width, height, public_bridge, &chroma, key);
     read_exact(argv[arg+1], pixels, count * sizeof(float));
@@ -104,7 +108,8 @@ int main(int argc, char **argv) {
            "\"chroma_numerical_policy\":\"%s\",\"chroma_weight\":%.9g,\"saturation_gain\":%.9g,"
            "\"target_luminance_weights\":[%.9g,%.9g,%.9g],"
            "\"l3_applied\":false,\"detail_applied\":false,"
-           "\"parameter_source\":\"%s\",\"b3_method\":\"%s\","
+           "\"parameter_source\":\"%s\",\"raw_normalization_method\":\"%s\","
+           "\"raw_normalization_assumed\":%s,\"b3_method\":\"%s\","
            "\"numerical_policy\":\"%s\",\"selected_metadata_level\":%u,"
            "\"identity_sha256\":\"%s\","
            "\"gain\":%.9g,\"offset\":%.9g,\"gamma\":%.9g,\"trim_words\":[",
@@ -113,7 +118,7 @@ int main(int argc, char **argv) {
            DV_TRIM_L2_CHROMA_BOUNDARY, chroma.value[0], chroma.value[1],
            dv_trim_bt2020_luma[0], dv_trim_bt2020_luma[1], dv_trim_bt2020_luma[2],
            public_bridge ? DV_TRIM_BRIDGE_METHOD : DV_TRIM_DIRECT_METHOD,
-           DV_TRIM_B3_METHOD, DV_TRIM_BOUNDARY_METHOD, trim.word[DT_LEVEL], key,
+           raw_method, raw_assumed ? "true" : "false", DV_TRIM_B3_METHOD, DV_TRIM_BOUNDARY_METHOD, trim.word[DT_LEVEL], key,
            sop[0], sop[1], sop[2]);
     for (unsigned i = 0; i < DV_TRIM_ID_WORDS; i++)
       printf("%s%u", i ? "," : "", trim.word[i]);

@@ -28,6 +28,7 @@ static inline void dv_trim_identity(const struct dv_trim_selection *trim,
   // NUL delimiters distinguish each named method; mode and actual selected
   // level remain separate scalar words, including neutral L2 versus neutral L8.
   const char *methods[] = {DV_TRIM_METHOD, DV_TRIM_BRIDGE_METHOD,
+      DV_TRIM_L2_RAW_METHOD, DV_TRIM_L8_RAW_METHOD,
       DV_TRIM_DIRECT_METHOD, DV_TRIM_B3_METHOD, DV_TRIM_BOUNDARY_METHOD, DV_TARGET_METHOD,
       DV_TRIM_L2_CHROMA_BRIDGE, DV_TRIM_L2_CHROMA_METHOD, DV_TRIM_L2_CHROMA_BOUNDARY};
   for (unsigned i = 0; i < sizeof(methods) / sizeof(*methods); i++)

@@ -19,8 +19,8 @@ serving while the ICtCp contract and independent acceptance remain unresolved.
 |---|---|---|
 | [SMPTE ST 2094-10:2021](https://pub.smpte.org/latest/st2094-10/st2094-10-2021.pdf), §6.2 and B.3 equation (8) | Gain/offset/gamma applied to target-normalized linear RGB, then rescaled to cd/m²; neutral gain/gamma 1 and offset 0. | Dolby RPU integer conversion or Dolby device equivalence. Annex B is informative. |
 | [Dolby patent US10701399B2](https://patents.google.com/patent/US10701399B2/en), A4.2 | L2 field encoding centered at raw 2048 with a 4096 scale; multiscale has a different encoding. | That a centered slope/power delta is added to B.3 gain/gamma, or an ICtCp compensation function. |
-| [Dolby patent US20210076042A1](https://patents.google.com/patent/US20210076042A1/en), equations (2)–(4) and following SOP rescaling | An explicit public embodiment rescales L2 and L8 SOP differently before the trim-pass function. | That this embodiment plus B.3 linear RGB reproduces CM4 rendering, or supplies missing chroma/detail/L3 behavior. |
-| [ETSI TS 103 572 v1.3.1](https://www.etsi.org/deliver/etsi_ts/103500_103599/103572/01.03.01_60/ts_103572v010301p.pdf), equations (7)/(8) | L2 raw chroma weight/saturation gain map to ST 2094-10 §6.3.1/2 with centered `/4096` encoding. | L8 conversion or a complete Dolby CM renderer. |
+| [Dolby patent US20210076042A1](https://patents.google.com/patent/US20210076042A1/en), equations (2)–(4) and following SOP rescaling | An explicit public embodiment rescales L2 and L8 SOP differently before the trim-pass function. | L8 raw-unit normalization, CM4 equivalence in B.3 linear RGB, or missing chroma/detail/L3 behavior. |
+| [ETSI TS 103 572 v1.3.1](https://www.etsi.org/deliver/etsi_ts/103500_103599/103572/01.03.01_60/ts_103572v010301p.pdf), equations (4)–(8) | L2 raw SOP and chroma/saturation encoding, mapped to ST 2094-10 §6.2/6.3. | L8 conversion or a complete Dolby CM renderer. |
 | Pinned public libdovi [L2](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/rpu/extension_metadata/blocks/level2.rs), [L8](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs), [L10](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/rpu/extension_metadata/blocks/level10.rs) | Actual field layouts, neutral defaults, L8 lengths and custom target indices; CM4 L8 is used to compute L2. | A complete preset-display table or the physical display-management algorithm. |
 | Pinned libplacebo [custom shader API](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/include/libplacebo/shaders/custom.h) | Each custom dispatch receives explicit variable data. | Executed native API 374 behavior; that requires the authored regression. |
 
@@ -47,7 +47,7 @@ all signalled trim controls (including currently unapplied multiscale,
 chroma, saturation, extended fields), resolved target peak/floor/primaries,
 L1, title mastering endpoints, bucket, raster, provenance mode, actual
 float32 SOP/CW/SG/luminance-weight parameters, L2 stage applicability, selection
-schema version, public bridge/direct parameter mode and the named candidate,
+schema version, metadata-interpretation/direct parameter mode and named candidate,
 SOP/L2 bridges, B.3 stages, numerical-boundary and L1 method versions.
 Method strings are NUL-delimited before the scalar stream is hashed. Frame
 number is excluded so repeated shots can reuse identity. A selected instruction
@@ -61,7 +61,7 @@ There is no LUT callback or external trim state whose change can be missed by
 a LUT cache. The native A→B→A regression is required evidence that reuse obeys
 those parameters; the API description alone is not a run.
 
-## 3. The public bridge distinguishes L2 from L8; the RGB domain stays separate
+## 3. Public rescaling and assumed L8 raw units stay distinct from the RGB domain
 
 For mapped linear component `E` in cd/m² and bucket peak `T`, B.3 equation (8)
 is retained as the separately named `st2094-10-2021-b3-eq8-linear-rgb-v1`:
@@ -70,34 +70,55 @@ is retained as the separately named `st2094-10-2021-b3-eq8-linear-rgb-v1`:
 F = T × clamp((E / T) × gain + offset, 0, 1)^gamma
 ```
 
-`public-us20210076042-sop-v1` replaces `inferred-raw-sop-v1` in the isolated
-instrument and adapters. Define centered deltas `s`, `o`, `p` as the respective
-raw slope, offset and power minus 2048, divided by 4096. The public embodiment's
-rescaling following equation (4) gives:
+`public-rescaling-l8-raw4096-assumed-v2` fixes the interpretation explicitly.
+The patent publishes the level-specific SOP rescaling below. ETSI TS 103 572
+v1.3.1 equations (4)–(6) establish the L2 raw normalization. For L8, this
+candidate **assumes** the patent's metadata deltas use the same centered raw
+units: `(raw − 2048)/4096`. Neither the L2 standard nor the cited patent
+explicitly establishes that L8 raw normalization. It remains a fixed engineering
+interpretation, not a reference-derived fit or an accepted Dolby conversion.
 
-| Actual selected level | gain | offset | gamma |
-|---|---|---|---|
-| L2 | `1 + s` | `o` | `1 + p` |
-| L8 | `1 + 2s` | `2o` | `1 + 2p` |
-| No eligible trim | `1` | `0` | `1` |
+| Actual selected level | gain | offset | gamma | Raw normalization |
+|---|---|---|---|---|
+| L2 | `1 + s` | `o` | `1 + p` | Public ETSI L2 inverse, `(raw − 2048)/4096` |
+| L8 | `1 + 2s` | `2o` | `1 + 2p` | Assumed centered `/4096`, explicitly versioned |
+| No eligible trim | `1` | `0` | `1` | No raw conversion |
 
-The previous implementation applied the L2 scaling to L8. Selection now carries
-its actual level into the bridge; an unsupported level or nonneutral values
-without a selected level refuse. The public
-[libdovi XML parser at the pinned revision](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/xml/parser.rs#L650)
-algebraically agrees for L8: before quantization/clipping, the new bridge yields
-`gain = (1 + G/2) × (1 − L/2)`, `offset = (1 + G/2) × L/2` and
-`gamma = 1 / (1 + C/2)` for XML gain `G`, lift `L` and gamma control `C`.
-The importer remains the authority for serialized integer rounding and clipping.
+Selection carries its actual level; unsupported levels or nonneutral values
+without a selected level refuse. The
+[public libdovi XML importer at the pinned revision](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/xml/parser.rs#L650)
+establishes integer serialization, not corroboration of this L8 rendering
+interpretation. Composing its expressions with this candidate, before integer
+quantization/clipping, actually yields:
 
-This establishes a public parameter bridge, not the full rendering domain or
+```text
+L8 gain   = (G + 2) × (1 − L/2) − 1
+L8 offset = (G + 2) × L/2
+L8 gamma  = 2 / (1 + C/2) − 1
+```
+
+Here `G`, `L`, `C` are the XML gain, lift and gamma controls. For `G=0.5`,
+`L=C=0`, the importer writes slope 3072 and this candidate produces gain 1.5.
+The previously claimed 1.25 used the old `/4096` final gain increment and was
+incorrect for the new L8 interpretation. It is not evidence to revert or fit
+the bridge. The focused authored control preserves this distinguishing example.
+
+The method `l8-centered-raw4096-engineering-assumption-v1` and
+`raw_normalization_assumed: true` identify every selected L8 metadata-mode
+receipt. L2 instead names `etsi-ts103572-1.3.1-l2-sop-raw-v1` with the assumption
+flag false; direct controls and no eligible trim identify their own provenance.
+Both normalization methods participate in the identity, alongside selected level
+and the new overall candidate version. Previous candidate hashes are distinct.
+
+The L2 normalization and patent rescaling are public; the L8 raw-normalization
+composition remains assumed. Neither establishes the full rendering domain or
 Dolby CM equivalence. The candidate still applies those parameters to B.3
 linear RGB after the L1 transform; it does not substitute that RGB operation
 for a patent ICtCp process. `direct-b3=gain,offset,gamma` remains a separate
 explicit-parameter formula control. Neutral SOP takes an exact texture copy.
 
 **Numerical boundary policy:** raw values are integers 0–4095. L2 gain/gamma
-span `[0.5, 1.5 − 1/4096]`, offset `[-0.5, 0.5 − 1/4096]`. L8 gain/gamma span
+span `[0.5, 1.5 − 1/4096]`, offset `[-0.5, 0.5 − 1/4096]`. Under the stated assumption, L8 gain/gamma span
 `[0, 2 − 1/2048]`, offset `[-1, 1 − 1/2048]`. The shader and direct controls
 accept finite gain/gamma `[0,2)`, offset `[-1,1)` and target `(0,10000]`; they
 reject other values without narrowing or silently clamping parameters. B.3's
@@ -109,11 +130,12 @@ choice, not a claimed Dolby rule. One-LSB fractions are exactly representable
 as float32; no epsilon or reference-derived fitting is introduced.
 
 The instrument records `scope: rgb-sop-and-l2-chroma-saturation`,
-`acceptance: unaccepted`, selected metadata level, parameter source, B.3 method, numerical policy, actual parameters,
+`acceptance: unaccepted`, selected metadata level, parameter source, raw-unit
+method/assumption flag, B.3 method, numerical policy, actual parameters,
 complete selected trim words and `creative_trims_applied: false` per frame.
 Selected L2 chroma/saturation now use the separate pass in §4; L8 chroma,
 L8 saturation, multiscale/detail, L3 and extended controls remain unapplied.
-The bounded public-bridge correction has authored controls only: independent
+The bounded candidate correction has authored controls only: independent
 review precedes compilation, native execution and a fresh software-reference
 comparison. Earlier reference errors are not repaired evidence; this source
 change establishes neither CM conformance nor full phase E acceptance.
@@ -196,7 +218,8 @@ independent review and fixes, the focused engineering regression is:
 It covers exact nominal target boundaries, list-order independence, no eligible
 trim, duplicate/missing target refusal, L8/L10 resolution and cross-version
 ties, all selected-field identity sensitivity, explicit parameter identity,
-same-raw L2/L8 differentiation, neutral/endpoints/one-LSB fractions, full-range
+same-raw L2/L8 differentiation, the XML gain-0.5/raw-3072 interpretation witness,
+neutral/endpoints/one-LSB fractions, full-range
 parameter refusal, explicit zero-power CPU/native behavior, exact neutral pixels,
 actual same-dispatch-cache L2→L8→L2 output sensitivity, independent direct
 L2 chroma equation witnesses, grayscale/color/black/extreme controls, distinct
@@ -355,8 +378,8 @@ Public sources justify the supported XML importer, frozen input/output color
 math, selection/identity mechanics and illustrative RGB SOP equation. They
 also justify the bounded L2 raw-to-B.3 RGB chroma/saturation pass. They do not
 identify L8 chroma conversion or an ICtCp chroma-weight/saturation algorithm,
-and fitted weights do not supply those gaps. The public SOP parameter bridge does not
-establish the B.3 RGB domain as Dolby rendering. Those are implementation/contract gaps even after reference
+and fitted weights do not supply those gaps. Public SOP rescaling and the assumed L8 raw-unit composition do not establish
+the B.3 RGB domain as Dolby rendering. Those are implementation/contract gaps even after reference
 access has been resolved; E is not complete and production remains L1-only.
 
 

@@ -193,7 +193,7 @@ def observe(args):
     native_input.write_bytes(b''.join(struct.pack('<ffff', *p, 1) for p in pixels))
     conversions, references, association = [], [], []
     argv = [binaries['candidate'], 'bt2020-pq-target-1000', '50', '4000',
-            str(width), str(height), 'public-us20210076042-sop-v1', output / 'candidate']
+            str(width), str(height), 'public-rescaling-l8-raw4096-assumed-v2', output / 'candidate']
     for case, (xml, image, contract) in zip(cases, frozen, strict=True):
         name = case['name']; converted = output / (name + '-rpu')
         record, _ = command([binaries['converter'], converted, 'xml-reference', xml,
@@ -237,7 +237,9 @@ def observe(args):
             e['acceptance'] != 'unaccepted' or e['creative_trims_applied'] is not False or
             e['scope'] != 'rgb-sop-and-l2-chroma-saturation' or
             e['chroma_compensation_applied'] is not False or e['saturation_gain_applied'] is not False or
-            e['chroma_parameter_source'] != 'unapplied' for e in rows):
+            e['chroma_parameter_source'] != 'unapplied' or
+            e['raw_normalization_assumed'] is not True or
+            e['raw_normalization_method'] != 'l8-centered-raw4096-engineering-assumption-v1' for e in rows):
         raise ValueError('candidate coverage or provenance mismatch')
     candidate_rgb = []
     for i, (event, parsed) in enumerate(zip(rows, conversions, strict=True)):
@@ -290,6 +292,7 @@ def observe(args):
              if authored is None else 'L8-only authored XML input variation; finite cases do not establish an algorithm'),
             'delta comparison does not remove nonlinear interactions with baseline instructions',
             'supported public XML importer supplies actual RPU mapping, not Dolby algorithm equivalence',
+            'candidate L8 centered /4096 raw normalization is a fixed engineering assumption',
             'source is decoded self-owned master RGB, not proof of encoded-DV reconstruction',
             'finite engineered software comparisons do not establish physical optics or full Dolby equivalence',
             'no fitting of weights, calibration curve or proprietary algorithm from these controls']}
