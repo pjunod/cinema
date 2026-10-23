@@ -41,6 +41,11 @@ bump may break compatibility and a **patch** bump never does.
   MaxFALL remains unknown. Default/master output is unchanged, and targeting
   controls remain unexposed pending subsequent delivery stages.
 
+- Processed P7 FEL rendering uses the same bounded public decoder-metadata
+  mapper as base/RPU rendering, preserving real piecewise polynomial and MMR
+  reshaping instead of requiring the synthetic identity subset. Fresh raw-RPU
+  association, paired enhancement-layer contribution and nonbinding residual
+  clipping checks remain required.
 
 - Processed Dolby Vision windows support an observed nonnegative common
   source origin instead of requiring literal zero. Absolute picture keys,

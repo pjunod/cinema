@@ -3,6 +3,7 @@
 // Public FFmpeg/libplacebo reconstruction; optional separate public-spec export.
 #include <libplacebo/utils/libav.h>
 #include "dv_trace.h"
+#include "dv_metadata.h"
 struct base_gpu {
   pl_log log;
   pl_vulkan vk;
@@ -59,69 +60,12 @@ static void base_metadata(const AVFrame *frame, const uint8_t *nal, size_t size,
                     dm->dm_data.level5->active_area_bottom_offset <
                 (unsigned)frame->height,
             "invalid base active area");
-  AVFrameSideData *side = av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA);
-  require(side && side->size >= sizeof(AVDOVIMetadata) + sizeof(AVDOVIDataMapping) && side->size <= 65536,
-          "actual decoder-derived base metadata required");
-  const AVDOVIMetadata *data = (const void *)side->data;
-  require(data->header_offset >= sizeof(*data) &&
-              data->header_offset % _Alignof(AVDOVIRpuDataHeader) == 0 &&
-              data->mapping_offset % _Alignof(AVDOVIDataMapping) == 0 &&
-              data->color_offset % _Alignof(AVDOVIColorMetadata) == 0 &&
-              data->header_offset <= side->size - sizeof(AVDOVIRpuDataHeader) &&
-              data->mapping_offset <= side->size - sizeof(AVDOVIDataMapping) &&
-              data->color_offset <= side->size - sizeof(AVDOVIColorMetadata),
-          "bounded decoded metadata offsets");
-  require(data->header_offset + sizeof(AVDOVIRpuDataHeader) <= data->mapping_offset &&
-              data->mapping_offset + sizeof(AVDOVIDataMapping) <= data->color_offset &&
-              data->color_offset + sizeof(AVDOVIColorMetadata) <= data->ext_block_offset,
-          "nonoverlapping decoded metadata sections");
-  require(data->num_ext_blocks >= 0 && data->num_ext_blocks <= 32 &&
-              data->ext_block_offset <= side->size &&
-              data->ext_block_size >= sizeof(AVDOVIDmData) &&
-              (size_t)data->num_ext_blocks <=
-                  (side->size - data->ext_block_offset) / data->ext_block_size,
-          "bounded decoded extension metadata");
-  const AVDOVIRpuDataHeader *dh = av_dovi_get_header(data);
-  require(dh->ext_mapping_idc_0_4 == 0 && dh->ext_mapping_idc_5_7 == 0,
-          "unsupported extended base inverse mapping");
-  const AVDOVIDataMapping *m = av_dovi_get_mapping(data);
-  const AVDOVIColorMetadata *color = av_dovi_get_color(data);
-  require(dh->bl_bit_depth == 10 && dh->vdr_bit_depth == 12 &&
-              dh->coef_log2_denom == 23 && dh->vdr_rpu_normalized_idc == 1 &&
-              dh->bl_video_full_range_flag == (profile == 5) &&
-              m->mapping_color_space == 0 && m->mapping_chroma_format_idc == 0 &&
-              m->num_x_partitions == 1 && m->num_y_partitions == 1 &&
-              color->signal_eotf == 65535 && color->signal_eotf_param0 == 0 &&
-              color->signal_eotf_param1 == 0 && color->signal_eotf_param2 == 0,
-          "decoded base metadata representation");
-  *out = (struct base_mapping){.profile = profile};
-  for (int c = 0; c < 3; c++) {
-    const AVDOVIReshapingCurve *curve = &m->curves[c];
-    require(curve->num_pivots >= 2 && curve->num_pivots <= 9 &&
-                curve->pivots[0] <= 1023 &&
-                curve->pivots[curve->num_pivots - 1] <= 1023,
-            "bounded base curve extent");
-    for (int i = 0; i < curve->num_pivots - 1; i++) {
-      require(curve->pivots[i] < curve->pivots[i + 1],
-              "strict base curve pivots");
-      if (curve->mapping_idc[i] == AV_DOVI_MAPPING_POLYNOMIAL) {
-        require(curve->poly_order[i] >= 1 && curve->poly_order[i] <= 2,
-                "supported base polynomial order");
-        out->polynomial_segments++;
-      } else {
-        require(curve->mapping_idc[i] == AV_DOVI_MAPPING_MMR &&
-                    curve->mmr_order[i] >= 1 && curve->mmr_order[i] <= 3,
-                "supported base MMR order");
-        out->mmr_segments++;
-      }
-    }
-  }
-  // This public mapper carries arbitrary signalled polynomial/MMR/color
-  // coefficients, including its signalled lower/upper output clamp. Real
-  // profiles need not span the entire ten-bit range. Preserve those endpoints;
-  // do not widen them to an identity curve or substitute a fixed matrix.
-  pl_map_dovi_metadata(&out->dovi, data);
-  out->dovi.nlq_active = false; // Explicitly omitted EL: never compose residuals.
+  struct dv_decoded_mapping decoded;
+  require(dv_map_decoded_metadata(frame, profile, false, &decoded),
+          "bounded decoder-derived base metadata mapping");
+  *out = (struct base_mapping){.dovi = decoded.dovi, .profile = profile,
+      .polynomial_segments = decoded.polynomial_segments,
+      .mmr_segments = decoded.mmr_segments};
   dv_target_metadata(dm);
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_data_mapping(mapping);
