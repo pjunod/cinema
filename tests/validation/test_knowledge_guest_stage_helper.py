@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from validation.knowledge.study_driver import guest_stage_helper as helper
 from validation.knowledge.study_driver import paired_runtime
+from validation.knowledge.study_driver import runtime_bindings
 
 
 class GuestStageFilesystemTests(unittest.TestCase):
@@ -56,10 +57,20 @@ class GuestStageFilesystemTests(unittest.TestCase):
             ])
         return rows
 
-    def new_stage(self, *, paired=False, runtime=b"old-runtime", worker_runtime=b"old-worker", pinned=False):
+    @staticmethod
+    def role_users(*, paired=False):
+        identity = [os.getuid(), os.getgid()]
+        users = {"protected": identity}
+        if paired:
+            users["worker"] = list(identity)
+        return users
+
+    def new_stage(self, *, paired=False, runtime=b"old-runtime", worker_runtime=b"old-worker",
+                  pinned=False, entries=None):
         stage_id = os.urandom(16).hex()
         result = self.fs.publish(stage_id, self.entries(paired=paired, runtime=runtime,
-                                                        worker_runtime=worker_runtime), pinned=pinned)
+                                                        worker_runtime=worker_runtime) if entries is None else entries,
+                                 pinned=pinned, role_users=self.role_users(paired=paired))
         return stage_id, result
 
     def test_publish_and_observe_keep_equal_relative_names_in_separate_tree_objects(self):
@@ -102,7 +113,41 @@ class GuestStageFilesystemTests(unittest.TestCase):
 
         for name, manifest in cases:
             with self.subTest(case=name), self.assertRaises(helper.GuestStageError):
-                self.fs.publish(os.urandom(16).hex(), manifest)
+                self.fs.publish(os.urandom(16).hex(), manifest, role_users=self.role_users())
+
+    def test_real_immutable_protected_and_worker_exports_publish_as_0444(self):
+        protected = self.base / "protected-export"
+        worker = self.base / "worker-export-source"
+        protected.mkdir(mode=0o700)
+        worker.mkdir(mode=0o700)
+        runtime_bindings.write_grader(protected, "protected-driver.py", b"assert True\n")
+        runtime_bindings.write_grader(worker, "rpc-contract.json", b"{\"ok\":true}\n")
+        paired_runtime.readable_tree(protected)
+        paired_runtime.readable_tree(worker)
+
+        protected_file = protected / "protected-driver.py"
+        worker_file = worker / "rpc-contract.json"
+        self.assertEqual(os.stat(protected_file).st_mode & 0o777, 0o444)
+        self.assertEqual(os.stat(worker_file).st_mode & 0o777, 0o444)
+        manifest = self.entries(paired=True)
+        manifest.extend((
+            self.file_entry("grader/protected-driver.py", protected_file.read_bytes(),
+                            mode=os.stat(protected_file).st_mode & 0o777),
+            self.file_entry("worker-export/rpc-contract.json", worker_file.read_bytes(),
+                            mode=os.stat(worker_file).st_mode & 0o777),
+        ))
+
+        stage_id, published = self.new_stage(paired=True, entries=manifest)
+        self.assertEqual(set(published["roots"]), set(helper.ROOTS))
+        for role, filename, source in (
+            ("grader", "protected-driver.py", protected_file),
+            ("worker-export", "rpc-contract.json", worker_file),
+        ):
+            with self.subTest(role=role):
+                observed = self.fs.observe(stage_id, role)
+                member = next(row for row in observed["entries"] if row["path"] == filename)
+                self.assertEqual(member["mode"], 0o444)
+                self.assertEqual(member["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
 
     def test_observe_refuses_guest_symlinks_and_special_files(self):
         stage_id, _ = self.new_stage()
