@@ -12,18 +12,19 @@ new source head.
 
 | Phase | Qualified evidence and source | Still open |
 |---|---|---|
-| A · title scan and HDR10-E | PR #1216 is draft and unmerged. Retained clock/shader results remain tied to their original heads; first P7 continuation 323 stopped at the identity/polygon MMR check. | P7 identity repair and remaining mapped cells; final review, fast lane and merge. |
-| B · output metadata | Seven focused Rust cases pass on `e53a221bf089c0a10daec572144fd06062be61d8`; pinned format/check 301 and Clippy/link 304 passed. Later integration leaves these code paths unchanged. | Independent review, current-head publication gate, encoder/device acceptance. |
-| C · server controls | Ten focused Rust cases pass on `a43fcf201defdfbd3e9f46704722ed70c3f3a919`; 14 badge and 72 distinct settings-web cases and pinned format/check 314 plus Clippy/link 316 also pass. These results remain source-bound after integration. | Current-head qualification and acceptance; no readiness advice overrides the saved preference. |
-| D · client presentation | 27 focused web cases pass on `clip600e`/`Dad802`; integration `d19abac` is in F. | No full current-head or physical-device acceptance is implied. |
-| Client builds | Android 30 tests and Apple 13 tests plus Apple test-build passed on `F7eed`; the client source closure is identical through F source `6d48d4c`. | Results were retained, not replayed on F; physical display acceptance remains open. |
-| E · L2/L8 trims | Public L2 and newly assumed L8 source is independently reviewed at `07c36ec`; software-reference comparison mechanics pass. | Substantial accuracy errors remain; no accuracy acceptance or L8 claim. |
-| F · SDR target | At `6d48d4c477446ab2609a449d5c5ba7873d6d272a`, pinned format/check 326 and Clippy/core+daemon links 324 passed. Ten distinct focused Rust regressions pass (three retained from 324 and seven completed in 331 with runtime FFmpeg); two focused web cases pass. Independent SDR pixel check 325 passed ten controls over 61,440 samples with maximum one-code error against a two-code limit; wrong-primary mutants differed by 13/37/68/74 codes. | Promotion, fast lane and physical acceptance remain open. |
+| A · title scan and HDR10-E | PR #1216 merged into the effort at `3fbb3f669`; compile-only gate5863 and paperwork5862 PASS. Actual P7 driver348 passed both1000/1600 on source503619eb, with retained frame/audio/cadence/seek evidence. | Final integrated P8 adoption, EOF follow-up and main promotion remain separate. |
+| B · output metadata | PR #1266 draft; seven Rust312 cases on e53a221b and compiler361 on f57d0071 PASS. Runtime input bytes remain unchanged. Gate5870 exposed the installed Xcode27.1 pin drift before Apple compilation; repaired at23b131dc, new compile-only gate379. | Current-candidate effort gate and encoder/device acceptance. |
+| C · server controls | PR #1267 draft; ten Rust cases on a43fcf20, fourteen badge and72 settings cases, compiler362 PASS with source attribution retained. | Own effort gate and integrated acceptance; readiness never overrides saved choices. |
+| D · client presentation | PR #1268 draft;27 web cases and compiler363 PASS with original attribution. | Own effort gate and physical display acceptance. |
+| Client builds | Android30 and Apple13 cases plus test-build passed on F7eed; client source closure unchanged through F6d48d4c. | Current Xcode27.1 compiler gate and physical acceptance. |
+| E · L2/L8 trims | Public L2 and explicitly assumed L8 prototype07c36ec; neutral-L3 provenance928407c. Fourteen comparisons353 completed; baseline PQ error.110077 and trim-delta errors~.44/.49 remain. | Supported CM4/L8 rendering contract and creative accuracy; vendor contact declined. Tooling passes do not establish creative support. |
+| F · SDR target | PR #1269 draft. Source6d48d4c retains ten Rust, two web, compiler326/Clippy324 and independent pixel325 passes (61440 samples, max1code/limit2). Current repair shares fresh FEL admission and conditional receipts across HDR10/SDR, preserving BT.709 conversion and100-nit mapping. | New repair compilation and final-candidate regression pending; prior evidence does not qualify the changed factory. Own effort gate, main promotion and physical acceptance remain open. |
 
-No PR in this series is merged to the target branch, and the stage fast lane has
-not run. Passing compiler, unit, web, client and pixel results above apply only
-to their named source heads or unchanged source closures. They do not establish
-qualification of an untested integration head or physical display behavior.
+Only A has merged, into `effort/display-targeted-dv`; main is unchanged.
+Results remain tied to their named sources or verified unchanged input closures.
+The final main candidate still requires adversarial review, once-only applicable
+fast-lane evidence and the Main promotion gate. No physical display acceptance
+or creative-trim equivalence is inferred from these records.
 
 ## PR B implementation checkpoint
 

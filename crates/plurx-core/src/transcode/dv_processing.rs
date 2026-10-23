@@ -1708,7 +1708,7 @@ pub fn dv_plan_completed_window(
             target.validate_rpu(raw)?;
         }
         if full_fel {
-            if input.destination == DvDestination::Hdr10 {
+            if matches!(input.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
                 DvFelMetadata::from_raw_rpu(raw, (bl_shape.width, bl_shape.height))?;
             } else if !DvParsedMetadata::from_raw_rpu(raw)?.runtime_supported() {
                 return Err(invalid(
@@ -1742,7 +1742,7 @@ pub fn dv_plan_completed_window(
         DvDestination::Profile81 => DvStrategy::ReconstructedProfile81,
     };
     let mut pixels = DvGraph::expected(strategy);
-    if !full_fel || input.destination == DvDestination::Hdr10 {
+    if !full_fel || matches!(input.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
         // The graph identifies the supported conditional renderer policy,
         // independent of which curve methods occur in this window. Actual
         // operations and segment counts belong to each fresh frame receipt.
@@ -2168,7 +2168,7 @@ impl DvBaseMetadata {
     }
 }
 
-/// Fresh raw-RPU predicate for the bounded public P7/FEL HDR10 renderer.
+/// Fresh raw-RPU predicate for the bounded public P7/FEL HDR10 and SDR renderer.
 /// Synthetic scalar evidence and P8.1 authoring retain their narrower types.
 #[derive(Debug, Clone)]
 pub struct DvFelMetadata {
@@ -2803,44 +2803,44 @@ pub fn dv_receipt_completed_window(
         {
             return Err(invalid());
         }
-        let (mut operations, retained_levels) =
-            if requires_el && plan.destination == DvDestination::Hdr10 {
-                if plan.source.el_kind != DvElKind::Fel {
-                    return Err(invalid());
-                }
-                let shape = plan.capability.bl_shape;
-                let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
-                (parsed.applied_operations, parsed.metadata_levels)
-            } else if requires_el {
-                let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
-                if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
-                    return Err(invalid());
-                }
-                (
-                    plan.graph.required_operations(),
-                    parsed
-                        .other_metadata_levels
-                        .union(&parsed.creative_trim_levels)
-                        .copied()
-                        .collect(),
-                )
-            } else {
-                let shape = plan.capability.bl_shape;
-                let parsed = DvBaseMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
-                if Some(i64::from(parsed.profile)) != plan.source.catalog.profile
-                    || parsed.source_el_kind != plan.source.el_kind
-                    || plan.capability.el_shape.is_some()
-                {
-                    return Err(invalid());
-                }
-                let mut operations = parsed.applied_operations;
-                if plan.destination == DvDestination::Sdr {
-                    operations.retain(|op| *op != DvOperation::Bt2020NclConversion);
-                    operations.push(DvOperation::Bt709Gamma24Conversion);
-                }
-                (operations, parsed.metadata_levels)
-            };
-        if !requires_el || plan.destination == DvDestination::Hdr10 {
+        let (mut operations, retained_levels) = if requires_el
+            && matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr)
+        {
+            if plan.source.el_kind != DvElKind::Fel {
+                return Err(invalid());
+            }
+            let shape = plan.capability.bl_shape;
+            let parsed = DvFelMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+            (parsed.applied_operations, parsed.metadata_levels)
+        } else if requires_el {
+            let parsed = DvParsedMetadata::from_raw_rpu(raw)?;
+            if !parsed.runtime_supported() || parsed.source_el_kind != plan.source.el_kind {
+                return Err(invalid());
+            }
+            (
+                plan.graph.required_operations(),
+                parsed
+                    .other_metadata_levels
+                    .union(&parsed.creative_trim_levels)
+                    .copied()
+                    .collect(),
+            )
+        } else {
+            let shape = plan.capability.bl_shape;
+            let parsed = DvBaseMetadata::from_raw_rpu(raw, (shape.width, shape.height))?;
+            if Some(i64::from(parsed.profile)) != plan.source.catalog.profile
+                || parsed.source_el_kind != plan.source.el_kind
+                || plan.capability.el_shape.is_some()
+            {
+                return Err(invalid());
+            }
+            (parsed.applied_operations, parsed.metadata_levels)
+        };
+        if plan.destination == DvDestination::Sdr {
+            operations.retain(|op| *op != DvOperation::Bt2020NclConversion);
+            operations.push(DvOperation::Bt709Gamma24Conversion);
+        }
+        if !requires_el || matches!(plan.destination, DvDestination::Hdr10 | DvDestination::Sdr) {
             // Source metadata determines conditional reshaping, not the
             // post-reconstruction export already verified by the daemon.
             operations.extend(
