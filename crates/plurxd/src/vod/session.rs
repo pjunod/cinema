@@ -217,7 +217,7 @@ impl Rendition {
     pub(super) async fn producer_belief(&self) -> Producer {
         #[cfg(target_os = "linux")]
         if let Some(producer) = self.dir.finite_producer() {
-            return producer.belief().await;
+            return producer.belief();
         }
         self.slot.belief().await
     }

@@ -87,7 +87,9 @@ impl FiniteSoftwareProducer {
                 Producer::Stopped {
                     produced_through,
                     positioned_at: 0,
-                    reason: crate::prodsched::Hold::Ahead,
+                    reason: crate::prodsched::Hold::Ahead {
+                        horizon: produced_through.unwrap_or(0),
+                    },
                 }
             } else {
                 Producer::Running {
