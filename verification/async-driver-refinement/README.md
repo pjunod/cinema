@@ -90,8 +90,7 @@ availability depends on the stored deadline. The retained T4 Kani policy proof
 does not prove this daemon-to-Store payload/time transfer. C9 is therefore a
 causal trigger-mutation witness only for the declared representative product.
 
-The selected model remains a finite abstraction. `NoTwoSourceReaders` counts
-unexpired durable queue authority, not physical readers still joining.
+The selected model remains a finite abstraction. NoTwoSourceReaders counts durable records with state running and queue expiry after the sampled time; it does not bound physical readers while expired work awaits cancellation or join.
 `GuardBeforeRevoke` is structural and does not independently prove lock
 publication. The three retirement wall samples, logical `resolve_claim`'s
 two authoritative reads, captured-time races, cancellation, child lifecycle,

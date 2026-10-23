@@ -165,76 +165,99 @@ class ReuseIdentities(OwnedScratch):
         sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
         changed = dict(sources); changed['crates/plurx-core/src/store/mod.rs'] = 'changed'
         self.assertEqual(runner.case_sources('graph-driver',sources),runner.case_sources('graph-driver',changed))
-        for case in ('graph-product','daemon-ready_work_precedes_burst_pressure_ticks'):
-            self.assertNotEqual(runner.case_sources(case,sources),runner.case_sources(case,changed))
+        product_input = self.directory/'store-edit-product-input'; product_input.mkdir()
+        (product_input/'driver-graph.json').write_text('{}\n')
+        self.assertNotEqual(runner.case_sources('graph-product',sources,out=product_input),
+                            runner.case_sources('graph-product',changed,out=product_input))
+        self.assertNotEqual(runner.case_sources('daemon-ready_work_precedes_burst_pressure_ticks',sources),
+                            runner.case_sources('daemon-ready_work_precedes_burst_pressure_ticks',changed))
 
     def test_product_causal_prefix_requires_linked_named_first_failure(self):
-        source_path = 'store/background_jobs_library.sql'
-        source_sha = runner.c.sha(ROOT/'crates/plurx-core/src/store/background_jobs_library.sql')
-        bindings = {source_path:source_sha}
-        before = runner.c.canonical({'durable':'before'})
-        normal_after = runner.c.canonical({'durable':'normal'})
-        mutant_after = runner.c.canonical({'durable':'mutated'})
-        before_sha = hashlib.sha256(before.encode()).hexdigest()
-        intermediate_sha = '1'*64
-        mutant_sha = hashlib.sha256(mutant_after.encode()).hexdigest()
-        driver = {'initial':0,'edges':[{'from':0,'to':1,'request':None,'reply':'QueueLoss'}]}
-        marker = {
-          'schema_version':1,'control':'C4','named_failure':'LastRequestAtomicRetirement',
-          'scope':'declared_representative_product','ordinary_settlement_payload_transfer':'unclosed',
-          'driver_graph_sha256':'d'*64,'source_bindings':bindings,
-          'schema_bindings':{'unmutated':'a'*64,'mutated':'b'*64},
-          'mutation':{'kind':'completion_retirement','trigger':'background_library_request_completed',
-            'source_sha256':source_sha,'mutated_trigger_sha256':'c'*64},
-          'unmutated_prefix_replay':True,
-          'prefix':[
-            {'driver_from':None,'request':None,'reply':None,'driver_to':None,
-              'primitive':{'op':'claim'},'normal_result':'claimed'},
-            {'driver_from':0,'request':None,'reply':'QueueLoss','driver_to':1,
-              'primitive':{'op':'complete'},'normal_result':'accepted'}],
-          'mutated_prefix':[
-            {'primitive':{'op':'complete'},'result':'accepted','from_sha256':before_sha,
-              'to_sha256':intermediate_sha,'invariant':None},
-            {'primitive':{'op':'complete'},'result':'accepted','from_sha256':intermediate_sha,
-              'to_sha256':mutant_sha,'invariant':'LastRequestAtomicRetirement'}],
-          'identities':{'normal_predecessor':before,'normal_successor':normal_after,
-            'mutated_predecessor':before,'mutated_successor':mutant_after},
-          'first_causal_violation':{'step':1,'name':'LastRequestAtomicRetirement'}}
-        output = 'async_store_causal_prefix='+json.dumps(marker,separators=(',',':'),sort_keys=True)
-        with patch.object(runner.c,'product_source_bindings',return_value=bindings,create=True):
-            facts = runner.causal_prefix_evidence('control-C4',output,driver,'d'*64)
-            self.assertEqual(facts['causal_prefix_steps'],2)
-            bad = json.loads(json.dumps(marker)); bad['schema_bindings']['mutated'] = bad['schema_bindings']['unmutated']
-            with self.assertRaises(runner.c.Invalid):
-                runner.causal_prefix_evidence('control-C4','async_store_causal_prefix='+json.dumps(bad),driver,'d'*64)
-            bad = json.loads(json.dumps(marker)); bad['first_causal_violation']['step'] = 0
-            with self.assertRaises(runner.c.Invalid):
-                runner.causal_prefix_evidence('control-C4','async_store_causal_prefix='+json.dumps(bad),driver,'d'*64)
-            bad_driver = json.loads(json.dumps(driver)); bad_driver['edges'] = []
-            broken_chain = json.loads(json.dumps(marker)); broken_chain['prefix'][1]['driver_from'] = 2
-            bad_identity = json.loads(json.dumps(marker)); bad_identity['identities']['mutated_predecessor'] = '{broken'
-            bad_hash_chain = json.loads(json.dumps(marker)); bad_hash_chain['mutated_prefix'][0]['from_sha256'] = 'f'*64
-            early_failure = json.loads(json.dumps(marker)); early_failure['mutated_prefix'][0]['invariant'] = 'LastRequestAtomicRetirement'
-            unrelated_failure = json.loads(json.dumps(marker)); unrelated_failure['first_causal_violation']['name'] = 'UnrelatedInvariant'
-            wrong_scope = json.loads(json.dumps(marker)); wrong_scope['scope'] = 'source_faithful_adapter'
-            falsely_closed = json.loads(json.dumps(marker)); falsely_closed['ordinary_settlement_payload_transfer'] = 'closed'
-            cases = [
-              ('unknown-key',json.dumps({**marker,'unreviewed':True}),driver),
-              ('duplicate-key',output[:-1]+',"schema_version":1}',driver),
-              ('forged-source-binding',json.dumps({**marker,'source_bindings':{source_path:'0'*64}}),driver),
-              ('forged-mutation-source',json.dumps({**marker,'mutation':{**marker['mutation'],'source_sha256':'0'*64}}),driver),
-              ('absent-driver-edge',json.dumps(marker),bad_driver),
-              ('broken-driver-chain',json.dumps(broken_chain),driver),
-              ('malformed-full-identity',json.dumps(bad_identity),driver),
-              ('broken-state-hash-chain',json.dumps(bad_hash_chain),driver),
-              ('early-causal-violation',json.dumps(early_failure),driver),
-              ('unrelated-causal-violation',json.dumps(unrelated_failure),driver),
-              ('wrong-product-scope',json.dumps(wrong_scope),driver),
-              ('false-settlement-closure',json.dumps(falsely_closed),driver),
-            ]
-            for label,payload,bad_graph in cases:
-                with self.subTest(case=label),self.assertRaises((runner.c.Invalid,ValueError)):
-                    runner.causal_prefix_evidence('control-C4','async_store_causal_prefix='+payload,bad_graph,'d'*64)
+        def fixture(control):
+            named,source_path,kind,trigger = {
+              'C4':('LastRequestAtomicRetirement','store/background_jobs_library.sql',
+                'completion_retirement','background_library_request_completed'),
+              'C9':('ReservationConservation','store/background_jobs_schema.sql',
+                'reservation_release','background_job_settlement_effects')}[control]
+            source_sha = runner.c.sha(ROOT/'crates/plurx-core/src'/source_path)
+            bindings = {source_path:source_sha}
+            before = runner.c.canonical({'durable':'before'})
+            normal_after = runner.c.canonical({'durable':'normal'})
+            mutant_after = runner.c.canonical({'durable':'mutated'})
+            before_sha = hashlib.sha256(before.encode()).hexdigest()
+            intermediate_sha = '1'*64
+            mutant_sha = hashlib.sha256(mutant_after.encode()).hexdigest()
+            driver = {'initial':0,
+              'states':[{'id':0,'pending':'AcquireDomain'},{'id':1,'pending':'Bind'}],
+              'edges':[{'from':0,'to':1,'request':'Bind','reply':'DomainAcquired'}]}
+            marker = {
+              'schema_version':1,'control':control,'named_failure':named,
+              'scope':'declared_representative_product','ordinary_settlement_payload_transfer':'unclosed',
+              'driver_graph_sha256':'d'*64,'source_bindings':bindings,
+              'schema_bindings':{'unmutated':'a'*64,'mutated':'b'*64},
+              'mutation':{'kind':kind,'trigger':trigger,'source_sha256':source_sha,
+                'mutated_trigger_sha256':'c'*64},
+              'unmutated_prefix_replay':True,
+              'prefix':[
+                {'driver_from':None,'request':'Claim','reply':'Claimed','driver_to':None,
+                  'primitive':{'op':'claim','job':0,'node':0},'normal_result':'claimed'},
+                {'driver_from':0,'request':'AcquireDomain','reply':'DomainAcquired','driver_to':1,
+                  'primitive':{'op':'acquire_domain','node':0},'normal_result':'acquired'}],
+              'mutated_prefix':[
+                {'primitive':{'op':'claim','job':0,'node':0},'result':'claimed','from_sha256':before_sha,
+                  'to_sha256':intermediate_sha,'invariant':None},
+                {'primitive':{'op':'acquire_domain','node':0},'result':'acquired','from_sha256':intermediate_sha,
+                  'to_sha256':mutant_sha,'invariant':named}],
+              'identities':{'normal_predecessor':before,'normal_successor':normal_after,
+                'mutated_predecessor':before,'mutated_successor':mutant_after},
+              'first_causal_violation':{'step':1,'name':named}}
+            return marker,driver,bindings,named
+
+        for control in ('C4','C9'):
+            marker,driver,bindings,named = fixture(control)
+            output = 'async_store_causal_prefix='+json.dumps(marker,separators=(',',':'),sort_keys=True)
+            with self.subTest(control=control),patch.object(runner.c,'product_source_bindings',return_value=bindings,create=True):
+                facts = runner.causal_prefix_evidence('control-'+control,output,driver,'d'*64)
+                self.assertEqual(facts['causal_prefix_steps'],2)
+                negatives = []
+                bad = json.loads(json.dumps(marker)); bad['schema_bindings']['mutated'] = bad['schema_bindings']['unmutated']
+                negatives.append(('schema-did-not-mutate',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['first_causal_violation']['step'] = 0
+                negatives.append(('wrong-final-step',bad,driver))
+                bad_driver = json.loads(json.dumps(driver)); bad_driver['edges'] = []
+                negatives.append(('absent-driver-edge',marker,bad_driver))
+                bad = json.loads(json.dumps(marker)); bad['prefix'][1]['driver_from'] = 2
+                negatives.append(('broken-driver-chain',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['prefix'][0]['request'] = None
+                negatives.append(('malformed-pre-driver-claim',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['prefix'][1]['request'] = 'Bind'
+                negatives.append(('consumed-versus-target-request',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['identities']['mutated_predecessor'] = '{broken'
+                negatives.append(('malformed-full-identity',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['mutated_prefix'][0]['from_sha256'] = 'f'*64
+                negatives.append(('broken-state-hash-chain',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['mutated_prefix'][0]['invariant'] = named
+                negatives.append(('early-causal-violation',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['first_causal_violation']['name'] = 'UnrelatedInvariant'
+                negatives.append(('unrelated-causal-violation',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['scope'] = 'source_faithful_adapter'
+                negatives.append(('wrong-product-scope',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['ordinary_settlement_payload_transfer'] = 'closed'
+                negatives.append(('false-settlement-closure',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['source_bindings'] = {next(iter(bindings)):'0'*64}
+                negatives.append(('forged-source-binding',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['mutation']['source_sha256'] = '0'*64
+                negatives.append(('forged-mutation-source',bad,driver))
+                negatives.append(('unknown-key',{**marker,'unreviewed':True},driver))
+                duplicate = output[:-1]+',"schema_version":1}'
+                for label,bad_marker,bad_graph in negatives:
+                    payload = json.dumps(bad_marker,separators=(',',':'),sort_keys=True)
+                    with self.subTest(case=label),self.assertRaises((runner.c.Invalid,ValueError)):
+                        runner.causal_prefix_evidence('control-'+control,
+                          'async_store_causal_prefix='+payload,bad_graph,'d'*64)
+                with self.subTest(case='duplicate-key'),self.assertRaises(runner.c.Invalid):
+                    runner.causal_prefix_evidence('control-'+control,
+                      'async_store_causal_prefix='+duplicate,driver,'d'*64)
 
     def test_new_workspace_path_dependency_outside_scope_fails_closed(self):
         crates = ['crates/plurx-core','crates/plurx-worker-control','crates/plurxd','crates/new-input']

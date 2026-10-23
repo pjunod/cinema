@@ -172,6 +172,7 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
               f'{name}: normal prefix replay was not established')
     c.require(isinstance(marker['prefix'],list) and 0 < len(marker['prefix']) <= 32,
               f'{name}: normal prefix is empty or exceeds bound')
+    states = {state['id']:state for state in driver['states']}
     edges = driver['edges']
     previous_to = None
     seen_edge = False
@@ -186,21 +187,26 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
                   f'{name}: malformed driver request')
         c.require(row['reply'] is None or isinstance(row['reply'],str),
                   f'{name}: malformed driver reply')
-        if source is not None:
+        if index == 0:
+            c.require(source is None and target is None and row['request'] == 'Claim'
+              and row['reply'] == 'Claimed' and row['primitive'] == {'op':'claim','job':0,'node':0}
+              and row['normal_result'] == 'claimed',
+              f'{name}: first prefix row is not the producer-shaped pre-driver Claim')
+        else:
+            c.require(source is not None and target is not None,
+                      f'{name}: post-claim prefix row needs actual driver endpoints')
             c.require(not seen_edge or previous_to == source,f'{name}: broken driver prefix chain')
             c.require(seen_edge or source == driver.get('initial'),
                       f'{name}: driver prefix does not begin at the actual initial state')
+            c.require(source in states and target in states,f'{name}: prefix references an unknown driver state')
+            source_state,target_state = states[source],states[target]
+            c.require(row['request'] == source_state['pending'] and row['request'] is not None,
+                      f'{name}: consumed request differs from source pending request')
             matching = [edge for edge in edges if edge['from'] == source and edge['to'] == target
-              and edge['request'] == row['request'] and edge['reply'] == row['reply']]
-            c.require(len(matching) == 1,f'{name}: prefix edge is absent/ambiguous in source driver graph')
+              and edge['reply'] == row['reply'] and edge['request'] == target_state['pending']]
+            c.require(len(matching) == 1 and matching[0]['request'] is not None,
+                      f'{name}: prefix edge/target pending request is absent or ambiguous')
             seen_edge = True; previous_to = target
-        else:
-            c.require(row['request'] is None or any(edge['request'] == row['request'] for edge in edges),
-                      f'{name}: initial request is absent from source driver graph')
-            c.require(row['reply'] is None or (row['reply'] in c.REPLIES and
-              (any(edge['reply'] == row['reply'] for edge in edges)
-               or any(rejected['reply'] == row['reply'] for rejected in driver.get('rejected',[])))),
-                      f'{name}: initial reply is absent from source driver graph')
         c.require(row['primitive'] is None or isinstance(row['primitive'],dict),
                   f'{name}: malformed normal primitive')
         c.require(row['normal_result'] is None or isinstance(row['normal_result'],str),
