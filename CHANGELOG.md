@@ -45,7 +45,9 @@ bump may break compatibility and a **patch** bump never does.
 - Processed Dolby Vision windows support an observed nonnegative common
   source origin instead of requiring literal zero. Absolute picture keys,
   soundtrack offset and bounded membership checks stay intact; missing or
-  differing held video/FORMAT origins explicitly fall back.
+  differing held video/FORMAT origins explicitly fall back. The frozen held
+  origin is passed to the helper explicitly, so missing or changing partial
+  demux timestamps cannot replace the epoch used for windows and EOF checks.
 
 - Complete-title Dolby Vision scans compare a selected Matroska track's
   `DURATION` tag to its timestamp endpoint rather than subtracting a nonzero
