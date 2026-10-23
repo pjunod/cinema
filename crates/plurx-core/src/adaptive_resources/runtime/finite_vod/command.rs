@@ -431,6 +431,8 @@ fn validate_env(env: &[(OsString, OsString)]) -> io::Result<()> {
 mod tests {
     #[cfg(target_os = "linux")]
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::transcode::LinuxExecutionObject;
 
     #[cfg(target_os = "linux")]
     #[test]
