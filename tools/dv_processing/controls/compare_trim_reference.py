@@ -129,7 +129,7 @@ def observe(packet_path, candidate, output):
                 'candidate_identity_sha256': event['identity_sha256']})
     report = {'schema': 'e-trim-observations-v1',
         'status': 'observations-only-not-acceptance', 'creative_trims_applied': False,
-        'limitations': ['SOP-only; chroma/saturation/detail/extended trims unapplied',
+        'limitations': ['B.3 RGB candidate includes L2 chroma/saturation; L8 chroma/saturation and L3/detail/extended trims unapplied',
                         'public level-specific SOP bridge; separate B.3 RGB candidate is not Dolby rendering conformance',
                         'capture provenance and frame registration are declared, not authenticated',
                         'luminance patches do not establish color/chroma fidelity'],

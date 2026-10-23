@@ -9,7 +9,7 @@
 #include <math.h>
 #include <libdovi/rpu_parser.h>
 
-#define DV_TRIM_METHOD "candidate-b3-linear-rgb-sop-v2"
+#define DV_TRIM_METHOD "candidate-b3-linear-rgb-sop-l2-chroma-v3"
 #define DV_TRIM_BRIDGE_METHOD "public-us20210076042-sop-v1"
 #define DV_TRIM_DIRECT_METHOD "direct-b3-parameters-v1"
 #define DV_TRIM_B3_METHOD "st2094-10-2021-b3-eq8-linear-rgb-v1"

@@ -1,8 +1,8 @@
-# Display-targeted DV trims — the unaccepted SOP candidate and missing color contract
+# Display-targeted DV trims — the unaccepted RGB candidate and remaining color contract
 
 **Status:** private candidate infrastructure, unmerged and unqualified ·
 **Executes:** phase 2 of [the build plan](DISPLAY-TARGETED-DV-BUILD.md) ·
-**Written:** 2026-10-22 · **Public SOP bridge correction:** 2026-10-22
+**Written:** 2026-10-22 · **Public SOP/L2 chroma continuation:** 2026-10-22
 
 Companion to [the build plan](DISPLAY-TARGETED-DV-BUILD.md): this records what
 can be implemented from public sources, what remains unresolved, and the exact
@@ -20,6 +20,7 @@ serving while the ICtCp contract and independent acceptance remain unresolved.
 | [SMPTE ST 2094-10:2021](https://pub.smpte.org/latest/st2094-10/st2094-10-2021.pdf), §6.2 and B.3 equation (8) | Gain/offset/gamma applied to target-normalized linear RGB, then rescaled to cd/m²; neutral gain/gamma 1 and offset 0. | Dolby RPU integer conversion or Dolby device equivalence. Annex B is informative. |
 | [Dolby patent US10701399B2](https://patents.google.com/patent/US10701399B2/en), A4.2 | L2 field encoding centered at raw 2048 with a 4096 scale; multiscale has a different encoding. | That a centered slope/power delta is added to B.3 gain/gamma, or an ICtCp compensation function. |
 | [Dolby patent US20210076042A1](https://patents.google.com/patent/US20210076042A1/en), equations (2)–(4) and following SOP rescaling | An explicit public embodiment rescales L2 and L8 SOP differently before the trim-pass function. | That this embodiment plus B.3 linear RGB reproduces CM4 rendering, or supplies missing chroma/detail/L3 behavior. |
+| [ETSI TS 103 572 v1.3.1](https://www.etsi.org/deliver/etsi_ts/103500_103599/103572/01.03.01_60/ts_103572v010301p.pdf), equations (7)/(8) | L2 raw chroma weight/saturation gain map to ST 2094-10 §6.3.1/2 with centered `/4096` encoding. | L8 conversion or a complete Dolby CM renderer. |
 | Pinned public libdovi [L2](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/rpu/extension_metadata/blocks/level2.rs), [L8](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/rpu/extension_metadata/blocks/level8.rs), [L10](https://github.com/quietvoid/dovi_tool/blob/83e1fdad6dcd5995556235946e7c5c0f9010d5a1/dolby_vision/src/rpu/extension_metadata/blocks/level10.rs) | Actual field layouts, neutral defaults, L8 lengths and custom target indices; CM4 L8 is used to compute L2. | A complete preset-display table or the physical display-management algorithm. |
 | Pinned libplacebo [custom shader API](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/include/libplacebo/shaders/custom.h) | Each custom dispatch receives explicit variable data. | Executed native API 374 behavior; that requires the authored regression. |
 
@@ -45,15 +46,17 @@ structure padding or parser addresses. It covers the selected level/index,
 all signalled trim controls (including currently unapplied multiscale,
 chroma, saturation, extended fields), resolved target peak/floor/primaries,
 L1, title mastering endpoints, bucket, raster, provenance mode, actual
-float32 SOP parameters, selection schema version, public bridge/direct parameter
-mode and the named candidate, B.3, numerical-boundary and L1 method versions.
+float32 SOP/CW/SG/luminance-weight parameters, L2 stage applicability, selection
+schema version, public bridge/direct parameter mode and the named candidate,
+SOP/L2 bridges, B.3 stages, numerical-boundary and L1 method versions.
 Method strings are NUL-delimited before the scalar stream is hashed. Frame
-number is excluded so repeated shots can reuse identity. A selected instruction change changes its
-identity even when that field remains unapplied.
+number is excluded so repeated shots can reuse identity. A selected instruction
+change changes its identity even when that field remains unapplied.
 
 The candidate uses a direct shader instead of a tone-map LUT: the production
 Annex B.2 path already exports native RGB through a custom dispatch. Every
-candidate dispatch supplies gain, offset, gamma and target as actual uniforms.
+SOP dispatch supplies gain, offset, gamma and target as actual uniforms; the
+separate L2 pass supplies actual CW/SG and target luminance coefficients.
 There is no LUT callback or external trim state whose change can be missed by
 a LUT cache. The native A→B→A regression is required evidence that reuse obeys
 those parameters; the API description alone is not a run.
@@ -105,32 +108,59 @@ power at base zero remains zero. This endpoint convention is an implementation
 choice, not a claimed Dolby rule. One-LSB fractions are exactly representable
 as float32; no epsilon or reference-derived fitting is introduced.
 
-The instrument records `scope: rgb-sop-only`, `acceptance: unaccepted`, selected
-metadata level, parameter source, B.3 method, numerical policy, actual parameters,
+The instrument records `scope: rgb-sop-and-l2-chroma-saturation`,
+`acceptance: unaccepted`, selected metadata level, parameter source, B.3 method, numerical policy, actual parameters,
 complete selected trim words and `creative_trims_applied: false` per frame.
-Chroma, saturation, multiscale/detail, L3 and extended controls remain unapplied.
+Selected L2 chroma/saturation now use the separate pass in §4; L8 chroma,
+L8 saturation, multiscale/detail, L3 and extended controls remain unapplied.
 The bounded public-bridge correction has authored controls only: independent
 review precedes compilation, native execution and a fresh software-reference
 comparison. Earlier reference errors are not repaired evidence; this source
 change establishes neither CM conformance nor full phase E acceptance.
 
-## 4. ICtCp compensation has an unresolved algorithm contract
+## 4. L2 chroma uses a coherent RGB pass; L8 remains unresolved
 
-The plan asks for a separate ICtCp chroma/saturation pass. ST 2094-10 B.3
-instead illustrates RGB chroma adjustment in equation (9). §6.3 describes
-chroma weight as depending on luminance and saturation inputs; it does not
-specify an ICtCp equivalent. The public raw-field descriptions do not choose:
+ETSI's L2 equations map the actual raw fields to `c = (raw_chroma − 2048)/4096`
+and `SG = (raw_saturation − 2048)/4096`. The new
+`etsi-ts103572-1.3.1-l2-cw-sg-v1` bridge applies only to selected L2 in public
+metadata mode. L8 and explicit `direct-b3` controls emit zero CW/SG with an
+unapplied source. No multiplier is inferred from L8's SOP scaling.
 
-- Whether compensation uses pre-map intensity, post-L1 intensity or post-SOP
-  intensity, nor which saturation measure it uses.
-- Whether the raw chroma-weight delta scales Ct/Cp directly or weights a
-  mapping-dependent compensation, and the sign/scale of that relationship.
-- The relative order of saturation and compensation, target normalization,
-  near-black behavior, or output-gamut handling.
+[`trim_l2_chroma_shader.h`](../../tools/dv_processing/controls/trim_l2_chroma_shader.h)
+is a separate dispatch after SOP. It follows B.3 equation (9) entirely in
+linear RGB, named `st2094-10-2021-b3-eq9-post-sop-bt2020-v1`:
 
-No ratio/power function, epsilon, arbitrary clamp or private/vendor LUT is
-introduced to fill this gap. SOP-only execution is useful infrastructure; it
-is not a completed E implementation or acceptance.
+```text
+Y = 0.2627 F_R + 0.6780 F_G + 0.0593 F_B
+G_i = F_i × (1+c) × (F_i/Y)^SG
+    = (1+c) × Y × (F_i/Y)^(1+SG), for Y > 0
+G_i = 0, for Y = 0
+```
+
+`F` is the post-SOP result. The luminance coefficients are from
+[BT.2020-2 tables 3/4](https://www.itu.int/rec/R-REC-BT.2020-2-201510-I/en)
+for this instrument's explicit BT.2020/D65 output; the cinema-primary example
+coefficients in SMPTE are not substituted. Both actual float32 coefficients and
+CW/SG uniforms enter the identity. Neutral CW/SG returns the exact SOP texture.
+
+**Numerical policy:** CW/SG span `[-0.5, 0.5 − 1/4096]`. Positive weights bound
+each ratio and `1+SG` is at least 0.5. The stable form therefore extends
+continuously to black and zero channels without an epsilon or `0 × infinity`.
+The named `continuous-black-no-bucket-clip-pq-ceiling-10000-v1` policy leaves
+formula output unbounded by the bucket; final PQ serialization clips only to
+its representable `[0,10000]` cd/m² range. This is an explicit transport ceiling,
+not a fitted chroma rule. Invalid parameters refuse without narrowing clamps.
+
+The receipt separately reports L2 chroma/saturation applicability, methods,
+CW/SG, luminance coefficients and boundary policy. L8 remains explicitly
+unapplied even when its SOP is nonneutral. L3, detail and extended controls
+remain unapplied at every level; `creative_trims_applied` stays false.
+
+The plan's proposed ICtCp pass remains unresolved. The RGB implementation does
+not combine ICtCp intensity with RGB ratios. Public L2 coverage does not supply
+L8 chroma conversion, an ICtCp compensation algorithm, target-gamut treatment or
+Dolby CM equivalence. Those require source-backed work and matched numerical
+reference acceptance; no reference-output fitting supplies them.
 
 The smallest distinguishing matched-reference packet contains the SAME source
 frame and target with: neutral controls; slope-only and power-only changes;
@@ -168,7 +198,9 @@ trim, duplicate/missing target refusal, L8/L10 resolution and cross-version
 ties, all selected-field identity sensitivity, explicit parameter identity,
 same-raw L2/L8 differentiation, neutral/endpoints/one-LSB fractions, full-range
 parameter refusal, explicit zero-power CPU/native behavior, exact neutral pixels,
-and actual same-dispatch-cache L2→L8→L2 output sensitivity.
+actual same-dispatch-cache L2→L8→L2 output sensitivity, independent direct
+L2 chroma equation witnesses, grayscale/color/black/extreme controls, distinct
+CW versus SG effects and same-cache chroma A→B→A output sensitivity.
 Synthetic structs and pixels prove mechanics; they do not prove optics.
 
 ## 6. The real-reference adapter emits observations, never acceptance
@@ -260,7 +292,8 @@ or decoder-association proof. Each candidate-selected L8/L10 is checked against
 the actual converted RPU; XML vector labels alone cannot satisfy that check.
 
 **Baseline and trim delta:** the zero-L8 official XML also contains nonneutral
-derived L2 and L3 instructions. The SOP-only candidate does not apply them.
+derived L2 and L3 instructions. Selection chooses L8, so neither its companion L2 nor L3 is applied. The new
+L2 chroma pass therefore remains unapplied for this L8 reference packet.
 Metafier also regenerates companion L2 instructions when applying the global L8
 edits. Their XML vectors and actual quantized RPU fields are recorded per case;
 this is an **L8-plus-companion-L2 metadata delta**, not a causally isolated
@@ -320,8 +353,9 @@ belong to the coordinator's evidence-bound batch.
 not photometry, full Dolby conformance or automatic creative-trim acceptance.
 Public sources justify the supported XML importer, frozen input/output color
 math, selection/identity mechanics and illustrative RGB SOP equation. They
-still do not identify an ICtCp chroma-weight/saturation algorithm or justify
-replacing it with fitted weights. The public SOP parameter bridge does not
+also justify the bounded L2 raw-to-B.3 RGB chroma/saturation pass. They do not
+identify L8 chroma conversion or an ICtCp chroma-weight/saturation algorithm,
+and fitted weights do not supply those gaps. The public SOP parameter bridge does not
 establish the B.3 RGB domain as Dolby rendering. Those are implementation/contract gaps even after reference
 access has been resolved; E is not complete and production remains L1-only.
 

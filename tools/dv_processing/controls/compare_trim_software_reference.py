@@ -3,7 +3,7 @@
 No vendor executable is invoked, inspected or copied. The existing acquisition
 packet supplies reference images/metadata/true-exit records. Public libdovi
 imports each XML into actual serialized RPUs. A pinned public FFmpeg decoder
-reads TIFF without a color transform. The SOP-only candidate remains unaccepted.
+reads TIFF without a color transform. The RGB candidate remains unaccepted; selected L8 chroma stays unapplied.
 Run only in the coordinator's reviewed qualification batch.
 """
 import argparse
@@ -235,7 +235,9 @@ def observe(args):
     rows = [e for e in events if e.get('kind') == 'trim_candidate_frame']
     if [e['frame'] for e in rows] != list(range(len(cases))) or any(
             e['acceptance'] != 'unaccepted' or e['creative_trims_applied'] is not False or
-            e['scope'] != 'rgb-sop-only' for e in rows):
+            e['scope'] != 'rgb-sop-and-l2-chroma-saturation' or
+            e['chroma_compensation_applied'] is not False or e['saturation_gain_applied'] is not False or
+            e['chroma_parameter_source'] != 'unapplied' for e in rows):
         raise ValueError('candidate coverage or provenance mismatch')
     candidate_rgb = []
     for i, (event, parsed) in enumerate(zip(rows, conversions, strict=True)):
@@ -282,7 +284,7 @@ def observe(args):
         'zero_baseline_error': {'normalized_pq': metrics(differences(candidate_rgb[0], references[0])),
                                 'linear_xyz_cd_m2': metrics(differences(candidate_xyz[0], reference_xyz[0]))},
         'comparisons': comparisons, 'patches': patches,
-        'limitations': ['SOP-only candidate; chroma/saturation/L3/detail/extended controls unapplied',
+        'limitations': ['selected L8 has SOP only; L8 chroma/saturation and all L3/detail/extended controls unapplied',
             'zero-reference has other nonneutral instructions; baseline error is separate from metadata delta',
             ('Metafier regenerated L2; recorded delta is not a causally isolated L8-only effect'
              if authored is None else 'L8-only authored XML input variation; finite cases do not establish an algorithm'),

@@ -14,7 +14,7 @@
 static void require(bool ok, const char *why) {
   if (!ok) { fprintf(stderr, "trim candidate refused: %s\n", why); exit(1); }
 }
-#include "trim_candidate_shader.h"
+#include "trim_l2_chroma_shader.h"
 
 static void read_exact(const char *path, void *data, size_t size) {
   FILE *f = fopen(path, "rb");
@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
   pl_tex source = pl_tex_create(gpu, pl_tex_params(.w = (int)width, .h = (int)height,
       .format = fmt, .sampleable = true, .host_writable = true));
   require(source != NULL, "source texture");
-  struct dv_trim_gpu state = {0};
+  struct dv_trim_gpu state = {0}, chroma_state = {0};
   for (int arg = 8, frame = 0; arg < argc; arg += 2, frame++) {
     DoviRpuOpaque *rpu = read_rpu(argv[arg]);
     const DoviRpuDataHeader *header = dovi_rpu_get_header(rpu);
@@ -75,8 +75,10 @@ int main(int argc, char **argv) {
     float sop[3];
     if (public_bridge) require(dv_trim_public_sop(&trim, sop), "public SOP level/encoding");
     else memcpy(sop, direct, sizeof(sop));
+    struct dv_trim_chroma chroma;
+    require(dv_trim_l2_chroma(&trim, public_bridge, &chroma), "L2 chroma encoding");
     char key[65];
-    dv_trim_identity(&trim, dm->dm_data.level1, sop, width, height, public_bridge, key);
+    dv_trim_identity(&trim, dm->dm_data.level1, sop, width, height, public_bridge, &chroma, key);
     read_exact(argv[arg+1], pixels, count * sizeof(float));
     for (size_t i = 0; i < count; i++)
       require(isfinite(pixels[i]) && pixels[i] >= 0 && pixels[i] <= 1,
@@ -85,6 +87,7 @@ int main(int argc, char **argv) {
             "native master upload");
     pl_tex mapped = dv_target_render(log, gpu, source, frame);
     pl_tex result = dv_trim_render(&state, log, gpu, mapped, sop, dv_target.nits);
+    result = dv_trim_l2_chroma_render(&chroma_state, log, gpu, result, &chroma);
     require(pl_tex_download(gpu, pl_tex_transfer_params(.tex = result, .ptr = pixels)),
             "candidate output download");
     char path[8192];
@@ -95,14 +98,21 @@ int main(int argc, char **argv) {
             "exclusive candidate output");
     printf("{\"kind\":\"trim_candidate_frame\",\"frame\":%d,\"method\":\"%s\","
            "\"acceptance\":\"unaccepted\",\"creative_trims_applied\":false,"
-           "\"scope\":\"rgb-sop-only\",\"chroma_compensation_applied\":false,"
-           "\"saturation_gain_applied\":false,\"other_trim_fields_applied\":false,"
+           "\"scope\":\"rgb-sop-and-l2-chroma-saturation\",\"chroma_compensation_applied\":%s,"
+           "\"saturation_gain_applied\":%s,\"other_trim_fields_applied\":false,"
+           "\"chroma_method\":\"%s\",\"chroma_parameter_source\":\"%s\","
+           "\"chroma_numerical_policy\":\"%s\",\"chroma_weight\":%.9g,\"saturation_gain\":%.9g,"
+           "\"target_luminance_weights\":[%.9g,%.9g,%.9g],"
            "\"l3_applied\":false,\"detail_applied\":false,"
            "\"parameter_source\":\"%s\",\"b3_method\":\"%s\","
            "\"numerical_policy\":\"%s\",\"selected_metadata_level\":%u,"
            "\"identity_sha256\":\"%s\","
            "\"gain\":%.9g,\"offset\":%.9g,\"gamma\":%.9g,\"trim_words\":[",
-           frame, DV_TRIM_METHOD, public_bridge ? DV_TRIM_BRIDGE_METHOD : DV_TRIM_DIRECT_METHOD,
+           frame, DV_TRIM_METHOD, chroma.applied ? "true" : "false", chroma.applied ? "true" : "false",
+           DV_TRIM_L2_CHROMA_METHOD, chroma.applied ? DV_TRIM_L2_CHROMA_BRIDGE : "unapplied",
+           DV_TRIM_L2_CHROMA_BOUNDARY, chroma.value[0], chroma.value[1],
+           dv_trim_bt2020_luma[0], dv_trim_bt2020_luma[1], dv_trim_bt2020_luma[2],
+           public_bridge ? DV_TRIM_BRIDGE_METHOD : DV_TRIM_DIRECT_METHOD,
            DV_TRIM_B3_METHOD, DV_TRIM_BOUNDARY_METHOD, trim.word[DT_LEVEL], key,
            sop[0], sop[1], sop[2]);
     for (unsigned i = 0; i < DV_TRIM_ID_WORDS; i++)
@@ -113,6 +123,7 @@ int main(int argc, char **argv) {
     dovi_rpu_free(rpu);
   }
   dv_trim_gpu_destroy(&state, gpu);
+  dv_trim_gpu_destroy(&chroma_state, gpu);
   dv_target_destroy(gpu);
   pl_tex_destroy(gpu, &source);
   pl_vulkan_destroy(&vk); pl_log_destroy(&log); free(pixels);
