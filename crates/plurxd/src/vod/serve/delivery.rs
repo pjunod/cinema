@@ -1896,66 +1896,6 @@ fn playlist_with_start_tag(playlist: &[u8], start_ms: i64) -> Vec<u8> {
     output
 }
 
-#[cfg(test)]
-mod cached_recovery_tests {
-    #[tokio::test]
-    async fn cached_reader_proof_requires_live_exact_incarnation_and_no_producer_demand() {
-        let (_temp, serve, facts, _) =
-            crate::vodserve::retained::test_post_attachment_output_facts().await;
-        let id = "00000000-0000-4000-8000-00000000cace";
-        let incarnation = "cached-recovery-incarnation";
-        let output = facts
-            .response_owner
-            .retained_output_facts()
-            .expect("actual immutable complete output");
-        assert!(
-            serve
-                .cached_prepared_reader_owner(id, incarnation, &output)
-                .await
-                .is_none(),
-            "ordinary cached publication is not a primed successor proof"
-        );
-        serve.mark_prepared_incarnation(id, incarnation).await;
-        let owner = serve
-            .cached_prepared_reader_owner(id, incarnation, &output)
-            .await
-            .expect("exact prepared retained reader");
-        assert_eq!(
-            serve.cached_prepared_reader_is_live(id, incarnation, &owner),
-            Some(true)
-        );
-        assert_eq!(
-            serve.cached_prepared_reader_is_live(id, "foreign-incarnation", &owner),
-            Some(false)
-        );
-        {
-            let _busy = owner.lifecycle.lock().await;
-            assert!(
-                serve
-                    .cached_prepared_reader_is_live(id, incarnation, &owner)
-                    .is_none(),
-                "contended lifecycle cannot mint a survival claim"
-            );
-        }
-        {
-            let _busy = serve.shared.sessions.lock().await;
-            assert_eq!(
-                serve.cached_prepared_reader_is_live(id, incarnation, &owner),
-                None
-            );
-        }
-        crate::vodserve::retained::test_make_attachment_uncaptured(&serve, id).await;
-        assert!(
-            serve.cached_prepared_reader_is_live(id, incarnation, &owner) == Some(false),
-            "cold attachment cannot retain an old cached proof"
-        );
-        assert!(serve
-            .cached_prepared_reader_owner(id, incarnation, &output)
-            .await
-            .is_none());
-    }
-}
-
 fn display_target_activity(rendition: &Rendition) -> Option<DisplayTargetActivity> {
     #[cfg(target_os = "linux")]
     {
@@ -2030,5 +1970,65 @@ impl VodServe {
             }
         }
         (reports, buckets)
+    }
+}
+
+#[cfg(test)]
+mod cached_recovery_tests {
+    #[tokio::test]
+    async fn cached_reader_proof_requires_live_exact_incarnation_and_no_producer_demand() {
+        let (_temp, serve, facts, _) =
+            crate::vodserve::retained::test_post_attachment_output_facts().await;
+        let id = "00000000-0000-4000-8000-00000000cace";
+        let incarnation = "cached-recovery-incarnation";
+        let output = facts
+            .response_owner
+            .retained_output_facts()
+            .expect("actual immutable complete output");
+        assert!(
+            serve
+                .cached_prepared_reader_owner(id, incarnation, &output)
+                .await
+                .is_none(),
+            "ordinary cached publication is not a primed successor proof"
+        );
+        serve.mark_prepared_incarnation(id, incarnation).await;
+        let owner = serve
+            .cached_prepared_reader_owner(id, incarnation, &output)
+            .await
+            .expect("exact prepared retained reader");
+        assert_eq!(
+            serve.cached_prepared_reader_is_live(id, incarnation, &owner),
+            Some(true)
+        );
+        assert_eq!(
+            serve.cached_prepared_reader_is_live(id, "foreign-incarnation", &owner),
+            Some(false)
+        );
+        {
+            let _busy = owner.lifecycle.lock().await;
+            assert!(
+                serve
+                    .cached_prepared_reader_is_live(id, incarnation, &owner)
+                    .is_none(),
+                "contended lifecycle cannot mint a survival claim"
+            );
+        }
+        {
+            let _busy = serve.shared.sessions.lock().await;
+            assert_eq!(
+                serve.cached_prepared_reader_is_live(id, incarnation, &owner),
+                None
+            );
+        }
+        crate::vodserve::retained::test_make_attachment_uncaptured(&serve, id).await;
+        assert!(
+            serve.cached_prepared_reader_is_live(id, incarnation, &owner) == Some(false),
+            "cold attachment cannot retain an old cached proof"
+        );
+        assert!(serve
+            .cached_prepared_reader_owner(id, incarnation, &output)
+            .await
+            .is_none());
     }
 }
