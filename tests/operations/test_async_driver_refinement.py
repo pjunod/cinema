@@ -7,8 +7,10 @@ import importlib.util
 import importlib.machinery
 import json
 import hashlib
+import re
 from pathlib import Path
 import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -794,6 +796,64 @@ class ReceiptContracts(unittest.TestCase):
     def test_reviewed_configuration_files_match_closed_registry(self):
         for name in checker.CONFIGS:
             self.assertEqual((checker.PACKAGE/f'{name}.cfg').read_text(),checker.config(name))
+
+
+class SelectorStagingContracts(unittest.TestCase):
+    """Staging fixtures inspect source closure and mutation; never invoke Cargo."""
+    scratch = ROOT/'target/async-driver-refinement-selector-source-fixture'
+
+    def test_selector_staging_copies_declared_modules_and_only_mutates_one_poll_order(self):
+        contract = json.loads((runner.PACKAGE/'selector-control.json').read_text())
+        crate = ROOT/'crates/plurx-worker-control'
+        source_paths = list((crate/'src').rglob('*.rs'))+[crate/'tests'/f"{contract['test_target']}.rs"]
+        before = {path.relative_to(crate).as_posix():path.read_bytes() for path in source_paths}
+        library = before['src/lib.rs'].decode()
+        required = {'src/lib.rs',f"tests/{contract['test_target']}.rs"}
+        required.update('src/'+name+'.rs' for name in re.findall(
+            r'^\s*(?:pub\s+)?mod\s+([A-Za-z_]\w*)\s*;',library,re.MULTILINE))
+        required.update('src/'+name for name in re.findall(r'include!\(\s*"([^"]+)"\s*\)',library))
+        self.assertIn('src/retry_policy.rs',required)
+        original = before['src/library_driver.rs'].decode()
+        self.assertEqual(hashlib.sha256(before['src/library_driver.rs']).hexdigest(),contract['source_sha256'])
+        self.assertEqual(original.count(contract['find']),1)
+        self.assertEqual(original.count(contract['replace']),0)
+        self.scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='selector-stage-',dir=self.scratch) as directory:
+            mutation = runner.stage_selector(Path(directory))
+            staged = Path(directory)/'selector-mutant'
+            self.assertEqual(set(mutation['original_sha256']),required)
+            for relative in required:
+                with self.subTest(source=relative):
+                    self.assertEqual(mutation['original_sha256'][relative],hashlib.sha256(before[relative]).hexdigest())
+                    expected = (original.replace(contract['find'],contract['replace'],1).encode()
+                      if relative == 'src/library_driver.rs' else before[relative])
+                    self.assertEqual((staged/relative).read_bytes(),expected)
+            self.assertEqual(mutation['mutant_sha256'],runner.c.sha(staged/'src/library_driver.rs'))
+            self.assertEqual(mutation['manifest_sha256'],runner.c.sha(staged/'Cargo.toml'))
+            self.assertEqual(mutation['contract_sha256'],runner.c.sha(runner.PACKAGE/'selector-control.json'))
+        self.assertEqual({relative:(crate/relative).read_bytes() for relative in before},before)
+
+    def test_selector_staging_rejects_stale_source_and_nonunique_mutation_anchor(self):
+        contract = json.loads((runner.PACKAGE/'selector-control.json').read_text())
+        original = (ROOT/contract['source']).read_text()
+        self.scratch.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='selector-guard-',dir=self.scratch) as directory:
+            root = Path(directory)
+            source = root/contract['source']; source.parent.mkdir(parents=True)
+            for kind,text in (
+                ('stale',original+'\n// source drift\n'),
+                ('missing',original.replace(contract['find'],contract['replace'],1)),
+                ('duplicate',original+contract['find']),
+            ):
+                source.write_text(text)
+                anchor = dict(contract)
+                if kind != 'stale':
+                    anchor['source_sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+                reason = 'reviewed mutation anchor' if kind == 'stale' else 'match exactly once'
+                with self.subTest(kind=kind),mock.patch.object(runner,'ROOT',root),mock.patch.object(
+                    runner.c,'read_json',return_value=anchor),self.assertRaisesRegex(runner.c.Invalid,reason):
+                    runner.stage_selector(root)
+                self.assertFalse((root/'selector-mutant').exists())
 
 
 class CargoPathOverrideIdentityContracts(unittest.TestCase):

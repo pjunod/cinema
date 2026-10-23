@@ -633,7 +633,7 @@ def stage_selector(out):
     c.require(source.read_text().count(contract['find']) == 1,'selector source swap must match exactly once')
     staged = out/'selector-mutant'; staged.mkdir(exist_ok=True)
     originals = {}
-    for relative in ('src/lib.rs','src/library_driver.rs','src/library_lifecycle.rs','src/proofs.rs','tests/library_driver.rs'):
+    for relative in ('src/lib.rs','src/library_driver.rs','src/library_lifecycle.rs','src/retry_policy.rs','src/proofs.rs','tests/library_driver.rs'):
         src = ROOT/'crates/plurx-worker-control'/relative
         dst = staged/relative; dst.parent.mkdir(exist_ok=True)
         shutil.copyfile(src,dst); originals[relative] = c.sha(src)

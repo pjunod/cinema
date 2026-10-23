@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source": "crates/plurx-worker-control/src/library_driver.rs",
-  "source_sha256": "a78b1f34a9b264ce82c72ff3fbab145e3e0780aaf7f43ee6770ada3cd61049ae",
+  "source_sha256": "4afc578789afe747baf6c512cf2d53127ffb96297ed4263b2aff7f6ddc1dbe58",
   "function": "select_work",
   "find": "        if let Poll::Ready(value) = work.as_mut().poll(cx) {\n            return Poll::Ready(Selected::Work(value));\n        }\n        if pressure.as_mut().poll(cx).is_ready() {\n            return Poll::Ready(Selected::Tick);\n        }\n",
   "replace": "        if pressure.as_mut().poll(cx).is_ready() {\n            return Poll::Ready(Selected::Tick);\n        }\n        if let Poll::Ready(value) = work.as_mut().poll(cx) {\n            return Poll::Ready(Selected::Work(value));\n        }\n",
@@ -10,5 +10,5 @@
   "test_name": "selector_ready_work_precedes_ready_tick_and_preserves_loss_priority",
   "expected_failure_marker": "SELECTOR_WORK_BEFORE_TICK",
   "expected_test_exit": 101,
-  "isolation": "Only mutate a durable staged standalone zero-dependency leaf crate; never mutate live checkout sources. Copy lib.rs, library_lifecycle.rs, library_driver.rs, proofs.rs, tests/library_driver.rs unchanged before one exact replacement. Derive package version/edition from workspace manifests; include standalone [workspace]. Record source/test/manifest/original/mutated hashes. Run only named exact regression; compile error, absent test, wrong assertion or unexpected status is failure."
+  "isolation": "Only mutate a durable staged standalone zero-dependency leaf crate; never mutate live checkout sources. Copy lib.rs, library_lifecycle.rs, library_driver.rs, retry_policy.rs, proofs.rs, tests/library_driver.rs unchanged before one exact replacement. Derive package version/edition from workspace manifests; include standalone [workspace]. Record source/test/manifest/original/mutated hashes. Run only named exact regression; compile error, absent test, wrong assertion or unexpected status is failure."
 }
