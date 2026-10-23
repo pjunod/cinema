@@ -865,6 +865,7 @@ impl RuntimeRecipe {
                 .source_boundary(end, grid.numerator, self.source_tick)
                 .map_err(|e| e.to_string())?,
             max_preroll: 512,
+            source_origin: Some(self.source_origin),
         })
     }
 
@@ -1650,7 +1651,9 @@ fn validate_window_origin(
     provenance: &str,
     expected: plurx_core::transcode::dv_processing::DvSourceOrigin,
 ) -> Result<(), String> {
-    if provenance != "observed_stream_start_time" || timestamp(origin)? != expected.timestamp() {
+    if provenance != "observed_held_format_and_selected_video_probe"
+        || timestamp(origin)? != expected.timestamp()
+    {
         return Err("source window origin differs from observed held common origin".into());
     }
     Ok(())
@@ -1690,6 +1693,9 @@ impl PrivateWindow {
         export_raster: (u32, u32),
     ) -> Result<ObservedWindow, String> {
         use plurx_core::transcode::dv_processing::*;
+        if window.source_origin != Some(source_origin) {
+            return Err("window does not carry the frozen held common origin".into());
+        }
         let events = self.evidence.renderer_events()?;
         let mut pairs = BTreeMap::new();
         let mut renders = BTreeMap::new();
@@ -1866,7 +1872,7 @@ impl PrivateWindow {
             .map(|row| serde_json::to_value(row).expect("integer target trace serializes"))
             .collect();
         let mut trace = serde_json::to_vec(&(
-            "observed_common_stream_format_origin-v1",
+            "observed_held_common_stream_format_origin-v2",
             source_origin,
             complete.origin_provenance.as_str(),
             stream,
@@ -2045,19 +2051,27 @@ mod source_origin_tests {
             )
             .expect("valid observed common origin");
             for actual in [origin, equivalent] {
-                validate_window_origin(actual, "observed_stream_start_time", expected)
-                    .expect("matching held-origin receipt");
+                validate_window_origin(
+                    actual,
+                    "observed_held_format_and_selected_video_probe",
+                    expected,
+                )
+                .expect("matching held-origin receipt");
             }
             for wrong in ["1/7", "124/1000", "N/A", "1/0", "9223372036854775808/1"] {
-                assert!(
-                    validate_window_origin(wrong, "observed_stream_start_time", expected).is_err()
-                );
+                assert!(validate_window_origin(
+                    wrong,
+                    "observed_held_format_and_selected_video_probe",
+                    expected
+                )
+                .is_err());
             }
             for provenance in [
                 "",
                 "unknown",
                 "producer_default_zero",
                 "first_window_picture",
+                "observed_stream_start_time",
             ] {
                 assert!(validate_window_origin(origin, provenance, expected).is_err());
             }
