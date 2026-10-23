@@ -549,11 +549,16 @@ def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 102
     return digest.hexdigest()
 
 
-def _mount_info(config, path):
+def _mount_info(config, path, *, directory):
+    _require(type(directory) is bool, "explicit mount member type required")
     if config.native_binding is not None:
-        return config.native_binding.info(path)
-    _no_symlinks(path)
-    return path.lstat()
+        info = config.native_binding.info(path)
+    else:
+        _no_symlinks(path, directory=directory)
+        info = path.lstat()
+    _require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
+             "required mount member type unavailable")
+    return info
 
 
 def _native_manifest(root, native, *, candidate, max_bytes, exceptions, source_members):
@@ -693,7 +698,7 @@ def _prepare(config: IsolationConfig):
     wrapper_commands = {"/work/" + relative for relative in wrappers}
     for relative, expected in wrappers.items():
         path = config.candidate_root / relative
-        info = _mount_info(config, path)
+        info = _mount_info(config, path, directory=False)
         _require(info.st_mode & 0o111 and _read_member(config.candidate_root, path, info, native=config.native_binding) == expected, "trusted wrapper content/mode changed")
     _require(0 < len(config.acceptance_argv) <= 32, "fixed acceptance argv required")
     for argv in config.acceptance_argv:
@@ -770,9 +775,9 @@ def _prepare(config: IsolationConfig):
                "caches": [_manifest(Path(cache.source), max_bytes=config.cache_max_bytes) for cache in config.readonly_caches]}
     payload = {"engine": str(config.engine), "engine_digest": engine_digest, "endpoint": config.endpoint,
                "image": config.image, "root": str(root), "mounts": [(str(p), target, ro) for p, target, ro in _mounts(config)],
-               "mount_identity": [(_mount_info(config, path).st_dev, _mount_info(config, path).st_ino) for path, _, _ in _mounts(config)],
+               "mount_identity": [(_mount_info(config, path, directory=True).st_dev, _mount_info(config, path, directory=True).st_ino) for path, _, _ in _mounts(config)],
                "quiet_log_mount": _quiet_log_mount(config),
-               "mountpoint_identity": [(str(path.relative_to(config.candidate_root)), _mount_info(config, path).st_dev, _mount_info(config, path).st_ino)
+               "mountpoint_identity": [(str(path.relative_to(config.candidate_root)), _mount_info(config, path, directory=True).st_dev, _mount_info(config, path, directory=True).st_ino)
                                        for path in _candidate_mountpoints(config)],
                "sources": sources, "argv": config.acceptance_argv, "candidate_readonly": config.candidate_readonly, "working_directory": config.working_directory, "environment": sorted(_environment(config).items()),
                "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit,
@@ -1235,7 +1240,7 @@ def _driver_packet(config, name, argv, plan, mode, context):
     driver = plan.driver
     _require(driver is not None, "family has no reviewed structured outcome driver")
     path = config.grader_root / driver.path
-    _require(_read_member(config.grader_root, path, _mount_info(config, path), native=config.native_binding) == driver.sha256, "family driver changed")
+    _require(_read_member(config.grader_root, path, _mount_info(config, path, directory=False), native=config.native_binding) == driver.sha256, "family driver changed")
     secret = os.urandom(32)
     nonce = uuid.uuid4().hex
     arguments = ["exec", "--interactive", "--workdir=/", name, config.python_executable, "-I", "-S", "-c", _OUTCOME_CONTROLLER,
@@ -1408,7 +1413,7 @@ def _worker_configuration(config, plan, step=None):
     _require(actual == expected, "worker export must contain only its driver and closed contract")
     for relative, expected_digest in ((worker.driver.path, worker.driver.sha256), ("rpc-contract.json", worker.schema_sha256)):
         path = current.grader_root / relative
-        _require(_read_member(current.grader_root, path, _mount_info(current, path), native=current.native_binding) == expected_digest, "worker trusted export changed")
+        _require(_read_member(current.grader_root, path, _mount_info(current, path, directory=False), native=current.native_binding) == expected_digest, "worker trusted export changed")
     return current, payload
 
 
@@ -1609,7 +1614,7 @@ def _duplex_broker(config, name, argv, plan, mode, context, worker_config, worke
 
 def _protected_packet(config, name, argv, plan, mode, context):
     driver = config.grader_root / plan.driver.path
-    _require(_read_member(config.grader_root, driver, _mount_info(config, driver), native=config.native_binding) == plan.driver.sha256, "protected driver changed")
+    _require(_read_member(config.grader_root, driver, _mount_info(config, driver, directory=False), native=config.native_binding) == plan.driver.sha256, "protected driver changed")
     current_step = (plan.prerequisite_steps if mode == "prerequisite" else plan.acceptance_steps)[context["step_index"]]
     worker_config, before = _worker_configuration(config, plan, current_step)
     private = worker_config.owned_root / ".isolation"

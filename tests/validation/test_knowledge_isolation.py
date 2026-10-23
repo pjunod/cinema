@@ -270,6 +270,22 @@ class KnowledgeIsolationTests(unittest.TestCase):
         self.assertEqual(receipt.status, "verified")
         self.assertEqual(self.execute(config, self.argv, receipt).status, "passed")
 
+    def test_mount_metadata_requires_explicit_file_or_directory_kind_for_both_backends(self):
+        from types import SimpleNamespace
+        directory=self.config.candidate_root
+        regular=directory/"input.py"
+        alias=directory/"file-alias";alias.symlink_to(regular)
+        # Native metadata is a synthetic lstat seam here, not guest admission.
+        configs=(self.config,SimpleNamespace(native_binding=SimpleNamespace(info=lambda path:path.lstat())))
+        for config in configs:
+            with self.subTest(native=config.native_binding is not None):
+                self.assertEqual(isolation._mount_info(config,directory,directory=True).st_ino,directory.stat().st_ino)
+                self.assertEqual(isolation._mount_info(config,regular,directory=False).st_ino,regular.stat().st_ino)
+                for path,expected in ((directory,False),(regular,True),(alias,False),(alias,True)):
+                    with self.subTest(path=path.name,directory=expected),self.assertRaises(isolation.IsolationError):
+                        isolation._mount_info(config,path,directory=expected)
+                with self.assertRaises(isolation.IsolationError):isolation._mount_info(config,regular,directory=None)
+
     def test_archive_bound_quiet_wrapper_preserves_exact_argv_and_rejects_changes(self):
         wrapper = self.config.candidate_root / "scripts/quiet"
         wrapper.parent.mkdir()
