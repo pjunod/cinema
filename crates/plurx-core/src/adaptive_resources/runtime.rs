@@ -81,6 +81,9 @@ pub struct NodeResourceRuntime {
     #[cfg(target_os = "linux")]
     recovered_r: Mutex<BTreeMap<Uuid, Arc<recovery::ImportedActiveR>>>,
     #[cfg(target_os = "linux")]
+    recovered_r_adoptions:
+        Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryRAdoption>>>>,
+    #[cfg(target_os = "linux")]
     recovered_adoptions: Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryAdoption>>>>,
     operations: Mutex<operations::Operations>,
     // Immutable actual daemon configuration, not a path authorized by audit JSON.
@@ -130,6 +133,8 @@ impl NodeResourceRuntime {
             #[cfg(target_os = "linux")]
             recovered_r: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
+            recovered_r_adoptions: Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
             recovered_adoptions: Mutex::new(BTreeMap::new()),
             operations: Mutex::new(operations::Operations::default()),
             rendition_root: None,
@@ -151,6 +156,21 @@ impl NodeResourceRuntime {
 
     pub fn accounting(&self) -> Result<LedgerSnapshot, AdmissionRefusal> {
         self.ledger.snapshot()
+    }
+
+    /// A nonblocking advisory read cannot grant capacity or delay admission.
+    pub fn history_diagnostics(&self) -> Option<crate::resource_history::HistoryDiagnostics> {
+        #[cfg(target_os = "linux")]
+        {
+            self.history
+                .try_lock()
+                .ok()
+                .map(|history| history.diagnostics(Instant::now()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     /// Refresh actual node/filesystem headroom before compiling an ordinary

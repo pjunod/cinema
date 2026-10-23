@@ -145,6 +145,7 @@ async fn held_clock_reporter_bytes_enter_existing_engine_identity_and_publicatio
     let mut engine = EncodedEngine {
         digest: "initial engine".into(),
         process_identity: encoded_process_identity().into(),
+        stable_software_digest: None,
         objects: Arc::from([]),
         font_objects: Arc::from([]),
         font_env: None,
@@ -220,6 +221,7 @@ async fn held_clock_matched_package_rejects_swapped_module_foreign_reporter_and_
     let initial = EncodedEngine {
         digest: "initial engine".into(),
         process_identity: encoded_process_identity().into(),
+        stable_software_digest: None,
         objects: Arc::from([]),
         font_objects: Arc::from([]),
         font_env: None,
@@ -1374,6 +1376,7 @@ async fn linux_clock_pair_requires_bound_reporter_origin_and_retained_capsule() 
     let engine = || EncodedEngine {
         digest: "base engine".into(),
         process_identity: encoded_process_identity().into(),
+        stable_software_digest: None,
         objects: Arc::from([]),
         font_objects: Arc::from([]),
         font_env: None,
@@ -2692,5 +2695,70 @@ async fn nightly_runner_has_ffmpeg_readrate() {
     assert!(
         caps.readrate,
         "nightly arbitration coverage requires ffmpeg 5.1+ (-readrate)"
+    );
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn finite_software_engine_identity_is_same_boot_and_tracks_held_reporter() {
+    use super::*;
+
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    std::fs::create_dir_all(&target).expect("repo-local fixture root");
+    let directory = tempfile::Builder::new()
+        .prefix("finite-engine-identity-")
+        .tempdir_in(&target)
+        .expect("repo-local fixture");
+    let media = directory.path().join("media-image");
+    let reporter = directory.path().join("clock-reporter");
+    std::fs::write(&media, b"same attested media image").expect("media image");
+    std::fs::write(&reporter, b"reporter version one").expect("reporter image");
+
+    let first = EncodedEngine::capture_test_objects(&[media.clone()], "process one")
+        .await
+        .expect("first engine");
+    let second = EncodedEngine::capture_test_objects(&[media], "process two")
+        .await
+        .expect("second engine");
+    assert_ne!(
+        first.digest, second.digest,
+        "legacy key remains process-local"
+    );
+    assert_eq!(
+        first.stable_software_digest().expect("Linux boot identity"),
+        second
+            .stable_software_digest()
+            .expect("Linux boot identity"),
+        "same attested engine must retain the finite key across processes"
+    );
+
+    let original_reporter = EncodedExecutable::capture_at(reporter.clone())
+        .await
+        .expect("original reporter");
+    let mut original = first.clone();
+    original
+        .bind_clock_reporter(&original_reporter)
+        .await
+        .expect("bind original reporter");
+    assert_ne!(
+        original.stable_software_digest(),
+        first.stable_software_digest()
+    );
+    std::fs::write(&reporter, b"reporter version two").expect("changed reporter image");
+    assert!(
+        !original.is_current().await,
+        "the old native fence is stale"
+    );
+    let changed_reporter = EncodedExecutable::capture_at(reporter)
+        .await
+        .expect("new reporter");
+    let mut changed = second;
+    changed
+        .bind_clock_reporter(&changed_reporter)
+        .await
+        .expect("bind new reporter");
+    assert_ne!(
+        original.stable_software_digest(),
+        changed.stable_software_digest(),
+        "a changed attested reporter cannot reuse finite bytes"
     );
 }

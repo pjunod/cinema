@@ -256,6 +256,7 @@ pub struct ResourceOwnershipDto {
     pub scope: &'static str,
     pub unreconciled_custody: Option<bool>,
     pub accounting: Option<plurx_core::adaptive_resources::LedgerSnapshot>,
+    pub history: Option<plurx_core::resource_history::HistoryDiagnostics>,
 }
 impl ResourceOwnershipDto {
     fn read(state: &AppState) -> Self {
@@ -266,6 +267,7 @@ impl ResourceOwnershipDto {
                 scope,
                 unreconciled_custody: None,
                 accounting: None,
+                history: None,
             };
         };
         let unreconciled_custody = Some(runtime.has_unreconciled_custody());
@@ -275,12 +277,14 @@ impl ResourceOwnershipDto {
                 scope,
                 unreconciled_custody,
                 accounting: Some(accounting),
+                history: runtime.history_diagnostics(),
             },
             Err(_) => Self {
                 state: "accounting_unavailable",
                 scope,
                 unreconciled_custody,
                 accounting: None,
+                history: runtime.history_diagnostics(),
             },
         }
     }

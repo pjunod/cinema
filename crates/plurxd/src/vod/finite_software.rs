@@ -119,9 +119,14 @@ impl FiniteSoftwareProducer {
 }
 
 pub(super) fn selected(key: &str, recipe: &Recipe, private: bool, ephemeral: bool) -> bool {
+    !key.starts_with("source-") && selected_recipe(recipe, private, ephemeral)
+}
+
+/// Also used before canonical key hashing, so the finite identity and the
+/// eventual finite builder select exactly the same ordinary recipe.
+pub(super) fn selected_recipe(recipe: &Recipe, private: bool, ephemeral: bool) -> bool {
     !private
         && !ephemeral
-        && !key.starts_with("source-")
         && recipe.encoding.as_ref().is_some_and(|encoding| {
             encoding.plan.encoder() == Encoder::Software
                 && encoding.plan.decode().backend() == DecodeBackend::Software
@@ -200,9 +205,10 @@ pub(super) async fn build(
             .as_ref()
             .ok_or("recovered finite encoding is missing")?
             .engine
-            .process_identity();
+            .stable_software_digest()
+            .ok_or("same-boot finite software engine identity unavailable")?;
         if std::str::from_utf8(&marker).ok().map(str::trim) != Some(current) {
-            return Err("recovered finite output belongs to an earlier encoder process".into());
+            return Err("recovered finite output belongs to another boot or engine".into());
         }
         let mut manifest = Manifest::new(plan.clone());
         for entry in 0..segment_count {

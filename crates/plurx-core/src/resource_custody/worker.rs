@@ -36,6 +36,13 @@ pub struct CustodyJournal {
             recovery::PositivePreviousOwnerExit,
         )>,
     >,
+    #[cfg(target_os = "linux")]
+    recovery_candidates_r: Mutex<
+        Vec<(
+            recovery::ActiveFiniteRImportClaim,
+            recovery::PositivePreviousRootExit,
+        )>,
+    >,
 }
 /// Waiter only. Drop does not cancel queued work, proof retention, or accounting.
 #[must_use]
@@ -127,6 +134,49 @@ impl CustodyJournal {
                 Some((claim, exit))
             })
             .collect();
+        #[cfg(target_os = "linux")]
+        let mut recovery_candidates_r = Vec::new();
+        #[cfg(target_os = "linux")]
+        for record in &snapshot.obligations {
+            if !matches!(
+                record.phase,
+                Phase::AcquisitionPossible | Phase::Sealed | Phase::UnknownHeld
+            ) || snapshot
+                .recovered_r_holders
+                .iter()
+                .any(|holder| holder.obligation_id == record.obligation_id)
+            {
+                continue;
+            }
+            let Ok(daemon_exit) =
+                recovery::prove_previous_daemon_exit(&options, &snapshot, record.owner_id)
+            else {
+                continue;
+            };
+            let Ok(root_exit) = recovery::prove_previous_fixed_root_exit(
+                &options,
+                &snapshot,
+                &daemon_exit,
+                record.obligation_id,
+            ) else {
+                continue;
+            };
+            let Ok(claim) = recovery::select_active_finite_r(
+                &storage.connection,
+                &snapshot,
+                &root_exit,
+                &options.owner,
+            ) else {
+                continue;
+            };
+            recovery_candidates_r.try_reserve(1).map_err(|_| {
+                CustodyError::new(
+                    ErrorKind::Exhausted,
+                    "recovered R candidate bound unavailable",
+                )
+            })?;
+            recovery_candidates_r.push((claim, root_exit));
+        }
         transaction::register_owner(&mut storage.connection, &options.owner)?;
         storage.verify()?;
         let journal_id = storage.witness.journal_id;
@@ -156,6 +206,8 @@ impl CustodyJournal {
                 worker: Some(worker),
                 #[cfg(target_os = "linux")]
                 recovery_candidates: Mutex::new(recovery_candidates),
+                #[cfg(target_os = "linux")]
+                recovery_candidates_r: Mutex::new(recovery_candidates_r),
             },
             snapshot,
         ))
@@ -168,6 +220,18 @@ impl CustodyJournal {
         recovery::PositivePreviousOwnerExit,
     )> {
         self.recovery_candidates
+            .lock()
+            .map(|mut candidates| std::mem::take(&mut *candidates))
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_recovery_candidates_r(
+        &self,
+    ) -> Vec<(
+        recovery::ActiveFiniteRImportClaim,
+        recovery::PositivePreviousRootExit,
+    )> {
+        self.recovery_candidates_r
             .lock()
             .map(|mut candidates| std::mem::take(&mut *candidates))
             .unwrap_or_default()
@@ -387,7 +451,7 @@ impl CustodyJournal {
                         Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
                     ) | (
                         Some(RecoveryAuthority::ProducerR(_)),
-                        Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
+                        Mutation::AssetChangeV3 { .. }
                     )
                 )
             {

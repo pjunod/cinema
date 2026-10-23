@@ -154,6 +154,35 @@ impl BootstrapMember {
         }
     }
 
+    /// The same actual parent/child descriptors are owned by the recovered R
+    /// cleanup actor. Its fold remains Open until the producer-specific journal
+    /// retirement sequence removes every observed file and closes the domain.
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_recovered_producer(
+        parts: crate::adaptive_resources::runtime::recovery::RecoveredProducerNativeParts,
+    ) -> Self {
+        let crate::adaptive_resources::runtime::recovery::RecoveredProducerNativeParts {
+            plan,
+            fold,
+            parent,
+            child,
+            parent_observed,
+            child_observed,
+            adoption_id,
+        } = parts;
+        Self::from_recovered(
+            crate::adaptive_resources::runtime::recovery::RecoveredNativeParts {
+                plan,
+                fold,
+                parent,
+                child,
+                parent_observed,
+                child_observed,
+                adoption_id,
+            },
+        )
+    }
+
     pub(super) fn resident_inventory_bytes(&self) -> Result<u64, OperationError> {
         self.fold
             .as_ref()

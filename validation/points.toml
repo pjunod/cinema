@@ -381,7 +381,17 @@ timeout_seconds = 600
 [[checks]]
 id = "finite-software-vod-lifecycle"
 title = "Ordinary Linux software VOD native custody, counted response, and retained refund"
-command = "cargo test -p plurxd --features hiqlite-store vodserve::tests::ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refunds_on_evict -- --exact --nocapture"
+command = "cargo test -p plurxd --features cluster-integration-tests vodserve::tests::ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refunds_on_evict -- --exact --nocapture"
+profiles = ["nightly"]
+platforms = ["linux"]
+requires = ["cargo", "ffmpeg", "ffprobe"]
+missing = "fail"
+timeout_seconds = 1800
+
+[[checks]]
+id = "finite-software-vod-restart"
+title = "Ordinary Linux software VOD recovers charged dormant output after process restart"
+command = "cargo test -p plurxd --features cluster-integration-tests vodserve::tests::ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart -- --exact --nocapture"
 profiles = ["nightly"]
 platforms = ["linux"]
 requires = ["cargo", "ffmpeg", "ffprobe"]
@@ -498,6 +508,7 @@ paths = [
   "crates/plurx-core/src/adaptive_resources/memory_claim.rs",
   "crates/plurx-core/src/adaptive_resources/task_claim.rs",
   "crates/plurx-core/src/adaptive_resources/history_mix.rs",
+  "crates/plurx-core/src/adaptive_resources/history_mix/**",
   "crates/plurx-core/src/adaptive_resources/retained.rs",
   "crates/plurx-core/src/adaptive_resources/retained/**",
   "crates/plurx-core/src/adaptive_resources/physical_graph.rs",
@@ -1771,12 +1782,13 @@ depends_on = ["desktop.control"]
 [[points]]
 id = "playback.finite-software-vod"
 title = "Ordinary finite software VOD lifecycle"
-contract = "An ordinary selected Linux software VOD keeps its actual source, process, files, counted responses, and retained asset under durable resource custody; retirement frees the producer claim while the asset remains charged, and exact native eviction refunds it."
+contract = "An ordinary selected Linux software VOD keeps its actual source, process, files, counted responses, and retained asset under durable resource custody; retirement frees the producer claim while the asset remains charged. A subsequent process in the same boot reopens that exact dormant asset without a fresh encoder, and exact native eviction refunds it."
 paths = [
   "crates/plurxd/src/vod/tests/finite_software.rs",
+  "crates/plurxd/src/vod/tests/finite_software_restart.rs",
   "crates/plurxd/src/vod/finite_software.rs",
   "crates/plurxd/src/vod/finite_profile.rs",
   "crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "finite-software-vod-lifecycle"]
+checks = ["rust-gate", "rust-gate-ci", "finite-software-vod-lifecycle", "finite-software-vod-restart"]
 depends_on = ["playback.pipeline"]

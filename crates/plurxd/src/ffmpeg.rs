@@ -2355,6 +2355,9 @@ async fn clock_package_document(
 pub(crate) struct EncodedEngine {
     pub digest: String,
     process_identity: String,
+    /// Same-boot, attested software identity. Legacy encoded keys retain the
+    /// process-scoped `digest`; only the fixed finite software profile uses it.
+    stable_software_digest: Option<String>,
     /// The encoder dependency closure. Statted under `kind="media"`.
     objects: Arc<[(std::path::PathBuf, String)]>,
     /// The frozen Fontconfig environment a text burn renders under, kept
@@ -2486,6 +2489,14 @@ impl EncodedEngine {
             hash.update(association.source_digest().as_bytes());
             hash.update(reporter.digest.as_bytes());
             self.digest = hex::encode(hash.finalize());
+            self.extend_stable_software_digest(
+                b"plurx/finite-software/linux-clock-package/v1\0",
+                &[
+                    association.capsule_digest(),
+                    association.source_digest(),
+                    &reporter.digest,
+                ],
+            );
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = producer; // exact reporter; no matched-source package claim
@@ -2506,6 +2517,10 @@ impl EncodedEngine {
         hash.update(self.digest.as_bytes());
         hash.update(reporter.digest.as_bytes());
         self.digest = hex::encode(hash.finalize());
+        self.extend_stable_software_digest(
+            b"plurx/finite-software/clock-reporter/v1\0",
+            &[&reporter.digest],
+        );
         let mut objects = self.objects.to_vec();
         objects.push(reporter.attestation_object());
         self.objects = objects.into();
@@ -2575,6 +2590,16 @@ impl EncodedEngine {
         digest.update(b"plurx/encoded-vod/engine-v1\0");
         digest.update(media.digest.as_bytes());
         digest.update(process.as_bytes());
+        #[cfg(target_os = "linux")]
+        let mut stable_software = finite_software_boot_id().map(|boot_id| {
+            let mut hash = Sha256::new();
+            hash.update(b"plurx/finite-software/engine/same-boot-v1\0");
+            hash.update(boot_id.as_bytes());
+            hash.update(media.digest.as_bytes());
+            hash
+        });
+        #[cfg(not(target_os = "linux"))]
+        let mut stable_software: Option<Sha256> = None;
         let mut objects = media.objects.to_vec();
         let mut font_objects: Vec<(std::path::PathBuf, String)> = Vec::new();
         let mut font_env = None;
@@ -2653,6 +2678,9 @@ impl EncodedEngine {
                 }
             };
             digest.update(frozen.digest().as_bytes());
+            if let Some(stable) = stable_software.as_mut() {
+                stable.update(frozen.digest().as_bytes());
+            }
             font_objects = frozen.objects().to_vec();
             font_env = Some(frozen);
         }
@@ -2664,6 +2692,7 @@ impl EncodedEngine {
         Ok(Self {
             digest: hex::encode(digest.finalize()),
             process_identity: process.to_owned(),
+            stable_software_digest: stable_software.map(|hash| hex::encode(hash.finalize())),
             objects: objects.into(),
             font_objects: font_objects.into(),
             font_env,
@@ -2785,6 +2814,24 @@ impl EncodedEngine {
         &self.process_identity
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn stable_software_digest(&self) -> Option<&str> {
+        self.stable_software_digest.as_deref()
+    }
+
+    fn extend_stable_software_digest(&mut self, domain: &[u8], values: &[&str]) {
+        if let Some(previous) = self.stable_software_digest.as_mut() {
+            let mut hash = Sha256::new();
+            hash.update(domain);
+            hash.update(previous.as_bytes());
+            for value in values {
+                hash.update((value.len() as u64).to_le_bytes());
+                hash.update(value.as_bytes());
+            }
+            *previous = hex::encode(hash.finalize());
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn capture_test_objects(
         paths: &[std::path::PathBuf],
@@ -2793,15 +2840,28 @@ impl EncodedEngine {
         let mut digest = Sha256::new();
         digest.update(b"plurx/encoded-vod/test-engine\0");
         digest.update(process.as_bytes());
+        #[cfg(target_os = "linux")]
+        let mut stable_software = finite_software_boot_id().map(|boot_id| {
+            let mut hash = Sha256::new();
+            hash.update(b"plurx/finite-software/test-engine/same-boot-v1\0");
+            hash.update(boot_id.as_bytes());
+            hash
+        });
+        #[cfg(not(target_os = "linux"))]
+        let mut stable_software: Option<Sha256> = None;
         let mut objects = Vec::new();
         for path in paths {
             let (object_digest, version) = hash_engine_object(path).await?;
-            digest.update(object_digest);
+            digest.update(&object_digest);
+            if let Some(stable) = stable_software.as_mut() {
+                stable.update(&object_digest);
+            }
             objects.push((path.clone(), version));
         }
         Ok(Self {
             digest: hex::encode(digest.finalize()),
             process_identity: process.to_owned(),
+            stable_software_digest: stable_software.map(|hash| hex::encode(hash.finalize())),
             objects: objects.into(),
             font_objects: Vec::new().into(),
             font_env: None,
@@ -2817,6 +2877,17 @@ pub(crate) fn encoded_process_identity() -> &'static str {
     ENCODED_PROCESS_IDENTITY
         .get_or_init(|| uuid::Uuid::new_v4().to_string())
         .as_str()
+}
+
+/// The finite software profile may reuse an attested engine only within this
+/// kernel boot. Missing or malformed boot identity leaves its stable identity
+/// unavailable; legacy process-scoped encoded work is unaffected.
+#[cfg(target_os = "linux")]
+fn finite_software_boot_id() -> Option<uuid::Uuid> {
+    let text = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    (text.len() <= 64)
+        .then(|| uuid::Uuid::parse_str(text.trim()).ok())
+        .flatten()
 }
 
 /// Digest the executable bytes and its complete self/dependency reports once

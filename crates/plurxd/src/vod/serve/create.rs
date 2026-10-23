@@ -451,6 +451,24 @@ impl VodServe {
         } = self
             .prepare_recipe(prepared, file, settings, viewer)
             .await?;
+        #[cfg(target_os = "linux")]
+        let identity = if finite_software::selected_recipe(
+            &recipe,
+            private_preparation.is_some(),
+            prepared
+                .root_admission
+                .as_ref()
+                .and_then(|root| root.instance_nonce)
+                .is_some(),
+        ) {
+            recipe
+                .encoding
+                .as_ref()
+                .expect("selected finite recipe has an encoding")
+                .finite_software_identity(&recipe.file, duration_ms as f64 / 1_000.0)?
+        } else {
+            identity
+        };
         let canonical_key = rendition_key(&recipe, &identity);
         if let Some(reuse) = prepared
             .root_admission

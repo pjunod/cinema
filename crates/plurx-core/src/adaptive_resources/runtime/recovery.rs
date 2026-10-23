@@ -4,6 +4,8 @@
 #![cfg(target_os = "linux")]
 
 mod producer;
+pub(super) use producer::RecoveredProducerNativeParts;
+pub(super) use producer::RecoveryRAdoption;
 pub(crate) use producer::{ImportedActiveR, NativeActiveRImportProof, RecoveredRAuthority};
 
 use super::*;
@@ -805,7 +807,12 @@ impl NodeResourceRuntime {
             || !matches!(&plan.filesystem_domain.mount_namespace, v2::NativeValue::Known { value }
                 if std::fs::metadata("/proc/self/ns/mnt").is_ok_and(|m| m.ino() == *value))
             || !full.readers.is_empty()
-            || full.files.len() > 1024
+            // The same finite output contract allows up to 65,536 objects.
+            // Bound requested inventory payload separately, instead of imposing
+            // a 34-minute (1,021 two-second segment) cache-recovery cutoff.
+            || full.files.len() > 65_536
+            || full.resident_inventory_bytes().map_err(|_| unavailable())?
+                > plan.limits.resident_memory_bytes
             || full.files.len()
                 > usize::try_from(plan.limits.resident_file_objects).map_err(|_| unavailable())?
         {

@@ -4,6 +4,9 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+mod tests;
+
 impl ResourceLedger {
     /// Hash actual unsettled owners under the same ledger lock used by
     /// admission. Bind role, claim, state, trial status and every numeric

@@ -195,7 +195,11 @@ pub(super) fn compile(
         memory,
         DIAGNOSTIC_BYTES,
         METADATA_BYTES,
-        encoding.engine.process_identity().to_owned(),
+        encoding
+            .engine
+            .stable_software_digest()
+            .ok_or("same-boot finite software engine identity unavailable")?
+            .to_owned(),
     )
     .map_err(|error| format!("planning the finite software writer: {error}"))?;
     let known_memory = SoftwareVodRequest::known_memory_component(&command, &pump, &output)

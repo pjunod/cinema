@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+mod tests;
+
 const MIN_WINDOW: Duration = Duration::from_secs(1);
 const MAX_WINDOW: Duration = Duration::from_secs(10);
 const MAX_PUBLICATION_WAIT: Duration = Duration::from_millis(250);
@@ -122,6 +125,34 @@ struct Baseline {
     control_epoch: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowDecision {
+    Stale,
+    Rebase,
+    Accumulate,
+    Record(Duration),
+}
+
+fn classify_window(before: Baseline, current: Baseline, now: Instant) -> WindowDecision {
+    if current.at <= before.at || now.saturating_duration_since(current.at) > MAX_WINDOW {
+        return WindowDecision::Stale;
+    }
+    if before.control_epoch != current.control_epoch
+        || before.counters.identity != current.counters.identity
+        || current.counters.cpu_ns < before.counters.cpu_ns
+    {
+        return WindowDecision::Rebase;
+    }
+    let elapsed = current.at.duration_since(before.at);
+    if elapsed > MAX_WINDOW {
+        WindowDecision::Rebase
+    } else if elapsed < MIN_WINDOW {
+        WindowDecision::Accumulate
+    } else {
+        WindowDecision::Record(elapsed)
+    }
+}
+
 pub(super) struct FiniteTelemetry {
     key: Option<HistoryKey>,
     control: RegisteredChildControl,
@@ -207,21 +238,23 @@ impl FiniteTelemetry {
             self.units = 0;
             return;
         };
-        if before.control_epoch != epoch || before.counters.identity != counters.identity {
-            self.baseline = Some(current);
-            self.units = 0;
-            return;
-        }
-        let elapsed = sampled_at.saturating_duration_since(before.at);
-        if elapsed > MAX_WINDOW || counters.cpu_ns < before.counters.cpu_ns {
-            self.baseline = Some(current);
-            self.units = 0;
-            return;
-        }
+        let elapsed = match classify_window(before, current, now) {
+            WindowDecision::Stale => {
+                self.reset();
+                return;
+            }
+            WindowDecision::Rebase => {
+                self.baseline = Some(current);
+                self.units = 0;
+                return;
+            }
+            WindowDecision::Accumulate => {
+                self.units = self.units.saturating_add(1);
+                return;
+            }
+            WindowDecision::Record(elapsed) => elapsed,
+        };
         self.units = self.units.saturating_add(1);
-        if elapsed < MIN_WINDOW {
-            return;
-        }
         let (Metric::Known(resident), Some(elapsed_ns), Some(unix_ms)) = (
             counters.resident_bytes,
             u64::try_from(elapsed.as_nanos()).ok(),

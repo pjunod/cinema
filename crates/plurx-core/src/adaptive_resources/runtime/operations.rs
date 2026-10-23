@@ -32,6 +32,8 @@ pub(super) mod plans;
 mod protection;
 #[cfg(target_os = "linux")]
 mod recovered;
+#[cfg(target_os = "linux")]
+mod recovered_producer;
 #[cfg(unix)]
 mod response_memory;
 mod scratch;

@@ -421,21 +421,31 @@ impl NodeResourceRuntime {
             let mut bundle = owner.state.lock().await;
             let bundle_id = bundle.id;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            #[cfg(target_os = "linux")]
+            let recovered_producer = role.finite_vod.is_none()
+                && role
+                    .handle
+                    .as_ref()
+                    .and_then(|handle| handle.producer_recovery_authority())
+                    .is_some();
+            #[cfg(not(target_os = "linux"))]
+            let recovered_producer = false;
             if role.refunded
                 || (mode == CleanupMode::Retained && role.retirement.is_none())
                 || (mode == CleanupMode::Producer
                     && (role.retirement.is_some()
-                        || role.finite_vod.as_ref().is_none_or(|finite| {
-                            let never_root = finite.never_root_closure.is_some();
-                            let root_only = finite.root_only_closure.is_some();
-                            let joined = finite.process_closure.is_some();
-                            !finite.retiring
-                                || usize::from(never_root)
-                                    + usize::from(root_only)
-                                    + usize::from(joined)
-                                    != 1
-                                || finite.producer_joined != joined
-                        })))
+                        || (!recovered_producer
+                            && role.finite_vod.as_ref().is_none_or(|finite| {
+                                let never_root = finite.never_root_closure.is_some();
+                                let root_only = finite.root_only_closure.is_some();
+                                let joined = finite.process_closure.is_some();
+                                !finite.retiring
+                                    || usize::from(never_root)
+                                        + usize::from(root_only)
+                                        + usize::from(joined)
+                                        != 1
+                                    || finite.producer_joined != joined
+                            }))))
             {
                 return Err(OperationError::State);
             }

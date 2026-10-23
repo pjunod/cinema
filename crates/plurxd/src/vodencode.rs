@@ -1532,18 +1532,49 @@ impl Encoding {
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
-        let mut hash = Sha256::new();
-        hash.update(if self.shared_audio.is_some() {
+        let domain = if self.shared_audio.is_some() {
             b"immutable-vod-shared-aac-v1\0".as_slice()
         } else {
             b"immutable-vod-encoded-v1\0".as_slice()
-        });
+        };
+        self.identity_with_engine(file, duration_seconds, domain, &self.engine.digest)
+    }
+
+    /// The fixed Linux software finite profile binds a same-boot attested
+    /// engine. Its namespace cannot collide with old process-scoped outputs.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_software_identity(
+        &self,
+        file: &MediaFile,
+        duration_seconds: f64,
+    ) -> Result<SourceIdentity, String> {
+        let engine = self
+            .engine
+            .stable_software_digest()
+            .ok_or("same-boot finite software engine identity unavailable")?;
+        Ok(self.identity_with_engine(
+            file,
+            duration_seconds,
+            b"immutable-vod-finite-software-v1\0",
+            engine,
+        ))
+    }
+
+    fn identity_with_engine(
+        &self,
+        file: &MediaFile,
+        duration_seconds: f64,
+        domain: &[u8],
+        engine_digest: &str,
+    ) -> SourceIdentity {
+        let mut hash = Sha256::new();
+        hash.update(domain);
         hash.update((self.source_object_version.len() as u64).to_le_bytes());
         hash.update(self.source_object_version.as_bytes());
         hash.update(self.source_clock.identity());
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
-        hash.update(self.engine.digest.as_bytes());
+        hash.update(engine_digest.as_bytes());
         if let plurx_core::transcode::dv_processing::DvSelection::Selected(plan) =
             &self.dv_processing
         {

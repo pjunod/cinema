@@ -67,6 +67,23 @@ pub enum HistoryStorage {
     UnrecognizedVolatile,
 }
 
+/// Observed service costs for operator inspection. These are neither hard
+/// allocation ceilings nor a claim about unseen concurrent workloads.
+#[derive(Serialize)]
+pub struct HistoryDiagnostics {
+    pub storage: HistoryStorage,
+    pub classes: usize,
+    pub recent_classes: usize,
+    pub latest: Option<ObservedCost>,
+}
+#[derive(Serialize)]
+pub struct ObservedCost {
+    pub phase: CostPhase,
+    pub summary: CostSummary,
+    /// Persisted priors have no monotonic stamp after restart.
+    pub age_ms: crate::process::observation::Metric<u64>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Image {
@@ -168,6 +185,37 @@ impl ResourceHistory {
     }
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn diagnostics(&self, now: Instant) -> HistoryDiagnostics {
+        use crate::process::observation::{Metric, UnknownReason};
+        let age = |entry: &Entry| {
+            entry
+                .last_monotonic
+                .and_then(|at| now.checked_duration_since(at))
+        };
+        let latest = self
+            .entries
+            .iter()
+            .max_by_key(|(_, entry)| (entry.summary.last_unix_ms, entry.lru))
+            .map(|(key, entry)| ObservedCost {
+                phase: key.phase,
+                summary: entry.summary,
+                age_ms: age(entry)
+                    .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+                    .map(Metric::Known)
+                    .unwrap_or(Metric::Unknown(UnknownReason::Stale)),
+            });
+        HistoryDiagnostics {
+            storage: self.storage,
+            classes: self.entries.len(),
+            recent_classes: self
+                .entries
+                .values()
+                .filter(|entry| age(entry).is_some_and(|elapsed| elapsed <= RECENT_LIFETIME))
+                .count(),
+            latest,
+        }
     }
 
     /// Predictions are exact-key priors, not activation/compatibility evidence.
@@ -395,6 +443,18 @@ mod tests {
         let mut first = ResourceHistory::open(directory.path(), node, 1000);
         assert_eq!(first.storage(), HistoryStorage::Persistent);
         assert!(first.observe(key(1), sample(now, 1000)));
+        let live = first.diagnostics(now);
+        assert_eq!((live.classes, live.recent_classes), (1, 1));
+        assert!(matches!(
+            live.latest.unwrap().age_ms,
+            crate::process::observation::Metric::Known(0)
+        ));
+        assert_eq!(
+            first
+                .diagnostics(now + Duration::from_secs(16))
+                .recent_classes,
+            0
+        );
         assert!(first.save(1000).expect("atomic save"));
         let mut second = ResourceHistory::open(directory.path(), node, 1000);
         assert_eq!(second.storage(), HistoryStorage::LockConflictVolatile);
@@ -405,6 +465,14 @@ mod tests {
         let mut restarted = ResourceHistory::open(directory.path(), node, 1001);
         assert!(restarted.prior(key(1), 1001).is_some());
         assert!(restarted.recent(key(1), now).is_none());
+        let prior = restarted.diagnostics(now);
+        assert_eq!((prior.classes, prior.recent_classes), (1, 0));
+        assert!(matches!(
+            prior.latest.unwrap().age_ms,
+            crate::process::observation::Metric::Unknown(
+                crate::process::observation::UnknownReason::Stale
+            )
+        ));
         assert!(restarted.prior(key(2), 1001).is_none());
     }
     #[test]

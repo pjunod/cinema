@@ -8,6 +8,11 @@ pub(crate) struct ImportedActiveR {
     root_exit: PositivePreviousRootExit,
     directories: Mutex<Option<(File, File)>>,
 }
+impl ImportedActiveR {
+    pub(in crate::adaptive_resources::runtime) fn claim(&self) -> &ActiveFiniteRImportClaim {
+        &self.claim
+    }
+}
 
 /// Nonserde, move-only proof held by the runtime before it can submit a
 /// current-holder adoption. Its Arc retains the exact imported parent/child
@@ -17,6 +22,74 @@ pub(crate) struct NativeActiveRImportProof {
     owner: Arc<ImportedActiveR>,
     current_owner_id: Uuid,
     binding: ReservationBinding,
+}
+
+/// One original adoption operation survives waiter cancellation and unknown
+/// commit results. The imported native owner is separately retained by the
+/// runtime map before this operation can enter the journal queue.
+pub(super) struct RecoveryRAdoption {
+    operation_id: Uuid,
+    obligation_id: Uuid,
+    previous_owner_id: Uuid,
+    proof: Option<NativeActiveRImportProof>,
+    pending: Option<crate::resource_custody::PendingOperation>,
+    result: Option<Result<crate::resource_custody::OperationResult, CustodyError>>,
+    acknowledged: bool,
+    handle: Option<(crate::resource_custody::ObligationHandle, i64)>,
+    preparation: Option<crate::adaptive_resources::runtime::operations::OwnedPreparation>,
+}
+impl RecoveryRAdoption {
+    fn submit(
+        &mut self,
+        journal: &CustodyJournal,
+        deadline: Instant,
+    ) -> Result<(), RuntimeOpenError> {
+        if self.pending.is_some() || self.acknowledged {
+            return Err(unavailable());
+        }
+        if let Some(proof) = self.proof.take() {
+            match journal.recover_active_r(self.operation_id, proof, deadline) {
+                Ok(pending) => self.pending = Some(pending),
+                Err((error, proof)) => {
+                    self.proof = Some(proof);
+                    self.result = Some(Err(error.clone()));
+                    return Err(error.into());
+                }
+            }
+        } else {
+            self.pending = Some(journal.retry(self.operation_id, deadline)?);
+        }
+        self.result = None;
+        Ok(())
+    }
+    async fn resolve(&mut self, runtime: &NodeResourceRuntime) -> Result<(), RuntimeOpenError> {
+        if self.acknowledged {
+            return Ok(());
+        }
+        if let Some(pending) = self.pending.as_mut() {
+            self.result = Some(pending.wait_retained().await);
+            self.pending = None;
+        }
+        let ack = match self.result.as_ref().ok_or_else(unavailable)? {
+            Ok(crate::resource_custody::OperationResult::RecoveredRAdoption(ack)) => ack,
+            Err(error) => return Err(error.clone().into()),
+            _ => return Err(unavailable()),
+        };
+        if ack.operation_id != self.operation_id
+            || ack.obligation_id != self.obligation_id
+            || ack.previous_owner_id != self.previous_owner_id
+            || ack.current_owner_id != runtime.owner.owner_id
+            || ack.sequence <= 0
+        {
+            return Err(unavailable());
+        }
+        if self.handle.is_none() {
+            self.handle = Some(runtime.journal.take_recovered_r_handle(self.operation_id)?);
+        }
+        runtime.journal.acknowledge(self.operation_id)?;
+        self.acknowledged = true;
+        Ok(())
+    }
 }
 
 /// Writer capability minted only from a known durable producer adoption.
@@ -143,7 +216,199 @@ impl NativeActiveRImportProof {
     }
 }
 
+/// Actual producer directories and replayed R moved after a known adoption.
+/// The original private exit proof remains in the imported owner for closure.
+pub(in crate::adaptive_resources::runtime) struct RecoveredProducerNativeParts {
+    pub(in crate::adaptive_resources::runtime) plan: v2::scratch::bootstrap::ScratchPlanV3,
+    pub(in crate::adaptive_resources::runtime) fold: v2::scratch::bootstrap::BootstrapFold,
+    pub(in crate::adaptive_resources::runtime) parent: File,
+    pub(in crate::adaptive_resources::runtime) child: File,
+    pub(in crate::adaptive_resources::runtime) parent_observed: v2::scratch::DirectoryObservedV1,
+    pub(in crate::adaptive_resources::runtime) child_observed: v2::scratch::DirectoryObservedV1,
+    pub(in crate::adaptive_resources::runtime) adoption_id: v2::Id,
+}
+
+impl RecoveredRAuthority {
+    pub(in crate::adaptive_resources::runtime) fn take_native(
+        &self,
+        imported: &ImportedActiveR,
+    ) -> Result<RecoveredProducerNativeParts, RuntimeOpenError> {
+        let claim = &imported.claim;
+        if claim.journal_id() != self.journal_id
+            || claim.installation_id() != self.installation_id
+            || claim.obligation_id() != self.obligation_id
+            || claim.graph_id() != self.graph_id
+            || claim.old_owner_id() != self.original_owner_id
+            || claim.state_head() != &self.state_head
+            || imported.root_exit.root_member_id() != self.root_member_id
+            || imported.root_exit.pid() != self.root_pid
+            || imported.root_exit.creation_marker() != self.root_creation_marker
+        {
+            return Err(unavailable());
+        }
+        let plan = claim.plan().clone();
+        let (parent_observed, child_observed) = claim
+            .with_fold(|fold| {
+                let state = fold.state();
+                if state.asset.lifecycle != v2::scratch::ScratchLifecycleV1::Open
+                    || state.bootstrap.phase != v2::scratch::bootstrap::BootstrapPhase::SinkReady
+                    || state.asset.totals.pending_jobs != 0
+                    || state.asset.totals.readers != 0
+                {
+                    return None;
+                }
+                Some((
+                    state.bootstrap.parent.as_ref()?.observed.clone(),
+                    state.asset.directory.as_ref()?.clone(),
+                ))
+            })?
+            .ok_or_else(unavailable)?;
+        if parent_observed.held_copy_ids.len() != 1
+            || child_observed.held_copy_ids.len() != 1
+            || parent_observed.held_copy_ids[0] == child_observed.held_copy_ids[0]
+        {
+            return Err(unavailable());
+        }
+        let adoption_id = v2::Id::new(self.adoption_operation_id)?;
+        let mut dirs = imported.directories.lock().map_err(|_| unavailable())?;
+        let (parent, child) = dirs.as_ref().ok_or_else(unavailable)?;
+        if !native_matches(
+            parent,
+            &parent_observed.native_object,
+            &plan.filesystem_domain,
+        ) || !native_matches(
+            child,
+            &child_observed.native_object,
+            &plan.filesystem_domain,
+        ) {
+            return Err(unavailable());
+        }
+        let fold = claim.take_fold()?;
+        let (parent, child) = dirs.take().ok_or_else(unavailable)?;
+        Ok(RecoveredProducerNativeParts {
+            plan,
+            fold,
+            parent,
+            child,
+            parent_observed,
+            child_observed,
+            adoption_id,
+        })
+    }
+}
+
 impl NodeResourceRuntime {
+    /// Select strictly proven, forward-recorded old R while the journal lock
+    /// is held. An unsupported row remains charged/protected in the snapshot.
+    pub(crate) fn begin_recovered_r_imports(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), RuntimeOpenError> {
+        for (claim, root_exit) in self.journal.take_recovery_candidates_r() {
+            let id = claim.obligation_id();
+            let previous_owner_id = claim.old_owner_id();
+            let proof = match self.import_active_finite_r(claim, root_exit) {
+                Ok(proof) => proof,
+                Err(_) => continue,
+            };
+            let operation = Arc::new(tokio::sync::Mutex::new(RecoveryRAdoption {
+                operation_id: Uuid::new_v4(),
+                obligation_id: id,
+                previous_owner_id,
+                proof: Some(proof),
+                pending: None,
+                result: None,
+                acknowledged: false,
+                handle: None,
+                preparation: None,
+            }));
+            let mut book = self
+                .recovered_r_adoptions
+                .lock()
+                .map_err(|_| unavailable())?;
+            if book.contains_key(&id) {
+                return Err(unavailable());
+            }
+            book.insert(id, operation.clone());
+            drop(book);
+            let mut operation = operation.try_lock().map_err(|_| unavailable())?;
+            let _ = operation.submit(&self.journal, deadline);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reconcile_recovered_r_imports(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), RuntimeOpenError> {
+        let operations: Vec<_> = self
+            .recovered_r_adoptions
+            .lock()
+            .map_err(|_| unavailable())?
+            .values()
+            .cloned()
+            .collect();
+        for operation in operations {
+            let mut operation = operation.lock().await;
+            if !operation.acknowledged && operation.pending.is_none() {
+                operation.submit(&self.journal, deadline)?;
+            }
+            operation.resolve(self).await?;
+            if operation.preparation.is_none() {
+                let (handle, sequence) = operation.handle.as_ref().ok_or_else(unavailable)?;
+                let preparation = self
+                    .install_recovered_r_preparation(handle.clone(), *sequence)
+                    .map_err(|_| unavailable())?;
+                operation.preparation = Some(preparation);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drive only native scratch cleanup under the original full R hold. This
+    /// does not settle root/task/source facts or release any ledger credit.
+    pub(crate) async fn cleanup_recovered_r_outputs(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), RuntimeOpenError> {
+        let operations: Vec<_> = self
+            .recovered_r_adoptions
+            .lock()
+            .map_err(|_| unavailable())?
+            .values()
+            .cloned()
+            .collect();
+        for operation in operations {
+            let (preparation, id) = {
+                let operation = operation.lock().await;
+                if !operation.acknowledged {
+                    return Err(unavailable());
+                }
+                (
+                    operation
+                        .preparation
+                        .as_ref()
+                        .ok_or_else(unavailable)?
+                        .clone(),
+                    operation.obligation_id,
+                )
+            };
+            let member = self
+                .recovered_r
+                .lock()
+                .map_err(|_| unavailable())?
+                .get(&id)
+                .ok_or_else(unavailable)?
+                .claim()
+                .scratch_member_id()
+                .uuid();
+            self.close_producer_finite_native(&preparation, 0, member, deadline)
+                .await
+                .map_err(|_| unavailable())?;
+        }
+        Ok(())
+    }
+
     /// Call synchronously while the restored R is UnknownHeld and before any
     /// journal adoption is queued. The caller must retain the returned proof
     /// in its runtime owner map before awaiting anything.
