@@ -1665,8 +1665,14 @@ fn general_fel_control_rpu() -> dolby_vision::rpu::dovi_rpu::DoviRpu {
         [-22004, 8388608],
         [-22004, 8388608],
     ];
-    polynomial.poly_coef_int = luma.iter().map(|v| split(v).0).collect();
-    polynomial.poly_coef = luma.iter().map(|v| split(v).1).collect();
+    polynomial.poly_coef_int = luma
+        .iter()
+        .map(|v| split(v).0.into_iter().collect())
+        .collect();
+    polynomial.poly_coef = luma
+        .iter()
+        .map(|v| split(v).1.into_iter().collect())
+        .collect();
     let chroma: [[i64; 21]; 2] = [
         [
             -230431, 11051188, 7235011, -5083283, 1418656, -9439323, 8448648, 2927811, -9479913,
@@ -1687,8 +1693,14 @@ fn general_fel_control_rpu() -> dolby_vision::rpu::dovi_rpu::DoviRpu {
             mmr_order_minus1: vec![2],
             mmr_constant_int: vec![0],
             mmr_constant: vec![[26_163, 566_438][component]],
-            mmr_coef_int: vec![values.chunks(7).map(|v| split(v).0).collect()],
-            mmr_coef: vec![values.chunks(7).map(|v| split(v).1).collect()],
+            mmr_coef_int: vec![values
+                .chunks(7)
+                .map(|v| split(v).0.into_iter().collect())
+                .collect()],
+            mmr_coef: vec![values
+                .chunks(7)
+                .map(|v| split(v).1.into_iter().collect())
+                .collect()],
         });
     }
     let nlq = mapping.nlq.as_mut().expect("control NLQ");
