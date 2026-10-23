@@ -732,6 +732,7 @@ fn open_exact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::io::Write;
 
     #[test]

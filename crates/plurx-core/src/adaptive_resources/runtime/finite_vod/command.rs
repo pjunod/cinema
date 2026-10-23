@@ -271,6 +271,7 @@ fn validate_env(env: &[(OsString, OsString)]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use super::*;
 
     #[cfg(target_os = "linux")]

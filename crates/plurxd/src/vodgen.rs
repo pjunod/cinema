@@ -5,13 +5,12 @@ pub use plurx_core::vod_generation::*;
 #[cfg(test)]
 use crate::copyseg::sanitize_stale_dolby_brand;
 #[cfg(test)]
-use crate::renditiondir::{InitIdentity, InitRefused};
+use crate::renditiondir::InitIdentity;
 #[cfg(test)]
-use plurx_core::fmp4::{CutPolicy, Fragment, FragmentReader, Init, Published, Segmenter, Unit};
+use plurx_core::fmp4::{CutPolicy, FragmentReader, Init, Unit};
 #[cfg(test)]
 use plurx_core::segplan::{
-    entry_row, match_landing, match_landing_at, FragmentIndex, LandingError, PlanEntryKind,
-    SegmentPlan, LANDING_WINDOW,
+    entry_row, FragmentIndex, PlanEntryKind, SegmentPlan, LANDING_WINDOW,
 };
 
 #[cfg(test)]

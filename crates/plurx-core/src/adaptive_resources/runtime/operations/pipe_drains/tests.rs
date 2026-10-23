@@ -130,7 +130,7 @@ async fn launch(runtime: &NodeResourceRuntime, owner: &OwnedPreparation, root: U
         .await
         .expect("real retained root");
 }
-async fn cleanup(runtime: &NodeResourceRuntime, owner: &OwnedPreparation) {
+async fn cleanup(_runtime: &NodeResourceRuntime, owner: &OwnedPreparation) {
     let bundle = owner.state.lock().await;
     let sealed = bundle.roles[0].sealed.as_ref().expect("sealed graph");
     assert_eq!(

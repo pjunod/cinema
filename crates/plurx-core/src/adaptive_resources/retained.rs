@@ -2,14 +2,11 @@
 //! storage. This module cannot mint the physical receipt required to commit.
 #[cfg(test)]
 use super::PhysicalRetirementReceipt;
-#[cfg(test)]
-use super::ResourceReservation;
 use super::{
     AdmissionRefusal, CleanupAuthority, Entry, MemoryClaim, ReservationBinding, ReservationState,
     ResourceLedger, ResourceVector,
 };
 use crate::resource_custody::CommittedRetirementReceipt;
-use std::collections::BTreeSet;
 use uuid::Uuid;
 
 /// Nonclone plan for one conservative R→S accounting replacement.
