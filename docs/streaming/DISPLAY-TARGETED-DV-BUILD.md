@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A–F source work is integrated on the private F branch; qualification is source-bound and promotion remains open · **Updated:** 2026-10-22 · **Owner:** direct GPT (PR #1216), Sol (source), coordinator (native/media/publication) ·
+**Status:** PR A remains draft and unmerged; A–F implementation and evidence are tracked on `effort/display-targeted-dv`, with the single main promotion still open · **Updated:** 2026-10-22 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 The matrix below is the current qualification record. Dated implementation
@@ -146,65 +146,59 @@ Authored regression anchors (not executed):
 
 ## PR A implementation checkpoint
 
-- **Qualification at this checkpoint (2026-10-22):** the original `a49`/`c036` source
-  review is retained. Scanner controls have 20 passes. The standalone P7 run
-  retained its actual `c036` listing, 17,983 valid frames, observed maximum
-  3,441 nits, and passing policy results. Owner-interrupted attempt 258 stopped
-  at 1,000 nits after 137/1,000 and is neither a product defect nor a pass;
-  1,600 nits was not run. Additive continuation 259 completed the same
-  17,983-frame scan (zero missing/invalid, maximum 3,441 nits), then its
-  1,000-nit cell failed with true exit 101: the helper required an observed
-  zero source origin. Its 1,600-nit cell was not run; there are zero new
-  mapped-P7 passes. The unchanged original input has held FORMAT/video origin
-  0.125 seconds and audio start 0.135 seconds. Its original packet cadence
-  agrees with the output grid within the existing 1 ms source tick after
-  subtracting that common origin; input retiming is neither needed nor used.
+User-confirmed delivery is one effort branch followed by one promotion PR to
+`main`. PR #1216 is retargeted to `effort/display-targeted-dv`, remains a draft
+and is unmerged. The current published source checkpoint is
+`503619eb6744264b99d4ce7858f92a244911faf3`; it remains the source identity for
+its compile and P7 evidence. This documentation-only update does not relabel
+those results. A–F stage PRs target the effort branch. Before each stage merge,
+run the manual Effort development gate with `compile_only=true`; it does not run
+unit suites. Keep every focused unit and media result attached to its actual
+source. After stages A–F are integrated, freeze task merges, reconcile the
+effort with current `main`, and open one final promotion PR. Promotion requires
+a passing Main promotion gate and a qualification receipt for that exact
+candidate. The final PR and landing record must preserve A’s 36 `Regression-Test:` anchors
+and the additional regression fields from stages B–F.
 
-  The bounded root-cause candidate carries the exact observed common origin
-  from the held probe into absolute source windows, helper receipt validation
-  and both output-grid mappings. Original BL/EL/RPU keys and the soundtrack's
-  held FORMAT offset stay intact. Missing, negative, producer-default or
-  differing FORMAT/video origins still refuse explicitly. Actual new-daemon
-  P7 continuation276 with bundle275 reached the same complete17,983 valid L1
-  observations, then1000 nits failed with true exit101 at the helper's
-  observed-origin validity guard;1600 was unrun and no new mapped P7 cell passed.
+Two measured root causes drove the repairs. Bounded demux discovery returned
+missing or transient origin fields, so the helper now consumes the exact
+common origin already established by the held probe. The real FEL input then
+exposed eight luma polynomial pieces and two chroma MMR curves, which the old
+synthetic identity-only path refused. Production now uses the shared validated
+public decoder-metadata projection, retaining coded-frame/RPU association,
+NLQ constraints and source-derived operation counts. Original timestamps,
+window bounds and the soundtrack offset stay intact.
 
-  Bounded CPU diagnostic308 found the root cause: after find_stream_info both
-  FORMAT and selected-stream start times were unknown; after four reordered
-  packet reads the stream start changed to208ms. Early versus deferred discard
-  produced identical results. That mutable partial-demux field cannot represent
-  the held common125ms epoch. The next candidate passes the already validated
-  typed held origin explicitly to the helper, reports honest held-probe
-  provenance and uses that epoch for declared-duration EOF. It preserves all
-  probe/packet/frame/byte bounds, original PTS/DTS and soundtrack offset.
-  The authored protocol/EOF regressions and updated
-  [origin contract](DV_PROCESSING_TOOLS.md#three-clocks-share-one-observed-common-origin)
-  await independent completed-delta review before any build or execution.
-  Native helper rebuild/bundle/daemon linkage and first-window qualification
-  precede only the missing P7 cells. No new test or native success is inferred
-  from this candidate's source.
+A’s general-FEL source review is approved. Pinned formatting (#339), check
+(#343), Clippy and core/daemon linkage (#334) passed; two core regressions
+passed at #334 and the exact daemon regression passed at #352. Fixture-only
+source repair `98cc1f4` did not change Rust production code. Retain #333 formatting
+and #335/#337 compile failures as build failures with zero tests; they are not
+unit outcomes. Helper CPU control #341 passed, bundle #342 contains 79 files and a 12-source renderer closure, and the zero control passed six frames. The real P7 helper run #345
+exited 0 after 48 frames. Public ffprobe #350 confirms the original cadence:
+source PTS 2085 plus duration 41 reaches 2126, followed by 2127. Checker-only
+#351 passed against that exact output; it is not a GPU render or mapped-cell
+pass. Full P7 driver #348 is running only the 1000-nit target; 1600 nits is
+pending. No mapped P7 cell has passed. The recorded maximum `3441` is a PQ code,
+not a nit measurement. No full mapped render or accuracy pass is inferred.
 
-  At this checkpoint, source integration was `a316`, plus test-only missing scanner
-  fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.
-  The original compile exposed E0063 in a scanner `/bin/false` test fixture;
-  that fixture-only repair passed failed-only compile 261 on exact
-  `fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8` with pinned Rust 1.97.1 and true
-  outer exit 0. The check covered `plurxd` and `plurx-core` all targets with
-  `hiqlite-contract-tests`, without units. PR B integration `2038269` is queued
-  for pinned compile 262. Retain prior 99 Rust passes, the new receipt regression,
-  141 shader cases / 866,304 samples, 70 helper results, and P8 passes with
-  their original source attribution; do not replay or relabel them.
+B–D and F have built source and retain their own checks without merge
+qualification: B has seven Rust passes (#312); C has ten Rust passes (#316),
+14 badge cases and 72 settings cases; D has 27 web cases, plus
+integrated Android 30, Apple 13 and build checks. F code `6d48d4c` and docs
+`67dbc9818` retain ten Rust passes (three at #324, seven at #331), two web
+cases and ten pixel cases at #325: 61,440 samples, maximum error one code under
+a two-code limit. These source-attributed results do not qualify a later
+integrated candidate by themselves.
 
-  Separate FEL comparison/interpreter work is excluded from PR A: no reviewed
-  production fix is available to integrate (the original contract, §§113–115,
-  permits this separation). Full-app C1 still has a final source-EOF failure;
-  full-clip and general FEL accuracy remain unclaimed. PR #1216 is owned by
-  direct GPT/root; existing full and delta reviews remain retained. Narrow
-  integration review, completed P7 evidence, current fast lane, and API merge
-  with 29 regression anchors remain open. B metadata and C/D/F follow-up
-  implementations remain separately owned and unqualified for merge. Phase E
-  has an official software-reference comparison; creative accuracy remains open. No setting is exposed before B,
-  and Apple peak reporting, device acceptance, and deployment are not claimed.
+E’s reviewed adapter source `928407c` adds a separately acquired official
+neutral-L3 reference (#349): 14 cases and 42 vendor commands, all exit 0. Its
+narrow Python unit passed once at run354. The 14-case comparison mechanics at #353
+completed against the neutral-L3 reference; baseline PQ error is 0.110077
+(previous #332 was 0.146821), with field-0 positive/negative errors 0.44085 /
+0.48964. Those observations are not creative-trim accuracy acceptance. The
+public contract still lacks complete L8 support. The full FEL mapped path,
+physical-device acceptance and deployment remain open.
 
 ### Historical qualification records
 
@@ -549,18 +543,33 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 ## Delivery
 
-| PR | Contents | Deploy |
+| Stage | Contents | Recorded state |
 |---|---|---|
-| A | Title L1 scan (stored with the DV facts) + helper target policy + L1 → CIE_Y + ST 2094-10 + `DvExportPolicy` identity + report operation + control scripts | server image |
-| B | MDCV/CLL writer for processed output (post-encode, reusing `hdr10_index.rs`) | server image |
-| C | Caps `max_nits`/`peak_source` (no display minimum), buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
-| D | Android / Android TV HdrCapabilities + web display-peak setting; Apple excluded in phase 1 | server image (web) + Android build |
-| E | Phase 2 trims (after acceptance) | server image |
-| F | Phase 3 SDR target | server image |
+| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 remains draft on `effort/display-targeted-dv`; source review is approved, general-FEL checks and exact regressions pass, while mapped P7 and accuracy qualification remain open. |
+| B | Processed-output MDCV/CLL writer | Built; seven Rust cases passed at #312; not merged or promotion-qualified. |
+| C | Peak capability, buckets, elision, Developer setting, indicator and Activity text | Built; source-attributed Rust, badge and settings cases pass; not merged or promotion-qualified. |
+| D | Android / Android TV peak reporting and web setting | Built; source-attributed web, Android, Apple and build checks pass; not merged or promotion-qualified. |
+| E | Phase 2 trim comparison | Neutral-L3 reference and 14-case numerical observations are retained; creative accuracy and complete L8 contract remain unaccepted. |
+| F | Phase 3 SDR target | Built with source-attributed Rust, web and pixel checks; not merged or promotion-qualified. |
 
-Each PR follows the usual lifecycle: draft, one adversarial review, fast
-lane once, merge with `Regression-Test:` lines. STATUS.html is updated as
-each one lands.
+### Stage PRs target one effort branch
+
+Open or retarget each A–F stage PR to `effort/display-targeted-dv`. Before
+merging a stage into the effort, dispatch the manual Effort development gate
+with `compile_only=true`. That gate checks policy, formatting, static web
+contracts and affected compilation; it runs no Rust, Apple or Android unit
+suites. Preserve focused regressions and native/media receipts with their exact
+source identities, and do not treat the compile-only result as unit or device
+qualification.
+
+### One reviewed promotion moves the effort to main
+
+When all stage merges are frozen, merge current `main` into the effort, resolve
+and review the resulting candidate, and open one promotion PR from the effort
+to `main`. Run the Main promotion gate and create the required qualification
+receipt against that exact candidate. If either branch moves, qualify the new
+tree again. Carry A’s 36 `Regression-Test:` anchors and the additional B–F regression
+fields through the promotion PR description and landing message. Do not publish or deploy from a task-stage PR.
 
 ## Risks
 
