@@ -156,9 +156,16 @@ unit outcomes. Helper CPU control #341 passed, bundle #342 contains 79 files and
 exited 0 after 48 frames. Public ffprobe #350 confirms the original cadence:
 source PTS 2085 plus duration 41 reaches 2126, followed by 2127. Checker-only
 #351 passed against that exact output; it is not a GPU render or mapped-cell
-pass. Full P7 driver #348 is running only the 1000-nit target; 1600 nits is
-pending. No mapped P7 cell has passed. The recorded maximum `3441` is a PQ code,
-not a nit measurement. No full mapped render or accuracy pass is inferred.
+pass. Full P7 driver #348 passed both 1000/1600-nit cells: four 48-frame
+windows per target at entries 0/1/2/360, including audio, cadence, native
+geometry and seek assertions. Outer exit 0 and both log hashes were verified;
+receipt SHA256 `73a0b9f99391c780437b4b1503790746f8d78b73fc573d4ec664994acd55ddfd`.
+Those media results retain actual source `503619eb`. Current-main merge
+`0e64dab8` changes no Rust/C/header or Cargo.lock bytes; its pinned check #358
+(repaired operator #365) passes with zero units. Original operator preflight
+failures remain preserved. The recorded maximum `3441` is a PQ code, not nits.
+P8 adoption on the final integrated renderer and creative/optical accuracy
+remain separate acceptance work.
 
 B–D and F have built source and retain their own checks without merge
 qualification: B has seven Rust passes (#312); C has ten Rust passes (#316),
@@ -175,8 +182,9 @@ narrow Python unit passed once at run354. The 14-case comparison mechanics at #3
 completed against the neutral-L3 reference; baseline PQ error is 0.110077
 (previous #332 was 0.146821), with field-0 positive/negative errors 0.44085 /
 0.48964. Those observations are not creative-trim accuracy acceptance. The
-public contract still lacks complete L8 support. The full FEL mapped path,
-physical-device acceptance and deployment remain open.
+public contract still lacks complete L8 support. The separate full-application FEL EOF follow-up, physical-device acceptance
+and deployment remain open. The user declined external Dolby contact; the
+prepared inquiry remains unsent.
 
 ### Historical qualification records
 
@@ -523,7 +531,7 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 | Stage | Contents | Recorded state |
 |---|---|---|
-| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 remains draft on `effort/display-targeted-dv`; source review is approved, general-FEL checks and exact regressions pass, while mapped P7 and accuracy qualification remain open. |
+| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 remains draft on `effort/display-targeted-dv`; source review is approved, general-FEL checks and exact regressions pass, both mapped P7 targets pass; final integrated adoption and accuracy qualification remain open. |
 | B | Processed-output MDCV/CLL writer | Built; seven Rust cases passed at #312; not merged or promotion-qualified. |
 | C | Peak capability, buckets, elision, Developer setting, indicator and Activity text | Built; source-attributed Rust, badge and settings cases pass; not merged or promotion-qualified. |
 | D | Android / Android TV peak reporting and web setting | Built; source-attributed web, Android, Apple and build checks pass; not merged or promotion-qualified. |
