@@ -73,7 +73,8 @@ PRAGMA user_version=1;
 pub(super) const DDL_V2: &str = include_str!("schema/v2.sql");
 pub(super) const DDL_V3: &str = include_str!("schema/v3.sql");
 pub(super) const DDL_V4: &str = include_str!("schema/v4.sql");
-pub(super) const DDL: &str = include_str!("schema/v5.sql");
+pub(super) const DDL_V5: &str = include_str!("schema/v5.sql");
+pub(super) const DDL: &str = include_str!("schema/v6.sql");
 
 fn shape(connection: &Connection) -> Result<Vec<(String, String, String)>, CustodyError> {
     let mut statement = connection.prepare(
@@ -90,7 +91,8 @@ pub(super) fn validate(connection: &Connection) -> Result<(), CustodyError> {
         2 => DDL_V2,
         3 => DDL_V3,
         4 => DDL_V4,
-        5 => DDL,
+        5 => DDL_V5,
+        6 => DDL,
         _ => {
             return Err(CustodyError::new(
                 ErrorKind::UnreadableAuthority,

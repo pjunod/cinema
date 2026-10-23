@@ -231,7 +231,10 @@ pub struct RecoverySnapshot {
     pub journal_id: Uuid,
     pub installation_id: Uuid,
     pub obligations: Vec<ObligationRecord>,
+    /// One source-validated representative per active obligation. The journal
+    /// validates and retains the complete multi-family authority on disk.
     pub families: Vec<FamilyEdge>,
+    pub(crate) family_authority: FamilyAuthority,
     pub(crate) retained_assets: Vec<RetainedAssetOwner>,
     pub total: ResourceVector,
     pub trial_groups: Vec<Uuid>,
@@ -243,6 +246,52 @@ pub struct RecoverySnapshot {
     pub(crate) recovered_s_holders: Vec<RecoveredSHolder>,
     /// Append-only current custodians for imported, exited fixed producers.
     pub(crate) recovered_r_holders: Vec<RecoveredRHolder>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FamilyAuthority {
+    active_edge_count: u64,
+    active_edges_sha256: [u8; 32],
+    representatives_sha256: [u8; 32],
+}
+
+impl FamilyAuthority {
+    pub(crate) fn from_validated_rows(
+        active_edge_count: u64,
+        active_edges_sha256: [u8; 32],
+        representatives: &[FamilyEdge],
+    ) -> Self {
+        Self {
+            active_edge_count,
+            active_edges_sha256,
+            representatives_sha256: family_edges_digest(representatives),
+        }
+    }
+
+    pub(crate) fn matches(&self, representatives: &[FamilyEdge]) -> bool {
+        self.active_edge_count >= representatives.len() as u64
+            && self.representatives_sha256 == family_edges_digest(representatives)
+    }
+
+    pub(crate) fn same_complete_rows(&self, other: &Self) -> bool {
+        self.active_edge_count == other.active_edge_count
+            && self.active_edges_sha256 == other.active_edges_sha256
+    }
+}
+
+pub(crate) fn family_edges_digest(edges: &[FamilyEdge]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for edge in edges {
+        hash.update(edge.family_id.as_bytes());
+        hash.update([match edge.role {
+            Role::Video => 0,
+            Role::Audio => 1,
+            Role::Companion => 2,
+        }]);
+        hash.update(edge.obligation_id.as_bytes());
+    }
+    hash.finalize().into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

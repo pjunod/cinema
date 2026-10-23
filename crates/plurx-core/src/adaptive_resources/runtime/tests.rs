@@ -71,18 +71,24 @@ fn snapshot(phases: &[Phase], trial: bool) -> RecoverySnapshot {
             }
         })
         .collect();
+    let families: Vec<FamilyEdge> = obligations
+        .iter()
+        .enumerate()
+        .map(|(index, record)| FamilyEdge {
+            family_id: if index < 3 { family } else { Uuid::new_v4() },
+            role: [Role::Video, Role::Audio, Role::Companion][index % 3],
+            obligation_id: record.obligation_id,
+        })
+        .collect();
     RecoverySnapshot {
         journal_id: Uuid::new_v4(),
         installation_id: Uuid::new_v4(),
-        families: obligations
-            .iter()
-            .enumerate()
-            .map(|(index, record)| FamilyEdge {
-                family_id: if index < 3 { family } else { Uuid::new_v4() },
-                role: [Role::Video, Role::Audio, Role::Companion][index % 3],
-                obligation_id: record.obligation_id,
-            })
-            .collect(),
+        family_authority: crate::resource_custody::FamilyAuthority::from_validated_rows(
+            families.len() as u64,
+            crate::resource_custody::family_edges_digest(&families),
+            &families,
+        ),
+        families,
         total: vector(u64::try_from(phases.len()).expect("fixture count") * 2),
         obligations,
         trial_groups: trial_id.into_iter().collect(),

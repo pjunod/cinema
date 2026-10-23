@@ -1,5 +1,5 @@
-//! Same-file recognized v1 -> v2 -> v3 -> v4 -> v5 upgrades; no missing-authority repair.
-use super::{validate, DDL, DDL_V2, DDL_V3, DDL_V4};
+//! Same-file recognized v1 -> v2 -> v3 -> v4 -> v5 -> v6 upgrades; no missing-authority repair.
+use super::{validate, DDL, DDL_V2, DDL_V3, DDL_V4, DDL_V5};
 use crate::resource_custody::{
     codec, storage::Witness, transaction, CommitCertainty, CustodyError, ErrorKind,
 };
@@ -33,6 +33,9 @@ pub(in crate::resource_custody) fn upgrade(
     }
     if version <= 4 {
         upgrade_v4_to_v5(connection, witness)?;
+    }
+    if version <= 5 {
+        upgrade_v5_to_v6(connection, witness)?;
     }
     Ok(())
 }
@@ -101,7 +104,9 @@ pub(super) fn upgrade_v1_to_v2(
     if before.total != after.total
         || before.trial_groups != after.trial_groups
         || before.obligations.len() != after.obligations.len()
-        || before.families.len() != after.families.len()
+        || !before
+            .family_authority
+            .same_complete_rows(&after.family_authority)
         || before.protected_paths != after.protected_paths
     {
         return Err(codec::invalid());
@@ -121,7 +126,10 @@ pub(super) fn upgrade_v1_to_v2(
 
 /// Preserve every old SQL value byte-for-byte. The only new interpretation is
 /// that an old allocation conservatively remains an active bounded producer.
-fn upgrade_v2_to_v3(connection: &mut Connection, witness: &Witness) -> Result<(), CustodyError> {
+pub(super) fn upgrade_v2_to_v3(
+    connection: &mut Connection,
+    witness: &Witness,
+) -> Result<(), CustodyError> {
     validate(connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version != 2 {
@@ -181,7 +189,9 @@ fn upgrade_v2_to_v3(connection: &mut Connection, witness: &Witness) -> Result<()
     if before.total != after.total
         || before.trial_groups != after.trial_groups
         || before.obligations.len() != after.obligations.len()
-        || before.families.len() != after.families.len()
+        || !before
+            .family_authority
+            .same_complete_rows(&after.family_authority)
         || before.retained_assets.len() != after.retained_assets.len()
         || before.protected_paths != after.protected_paths
     {
@@ -202,7 +212,10 @@ fn upgrade_v2_to_v3(connection: &mut Connection, witness: &Witness) -> Result<()
 
 /// Add only the append-only recovered-holder overlay. Historical obligations,
 /// operations, owners and retained custody keep their original bytes and owner.
-fn upgrade_v3_to_v4(connection: &mut Connection, witness: &Witness) -> Result<(), CustodyError> {
+pub(super) fn upgrade_v3_to_v4(
+    connection: &mut Connection,
+    witness: &Witness,
+) -> Result<(), CustodyError> {
     validate(connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let foreign_keys: bool = connection.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
@@ -246,7 +259,9 @@ fn upgrade_v3_to_v4(connection: &mut Connection, witness: &Witness) -> Result<()
     if before.total != after.total
         || before.trial_groups != after.trial_groups
         || before.obligations.len() != after.obligations.len()
-        || before.families.len() != after.families.len()
+        || !before
+            .family_authority
+            .same_complete_rows(&after.family_authority)
         || before.retained_assets.len() != after.retained_assets.len()
         || before.protected_paths != after.protected_paths
     {
@@ -265,7 +280,10 @@ fn upgrade_v3_to_v4(connection: &mut Connection, witness: &Witness) -> Result<()
 
 /// Add a distinct producer-custodian overlay. The historical producer row,
 /// including its original owner and typed proof chain, retains its bytes.
-fn upgrade_v4_to_v5(connection: &mut Connection, witness: &Witness) -> Result<(), CustodyError> {
+pub(super) fn upgrade_v4_to_v5(
+    connection: &mut Connection,
+    witness: &Witness,
+) -> Result<(), CustodyError> {
     validate(connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let foreign_keys: bool = connection.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
@@ -279,7 +297,7 @@ fn upgrade_v4_to_v5(connection: &mut Connection, witness: &Witness) -> Result<()
         "CREATE TEMP TABLE custody_upgrade_v5_meta AS SELECT * FROM main.journal_meta;",
     )?;
     let canonical = Connection::open_in_memory()?;
-    canonical.execute_batch(DDL)?;
+    canonical.execute_batch(DDL_V5)?;
     let meta_sql: String = canonical.query_row(
         "SELECT sql FROM sqlite_schema WHERE name='journal_meta'",
         [],
@@ -310,7 +328,9 @@ fn upgrade_v4_to_v5(connection: &mut Connection, witness: &Witness) -> Result<()
     if before.total != after.total
         || before.trial_groups != after.trial_groups
         || before.obligations.len() != after.obligations.len()
-        || before.families.len() != after.families.len()
+        || !before
+            .family_authority
+            .same_complete_rows(&after.family_authority)
         || before.retained_assets.len() != after.retained_assets.len()
         || before.recovered_s_holders != after.recovered_s_holders
         || before.recovered_r_holders != after.recovered_r_holders
@@ -319,6 +339,100 @@ fn upgrade_v4_to_v5(connection: &mut Connection, witness: &Witness) -> Result<()
         return Err(codec::invalid());
     }
     tx.execute_batch("DROP TABLE temp.custody_upgrade_v5_meta;")?;
+    tx.commit().map_err(|_| {
+        let mut error = CustodyError::new(
+            ErrorKind::Storage,
+            "custody schema upgrade commit uncertain",
+        );
+        error.certainty = CommitCertainty::Unknown;
+        error
+    })
+}
+
+/// Add the covering obligation/role lookup without changing any historical
+/// custody row. Full row comparisons guard even settled holder history.
+pub(super) fn upgrade_v5_to_v6(
+    connection: &mut Connection,
+    witness: &Witness,
+) -> Result<(), CustodyError> {
+    validate(connection)?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let foreign_keys: bool = connection.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    if version != 5 || !foreign_keys {
+        return Err(codec::invalid());
+    }
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    validate(&tx)?;
+    let tables = TABLES.into_iter().chain([
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+    ]);
+    for table in tables.clone() {
+        tx.execute_batch(&format!(
+            "CREATE TEMP TABLE custody_upgrade_v6_{table} AS SELECT * FROM main.{table};"
+        ))?;
+    }
+    let canonical = Connection::open_in_memory()?;
+    canonical.execute_batch(DDL)?;
+    let index_sql: String = canonical.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='family_roles_by_obligation_role'",
+        [],
+        |row| row.get(0),
+    )?;
+    // The index changes no table row and is rolled back with this transaction.
+    // The complete history is validated after the exact projection is built.
+    tx.execute_batch(&index_sql)?;
+    for name in [
+        "asset_operation_membership",
+        "asset_operation_by_asset_sequence",
+    ] {
+        let sql: String = canonical.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name=?1",
+            [name],
+            |row| row.get(0),
+        )?;
+        tx.execute_batch(&sql)?;
+    }
+    transaction::backfill_asset_membership(&tx)?;
+    let meta_sql: String = canonical.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='journal_meta'",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.execute_batch("DROP TABLE journal_meta;")?;
+    tx.execute_batch(&meta_sql)?;
+    tx.execute_batch(
+        "INSERT INTO journal_meta SELECT singleton,6,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.custody_upgrade_v6_journal_meta;
+         PRAGMA user_version=6;",
+    )?;
+    validate(&tx)?;
+    for table in tables.clone() {
+        let projection = if table == "journal_meta" {
+            "singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id"
+        } else {
+            "*"
+        };
+        let unchanged: bool = tx.query_row(
+            &format!(
+                "SELECT NOT EXISTS(SELECT {projection} FROM main.{table} EXCEPT SELECT {projection} FROM temp.custody_upgrade_v6_{table}) AND NOT EXISTS(SELECT {projection} FROM temp.custody_upgrade_v6_{table} EXCEPT SELECT {projection} FROM main.{table}) AND (SELECT count(*) FROM main.{table})=(SELECT count(*) FROM temp.custody_upgrade_v6_{table})"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if !unchanged {
+            return Err(codec::invalid());
+        }
+    }
+    // Every old table still has byte-exact rows. The global projection pass
+    // proves that asset+sequence index order is the same subsequence of the
+    // immutable result_json rowid stream that legacy folds replayed. Thus this
+    // one complete v6 snapshot exercises the original fold checks on every
+    // historical asset without the old per-obligation full-history rescan.
+    transaction::snapshot(&tx, witness)?;
+    for table in tables {
+        tx.execute_batch(&format!("DROP TABLE temp.custody_upgrade_v6_{table};"))?;
+    }
     tx.commit().map_err(|_| {
         let mut error = CustodyError::new(
             ErrorKind::Storage,

@@ -182,7 +182,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     for (table, old) in tables.iter().zip(before) {
         assert_eq!(logical_rows(&db, table), old, "{table}");
@@ -193,7 +193,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(snapshot.obligations[0].allocation_epoch, u64::MAX);
     assert_eq!(snapshot.trial_groups.len(), 1);
     assert!(snapshot.retained_assets.is_empty());
-    // Exact-v5 reopen is a no-op; old shape recognition cannot accept the new DB.
+    // Exact-v6 reopen is a no-op; old shape recognition cannot accept the new DB.
     let rows = logical_rows(&db, "operations");
     upgrade(&mut db, &store.witness).unwrap();
     assert_eq!(rows, logical_rows(&db, "operations"));
@@ -322,7 +322,7 @@ fn v4_schema_is_exact_and_rejects_extra_shape() {
 #[test]
 fn v5_schema_is_exact_and_rejects_extra_shape() {
     let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(DDL).unwrap();
+    db.execute_batch(DDL_V5).unwrap();
     validate(&db).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
@@ -332,6 +332,162 @@ fn v5_schema_is_exact_and_rejects_extra_shape() {
     db.execute_batch("CREATE TABLE extra_authority(value TEXT) STRICT;")
         .unwrap();
     assert!(validate(&db).is_err());
+}
+
+#[test]
+fn v6_schema_requires_covering_family_lookup_index() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(DDL).unwrap();
+    validate(&db).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        6
+    );
+    let mut plan = db
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1 AND role<>?2)",
+        )
+        .unwrap();
+    let details: Vec<String> = plan
+        .query_map(params![Uuid::new_v4().as_bytes(), "video"], |row| {
+            row.get(3)
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(details
+        .iter()
+        .any(|detail| { detail.contains("USING COVERING INDEX family_roles_by_obligation_role") }));
+    let mut asset_plan = db
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT operations.result_json FROM asset_operation_membership AS membership JOIN operations ON operations.operation_id=membership.operation_id WHERE membership.asset_id=?1 ORDER BY membership.sequence",
+        )
+        .unwrap();
+    let asset_details: Vec<String> = asset_plan
+        .query_map([Uuid::new_v4().as_bytes()], |row| row.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(asset_details
+        .iter()
+        .any(|detail| { detail.contains("asset_operation_by_asset_sequence") }));
+    db.execute_batch("DROP INDEX family_roles_by_obligation_role;")
+        .unwrap();
+    assert!(validate(&db).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn v5_to_v6_index_upgrade_preserves_all_historical_table_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let store = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::FirstInstallation,
+    ))
+    .unwrap();
+    let mut db = Connection::open_in_memory().unwrap();
+    populated_v1(&mut db, &store.witness);
+    migration::upgrade_v1_to_v2(&mut db, &store.witness).unwrap();
+    migration::upgrade_v2_to_v3(&mut db, &store.witness).unwrap();
+    migration::upgrade_v3_to_v4(&mut db, &store.witness).unwrap();
+    migration::upgrade_v4_to_v5(&mut db, &store.witness).unwrap();
+    validate(&db).unwrap();
+    let tables = [
+        "journal_meta",
+        "owners",
+        "obligations",
+        "family_roles",
+        "members",
+        "operations",
+        "retained_asset_owners",
+        "recovered_s_holders",
+        "recovered_r_holders",
+    ];
+    let before: Vec<_> = tables
+        .iter()
+        .map(|table| logical_rows(&db, table))
+        .collect();
+    migration::upgrade_v5_to_v6(&mut db, &store.witness).unwrap();
+    validate(&db).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        6
+    );
+    for (table, old) in tables.iter().zip(before) {
+        assert_eq!(logical_rows(&db, table), old, "{table}");
+    }
+    assert_eq!(
+        transaction::snapshot(&db, &store.witness).unwrap().total,
+        vector(u64::MAX)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn v5_to_v6_refuses_corrupted_oldest_asset_event_and_rolls_back_projection() {
+    use crate::resource_custody::transaction::frozen_source_fixture;
+
+    let mut source = frozen_source_fixture();
+    let db = &mut source.storage.connection;
+    let canonical = Connection::open_in_memory().unwrap();
+    canonical.execute_batch(DDL_V5).unwrap();
+    let old_meta_sql: String = canonical
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='journal_meta'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute_batch(
+        "DROP TABLE asset_operation_membership;
+         DROP INDEX family_roles_by_obligation_role;
+         CREATE TEMP TABLE fixture_v6_meta AS SELECT * FROM journal_meta;
+         DROP TABLE journal_meta;",
+    )
+    .unwrap();
+    db.execute_batch(&old_meta_sql).unwrap();
+    db.execute_batch(
+        "INSERT INTO journal_meta SELECT singleton,5,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.fixture_v6_meta;
+         DROP TABLE temp.fixture_v6_meta;
+         PRAGMA user_version=5;",
+    )
+    .unwrap();
+    validate(db).unwrap();
+    let (operation, altered) = {
+        let mut statement = db
+            .prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")
+            .unwrap();
+        let mut rows = statement.query([]).unwrap();
+        let mut found = None;
+        while let Some(row) = rows.next().unwrap() {
+            let operation: Vec<u8> = row.get(0).unwrap();
+            let json: String = row.get(1).unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            if value["kind"] == "asset_changed_v3" {
+                value["change"]["asset_id"] = serde_json::json!(Uuid::new_v4());
+                found = Some((operation, serde_json::to_string(&value).unwrap()));
+                break;
+            }
+        }
+        found.expect("fixture has an asset event")
+    };
+    db.execute(
+        "UPDATE operations SET result_json=?1 WHERE operation_id=?2",
+        params![altered, operation],
+    )
+    .unwrap();
+    let original_rows = logical_rows(db, "operations");
+    assert!(migration::upgrade_v5_to_v6(db, &source.storage.witness).is_err());
+    validate(db).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    assert_eq!(logical_rows(db, "operations"), original_rows);
 }
 
 #[cfg(unix)]
@@ -391,7 +547,7 @@ fn recognized_v2_history_upgrades_to_v3_with_conservative_claim_and_unchanged_by
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(logical_rows(&db, "obligations"), before_obligations);
     assert_eq!(logical_rows(&db, "operations"), before_operations);

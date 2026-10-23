@@ -94,11 +94,19 @@ pub(in crate::resource_custody) fn restore(
     }
     let mut fold = BootstrapFold::empty(plan, v2::Id::new(obligation)?, member)?;
     let mut prior_sequence = 0;
-    let mut statement =
-        connection.prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")?;
-    let mut rows = statement.query([])?;
+    let indexed = membership::indexed(connection)?;
+    let mut statement = connection.prepare(membership::history_sql(indexed))?;
+    let mut rows = if indexed {
+        statement.query([plan.asset_id.uuid().as_bytes()])?
+    } else {
+        statement.query([])?
+    };
     while let Some(row) = rows.next()? {
+        let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
+        if indexed {
+            membership::validate_asset_row(connection, operation, &result, plan.asset_id.uuid())?;
+        }
         let record = match result {
             DiskResult::AssetChangedV3(record) => record,
             DiskResult::AssetChangedV2(record) if record.change.asset_id == plan.asset_id => {
@@ -107,7 +115,6 @@ pub(in crate::resource_custody) fn restore(
             _ => continue,
         };
         record.validate()?;
-        let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         if record.ack.operation_id != operation {
             return Err(codec::invalid());
         }
@@ -371,12 +378,19 @@ fn replay_producer_until_transfer(
     )?;
     let mut boundary = false;
     let mut prior_sequence = 0;
-    let mut stmt =
-        connection.prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")?;
-    let mut rows = stmt.query([])?;
+    let indexed = membership::indexed(connection)?;
+    let mut stmt = connection.prepare(membership::history_sql(indexed))?;
+    let mut rows = if indexed {
+        stmt.query([plan.asset_id.uuid().as_bytes()])?
+    } else {
+        stmt.query([])?
+    };
     while let Some(row) = rows.next()? {
         let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
+        if indexed {
+            membership::validate_asset_row(connection, operation, &result, plan.asset_id.uuid())?;
+        }
         match result {
             DiskResult::AssetChangedV3(record) if record.change.asset_id == plan.asset_id => {
                 record.validate()?;
@@ -465,12 +479,19 @@ fn restore_transferred(
     )?;
     let mut boundary = false;
     let mut prior_sequence = 0;
-    let mut stmt =
-        connection.prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")?;
-    let mut rows = stmt.query([])?;
+    let indexed = membership::indexed(connection)?;
+    let mut stmt = connection.prepare(membership::history_sql(indexed))?;
+    let mut rows = if indexed {
+        stmt.query([plan.asset_id.uuid().as_bytes()])?
+    } else {
+        stmt.query([])?
+    };
     while let Some(row) = rows.next()? {
         let operation = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
+        if indexed {
+            membership::validate_asset_row(connection, operation, &result, plan.asset_id.uuid())?;
+        }
         match result {
             DiskResult::AssetChangedV3(record) if record.change.asset_id == plan.asset_id => {
                 record.validate()?;

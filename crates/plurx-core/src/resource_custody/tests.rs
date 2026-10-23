@@ -303,7 +303,8 @@ async fn atomic_family_prepare_shared_roles_count_once_and_retain_trial_group() 
     .expect("read fixture");
     let snapshot = transaction::snapshot(&store.connection, &store.witness).expect("full snapshot");
     assert_eq!(snapshot.total, vector(3));
-    assert_eq!(snapshot.families.len(), 3);
+    assert_eq!(snapshot.families.len(), 2);
+    assert_eq!(snapshot.family_authority.active_edge_count, 3);
     assert_eq!(snapshot.trial_groups.len(), 1);
     journal.acknowledge(op).expect("ack prepare");
     journal.drain().expect("drain");

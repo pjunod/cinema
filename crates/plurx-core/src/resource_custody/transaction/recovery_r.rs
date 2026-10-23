@@ -30,6 +30,7 @@ fn next_holder_matches_previous(
     }
 }
 
+#[cfg(test)]
 fn predecessor_unchanged_since_adoption(
     previous: &RecoveredRHolder,
     last_data_sequence: i64,
@@ -43,7 +44,6 @@ pub(super) fn load_overlay(
     connection: &Connection,
     schema_version: i64,
     obligations: &[ObligationRecord],
-    owners: &BTreeSet<Uuid>,
     next: i64,
 ) -> Result<Vec<RecoveredRHolder>, CustodyError> {
     if schema_version < 5 {
@@ -54,13 +54,24 @@ pub(super) fn load_overlay(
     )?;
     let mut rows = statement.query([])?;
     let mut holders = Vec::new();
-    let mut effective = BTreeMap::<Uuid, RecoveredRHolder>::new();
-    let mut recovered = BTreeMap::<Uuid, OverlayRecord>::new();
+    let mut previous: Option<RecoveredRHolder> = None;
+    let mut group_record: Option<OverlayRecord> = None;
     while let Some(row) = rows.next()? {
-        if holders.len() >= codec::ACTIVE_LIMIT {
-            return Err(codec::invalid());
-        }
         let obligation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
+        if previous
+            .as_ref()
+            .is_some_and(|holder| holder.obligation_id != obligation_id)
+        {
+            let last = previous.take().ok_or_else(codec::invalid)?;
+            group_record = None;
+            let (_, _, _, phase, _) = obligation_tail(connection, last.obligation_id)?;
+            if phase != Phase::Settled {
+                if holders.len() >= codec::ACTIVE_LIMIT {
+                    return Err(codec::invalid());
+                }
+                holders.push(last);
+            }
+        }
         let adoption_sequence: i64 = row.get(1)?;
         let operation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(2)?)?;
         let previous_owner_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(3)?)?;
@@ -76,49 +87,49 @@ pub(super) fn load_overlay(
         let root_creation_marker = root_creation_marker
             .parse::<u64>()
             .map_err(|_| codec::invalid())?;
-        if !recovered.contains_key(&obligation_id) {
-            let record = if let Some(active) = obligations
-                .iter()
-                .find(|r| r.obligation_id == obligation_id)
-            {
-                OverlayRecord {
-                    owner_id: active.owner_id,
-                    phase: active.phase,
-                    sequence: active.sequence,
-                    inventory: active.inventory.clone(),
-                }
-            } else {
-                let (owner, graph, phase, sequence, manifest_json, settlement_json):
+        if group_record.is_none() {
+            group_record = Some(
+                if let Some(active) = obligations
+                    .iter()
+                    .find(|r| r.obligation_id == obligation_id)
+                {
+                    OverlayRecord {
+                        owner_id: active.owner_id,
+                        phase: active.phase,
+                        sequence: active.sequence,
+                        inventory: active.inventory.clone(),
+                    }
+                } else {
+                    let (owner, graph, phase, sequence, manifest_json, settlement_json):
                     (Vec<u8>, Vec<u8>, String, i64, String, Option<String>) = connection.query_row(
                         "SELECT owner_id,graph_id,phase,sequence,manifest_json,settlement_json FROM obligations WHERE obligation_id=?1",
                         [obligation_id.as_bytes()],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                     )?;
-                let owner = codec::uuid_from_bytes(&owner)?;
-                let graph = codec::uuid_from_bytes(&graph)?;
-                let phase = Phase::parse(&phase)?;
-                if phase != Phase::Settled || settlement_json.is_none() {
-                    return Err(codec::invalid());
-                }
-                OverlayRecord {
-                    owner_id: owner,
-                    phase,
-                    sequence,
-                    inventory: inventory::load(
-                        connection,
-                        obligation_id,
-                        owner,
-                        graph,
+                    let owner = codec::uuid_from_bytes(&owner)?;
+                    let graph = codec::uuid_from_bytes(&graph)?;
+                    let phase = Phase::parse(&phase)?;
+                    if phase != Phase::Settled || settlement_json.is_none() {
+                        return Err(codec::invalid());
+                    }
+                    OverlayRecord {
+                        owner_id: owner,
                         phase,
-                        &manifest_json,
-                        settlement_json.as_deref(),
-                    )?,
-                }
-            };
-            recovered.insert(obligation_id, record);
+                        sequence,
+                        inventory: inventory::load(
+                            connection,
+                            obligation_id,
+                            owner,
+                            graph,
+                            phase,
+                            &manifest_json,
+                            settlement_json.as_deref(),
+                        )?,
+                    }
+                },
+            );
         }
-        let record = recovered.get(&obligation_id).ok_or_else(codec::invalid)?;
-        let previous = effective.get(&obligation_id);
+        let record = group_record.as_ref().ok_or_else(codec::invalid)?;
         let ObligationInventory::TypedV2 { manifest, members } = &record.inventory else {
             return Err(codec::invalid());
         };
@@ -161,9 +172,9 @@ pub(super) fn load_overlay(
             root_pid,
             root_creation_marker,
         };
-        if !owners.contains(&previous_owner_id)
-            || !owners.contains(&current_owner_id)
-            || !next_holder_matches_previous(previous, record.owner_id, &holder)
+        if !owner_exists(connection, previous_owner_id)?
+            || !owner_exists(connection, current_owner_id)?
+            || !next_holder_matches_previous(previous.as_ref(), record.owner_id, &holder)
             || previous_owner_id == current_owner_id
             || adoption_sequence <= original_r_sequence
             || adoption_sequence > next
@@ -203,10 +214,17 @@ pub(super) fn load_overlay(
         {
             return Err(codec::invalid());
         }
-        effective.insert(obligation_id, holder.clone());
-        holders.push(holder);
+        previous = Some(holder);
     }
-    validate_overlay_history(connection, &holders, &recovered, next)?;
+    if let Some(last) = previous {
+        let (_, _, _, phase, _) = obligation_tail(connection, last.obligation_id)?;
+        if phase != Phase::Settled {
+            if holders.len() >= codec::ACTIVE_LIMIT {
+                return Err(codec::invalid());
+            }
+            holders.push(last);
+        }
+    }
     Ok(holders)
 }
 
@@ -285,167 +303,214 @@ fn validate_settled_dispositions(
 
 /// Replay the post-adoption producer fold from its exact imported head. The
 /// adoption itself does not rewrite the original R row or release its charge.
-fn validate_overlay_history(
+fn later_holder_exists(
     connection: &Connection,
-    holders: &[RecoveredRHolder],
-    obligations: &BTreeMap<Uuid, OverlayRecord>,
-    next: i64,
-) -> Result<(), CustodyError> {
-    if holders.is_empty() {
-        return Ok(());
+    id: Uuid,
+    adoption_sequence: i64,
+) -> Result<bool, CustodyError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recovered_r_holders WHERE obligation_id=?1 AND adoption_sequence>?2)",
+            params![id.as_bytes(), adoption_sequence],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+}
+
+struct RReplayState {
+    original_sequence: i64,
+    first_adoption: i64,
+    last_data: i64,
+    last_operation: i64,
+    last_adoption: i64,
+    head: AssetEventRefV1,
+    final_sequence: i64,
+    final_phase: Phase,
+    final_head: AssetEventRefV1,
+}
+
+#[derive(Default)]
+pub(super) struct ReplayR {
+    enabled: bool,
+    in_flight: BTreeMap<Uuid, RReplayState>,
+}
+
+impl ReplayR {
+    pub(super) fn new(schema_version: i64) -> Self {
+        Self {
+            enabled: schema_version >= 5,
+            in_flight: BTreeMap::new(),
+        }
     }
-    let mut chains = BTreeMap::<Uuid, Vec<&RecoveredRHolder>>::new();
-    for holder in holders {
-        let chain = chains.entry(holder.obligation_id).or_default();
-        chain.try_reserve(1).map_err(|_| codec::invalid())?;
-        chain.push(holder);
-    }
-    let mut tracked = BTreeMap::<Uuid, (i64, i64, AssetEventRefV1, usize, bool)>::new();
-    for (id, chain) in &chains {
-        let first = chain.first().ok_or_else(codec::invalid)?;
-        tracked.insert(
-            *id,
-            (first.original_r_sequence, 0, first.head.clone(), 0, false),
-        );
-    }
-    let mut sequence = 0_i64;
-    let mut rows =
-        connection.prepare("SELECT operation_id,result_json FROM operations ORDER BY rowid")?;
-    let mut query = rows.query([])?;
-    while let Some(row) = query.next()? {
-        let operation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
-        let result: DiskResult = codec::decode(&row.get::<_, String>(1)?)?;
-        let committed = match &result {
-            DiskResult::Prepared { sequence, .. } => *sequence,
-            DiskResult::Changed(ack) => ack.sequence,
-            DiskResult::AssetChangedV2(record) => record.ack.sequence,
-            DiskResult::AssetChangedV3(record) => record.ack.sequence,
-            DiskResult::RetiredWithAssets(ack) => ack.sequence,
-            DiskResult::RecoveredSAdoption(ack) | DiskResult::RecoveredRAdoption(ack) => {
-                ack.sequence
-            }
-        };
-        sequence = sequence.checked_add(1).ok_or_else(codec::invalid)?;
-        if committed != sequence {
-            return Err(codec::invalid());
+
+    pub(super) fn observe(
+        &mut self,
+        connection: &Connection,
+        operation_id: Uuid,
+        result: &DiskResult,
+    ) -> Result<(), CustodyError> {
+        if !self.enabled {
+            return Ok(());
         }
         match result {
-            DiskResult::RecoveredRAdoption(ack) if tracked.contains_key(&ack.obligation_id) => {
-                let state = tracked
-                    .get_mut(&ack.obligation_id)
-                    .ok_or_else(codec::invalid)?;
-                let chain = chains.get(&ack.obligation_id).ok_or_else(codec::invalid)?;
-                let holder = chain.get(state.3).ok_or_else(codec::invalid)?;
-                if state.4
-                    || (state.3 > 0
-                        && !predecessor_unchanged_since_adoption(
-                            chain[state.3 - 1],
-                            state.0,
-                            state.1,
-                        ))
-                    || operation_id != holder.operation_id
-                    || ack.sequence != holder.adoption_sequence
-                    || ack.obligation_id != holder.obligation_id
-                    || ack.previous_owner_id != holder.previous_owner_id
-                    || ack.current_owner_id != holder.current_owner_id
+            DiskResult::RecoveredRAdoption(ack) => {
+                let row: (i64, i64, Vec<u8>, i64, Vec<u8>, Vec<u8>) = connection.query_row(
+                    "SELECT adoption_sequence,original_r_sequence,head_operation_id,head_revision,previous_owner_id,current_owner_id FROM recovered_r_holders WHERE operation_id=?1 AND obligation_id=?2",
+                    params![operation_id.as_bytes(), ack.obligation_id.as_bytes()],
+                    |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+                )?;
+                let row_head = AssetEventRefV1 {
+                    operation_id: v2::Id::new(codec::uuid_from_bytes(&row.2)?)?,
+                    revision: u64::try_from(row.3).map_err(|_| codec::invalid())?,
+                };
+                if ack.operation_id != operation_id
+                    || ack.sequence != row.0
+                    || ack.previous_owner_id != codec::uuid_from_bytes(&row.4)?
+                    || ack.current_owner_id != codec::uuid_from_bytes(&row.5)?
                 {
                     return Err(codec::invalid());
                 }
-                state.1 = ack.sequence;
-                state.3 += 1;
-            }
-            DiskResult::AssetChangedV3(record)
-                if tracked.contains_key(&record.ack.obligation_id) =>
-            {
-                let state = tracked
-                    .get_mut(&record.ack.obligation_id)
-                    .ok_or_else(codec::invalid)?;
-                let first = chains
-                    .get(&record.ack.obligation_id)
-                    .and_then(|chain| chain.first())
-                    .ok_or_else(codec::invalid)?;
-                if record.ack.sequence > first.adoption_sequence {
-                    if state.3 == 0
-                        || state.3
-                            != chains
-                                .get(&record.ack.obligation_id)
-                                .ok_or_else(codec::invalid)?
-                                .len()
-                        || state.4
-                        || record.change.previous.as_ref() != Some(&state.2)
+                if let Some(state) = self.in_flight.get_mut(&ack.obligation_id) {
+                    if state.last_data != state.original_sequence
+                        || state.last_operation != state.last_adoption
+                        || state.head != row_head
+                        || state.original_sequence != row.1
+                        || row.0 <= state.last_adoption
                     {
                         return Err(codec::invalid());
                     }
-                    state.0 = record.ack.sequence;
-                    state.1 = record.ack.sequence;
-                    state.2 = record.after.asset.head.ok_or_else(codec::invalid)?;
+                    state.last_adoption = row.0;
+                    state.last_operation = row.0;
+                } else {
+                    if self.in_flight.len() >= codec::ACTIVE_LIMIT {
+                        return Err(codec::invalid());
+                    }
+                    let first: i64 = connection.query_row(
+                        "SELECT adoption_sequence FROM recovered_r_holders WHERE obligation_id=?1 ORDER BY adoption_sequence LIMIT 1",
+                        [ack.obligation_id.as_bytes()],
+                        |r| r.get(0),
+                    )?;
+                    if first != row.0 {
+                        return Err(codec::invalid());
+                    }
+                    let (final_sequence, final_phase, final_head) =
+                        load_r_final(connection, ack.obligation_id)?;
+                    if final_phase == Phase::Settled && row.0 >= final_sequence {
+                        return Err(codec::invalid());
+                    }
+                    self.in_flight.insert(
+                        ack.obligation_id,
+                        RReplayState {
+                            original_sequence: row.1,
+                            first_adoption: row.0,
+                            last_data: row.1,
+                            last_operation: row.0,
+                            last_adoption: row.0,
+                            head: row_head,
+                            final_sequence,
+                            final_phase,
+                            final_head,
+                        },
+                    );
                 }
             }
-            DiskResult::Changed(ack)
-                if tracked
-                    .get(&ack.obligation_id)
-                    .is_some_and(|state| state.3 > 0) =>
-            {
-                let state = tracked
-                    .get_mut(&ack.obligation_id)
-                    .ok_or_else(codec::invalid)?;
-                if state.4
-                    || state.3
-                        != chains
-                            .get(&ack.obligation_id)
-                            .ok_or_else(codec::invalid)?
-                            .len()
-                    || ack.phase != Phase::Settled
-                    || ack.sequence <= state.1
-                {
-                    return Err(codec::invalid());
+            DiskResult::AssetChangedV3(change) => {
+                if let Some(state) = self.in_flight.get_mut(&change.ack.obligation_id) {
+                    if change.ack.sequence > state.first_adoption {
+                        if later_holder_exists(
+                            connection,
+                            change.ack.obligation_id,
+                            state.last_adoption,
+                        )? || change.change.previous.as_ref() != Some(&state.head)
+                        {
+                            return Err(codec::invalid());
+                        }
+                        state.last_data = change.ack.sequence;
+                        state.last_operation = change.ack.sequence;
+                        state.head = change.after.asset.head.clone().ok_or_else(codec::invalid)?;
+                    }
                 }
-                state.0 = ack.sequence;
-                state.1 = ack.sequence;
-                state.4 = true;
+            }
+            DiskResult::Changed(ack) => {
+                if let Some(state) = self.in_flight.get_mut(&ack.obligation_id) {
+                    if later_holder_exists(connection, ack.obligation_id, state.last_adoption)?
+                        || ack.phase != Phase::Settled
+                        || ack.sequence <= state.last_operation
+                    {
+                        return Err(codec::invalid());
+                    }
+                    state.last_data = ack.sequence;
+                    state.last_operation = ack.sequence;
+                    if state.final_phase != Phase::Settled
+                        || state.last_data != state.final_sequence
+                        || state.head != state.final_head
+                    {
+                        return Err(codec::invalid());
+                    }
+                    self.in_flight.remove(&ack.obligation_id);
+                }
             }
             DiskResult::RetiredWithAssets(ack)
-                if tracked
-                    .get(&ack.source_obligation_id.uuid())
-                    .is_some_and(|state| state.3 > 0) =>
+                if self
+                    .in_flight
+                    .contains_key(&ack.source_obligation_id.uuid()) =>
             {
-                return Err(codec::invalid())
+                return Err(codec::invalid());
             }
             DiskResult::AssetChangedV2(record)
-                if tracked
-                    .get(&record.ack.obligation_id)
-                    .is_some_and(|state| state.3 > 0) =>
+                if self.in_flight.contains_key(&record.ack.obligation_id) =>
             {
-                return Err(codec::invalid())
+                return Err(codec::invalid());
             }
             _ => {}
         }
+        Ok(())
     }
-    if sequence != next {
-        return Err(codec::invalid());
-    }
-    for (id, chain) in &chains {
-        let (last_data, _, head, adopted, settled) = tracked.get(id).ok_or_else(codec::invalid)?;
-        let record = obligations.get(id).ok_or_else(codec::invalid)?;
-        let ObligationInventory::TypedV2 { members, .. } = &record.inventory else {
-            return Err(codec::invalid());
-        };
-        let current_head = members
-            .iter()
-            .find_map(|member| match &member.envelope.observed {
-                Some(v2::Observed::ScratchAssetsV3 { state }) => state.asset.head.as_ref(),
-                _ => None,
-            })
-            .ok_or_else(codec::invalid)?;
-        if *adopted != chain.len()
-            || *last_data != record.sequence
-            || *settled != (record.phase == Phase::Settled)
-            || head != current_head
-        {
-            return Err(codec::invalid());
+
+    pub(super) fn finish(self) -> Result<(), CustodyError> {
+        for state in self.in_flight.into_values() {
+            if state.last_data != state.final_sequence
+                || state.final_phase == Phase::Settled
+                || state.head != state.final_head
+            {
+                return Err(codec::invalid());
+            }
         }
+        Ok(())
     }
-    Ok(())
+}
+
+fn load_r_final(
+    connection: &Connection,
+    id: Uuid,
+) -> Result<(i64, Phase, AssetEventRefV1), CustodyError> {
+    let (owner, graph, phase, sequence, manifest_json, settlement_json):
+        (Vec<u8>, Vec<u8>, String, i64, String, Option<String>) = connection.query_row(
+        "SELECT owner_id,graph_id,phase,sequence,manifest_json,settlement_json FROM obligations WHERE obligation_id=?1",
+        [id.as_bytes()],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    )?;
+    let phase = Phase::parse(&phase)?;
+    let inventory = inventory::load(
+        connection,
+        id,
+        codec::uuid_from_bytes(&owner)?,
+        codec::uuid_from_bytes(&graph)?,
+        phase,
+        &manifest_json,
+        settlement_json.as_deref(),
+    )?;
+    let ObligationInventory::TypedV2 { members, .. } = inventory else {
+        return Err(codec::invalid());
+    };
+    let head = members
+        .iter()
+        .find_map(|member| match &member.envelope.observed {
+            Some(v2::Observed::ScratchAssetsV3 { state }) => state.asset.head.clone(),
+            _ => None,
+        })
+        .ok_or_else(codec::invalid)?;
+    Ok((sequence, phase, head))
 }
 
 #[cfg(target_os = "linux")]

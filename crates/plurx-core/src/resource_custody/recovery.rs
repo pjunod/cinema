@@ -1128,6 +1128,11 @@ mod namespace_tests {
             installation_id: Uuid::new_v4(),
             obligations: Vec::new(),
             families: Vec::new(),
+            family_authority: FamilyAuthority::from_validated_rows(
+                0,
+                family_edges_digest(&[]),
+                &[],
+            ),
             retained_assets: Vec::new(),
             total: ResourceVector::default(),
             trial_groups: Vec::new(),

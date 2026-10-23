@@ -2,11 +2,7 @@
 use super::*;
 use crate::resource_custody::codec_v2 as v2;
 
-pub(super) fn load(
-    connection: &Connection,
-    all_ids: &BTreeMap<Uuid, Phase>,
-    family_references: &BTreeSet<Uuid>,
-) -> Result<Vec<RetainedAssetOwner>, CustodyError> {
+pub(super) fn load(connection: &Connection) -> Result<Vec<RetainedAssetOwner>, CustodyError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version == 1 {
         return Ok(Vec::new());
@@ -20,15 +16,25 @@ pub(super) fn load(
         let rendition: String = row.get(2)?;
         let epoch = codec::epoch_from_bytes(&row.get::<_, Vec<u8>>(3)?)?;
         let document = v2::decode_retained_assets(&row.get::<_, String>(4)?)?;
+        let family_reference: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1)",
+            [id.as_bytes()],
+            |r| r.get(0),
+        )?;
         if document.target_obligation_id().uuid() != id
             || document.asset_id().uuid() != asset
             || document.rendition_id() != rendition
             || document.generation_epoch() != epoch
-            || family_references.contains(&id)
+            || family_reference
         {
             return Err(codec::invalid());
         }
-        let phase = *all_ids.get(&id).ok_or_else(codec::invalid)?;
+        let phase: String = connection.query_row(
+            "SELECT phase FROM obligations WHERE obligation_id=?1",
+            [id.as_bytes()],
+            |r| r.get(0),
+        )?;
+        let phase = Phase::parse(&phase)?;
         if !matches!(phase, Phase::Sealed | Phase::UnknownHeld | Phase::Settled) {
             return Err(codec::invalid());
         }

@@ -1,6 +1,7 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
 mod inventory;
+mod membership;
 mod recovery;
 mod recovery_r;
 mod retained_settlement;
@@ -13,6 +14,8 @@ use codec::{MemberEnvelope, SettlementRecord};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+pub(in crate::resource_custody) use typed::tests::bootstrap::frozen_source_fixture;
 
 pub(super) fn validate_owner(owner: &OwnerIdentity) -> Result<(), CustodyError> {
     codec::nonnil(owner.owner_id)?;
@@ -63,6 +66,151 @@ pub(super) fn register_owner(
     Ok(())
 }
 
+type ObligationTail = (Uuid, Uuid, i64, Phase, Option<Uuid>);
+
+fn obligation_tail(connection: &Connection, id: Uuid) -> Result<ObligationTail, CustodyError> {
+    let row: (Vec<u8>, Vec<u8>, i64, String, Option<Vec<u8>>) = connection.query_row(
+        "SELECT last_operation_id,graph_id,sequence,phase,trial_group_id FROM obligations WHERE obligation_id=?1",
+        [id.as_bytes()],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    Ok((
+        codec::uuid_from_bytes(&row.0)?,
+        codec::uuid_from_bytes(&row.1)?,
+        row.2,
+        Phase::parse(&row.3)?,
+        row.4.map(|v| codec::uuid_from_bytes(&v)).transpose()?,
+    ))
+}
+
+fn owner_exists(connection: &Connection, id: Uuid) -> Result<bool, CustodyError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM owners WHERE owner_id=?1)",
+            [id.as_bytes()],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn load_owner(
+    connection: &Connection,
+    id: Uuid,
+    witness: &storage::Witness,
+) -> Result<OwnerIdentity, CustodyError> {
+    let row: (String, String, String, String, String) = connection.query_row(
+        "SELECT node_id,cluster_id,os_boot_json,daemon_process_json,platform_domain_json FROM owners WHERE owner_id=?1",
+        [id.as_bytes()],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    if row.0 != witness.node_id || row.1 != witness.cluster_id {
+        return Err(codec::invalid());
+    }
+    let owner = OwnerIdentity {
+        owner_id: id,
+        node_id: row.0,
+        cluster_id: row.1,
+        os_boot: codec::decode(&row.2)?,
+        daemon_process: codec::decode(&row.3)?,
+        platform_domain: codec::decode(&row.4)?,
+    };
+    validate_owner(&owner)?;
+    Ok(owner)
+}
+
+fn validate_final_operation(
+    connection: &Connection,
+    id: Uuid,
+    operation_id: Uuid,
+    graph: Uuid,
+    sequence: i64,
+    phase: Phase,
+    trial: Option<Uuid>,
+) -> Result<(), CustodyError> {
+    let result: String = connection.query_row(
+        "SELECT result_json FROM operations WHERE operation_id=?1",
+        [operation_id.as_bytes()],
+        |r| r.get(0),
+    )?;
+    let valid = match codec::decode::<DiskResult>(&result)? {
+        DiskResult::Prepared {
+            sequence: prepared,
+            obligations,
+            trial: group,
+        } => {
+            phase == Phase::Prepared
+                && prepared == sequence
+                && group == trial
+                && obligations.contains(&id)
+        }
+        DiskResult::Changed(ack) => {
+            ack.operation_id == operation_id
+                && ack.obligation_id == id
+                && ack.graph_id == graph
+                && ack.sequence == sequence
+                && ack.phase == phase
+        }
+        DiskResult::AssetChangedV2(record) => {
+            let ack = record.ack;
+            ack.operation_id == operation_id
+                && ack.obligation_id == id
+                && ack.graph_id == graph
+                && ack.sequence == sequence
+                && ack.phase == phase
+        }
+        DiskResult::AssetChangedV3(record) => {
+            let ack = record.ack;
+            ack.operation_id == operation_id
+                && ack.obligation_id == id
+                && ack.graph_id == graph
+                && ack.sequence == sequence
+                && ack.phase == phase
+        }
+        DiskResult::RetiredWithAssets(ack) => {
+            ack.operation_id.uuid() == operation_id
+                && ack.sequence == sequence
+                && ((ack.source_obligation_id.uuid() == id
+                    && ack.source_graph_id.uuid() == graph
+                    && phase == Phase::Settled)
+                    || (ack.target_obligation_id.uuid() == id
+                        && ack.target_graph_id.uuid() == graph
+                        && phase == Phase::Sealed))
+        }
+        DiskResult::RecoveredSAdoption(_) | DiskResult::RecoveredRAdoption(_) => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(codec::invalid())
+    }
+}
+
+fn adoption_holder_matches(
+    connection: &Connection,
+    table: &'static str,
+    ack: &RecoveryAdoptionAck,
+    operation_id: Uuid,
+) -> Result<bool, CustodyError> {
+    let query = match table {
+        "recovered_s_holders" => "SELECT obligation_id,adoption_sequence,previous_owner_id,current_owner_id FROM recovered_s_holders WHERE operation_id=?1",
+        "recovered_r_holders" => "SELECT obligation_id,adoption_sequence,previous_owner_id,current_owner_id FROM recovered_r_holders WHERE operation_id=?1",
+        _ => return Err(codec::invalid()),
+    };
+    let row: Option<(Vec<u8>, i64, Vec<u8>, Vec<u8>)> = connection
+        .query_row(query, [operation_id.as_bytes()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .optional()?;
+    let Some((obligation, sequence, previous, current)) = row else {
+        return Ok(false);
+    };
+    Ok(ack.operation_id == operation_id
+        && ack.obligation_id == codec::uuid_from_bytes(&obligation)?
+        && ack.sequence == sequence
+        && ack.previous_owner_id == codec::uuid_from_bytes(&previous)?
+        && ack.current_owner_id == codec::uuid_from_bytes(&current)?)
+}
+
 pub(super) fn snapshot(
     connection: &Connection,
     witness: &storage::Witness,
@@ -76,8 +224,6 @@ pub(super) fn snapshot(
         return Err(codec::invalid());
     }
     let current = current.map(|v| codec::uuid_from_bytes(&v)).transpose()?;
-    let mut owners = BTreeSet::new();
-    let mut owner_records = BTreeMap::new();
     let mut current_count = 0;
     let mut stmt = connection.prepare("SELECT owner_id,node_id,cluster_id,os_boot_json,daemon_process_json,platform_domain_json,state FROM owners")?;
     let mut rows = stmt.query([])?;
@@ -97,7 +243,6 @@ pub(super) fn snapshot(
             platform_domain: codec::decode(&row.get::<_, String>(5)?)?,
         };
         validate_owner(&identity)?;
-        owner_records.insert(id, identity);
         let state: String = row.get(6)?;
         if state == "current" {
             if current != Some(id) {
@@ -107,21 +252,21 @@ pub(super) fn snapshot(
         } else if state != "retired" {
             return Err(codec::invalid());
         }
-        owners.insert(id);
     }
     if current_count != usize::from(current.is_some()) {
         return Err(codec::invalid());
     }
     let mut obligations = Vec::new();
-    let mut all_ids = BTreeMap::new();
-    let mut legacy_ids = BTreeSet::new();
-    let mut last_operations = BTreeMap::new();
-    let mut original_owners = BTreeMap::new();
-    let mut graphs = BTreeSet::new();
     let mut total = ResourceVector::default();
     let mut trials = BTreeSet::new();
     let mut protected = BTreeSet::new();
     let schema_version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if !(1..=6).contains(&schema_version) {
+        return Err(codec::invalid());
+    }
+    if schema_version >= 6 {
+        membership::validate_all(connection, next)?;
+    }
     let obligation_query = if schema_version >= 3 {
         "SELECT obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,memory_claim FROM obligations ORDER BY obligation_id"
     } else {
@@ -179,11 +324,10 @@ pub(super) fn snapshot(
                 return Err(codec::invalid());
             }
         }
-        if !owners.contains(&owner)
+        if !owner_exists(connection, owner)?
             || sequence < 1
             || sequence > next
             || resources == ResourceVector::default()
-            || !graphs.insert(graph)
         {
             return Err(codec::invalid());
         }
@@ -195,8 +339,7 @@ pub(super) fn snapshot(
         if let Some(reason) = &reason {
             codec::text(reason)?;
         }
-        last_operations.insert(id, (operation, graph, sequence, phase, trial));
-        original_owners.insert(id, owner);
+        validate_final_operation(connection, id, operation, graph, sequence, phase, trial)?;
         let inventory = inventory::load(
             connection,
             id,
@@ -207,9 +350,15 @@ pub(super) fn snapshot(
             settlement.as_deref(),
         )?;
         if matches!(inventory, ObligationInventory::LegacyV1 { .. }) {
-            legacy_ids.insert(id);
+            let referenced: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1)",
+                [id.as_bytes()],
+                |r| r.get(0),
+            )?;
+            if !referenced {
+                return Err(codec::invalid());
+            }
         }
-        all_ids.insert(id, phase);
         if phase != Phase::Settled {
             if obligations.len() >= codec::ACTIVE_LIMIT {
                 return Err(CustodyError::new(
@@ -239,73 +388,100 @@ pub(super) fn snapshot(
         }
     }
     let mut families = Vec::new();
-    let mut role_kinds = BTreeMap::new();
-    let mut family_counts = BTreeMap::new();
-    let mut stmt = connection.prepare("SELECT family_id,role,obligation_id FROM family_roles")?;
+    let mut represented = BTreeSet::new();
+    let mut family_hash = Sha256::new();
+    let mut active_family_edge_count = 0_u64;
+    let mut stmt = connection.prepare("SELECT family_id,role,obligation_id FROM family_roles ORDER BY family_id,role,obligation_id")?;
     let mut rows = stmt.query([])?;
-    let mut referenced = BTreeSet::new();
+    let mut family_cursor = None;
+    let mut family_count = 0;
     while let Some(row) = rows.next()? {
         let family_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let role = Role::parse(&row.get::<_, String>(1)?)?;
         let obligation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(2)?)?;
-        let phase = all_ids.get(&obligation_id).ok_or_else(codec::invalid)?;
-        if let Some(existing) = role_kinds.insert(obligation_id, role) {
-            if existing != role {
-                return Err(codec::invalid());
-            }
-        }
-        let count = family_counts.entry(family_id).or_insert(0usize);
-        *count += 1;
-        if *count > 3 {
+        let phase: String = connection.query_row(
+            "SELECT phase FROM obligations WHERE obligation_id=?1",
+            [obligation_id.as_bytes()],
+            |r| r.get(0),
+        )?;
+        let phase = Phase::parse(&phase)?;
+        let conflicting_role: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1 AND role<>?2)",
+            params![obligation_id.as_bytes(), role.as_str()],
+            |r| r.get(0),
+        )?;
+        if conflicting_role {
             return Err(codec::invalid());
         }
-        referenced.insert(obligation_id);
-        if *phase != Phase::Settled {
-            families.push(FamilyEdge {
+        if family_cursor == Some(family_id) {
+            family_count += 1;
+        } else {
+            family_cursor = Some(family_id);
+            family_count = 1;
+        }
+        if family_count > 3 {
+            return Err(codec::invalid());
+        }
+        if phase != Phase::Settled {
+            let edge = FamilyEdge {
                 family_id,
                 role,
                 obligation_id,
-            });
+            };
+            family_hash.update(edge.family_id.as_bytes());
+            family_hash.update([match edge.role {
+                Role::Video => 0,
+                Role::Audio => 1,
+                Role::Companion => 2,
+            }]);
+            family_hash.update(edge.obligation_id.as_bytes());
+            active_family_edge_count = active_family_edge_count
+                .checked_add(1)
+                .ok_or_else(codec::invalid)?;
+            if represented.insert(obligation_id) {
+                if families.len() >= codec::ACTIVE_LIMIT {
+                    return Err(codec::invalid());
+                }
+                families.push(edge);
+            }
         }
     }
-    let retained_assets = assets::load(connection, &all_ids, &referenced)?;
-    let asset_ids: BTreeSet<_> = retained_assets.iter().map(|a| a.obligation_id).collect();
-    let active_ids: BTreeSet<_> = all_ids
-        .iter()
-        .filter_map(|(id, phase)| (*phase != Phase::Settled).then_some(*id))
-        .collect();
-    let active_references: BTreeSet<_> = referenced
-        .intersection(&active_ids)
-        .copied()
-        .chain(asset_ids.iter().copied())
-        .collect();
-    if active_references != active_ids
-        || !asset_ids.is_disjoint(&referenced)
-        || !legacy_ids.is_subset(&referenced)
-        || trials.len() > 1
-    {
+    let family_authority = FamilyAuthority::from_validated_rows(
+        active_family_edge_count,
+        family_hash.finalize().into(),
+        &families,
+    );
+    let retained_assets = assets::load(connection)?;
+    if trials.len() > 1 {
         return Err(codec::invalid());
+    }
+    for record in &obligations {
+        let (family, asset): (bool, bool) = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM family_roles WHERE obligation_id=?1),EXISTS(SELECT 1 FROM retained_asset_owners WHERE obligation_id=?1)",
+            [record.obligation_id.as_bytes()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if family == asset {
+            return Err(codec::invalid());
+        }
     }
     let recovered_s_holders = recovery::load_overlay(
         connection,
         schema_version,
-        &original_owners,
-        &last_operations,
         &retained_assets,
         &obligations,
-        &owners,
         next,
     )?;
     let recovered_r_holders =
-        recovery_r::load_overlay(connection, schema_version, &obligations, &owners, next)?;
+        recovery_r::load_overlay(connection, schema_version, &obligations, next)?;
     // Validate operation records too: unknown/truncated codecs cannot be ignored.
-    let mut stmt =
-        connection.prepare("SELECT operation_id,request_json,result_json FROM operations")?;
+    let mut stmt = connection
+        .prepare("SELECT operation_id,request_json,result_json FROM operations ORDER BY rowid")?;
     let mut rows = stmt.query([])?;
-    let mut operation_sequences = BTreeSet::new();
-    let mut validated_last = BTreeSet::new();
-    let mut validated_holders = BTreeSet::new();
-    let mut validated_r_holders = BTreeSet::new();
+    let mut committed_sequence = 0_i64;
+    let mut projected_events = 0_i64;
+    let mut s_replay = recovery::ReplayS::new(schema_version);
+    let mut r_replay = recovery_r::ReplayR::new(schema_version);
     while let Some(row) = rows.next()? {
         let operation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let fingerprint: String = codec::decode(&row.get::<_, String>(1)?)?;
@@ -313,6 +489,27 @@ pub(super) fn snapshot(
             return Err(codec::invalid());
         }
         let result: DiskResult = codec::decode(&row.get::<_, String>(2)?)?;
+        let sequence = match &result {
+            DiskResult::Prepared { sequence, .. } => *sequence,
+            DiskResult::Changed(ack) => ack.sequence,
+            DiskResult::AssetChangedV2(record) => record.ack.sequence,
+            DiskResult::AssetChangedV3(record) => record.ack.sequence,
+            DiskResult::RetiredWithAssets(ack) => ack.sequence,
+            DiskResult::RecoveredSAdoption(ack) | DiskResult::RecoveredRAdoption(ack) => {
+                ack.sequence
+            }
+        };
+        committed_sequence = committed_sequence
+            .checked_add(1)
+            .ok_or_else(codec::invalid)?;
+        if sequence != committed_sequence || sequence > next {
+            return Err(codec::invalid());
+        }
+        if schema_version >= 6 && membership::validate(connection, operation_id, &result)? {
+            projected_events = projected_events.checked_add(1).ok_or_else(codec::invalid)?;
+        }
+        s_replay.observe(connection, operation_id, &result)?;
+        r_replay.observe(connection, operation_id, &result)?;
         match result {
             DiskResult::Prepared {
                 sequence,
@@ -325,13 +522,14 @@ pub(super) fn snapshot(
                     || obligations.is_empty()
                     || obligations.len() > 6
                     || unique.len() != obligations.len()
-                    || obligations.iter().any(|id| !all_ids.contains_key(id))
-                    || !operation_sequences.insert(sequence)
+                    || obligations
+                        .iter()
+                        .any(|id| obligation_tail(connection, *id).is_err())
                 {
                     return Err(codec::invalid());
                 }
                 for id in obligations {
-                    let (last, _, last_seq, last_phase, group) = last_operations[&id];
+                    let (last, _, last_seq, last_phase, group) = obligation_tail(connection, id)?;
                     if group != trial || last_seq < sequence {
                         return Err(codec::invalid());
                     }
@@ -339,41 +537,43 @@ pub(super) fn snapshot(
                         if last_seq != sequence || last_phase != Phase::Prepared {
                             return Err(codec::invalid());
                         }
-                        validated_last.insert(id);
                     }
                 }
             }
             DiskResult::Changed(ack) => {
                 if ack.sequence < 1
                     || ack.sequence > next
-                    || !all_ids.contains_key(&ack.obligation_id)
+                    || obligation_tail(connection, ack.obligation_id).is_err()
                     || ack.operation_id != operation_id
-                    || !operation_sequences.insert(ack.sequence)
                 {
                     return Err(codec::invalid());
                 }
-                let (last, graph, last_seq, last_phase, _) = last_operations[&ack.obligation_id];
-                if graph != ack.graph_id || last_seq < ack.sequence {
+                let (last, graph, last_seq, last_phase, _) =
+                    obligation_tail(connection, ack.obligation_id)?;
+                if graph != ack.graph_id
+                    || last_seq < ack.sequence
+                    || (ack.phase == Phase::Settled
+                        && (last != operation_id || last_seq != ack.sequence))
+                {
                     return Err(codec::invalid());
                 }
                 if last == operation_id {
                     if last_seq != ack.sequence || last_phase != ack.phase {
                         return Err(codec::invalid());
                     }
-                    validated_last.insert(ack.obligation_id);
                 }
             }
             DiskResult::AssetChangedV2(record) => {
                 scratch::validate_record_binding(connection, &record)?;
                 let ack = &record.ack;
                 if ack.sequence > next
-                    || !all_ids.contains_key(&ack.obligation_id)
+                    || obligation_tail(connection, ack.obligation_id).is_err()
                     || ack.operation_id != operation_id
-                    || !operation_sequences.insert(ack.sequence)
                 {
                     return Err(codec::invalid());
                 }
-                let (last, graph, last_seq, last_phase, _) = last_operations[&ack.obligation_id];
+                let (last, graph, last_seq, last_phase, _) =
+                    obligation_tail(connection, ack.obligation_id)?;
                 if graph != ack.graph_id || last_seq < ack.sequence {
                     return Err(codec::invalid());
                 }
@@ -381,20 +581,19 @@ pub(super) fn snapshot(
                     if last_seq != ack.sequence || last_phase != ack.phase {
                         return Err(codec::invalid());
                     }
-                    validated_last.insert(ack.obligation_id);
                 }
             }
             DiskResult::AssetChangedV3(record) => {
                 scratch::bootstrap::validate_record_binding(connection, &record)?;
                 let ack = &record.ack;
                 if ack.sequence > next
-                    || !all_ids.contains_key(&ack.obligation_id)
+                    || obligation_tail(connection, ack.obligation_id).is_err()
                     || ack.operation_id != operation_id
-                    || !operation_sequences.insert(ack.sequence)
                 {
                     return Err(codec::invalid());
                 }
-                let (last, graph, last_seq, last_phase, _) = last_operations[&ack.obligation_id];
+                let (last, graph, last_seq, last_phase, _) =
+                    obligation_tail(connection, ack.obligation_id)?;
                 if graph != ack.graph_id || last_seq < ack.sequence {
                     return Err(codec::invalid());
                 }
@@ -402,7 +601,6 @@ pub(super) fn snapshot(
                     if last_seq != ack.sequence || last_phase != ack.phase {
                         return Err(codec::invalid());
                     }
-                    validated_last.insert(ack.obligation_id);
                 }
             }
             DiskResult::RetiredWithAssets(ack) => {
@@ -412,17 +610,12 @@ pub(super) fn snapshot(
                     || ack.operation_id.uuid() != operation_id
                     || ack.sequence < 1
                     || ack.sequence > next
-                    || !operation_sequences.insert(ack.sequence)
                     || ack.source_obligation_id == ack.target_obligation_id
                 {
                     return Err(codec::invalid());
                 }
-                let source = last_operations
-                    .get(&ack.source_obligation_id.uuid())
-                    .ok_or_else(codec::invalid)?;
-                let target = last_operations
-                    .get(&ack.target_obligation_id.uuid())
-                    .ok_or_else(codec::invalid)?;
+                let source = obligation_tail(connection, ack.source_obligation_id.uuid())?;
+                let target = obligation_tail(connection, ack.target_obligation_id.uuid())?;
                 if source.1 != ack.source_graph_id.uuid()
                     || target.1 != ack.target_graph_id.uuid()
                     || source.2 != ack.sequence
@@ -458,63 +651,60 @@ pub(super) fn snapshot(
                 {
                     return Err(codec::invalid());
                 }
-                validated_last.insert(ack.source_obligation_id.uuid());
                 if target.0 == operation_id {
                     if target.2 != ack.sequence || target.3 != Phase::Sealed {
                         return Err(codec::invalid());
                     }
-                    validated_last.insert(ack.target_obligation_id.uuid());
                 }
             }
             DiskResult::RecoveredSAdoption(ack) => {
-                let holder = recovered_s_holders
-                    .iter()
-                    .find(|holder| holder.operation_id == operation_id)
-                    .ok_or_else(codec::invalid)?;
-                if ack.operation_id != operation_id
-                    || ack.obligation_id != holder.obligation_id
-                    || ack.previous_owner_id != holder.previous_owner_id
-                    || ack.current_owner_id != holder.current_owner_id
-                    || ack.sequence != holder.adoption_sequence
-                    || !validated_holders.insert(operation_id)
-                    || !operation_sequences.insert(ack.sequence)
+                if !adoption_holder_matches(connection, "recovered_s_holders", &ack, operation_id)?
                 {
                     return Err(codec::invalid());
                 }
             }
             DiskResult::RecoveredRAdoption(ack) => {
-                let holder = recovered_r_holders
-                    .iter()
-                    .find(|holder| holder.operation_id == operation_id)
-                    .ok_or_else(codec::invalid)?;
-                if ack.operation_id != operation_id
-                    || ack.obligation_id != holder.obligation_id
-                    || ack.previous_owner_id != holder.previous_owner_id
-                    || ack.current_owner_id != holder.current_owner_id
-                    || ack.sequence != holder.adoption_sequence
-                    || !validated_r_holders.insert(operation_id)
-                    || !operation_sequences.insert(ack.sequence)
+                if !adoption_holder_matches(connection, "recovered_r_holders", &ack, operation_id)?
                 {
                     return Err(codec::invalid());
                 }
             }
         }
     }
-    // v1 retains all operation history; a gap is missing authority, not a
-    // pruned diagnostic. A future pruning format needs an explicit checkpoint.
-    if validated_last.len() != all_ids.len()
-        || validated_holders.len() != recovered_s_holders.len()
-        || validated_r_holders.len() != recovered_r_holders.len()
-        || i64::try_from(operation_sequences.len()).ok() != Some(next)
-    {
+    // Every operation remains present and ordered; no historical row is pruned.
+    if committed_sequence != next {
         return Err(codec::invalid());
     }
-    let pending_owners = owner_records.into_values().collect();
+    if schema_version >= 6 {
+        membership::validate_count(connection, projected_events)?;
+    }
+    s_replay.finish()?;
+    r_replay.finish()?;
+    let mut needed_owners = BTreeSet::new();
+    if let Some(current) = current {
+        needed_owners.insert(current);
+    }
+    for record in &obligations {
+        needed_owners.insert(record.owner_id);
+    }
+    for holder in &recovered_s_holders {
+        needed_owners.insert(holder.previous_owner_id);
+        needed_owners.insert(holder.current_owner_id);
+    }
+    for holder in &recovered_r_holders {
+        needed_owners.insert(holder.previous_owner_id);
+        needed_owners.insert(holder.current_owner_id);
+    }
+    let mut pending_owners = Vec::new();
+    for id in needed_owners {
+        pending_owners.push(load_owner(connection, id, witness)?);
+    }
     Ok(RecoverySnapshot {
         journal_id: witness.journal_id,
         installation_id: witness.installation_id,
         obligations,
         families,
+        family_authority,
         retained_assets,
         total,
         trial_groups: trials.into_iter().collect(),
@@ -523,6 +713,12 @@ pub(super) fn snapshot(
         recovered_s_holders,
         recovered_r_holders,
     })
+}
+
+pub(in crate::resource_custody) fn backfill_asset_membership(
+    tx: &Transaction<'_>,
+) -> Result<(), CustodyError> {
+    membership::backfill(tx)
 }
 
 fn validate_settlement_record(
@@ -825,7 +1021,12 @@ pub(super) fn execute(
                 "operation replay payload differs",
             ));
         }
-        codec::decode::<DiskResult>(&result)?
+        let decoded = codec::decode::<DiskResult>(&result)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 6 {
+            membership::validate(&tx, operation.id, &decoded)?;
+        }
+        decoded
     } else {
         let current: Vec<u8> = tx.query_row(
             "SELECT current_owner_id FROM journal_meta WHERE singleton=1",
@@ -885,6 +1086,10 @@ pub(super) fn execute(
                 codec::encode(&result)?
             ],
         )?;
+        let schema_version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version >= 6 {
+            membership::insert(&tx, operation.id, &result)?;
+        }
         result
     };
     // Errors before COMMIT are a rollback (Transaction's drop performs it).

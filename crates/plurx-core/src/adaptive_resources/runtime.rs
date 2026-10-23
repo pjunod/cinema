@@ -376,6 +376,11 @@ fn restore_accounting(
     {
         return Err(invalid);
     }
+    if !recovered.family_authority.matches(&recovered.families) {
+        return Err(invalid);
+    }
+    // The journal validated every family row before projecting one role per
+    // active obligation. Full family IDs remain durable in family_roles.
     for edge in &recovered.families {
         if edge.family_id.is_nil()
             || !ids.contains(&edge.obligation_id)
@@ -452,7 +457,8 @@ fn restore_accounting(
                 id,
                 Entry {
                     binding,
-                    // Full multi-family edges remain in recovered.families.
+                    // Full multi-family edges remain in the journal; this
+                    // process only holds their validated role projection.
                     // No single live family is allowed to adopt old custody.
                     family_role: None,
                     resources: record.resources,

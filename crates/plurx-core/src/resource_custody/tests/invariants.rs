@@ -229,6 +229,45 @@ fn existing_family_request_cannot_omit_preexisting_role_edges() {
 
 #[cfg(unix)]
 #[test]
+fn repeated_family_authority_beyond_three_active_limits_stays_readable_and_old_rows_validate() {
+    let root = tempfile::tempdir().expect("fixture");
+    let (store, _, _, handle, _) = prepared_store(root.path());
+    for _ in 0..(3 * codec::ACTIVE_LIMIT + 1) {
+        store
+            .connection
+            .execute(
+                "INSERT INTO family_roles VALUES(?1,'video',?2)",
+                rusqlite::params![Uuid::new_v4().as_bytes(), handle.obligation_id.as_bytes()],
+            )
+            .expect("another valid family reference");
+    }
+    let snapshot = transaction::snapshot(&store.connection, &store.witness)
+        .expect("all historical family rows remain valid");
+    assert_eq!(snapshot.families.len(), 1);
+    assert_eq!(
+        snapshot.family_authority.active_edge_count,
+        (3 * codec::ACTIVE_LIMIT + 2) as u64
+    );
+    let oldest: Vec<u8> = store
+        .connection
+        .query_row(
+            "SELECT family_id FROM family_roles ORDER BY family_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE family_roles SET role='audio' WHERE family_id=?1",
+            [oldest],
+        )
+        .expect("drift oldest family identity");
+    assert!(transaction::snapshot(&store.connection, &store.witness).is_err());
+}
+
+#[cfg(unix)]
+#[test]
 fn aggregate_overflow_and_exhausted_sequence_refuse_without_partial_rows() {
     let root = tempfile::tempdir().expect("fixture");
     let (mut store, identity, _, handle, _) = prepared_store(root.path());
