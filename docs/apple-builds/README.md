@@ -77,6 +77,8 @@ sequence to prove they no longer collide.
 
 ## Notes moved from the docs index
 
+Apple TV timeline Select: [Commit the previewed seek position](1264-tvos-timeline-select.md).
+
 These lines used to sit in `docs/README.md`; they point at fragments in this folder.
 
 Apple build 160: [Native Live TV and shelf layouts](320-native-layout-followup.md).
