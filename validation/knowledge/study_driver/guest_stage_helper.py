@@ -72,6 +72,26 @@ def _relative(value):
     return value.split("/")
 
 
+def _role_users(value):
+    _require(type(value) is dict and set(value) in ({"protected"}, {"protected", "worker"}), "TrustedRoleUsersRequired")
+    _require(all(type(pair) in {list, tuple} and len(pair) == 2
+                 and all(type(number) is int and 0 < number < 2**31 for number in pair) for pair in value.values()),
+             "NonrootRoleUsersRequired")
+    return {name:list(pair) for name,pair in value.items()}
+
+
+def _root_owner(role, users, controller):
+    if role in {"grader", "worker-export"}:return tuple(controller)
+    return tuple(users["worker" if role.startswith("worker-") else "protected"])
+
+
+def _set_owner(descriptor, owner):
+    info=os.fstat(descriptor)
+    if (info.st_uid,info.st_gid)!=tuple(owner):os.fchown(descriptor,*owner)
+    info=os.fstat(descriptor)
+    _require((info.st_uid,info.st_gid)==tuple(owner), "InstalledRoleOwnershipUnproved")
+
+
 def _open_chain(path):
     path = Path(path)
     _require(path.is_absolute(), "AbsoluteOwnedRootRequired")
@@ -154,7 +174,9 @@ class GuestStageFilesystem:
         _require(not open_only or record["phase"] == "open", "ClosedGuestStage")
         directory = os.open(stage_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.work)
         try:
-            _require(_identity(os.fstat(directory)) == record["identity"], "GuestStageIdentityChanged")
+            info=os.fstat(directory)
+            _require(_identity(info) == record["identity"] and info.st_uid==os.geteuid()
+                     and info.st_gid==os.getegid() and stat.S_IMODE(info.st_mode)==0o700, "GuestStageIdentityChanged")
             for role, token in record["roots"].items():
                 info = os.stat(role, dir_fd=directory, follow_symlinks=False)
                 _require(stat.S_ISDIR(info.st_mode) and _identity(info) == (token["device"], token["inode"]),
@@ -178,15 +200,17 @@ class GuestStageFilesystem:
     def _public(self, stage_id):
         record = self.stages[stage_id]
         return {"stage": stage_id, "session": self.session, "identity": list(record["identity"]),
-                "roots": {role: dict(token) for role, token in record["roots"].items()}, "pinned": record["pinned"]}
+                "roots": {role: dict(token) for role, token in record["roots"].items()}, "pinned": record["pinned"],
+                "role_users": record["role_users"], "controller_parent": {"uid":os.geteuid(),"gid":os.getegid(),"mode":0o700}}
 
-    def publish(self, stage_id, entries, *, pinned=False):
+    def publish(self, stage_id, entries, *, role_users, pinned=False):
         self._check()
+        users=_role_users(role_users)
         _require(re.fullmatch(r"[a-f0-9]{32}", stage_id) is not None and stage_id not in self.stages
                  and len(self.stages) < 512 and type(pinned) is bool, "FreshGuestStageRequired")
         os.mkdir(stage_id, mode=0o700, dir_fd=self.work)
         directory = os.open(stage_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.work)
-        record = {"identity": _identity(os.fstat(directory)), "roots": {}, "phase": "publishing", "pinned": pinned}
+        record = {"identity": _identity(os.fstat(directory)), "roots": {}, "phase": "publishing", "pinned": pinned, "role_users": users}
         self.stages[stage_id] = record
         manifest, seen, total = [], set(), 0
         try:
@@ -197,7 +221,7 @@ class GuestStageFilesystem:
                 parts = _relative(row["path"])
                 _require(parts[0] in ROOTS and row["path"] not in seen and len(seen) < 6 * MEMBERS,
                          "TransferMemberScope")
-                _require(type(row["mode"]) is int and row["mode"] in {0o600, 0o644, 0o700, 0o755, 0o777}, "TransferMode")
+                _require(type(row["mode"]) is int and row["mode"] in ({0o700,0o755,0o777} if kind=="dir" else {0o444,0o600,0o644,0o700,0o755,0o777}), "TransferMode")
                 seen.add(row["path"])
                 parent = os.dup(directory)
                 try:
@@ -207,7 +231,9 @@ class GuestStageFilesystem:
                     if kind == "dir":
                         os.mkdir(parts[-1], mode=row["mode"], dir_fd=parent)
                         made = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                        try:os.fchmod(made, row["mode"])
+                        try:
+                            _set_owner(made,_root_owner(parts[0],users,(os.geteuid(),os.getegid())))
+                            os.fchmod(made, row["mode"])
                         finally:os.close(made)
                         if len(parts) == 1:
                             info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
@@ -226,6 +252,7 @@ class GuestStageFilesystem:
                                 _require(count <= row["size"], "TransferFileGrew")
                                 digest.update(chunk);stream.write(chunk)
                             _require(count == row["size"] and digest.hexdigest() == row["sha256"], "TransferDigestMismatch")
+                            _set_owner(stream.fileno(),_root_owner(parts[0],users,(os.geteuid(),os.getegid())))
                             os.fchmod(stream.fileno(), row["mode"]);stream.flush();os.fsync(stream.fileno())
                     manifest.append({key: value for key, value in row.items() if key != "chunks"})
                     os.fsync(parent)
@@ -233,6 +260,7 @@ class GuestStageFilesystem:
                     os.close(parent)
             roles = set(record["roots"])
             _require(roles == {"candidate", "grader", "runtime"} or roles == ROOTS, "CompleteRoleTransferRequired")
+            _require(("worker" in users)==("worker-source" in roles), "PairedRoleUsersMismatch")
             record["phase"] = "open"
             record["transfer_sha256"] = _sha(_json(manifest))
             result = dict(self._public(stage_id), transfer_sha256=record["transfer_sha256"], transferred_bytes=total)
@@ -259,7 +287,7 @@ class GuestStageFilesystem:
                 _require(info.st_dev == os.fstat(root).st_dev and len(entries) < MEMBERS, "ObservationScopeBound")
                 _require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "GuestLinksOrSpecialFilesRefused")
                 row = {"path": path, "kind": "dir" if stat.S_ISDIR(info.st_mode) else "file", "mode": stat.S_IMODE(info.st_mode),
-                       "stat": list(_fingerprint(info)), "size": info.st_size}
+                       "stat": list(_fingerprint(info)), "size": info.st_size, "uid":info.st_uid, "gid":info.st_gid}
                 if row["kind"] == "dir":
                     entries.append(row)
                     if selected is None:
@@ -297,11 +325,11 @@ class GuestStageFilesystem:
                         info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
                         _require(info.st_dev == root_info.st_dev and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)), "GuestLinksOrSpecialFilesRefused")
                         entries = [{"path": relative, "kind": "dir" if stat.S_ISDIR(info.st_mode) else "file",
-                                    "mode": stat.S_IMODE(info.st_mode), "stat": list(_fingerprint(info)), "size": info.st_size}]
+                                    "mode": stat.S_IMODE(info.st_mode), "stat": list(_fingerprint(info)), "size": info.st_size, "uid":info.st_uid, "gid":info.st_gid}]
                     finally:os.close(parent)
                 self._record(stage_id)
                 return {"stage": stage_id, "role": role, "root_stat": list(_fingerprint(root_info)), "entries": entries,
-                        "bytes": 0, "root": dict(self.stages[stage_id]["roots"][role])}
+                        "bytes": 0, "root": dict(self.stages[stage_id]["roots"][role]), "root_owner":[root_info.st_uid,root_info.st_gid]}
             if relative is None:
                 walk(root, "")
             else:
@@ -315,12 +343,13 @@ class GuestStageFilesystem:
                 _require(len(entries) == 1, "GuestMemberMissing")
             self._record(stage_id)
             return {"stage": stage_id, "role": role, "root_stat": list(_fingerprint(root_info)), "entries": entries,
-                    "bytes": total, "root": dict(self.stages[stage_id]["roots"][role])}
+                    "bytes": total, "root": dict(self.stages[stage_id]["roots"][role]), "root_owner":[root_info.st_uid,root_info.st_gid]}
         finally:
             os.close(root)
 
     def layout(self, stage_id, candidate_role, runtime_role, *, quiet=False):
-        self._record(stage_id, open_only=True)
+        record=self._record(stage_id, open_only=True)
+        owner=_root_owner(candidate_role,record["role_users"],(os.geteuid(),os.getegid()))
         _require((candidate_role, runtime_role) in {("candidate", "runtime"), ("worker-source", "worker-runtime")}
                  and type(quiet) is bool and (not quiet or candidate_role == "candidate"), "FixedRoleLayoutRequired")
         def child(parent, name, mode, *, empty=False):
@@ -328,6 +357,7 @@ class GuestStageFilesystem:
             except FileExistsError:pass
             fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             if empty:_require(not os.listdir(fd), "GuestMountpointNotEmpty")
+            _set_owner(fd,owner)
             os.fchmod(fd, mode)
             return fd
         source, runtime = self._root(stage_id, candidate_role), self._root(stage_id, runtime_role)
@@ -350,13 +380,17 @@ class GuestStageFilesystem:
         _require(stage_id != baseline_id and baseline["pinned"] and current["roots"] == expected_roots, "QualifiedGuestBaselineRequired")
         names = ("runtime", "worker-runtime") if "worker-runtime" in current["roots"] else ("runtime",)
         _require(set(digests) == {"runtime", "worker_runtime"} if len(names) == 2 else set(digests) == {"runtime"}, "QualifiedRuntimeDigestsRequired")
-        replacements = {}
+        _require(current["role_users"]==baseline["role_users"], "QualifiedRoleUsersChanged")
+        replacements = {};ownership={}
         try:
             for role in names:
                 old = expected_roots[role]
                 token = _copy_runtime(self.work_path / baseline_id / role, self.work_path / stage_id / role,
                     digests["runtime" if role == "runtime" else "worker_runtime"],
-                    expected_target_identity=(old["device"], old["inode"]), expected_parent_identity=current["identity"])
+                    expected_target_identity=(old["device"], old["inode"]), expected_parent_identity=current["identity"],
+                    install_owner=_root_owner(role,current["role_users"],(os.geteuid(),os.getegid())))
+                from .paired_runtime import runtime_ownership
+                ownership[role]=runtime_ownership(self.work_path/stage_id/role,_root_owner(role,current["role_users"],(os.geteuid(),os.getegid())))
                 replacements[role] = {"capability": uuid.uuid4().hex, "device": token[0], "inode": token[1]}
             for role, old in current["roots"].items():
                 token = replacements.get(role, old)
@@ -381,7 +415,7 @@ class GuestStageFilesystem:
                             os.utime(name, ns=(now, now), dir_fd=parent, follow_symlinks=False)
                     finally:os.close(parent)
             current["roots"].update(replacements)
-            result = self._public(stage_id)
+            result = dict(self._public(stage_id),ownership=ownership)
             _durable(self.records, stage_id + "-adopted.json", result)
             return result
         except BaseException:
@@ -649,8 +683,8 @@ def serve(filesystem, binding, source_hashes, input_stream, output_stream):
                         source_tree=body["source_tree"], source_exceptions=body["source_exceptions"], source_permits=body["source_permits"])
                     result = {"archive_sha256": baseline.expected, "source_commit": baseline.commit, "source_tree": baseline.tree}
                 elif op == "publish":
-                    _require(set(body) == {"stage", "pinned"}, "ClosedPublishRequired")
-                    result = filesystem.publish(body["stage"], _publish_entries(input_stream, sequence, baseline), pinned=body["pinned"])
+                    _require(set(body) == {"stage", "pinned", "role_users"}, "ClosedPublishRequired")
+                    result = filesystem.publish(body["stage"], _publish_entries(input_stream, sequence, baseline), pinned=body["pinned"], role_users=body["role_users"])
                 elif op == "observe":result = filesystem.observe(**body)
                 elif op == "fixed_layout":result = filesystem.layout(**body)
                 elif op == "copy_qualified_pair":result = filesystem.copy_qualified_pair(**body)

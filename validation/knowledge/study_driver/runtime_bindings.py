@@ -370,7 +370,11 @@ class SourceStager:
                 readable_tree(handle.candidate);readable_tree(handle.grader);runtime_layout(handle.runtime)
             self._register_stage(handle)
             if self.native_store is not None:
-                handle.native_binding=self.native_store.publish(handle,pinned=_pinned)
+                users={"protected":[os.getuid(),os.getgid()]}
+                if handle.paired_role is not None:
+                    role=handle.paired_role
+                    users["worker"]=[role.worker_uid,os.getgid() if role.worker_gid is None else role.worker_gid]
+                handle.native_binding=self.native_store.publish(handle,pinned=_pinned,role_users=users)
                 self._stages[id(handle)]["pinned"]=_pinned
                 if handle.family_v2 is not None:handle.family_v2=self.paired.bind_plan(handle,handle.family_v2)
             return handle

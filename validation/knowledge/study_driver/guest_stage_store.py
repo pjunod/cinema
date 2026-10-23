@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import uuid
 
 from .guest_stage_helper import (CHUNK_BYTES, FRAME_BYTES, MEMBERS, RESPONSE_BYTES,
-    ROOTS, SOURCE_BYTES, TRANSFER_BYTES, GUEST_MODULES, _fingerprint, _identity, _json, _relative, _sha, _tree_digest)
+    ROOTS, SOURCE_BYTES, TRANSFER_BYTES, GUEST_MODULES, _fingerprint, _identity, _json, _relative, _sha, _tree_digest, _role_users, _root_owner)
 
 
 class NativeGuestError(ValueError):
@@ -207,6 +207,8 @@ class GuestStageRef:
     roots: dict[str, GuestRootRef]
     transfer_sha256: str
     pinned: bool
+    role_users: dict = field(default_factory=dict)
+    controller: tuple[int,int] = (0,0)
     proofs: dict = field(default_factory=dict)
     closed: bool = False
     retired: bool = False
@@ -221,8 +223,18 @@ class NativeGuestBinding:
         self.store._ref(self.stage)
         return {"kind": "guest-native-stage-v1", "session": self.stage.session, "stage": self.stage.stage,
                 "stage_identity": list(self.stage.identity), "transfer_sha256": self.stage.transfer_sha256, "binding_sha256": self.store.binding_sha256,
-                "source_hashes": self.store.transport_spec.source_hashes,
+                "source_hashes": self.store.transport_spec.source_hashes, "role_users":self.stage.role_users,
                 "roots": self.store._root_data(self.stage)}
+
+    def assert_role(self, config):
+        self.store._ref(self.stage)
+        _,role,relative=self.store._locate(config.candidate_root)
+        worker=role=="worker-source"
+        _require(not relative and role in {"candidate","worker-source"}
+                 and Path(config.runtime_root)==self.stage.host_root/("worker-runtime" if worker else "runtime")
+                 and Path(config.grader_root)==self.stage.host_root/("worker-export" if worker else "grader")
+                 and [config.uid,config.gid]==self.stage.role_users["worker" if worker else "protected"],
+                 "ConfiguredNativeRoleUsersChanged")
 
     def prepare(self, candidate, runtime, *, quiet):
         _, source_role, relative = self.store._locate(candidate)
@@ -439,8 +451,11 @@ class NativeGuestStageStore:
         return record
 
     @_fail_closed
-    def publish(self, handle, *, pinned=False):
+    def publish(self, handle, *, role_users, pinned=False):
         self._check();stage = handle.root.name
+        users=_role_users(role_users)
+        paired=getattr(handle,"worker_candidate",None) is not None
+        _require(("worker" in users)==paired and (not paired or users["worker"][0]!=users["protected"][0]), "DistinctConfiguredNativeRoleUsersRequired")
         _require(stage in self.reservations and not self.reservations[stage]["published"]
                  and handle.root.parent == self.owned_root, "ReservedNativeStageRequired")
         rows, total = [], 0
@@ -477,12 +492,15 @@ class NativeGuestStageStore:
         expected = _sha(_json(manifest))
         self._audit_receipt(self._audit, "transfer-intent-" + stage + ".json", {
             "stage": stage, "host_root_identity": list(_identity(handle.root.lstat())),
-            "host_manifest_sha256": expected, "bytes": total, "pinned": pinned})
-        result = self._exchange("publish", {"stage": stage, "pinned": pinned}, entries=rows)
+            "host_manifest_sha256": expected, "bytes": total, "pinned": pinned,"role_users":users})
+        result = self._exchange("publish", {"stage": stage, "pinned": pinned,"role_users":users}, entries=rows)
         roots = self._response_roots(result, stage=stage)
         _require(result.get("transfer_sha256") == expected and result.get("transferred_bytes") == total
-                 and result.get("pinned") is pinned, "GuestTransferManifestMismatch")
-        ref = GuestStageRef(handle.root, _identity(handle.root.lstat()), stage, self.session, tuple(result["identity"]), roots, expected, pinned)
+                 and result.get("pinned") is pinned and result.get("role_users")==users
+                 and result.get("controller_parent",{}).get("uid")==0
+                 and result["controller_parent"].get("mode")==0o700
+                 and type(result["controller_parent"].get("gid")) is int, "GuestTransferManifestMismatch")
+        ref = GuestStageRef(handle.root, _identity(handle.root.lstat()), stage, self.session, tuple(result["identity"]), roots, expected, pinned,role_users=users,controller=(0,result["controller_parent"]["gid"]))
         self.stages[stage] = ref
         self._proof(ref, "transfer.json", {"host_root_identity": list(ref.host_identity), "host_manifest_sha256": expected,
             "guest": result, "binding_sha256": self.binding_sha256, "source_hashes": self.transport_spec.source_hashes})
@@ -497,6 +515,9 @@ class NativeGuestStageStore:
         _require(result.get("stage") == ref.stage and result.get("role") == role
                  and result.get("root") == self._root_data(ref)[role] and type(result.get("entries")) is list,
                  "GuestObservationRootChanged")
+        owner=_root_owner(role,ref.role_users,ref.controller)
+        _require(result.get("root_owner")==list(owner)
+                 and all((row.get("uid"),row.get("gid"))==owner for row in result["entries"]), "GuestRoleOwnershipChanged")
         return result
 
     def validate(self, handle):
@@ -514,16 +535,21 @@ class NativeGuestStageStore:
     @_fail_closed
     def copy_qualified(self, handle, baseline, body):
         ref, source = self._ref(handle.native_binding.stage), self._ref(baseline.native_binding.stage)
+        _require(ref.role_users==source.role_users,"QualifiedNativeRoleUsersChanged")
         old = self._root_data(ref)
         names = {"runtime", "worker_runtime"} if "worker-runtime" in ref.roots else {"runtime"}
         result = self._exchange("copy_qualified_pair", {"stage_id": ref.stage, "baseline_id": source.stage,
             "expected_roots": old, "digests": {name: body["after"][name] for name in names}})
         roots = self._response_roots(result, stage=ref.stage)
         _require(tuple(result["identity"]) == ref.identity and result.get("pinned") is ref.pinned
+                 and result.get("role_users")==ref.role_users
+                 and set(result.get("ownership",{}))==({"runtime","worker-runtime"} if "worker-runtime" in ref.roots else {"runtime"})
+                 and all(re.fullmatch(r"[a-f0-9]{64}",value) for value in result["ownership"].values())
                  and all(roots[name] == ref.roots[name] for name in set(ref.roots) - {"runtime", "worker-runtime"}),
                  "GuestCopyScopeChanged")
         transition = {"namespace": "guest-native", "before": old, "after": result["roots"],
-                      "baseline_stage": source.stage, "prerequisite_sha256": body.get("receipt_sha256")}
+                      "baseline_stage": source.stage, "prerequisite_sha256": body.get("receipt_sha256"),
+                      "role_users":ref.role_users,"ownership":result["ownership"]}
         self._proof(ref, "adoption.json", transition)
         ref.roots = roots
         return transition
@@ -533,7 +559,7 @@ class NativeGuestStageStore:
         ref = self._ref(handle.native_binding.stage)
         if ref.closed:return
         result = self._exchange("close", {"stage_id": ref.stage})
-        _require(self._response_roots(result, stage=ref.stage) == ref.roots and tuple(result["identity"]) == ref.identity,
+        _require(self._response_roots(result, stage=ref.stage) == ref.roots and tuple(result["identity"]) == ref.identity and result.get("role_users")==ref.role_users,
                  "GuestCloseRootChanged")
         self._proof(ref, "closure.json", result);ref.closed = True
 

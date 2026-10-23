@@ -732,6 +732,7 @@ def _prepare(config: IsolationConfig):
         logs.chmod(0o777)
     if config.native_binding is not None:
         _require(not config.readonly_caches, "native stages do not expose external caches")
+        config.native_binding.assert_role(config)
         config.native_binding.prepare(config.candidate_root, config.runtime_root, quiet=_quiet_log_mount(config))
     # Runtime artifacts, including protected wrapper logs, share one measured
     # durable state tree. Empty source mountpoints add no hidden source bytes.
@@ -1026,6 +1027,35 @@ def _network_denied(network, guest_errno):
     return _guest_error_matches(network, guest_errno, {"ENETUNREACH", "EHOSTUNREACH", "EACCES", "EPERM"})
 
 
+def _stable_probe_observations(observations, *, native_stage=None):
+    """Compare compatibility while retaining fresh challenge evidence verbatim."""
+    _require(type(observations) is dict,"isolation observations required")
+    stable={key:value for key,value in observations.items() if key!="sentinel_digest"}
+    if native_stage is None:
+        _require("native_outside_sentinel" not in stable,"unexpected native challenge evidence")
+        return stable
+    sentinel=observations.get("native_outside_sentinel")
+    fields={"scope","stage","name","device","inode","sha256","bytes","mode","present"}
+    _require(type(sentinel) is dict and set(sentinel)==fields
+             and isinstance(native_stage,str) and re.fullmatch(r"[a-f0-9]{32}",native_stage)
+             and sentinel["stage"]==native_stage and sentinel["scope"]=="outside-all-role-mounts"
+             and isinstance(sentinel["name"],str) and re.fullmatch(r"outside-[a-f0-9]{32}",sentinel["name"])
+             and isinstance(sentinel["sha256"],str) and re.fullmatch(r"[a-f0-9]{64}",sentinel["sha256"])
+             and sentinel["sha256"]==observations.get("sentinel_digest")
+             and type(sentinel["device"]) is int and sentinel["device"]>=0
+             and type(sentinel["inode"]) is int and sentinel["inode"]>0
+             and type(sentinel["bytes"]) is int and sentinel["bytes"]==32
+             and type(sentinel["mode"]) is int and sentinel["mode"]==0o600 and sentinel["present"] is True,
+             "native challenge provenance unproved")
+    mounts=observations.get("observed_probes",{}).get("native_mounts")
+    _require(type(mounts) is dict and set(mounts)=={"/work","/work/.runtime","/grader"}
+             and all(type(pair) is list and len(pair)==2 and type(pair[0]) is int and pair[0]>=0
+                     and type(pair[1]) is int and pair[1]>0 for pair in mounts.values())
+             and sentinel["device"]==mounts["/work"][0],"native mounted identity evidence unproved")
+    stable["native_outside_sentinel"]={key:value for key,value in sentinel.items() if key not in {"name","sha256","inode"}}
+    return stable
+
+
 def _configuration_probe(config, private):
     name = "plurx-knowledge-" + uuid.uuid4().hex
     sentinel = private / ("outside-" + uuid.uuid4().hex)
@@ -1087,7 +1117,12 @@ def _configuration_probe(config, private):
             _require(cargo["returncode"] == 0 and cargo["output"].startswith("cargo "), "Cargo runtime unavailable")
         _require(_bytes_digest(sentinel.read_bytes()) == sentinel_digest, "outside sentinel changed")
         observations = {"security": security, "observed_probes": observed, "sentinel_digest": sentinel_digest}
-        if native_sentinel is not None:observations["native_outside_sentinel"] = native_sentinel
+        if native_sentinel is not None:
+            observations["native_outside_sentinel"] = native_sentinel
+            try:_stable_probe_observations(observations,native_stage=config.native_binding.stage.stage)
+            except BaseException:
+                observations=None
+                raise
         return name, observations
     finally:
         # Successful callers retain this live container for their one callback;
@@ -1263,8 +1298,9 @@ def _execute_family(config, argv, receipt, plan, *, mode, prerequisite=None, bas
     try:
         name, observed = _configuration_probe(config, private)
         previous = issued[1]["observations"]
-        _require({k: v for k, v in observed.items() if k != "sentinel_digest"} ==
-                 {k: v for k, v in previous.items() if k != "sentinel_digest"}, "observed isolation changed")
+        stage=config.native_binding.stage.stage if config.native_binding is not None else None
+        _require(_stable_probe_observations(observed,native_stage=stage)==
+                 _stable_probe_observations(previous,native_stage=stage), "observed isolation changed")
         _require(_prepare(config)[1] == payload, "configuration changed before callback")
         outcome, packet = _driver_packet(config, name, argv, plan, mode, context)
         inspected = _command(config, ["inspect", name])
@@ -1586,8 +1622,9 @@ def _protected_packet(config, name, argv, plan, mode, context):
         _require(_issued_probe(issued_probe, private, _prepare(worker_config)[1]) is not None, "worker isolation unqualified")
         worker_name, observations = _configuration_probe(worker_config, private)
         previous = _ISSUED[id(issued_probe)][1]["observations"]
-        _require({key: value for key, value in observations.items() if key != "sentinel_digest"} ==
-                 {key: value for key, value in previous.items() if key != "sentinel_digest"}, "worker isolation changed")
+        stage=worker_config.native_binding.stage.stage if worker_config.native_binding is not None else None
+        _require(_stable_probe_observations(observations,native_stage=stage)==
+                 _stable_probe_observations(previous,native_stage=stage), "worker isolation changed")
         expected_versions = context.get("expected_worker_versions")
         _require(expected_versions is None or observations["observed_probes"]["versions"] == expected_versions,
                  "qualified worker runtime changed")
@@ -1841,8 +1878,9 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
     after_sources = None
     try:
         name, observed = _configuration_probe(config, private)
-        _require({k: v for k, v in observed.items() if k != "sentinel_digest"} ==
-                 {k: v for k, v in issued[1]["observations"].items() if k != "sentinel_digest"}, "observed isolation changed")
+        stage=config.native_binding.stage.stage if config.native_binding is not None else None
+        _require(_stable_probe_observations(observed,native_stage=stage)==
+                 _stable_probe_observations(issued[1]["observations"],native_stage=stage), "observed isolation changed")
         _require(_prepare(config)[1] == before and _plan_sources(config, before, plan, step) == before_sources, "step inputs changed before callback")
         if plan.worker is None:
             outcome, packet = _driver_packet(config, name, step.argv, plan, mode, context)

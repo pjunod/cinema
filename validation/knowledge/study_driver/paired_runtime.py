@@ -161,13 +161,52 @@ def _remove_captured_runtime(parent, name, expected_identity):
         os.close(directory)
 
 
+def runtime_ownership(root, owner, *, assign=False):
+    """Observe/assign only a verified runtime tree; never its private parent."""
+    require(type(owner) in {tuple,list} and len(owner)==2
+            and all(type(value) is int and 0<value<2**31 for value in owner),"NonrootRuntimeOwnerRequired")
+    root=no_links(root);device=root.stat().st_dev;rows=[]
+    def walk(directory,relative):
+        info=os.fstat(directory)
+        require(info.st_dev==device and not info.st_mode&0o7000,"RuntimeOwnershipScopeChanged")
+        if assign and (info.st_uid,info.st_gid)!=tuple(owner):os.fchown(directory,*owner)
+        info=os.fstat(directory)
+        require((info.st_uid,info.st_gid)==tuple(owner),"RuntimeRoleOwnerChanged")
+        rows.append((relative,"dir",info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)))
+        names=sorted(os.listdir(directory))
+        for name in names:
+            info=os.stat(name,dir_fd=directory,follow_symlinks=False)
+            require(info.st_dev==device and not info.st_mode&0o7000 and len(rows)<100000
+                    and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)),"RuntimeOwnershipScopeChanged")
+            fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|(os.O_DIRECTORY if stat.S_ISDIR(info.st_mode) else 0),dir_fd=directory)
+            try:
+                require(_identity(os.fstat(fd))==_identity(info),"RuntimeOwnershipEntryChanged")
+                key=relative+"/"+name if relative else name
+                if stat.S_ISDIR(info.st_mode):walk(fd,key)
+                else:
+                    if assign and (info.st_uid,info.st_gid)!=tuple(owner):os.fchown(fd,*owner)
+                    after=os.fstat(fd)
+                    require((after.st_uid,after.st_gid)==tuple(owner),"RuntimeRoleOwnerChanged")
+                    rows.append((key,"file",after.st_uid,after.st_gid,stat.S_IMODE(after.st_mode)))
+                require(_identity(os.stat(name,dir_fd=directory,follow_symlinks=False))==_identity(os.fstat(fd)),"RuntimeOwnershipEntryChanged")
+            finally:os.close(fd)
+        require(sorted(os.listdir(directory))==names,"RuntimeOwnershipMembershipChanged")
+    directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        identity=_identity(os.fstat(directory))[:2];walk(directory,"")
+        require(_identity(no_links(root).lstat())[:2]==identity,"RuntimeOwnershipRootChanged")
+    finally:os.close(directory)
+    return _manifest(rows)
+
+
 def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 1024**3,
-                           expected_target_identity=None, expected_parent_identity=None):
+                           expected_target_identity=None, expected_parent_identity=None, install_owner=None):
     """Copy qualified bytes; capture the authorized old root before removal."""
     source, target = no_links(source), no_links(target)
     require(source != target and source.is_dir() and target.is_dir()
             and not source.is_relative_to(target) and not target.is_relative_to(source),
             "DistinctQualifiedRuntimes")
+    if install_owner is not None:runtime_ownership(source,install_owner)
     expected_target_identity = expected_target_identity or _identity(target.lstat())[:2]
     expected_parent_identity = expected_parent_identity or _identity(target.parent.lstat())[:2]
     parent = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -220,6 +259,7 @@ def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 10
         require(current == identities and _manifest(rows) == expected_sha256, "QualifiedRuntimeIdentityMismatch")
         verified_identity=_identity(no_links(staging).lstat())[:2]
         require(measure_tree(staging,max_bytes=max_bytes)==expected_sha256,"CopiedRuntimeIdentityMismatch")
+        if install_owner is not None:runtime_ownership(staging,install_owner,assign=True)
         require(_identity(no_links(staging).lstat())[:2]==verified_identity,"CopiedRuntimeRootChanged")
         require(_identity(os.fstat(parent))[:2] == expected_parent_identity
                 and _identity(no_links(target.parent).lstat())[:2] == expected_parent_identity,
@@ -248,6 +288,7 @@ def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 10
             os.rename(staging.name, target.name, src_dir_fd=parent, dst_dir_fd=parent)
             require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
             runtime_layout(target)
+            if install_owner is not None:runtime_ownership(target,install_owner,assign=True)
             require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
             _remove_captured_runtime(capture, "old", expected_target_identity)
         finally:
