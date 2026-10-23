@@ -16,6 +16,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, sync::mpsc};
+#[cfg(target_os = "linux")]
+mod telemetry;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) use telemetry::history_basis;
+#[cfg(target_os = "linux")]
+use telemetry::FiniteTelemetry;
 
 /// Planning data only. Its fields cannot carry callbacks or native close facts.
 pub struct SoftwareAvcPumpPlan {
@@ -165,6 +171,8 @@ pub(in crate::adaptive_resources) struct SoftwarePump {
     output: FiniteOutput,
     plan: SoftwareAvcPumpPlan,
     events: mpsc::Sender<SoftwareVodEvent>,
+    #[cfg(target_os = "linux")]
+    history_key: Option<crate::resource_history::HistoryKey>,
 }
 pub(in crate::adaptive_resources) struct PumpFinished {
     pub outcome: Outcome,
@@ -251,12 +259,21 @@ impl SoftwarePump {
                 output,
                 plan,
                 events,
+                #[cfg(target_os = "linux")]
+                history_key: None,
             },
             receiver,
         ))
     }
     pub(in crate::adaptive_resources) fn minimum_memory_bytes(&self) -> io::Result<u64> {
         self.plan.minimum_memory_bytes()
+    }
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn bind_history_key(
+        &mut self,
+        key: crate::resource_history::HistoryKey,
+    ) {
+        self.history_key = Some(key);
     }
     pub(in crate::adaptive_resources) async fn run(
         self,
@@ -282,7 +299,7 @@ impl SoftwarePump {
         control: RegisteredChildControl,
     ) -> (Outcome, bool, Option<io::ErrorKind>) {
         let complete = AtomicBool::new(false);
-        let outcome = match self.produce_inner(&mut stdout, &complete).await {
+        let outcome = match self.produce_inner(&mut stdout, &complete, control).await {
             Ok(outcome) => outcome,
             Err(error) => Outcome::Failed(Failure::Sink(error)),
         };
@@ -300,7 +317,16 @@ impl SoftwarePump {
         self,
         stdout: &mut crate::adaptive_resources::physical_graph::finite_pipes::FinitePipeReader,
         complete: &AtomicBool,
+        control: RegisteredChildControl,
     ) -> io::Result<Outcome> {
+        #[cfg(target_os = "linux")]
+        let telemetry = FiniteTelemetry::new(
+            self.history_key,
+            control,
+            std::sync::Arc::clone(&self.output.runtime.history),
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = control;
         let mut muxer = super::initial_unit::read_initial_unit(
             stdout,
             self.plan.memory.reader,
@@ -388,15 +414,29 @@ impl SoftwarePump {
             output: &self.output,
             events: &self.events,
             complete,
+            #[cfg(target_os = "linux")]
+            telemetry: std::sync::Mutex::new(telemetry),
         };
-        Ok(vod_generation::run_bounded(
+        let outcome = vod_generation::run_bounded(
             replay,
             generation,
             &sink,
             "finite-software-vod",
             self.plan.memory,
         )
-        .await)
+        .await;
+        #[cfg(target_os = "linux")]
+        let recorded_history = {
+            sink.telemetry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recorded_history()
+        };
+        #[cfg(target_os = "linux")]
+        if let Some(history) = recorded_history {
+            telemetry::persist_history(history).await;
+        }
+        Ok(outcome)
     }
 }
 
@@ -404,21 +444,41 @@ struct FiniteSink<'a> {
     output: &'a FiniteOutput,
     events: &'a mpsc::Sender<SoftwareVodEvent>,
     complete: &'a AtomicBool,
+    #[cfg(target_os = "linux")]
+    telemetry: std::sync::Mutex<FiniteTelemetry>,
 }
 impl Sink for FiniteSink<'_> {
     async fn materialize(&self, entry: u32, mut bytes: Vec<u8>) -> io::Result<()> {
         use sha2::Digest as _;
         let count = u64::try_from(bytes.len()).map_err(|_| overflow())?;
         let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+        let entered_publish = Instant::now();
         publish(self.output, FiniteFile::Segment(entry), &mut bytes).await?;
-        self.events
+        #[cfg(target_os = "linux")]
+        self.telemetry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .durable_unit(entered_publish, Instant::now());
+        #[cfg(not(target_os = "linux"))]
+        let _ = entered_publish;
+        let send_started = Instant::now();
+        let result = self
+            .events
             .send(SoftwareVodEvent::Materialized {
                 entry,
                 bytes: count,
                 digest,
             })
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "finite VOD observer dropped"))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "finite VOD observer dropped"));
+        #[cfg(target_os = "linux")]
+        self.telemetry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .delivered(send_started, Instant::now());
+        #[cfg(not(target_os = "linux"))]
+        let _ = send_started;
+        result
     }
     async fn completed_output(&self) {
         self.complete.store(true, Ordering::Release);

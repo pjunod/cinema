@@ -135,7 +135,16 @@ impl NodeResourceRuntime {
             .bootstrap
             .get(&source_member)
             .ok_or(OperationError::State)?;
+        // Runtime payload accounting is separate from frozen durable totals.
+        // The active unknown producer claim remains held throughout cloning;
+        // only a fold fitting S's explicit resident partition can transfer.
+        if bootstrap.resident_inventory_bytes()? > plan.limits.resident_memory_bytes {
+            return Err(OperationError::State);
+        }
         let full = bootstrap.frozen_inventory()?;
+        if full.resident_inventory_bytes()? > plan.limits.resident_memory_bytes {
+            return Err(OperationError::State);
+        }
         let reference = frozen_snapshot_ref(plan, &full)?;
         // The first adapter has no response/native reader owner. Never invent
         // a retained reader from a serialized lease identifier.

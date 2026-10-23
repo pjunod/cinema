@@ -375,3 +375,32 @@ independent of advisory mode, or refuse new adaptive Prepare/Adopt.
 ## Historical manager direction
 
 The revision-2 manager direction is preserved verbatim in [contract history](ADAPTIVE-PLAYBACK-CONTRACT-HISTORY.md#m0-contract-refinement-for-manager-check-revision-2). It records accepted direction, not implementation or acceptance.
+
+## Selected ordinary finite-software VOD ownership map
+
+This table maps the currently connected Linux ordinary software AVC path from
+selection through retained serving and cleanup. It records implementation
+locations, not V1–V5 acceptance: authored regressions have not been executed,
+the requested-capacity accounting is not an RSS bound, and source stability,
+restart/cache coverage, other recipes and adapters remain open.
+
+| Stage | Production owner and concrete seam | Relevant regression leaf |
+|---|---|---|
+| Select the ordinary profile | `plurxd/src/vod/shared.rs::build_rendition_with_storage` calls `vod/finite_software.rs::selected` and `build`; copy, private, ephemeral, source-prefixed, DV, subtitle, shared-audio and non-software profiles stay on other paths. | No dedicated selection regression in this path. |
+| Associate and open the original source | `plurx-core/src/adaptive_resources/runtime/finite_vod.rs::SoftwareVodOwner::prepare/open_source` registers source cells; `operations/source_files.rs::SourceCell::open_source` checks the same held descriptor and planned scanner identity. The Linux software profile also requires the planned executable digest/ELF identity before launch. | `adaptive_resources/runtime/operations/source_files/tests.rs::binary_digest_uses_same_source_descriptor_without_changing_its_offset`; `::publication_rechecks_the_same_held_file_after_in_place_mutation`. |
+| Build the fixed software command and reserve the graph | `vod/finite_software.rs::build` derives the fixed `SoftwareAvcCommand`, source copies, output slots and `SoftwareAvcPumpPlan`, then prepares the typed graph in the same `NodeResourceRuntime`. This is a selected recipe profile, not an arbitrary command API. | `adaptive_resources/runtime/finite_vod/tests.rs::finite_software_writer_waits_for_original_start_sender_before_reading`. |
+| Start and join the original producer | `operations/finite_vod.rs::start_finite_vod/join_finite_producer` and `runtime/finite_vod/pump.rs` keep the registered writer task and child in the runtime until joined; stop/cancellation routes retain the original task and root. | `adaptive_resources/runtime/finite_vod/tests.rs::finite_stop_before_task_registration_aborts_the_late_original_task`; `::finite_stop_aborts_original_task_while_join_mutex_is_held`. |
+| Publish output through the held directory | `runtime/finite_vod.rs::SoftwarePump` submits init/segments to the same `FiniteOutput`; `operations/bootstrap/native/publication.rs::queue_scratch_publication_wait` and `sync.rs::queue_scratch_sync_wait` use the original native publication/sync jobs and their journal observations. | `adaptive_resources/runtime/operations/bootstrap/native/tests.rs::bootstrap_native_cancelled_join_waiter_keeps_actual_original_handle`; `::bootstrap_native_joined_result_is_retained_without_relaunch_or_new_ids`. |
+| Attach the daemon rendition owner | `plurxd/src/renditiondir/finite_publication.rs::RenditionDir::from_finite_producer/finite_output` carries a selector to the native owner without duplicating its directory descriptor; `renditiondir.rs::join_writes` joins the finite owner. | `adaptive_resources/runtime/finite_vod/tests.rs::finite_software_writer_waits_for_original_start_sender_before_reading`. |
+| Serve init and segments | `plurxd/src/vod/serve/serve.rs::open_materialized` and finite-ready construction choose `ReadyFile::Finite`; `read_rendition_artifact` uses bounded reads from the same `FiniteOutput`, not path opens. | No dedicated daemon serving regression cited here. |
+| Inspect HLS init | `plurxd/src/http/hls/context.rs::bind_hls_init_context` uses borrowed bounded init inspection; parser metadata remains separately accounted from response and retained-file capacities. | Existing HLS context tests exercise complete and partial init parsing; they are authored, not executed for this status. |
+| Hold response read custody | `runtime/finite_vod.rs::FiniteOutput::prepare_reader/finish` and `operations/bootstrap/readers.rs::prepare_finite_reader/finite_reader_step` journal bounded range reads and close the same retained reader lease. | No dedicated production-reader lifecycle leaf is listed in this table. |
+| Transfer finished output R→S | `operations/finite_retirement.rs::retire_finite_output` joins the producer, freezes its exact head, and transfers the same bootstrap/native cells only after the durable retained swap; it does not reopen the child path. | `resource_custody/codec_v2/scratch/bootstrap/snapshot/tests.rs::frozen_v3_reference_streams_inventory_larger_than_sql_row` covers frozen inventory shape, not native transfer acceptance. |
+| Recover and reuse retained output | `vod/finite_software.rs::build` checks `recovered_software_output` against media identity, object version and segment count before attaching the recovered selector; `runtime/operations/recovered.rs` rebuilds process-local accounting. | Recovered-cache acceptance still needs restart and source-stability qualification. |
+| Retire retained S | `runtime/operations/bootstrap/retirement.rs` drives reader drain, owned-file removal, directory sync/unlink and exact retained-handle closure; `operations/finite_retirement.rs` settles the source reservation only after the physical retirement receipt. | Cleanup fold tests cover ordered events; native Linux end-to-end cleanup qualification remains open. |
+
+The ordinary software AVC selection is the only VOD recipe path mapped here.
+The map does not close V1–V5, R1 or M0–M7, and it does not establish a full
+process-memory ceiling: allocator/runtime overhead, framework parser and
+indexing allocations, cold-cache restart policy, other adapters and executed
+behavioral regressions remain separate work.

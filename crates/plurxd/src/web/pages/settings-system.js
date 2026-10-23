@@ -387,6 +387,17 @@ function transcoderCard(sys){
     <p class="system-pref-status muted" id="node-hwaccel-status" aria-live="polite">${!available?"The saved backend is unavailable. Choose and save an available option. ":""}${pending?"Saved choice is waiting for this node to restart.":"Changes take effect after restarting Cinema."}</p>
     ${systemGraphicsHtml(sys)}${rows}</section>`;
 }
+// Snapshot of the actual node owner. Unknown observations and missing owners
+// stay visible; this card neither starts work nor changes saved settings.
+function systemResourceOwnershipCard(sys){
+  const owner=sys&&sys.resource_ownership;
+  if(!owner)return ""; // Compatible with an older server response.
+  const metric=value=>value&&value.state==="known"?esc(value.value):`Unknown (${esc(value&&value.value||"insufficient_evidence")})`;
+  const ledger=owner.accounting;
+  const detail=ledger?`<dl><dt>Reservations held</dt><dd>${esc(ledger.held)}</dd><dt>Uncertain reservations held</dt><dd>${esc(ledger.unknown_held)}</dd><dt>Known reserved memory (bytes)</dt><dd>${esc(ledger.used.peak_memory_bytes)}</dd><dt>Managed memory peak (bytes)</dt><dd>${metric(ledger.managed_memory_peak_bytes)}</dd><dt>Managed kernel-task peak</dt><dd>${metric(ledger.managed_kernel_task_peak)}</dd><dt>Kernel-task headroom at admission sample</dt><dd>${metric(ledger.capacity.kernel_tasks)}</dd><dt>Admission sample age (ms)</dt><dd>${metric(ledger.capacity_observation_age_ms)}</dd></dl>`:`<p>Accounting is unknown (${esc(owner.state)}).</p>`;
+  const unresolved=owner.unreconciled_custody===true?"Unreconciled custody remains held and prevents competing startup work.":owner.unreconciled_custody===false?"No unreconciled startup custody.":"Startup custody status is unknown.";
+  return `<section class="card system-card" id="system-resource-ownership-card"><h2>Resource ownership</h2><p class="muted">This node’s selected Linux finite software VOD path. Other playback paths are outside this accounting scope.</p>${detail}<p>${esc(unresolved)}</p><p class="muted">Reserved allocations are not measured RSS. Unknown producer peaks serialize producers; an unknown peak has no proven hard bound.</p></section>`;
+}
 function systemCapacityCard(settings){
   const report=settings?.transcode_capacity_settings;
   if(!report)return "";
@@ -552,5 +563,5 @@ function systemLogsToggled(details){
 }
 function systemPanel(sys){
   const platform=sys.platform==="macos"?"macOS":sys.platform==="linux"?"Linux":sys.platform||"";
-  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemCapacityCard(typeof SETTINGS_DATA==="undefined"?null:SETTINGS_DATA.settings)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${systemLogsCard()}</div>`;
+  return `<div class="system-settings"><div class="system-title"><h1>System</h1><span class="muted system-small">${esc(platform)}</span></div>${ffmpegSupportWarning(sys)}${systemAttentionHtml(sys)}${systemVersionsCard(sys)}${transcoderCard(sys)}${systemCapacityCard(typeof SETTINGS_DATA==="undefined"?null:SETTINGS_DATA.settings)}${systemResourceOwnershipCard(sys)}${systemAdditionalSupportCard(sys)}${systemPerformanceCard(sys)}${systemStorageCard(sys)}${systemLogsCard()}</div>`;
 }

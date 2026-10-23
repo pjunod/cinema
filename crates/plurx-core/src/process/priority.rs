@@ -315,6 +315,9 @@ struct Entry {
     started_at_ms: u64,
     resources: Arc<Mutex<super::observation::ProcessObserver>>,
     resource_graph: Option<u64>,
+    // Changes on any exact-key control request, including a failed signal.
+    // A cost window spanning pause, resume or termination cannot be reused.
+    control_epoch: u64,
     #[cfg(target_os = "linux")]
     pidfd: Option<std::os::fd::OwnedFd>,
 }
@@ -361,15 +364,46 @@ impl Registration {
 }
 
 impl RegisteredChildControl {
+    /// Sample only the observer created for this exact registration. The
+    /// registry lock is released before the cached observer reads the OS.
+    /// Removal returns None; there is no numeric-PID fallback.
+    pub(crate) fn snapshot_resources(
+        self,
+        now: std::time::Instant,
+    ) -> Option<(
+        super::observation::ProcessObservation,
+        u64,
+        std::time::Instant,
+    )> {
+        let (observer, epoch) = {
+            let registry = registry();
+            let entry = registry.entries.get(&self.key)?;
+            (Arc::clone(&entry.resources), entry.control_epoch)
+        };
+        let snapshot = observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot_stamped(now);
+        // The row must still be the same registration after the OS read.
+        if registry().entries.get(&self.key)?.control_epoch != epoch {
+            return None;
+        }
+        Some((snapshot.0, epoch, snapshot.1))
+    }
+
     /// Request SIGKILL through the pidfd opened for this registration.
     /// A removed registration is already gone; a missing pidfd is a refusal.
     pub(crate) fn start_kill(self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            let registry = registry();
-            let Some(entry) = registry.entries.get(&self.key) else {
+            let mut registry = registry();
+            let Some(entry) = registry.entries.get_mut(&self.key) else {
                 return Ok(());
             };
+            entry.control_epoch = entry
+                .control_epoch
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("registered child control epoch exhausted"))?;
             let pidfd = entry.pidfd.as_ref().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -393,10 +427,14 @@ impl RegisteredChildControl {
     pub(crate) fn signal(self, signal: super::ProcessSignal) -> io::Result<bool> {
         #[cfg(target_os = "linux")]
         {
-            let registry = registry();
-            let Some(entry) = registry.entries.get(&self.key) else {
+            let mut registry = registry();
+            let Some(entry) = registry.entries.get_mut(&self.key) else {
                 return Ok(false);
             };
+            entry.control_epoch = entry
+                .control_epoch
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("registered child control epoch exhausted"))?;
             let pidfd = entry.pidfd.as_ref().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -459,6 +497,7 @@ pub(crate) fn register(
         started_at_ms,
         resources: Arc::new(Mutex::new(super::observation::ProcessObserver::new(pid))),
         resource_graph: super::observation::current_graph(),
+        control_epoch: 0,
         #[cfg(target_os = "linux")]
         pidfd: linux::pidfd_open(pid),
     };

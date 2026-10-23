@@ -68,6 +68,8 @@ fn obligations(command: &Command) -> Vec<Uuid> {
     match command {
         #[cfg(target_os = "linux")]
         Command::RecoverRetainedS { proof, .. } => vec![proof.obligation_id()],
+        #[cfg(target_os = "linux")]
+        Command::RecoverActiveR { proof } => vec![proof.obligation_id()],
         Command::Prepare { handles, .. } | Command::PrepareTyped { handles, .. } => {
             handles.iter().map(|h| h.obligation_id).collect()
         }
@@ -208,9 +210,49 @@ impl CustodyJournal {
                 obligation_id: proof.obligation_id(),
                 graph_id: proof.claim().graph_id(),
                 runtime_binding: proof.binding(),
-                recovery: Some(authority),
+                recovery: Some(RecoveryAuthority::RetainedS(authority)),
             },
             sequence,
+        ))
+    }
+    /// Require the exact known adoption operation before granting the current
+    /// owner any journal writer capability for this historical producer.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_recovered_r_handle(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<(ObligationHandle, i64), CustodyError> {
+        let book = self.book.lock().map_err(|_| unavailable())?;
+        let owned = book.operations.get(&operation_id).ok_or_else(unavailable)?;
+        let operation = owned.lock().map_err(|_| unavailable())?;
+        if operation.queued {
+            return Err(unavailable());
+        }
+        let (Command::RecoverActiveR { proof }, Some(Ok(OperationResult::RecoveredRAdoption(ack)))) =
+            (&operation.operation.command, &operation.result)
+        else {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "recovered R adoption unacknowledged",
+            ));
+        };
+        if ack.operation_id != operation_id
+            || proof.journal_id() != self.journal_id
+            || proof.current_owner_id() != self.owner_id
+        {
+            return Err(codec::invalid());
+        }
+        let authority = proof.adopted_authority(ack).ok_or_else(codec::invalid)?;
+        Ok((
+            ObligationHandle {
+                journal_id: self.journal_id,
+                owner_id: self.owner_id,
+                obligation_id: proof.obligation_id(),
+                graph_id: proof.graph_id(),
+                runtime_binding: proof.binding(),
+                recovery: Some(RecoveryAuthority::ProducerR(authority)),
+            },
+            proof.original_sequence(),
         ))
     }
     pub(crate) fn new_family(&self) -> FamilyHandle {
@@ -339,14 +381,20 @@ impl CustodyJournal {
                 || authority.obligation_id() != key.handle.obligation_id
                 || authority.binding() != key.handle.runtime_binding
                 || !matches!(
-                    mutation,
-                    Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
+                    (&key.handle.recovery, &mutation),
+                    (
+                        Some(RecoveryAuthority::RetainedS(_)),
+                        Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
+                    ) | (
+                        Some(RecoveryAuthority::ProducerR(_)),
+                        Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
+                    )
                 )
             {
                 return Err(RejectedTransition {
                     error: CustodyError::new(
                         ErrorKind::Conflict,
-                        "recovered S writer authority differs",
+                        "recovered writer authority differs",
                     ),
                     key,
                     mutation,
@@ -370,6 +418,10 @@ impl CustodyJournal {
                 }
                 #[cfg(target_os = "linux")]
                 Command::RecoverRetainedS { .. } => {
+                    unreachable!("change constructs only a transition")
+                }
+                #[cfg(target_os = "linux")]
+                Command::RecoverActiveR { .. } => {
                     unreachable!("change constructs only a transition")
                 }
             },
@@ -408,6 +460,38 @@ impl CustodyJournal {
         .map_err(|(error, operation)| match operation.command {
             Command::RecoverRetainedS { proof, exit } => (error, proof, exit),
             _ => unreachable!("recovery constructs only an adoption"),
+        })
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recover_active_r(
+        &self,
+        operation_id: Uuid,
+        proof: crate::adaptive_resources::runtime::recovery::NativeActiveRImportProof,
+        deadline: Instant,
+    ) -> Result<
+        PendingOperation,
+        (
+            CustodyError,
+            crate::adaptive_resources::runtime::recovery::NativeActiveRImportProof,
+        ),
+    > {
+        if operation_id.is_nil()
+            || proof.journal_id() != self.journal_id
+            || proof.current_owner_id() != self.owner_id
+        {
+            return Err((
+                CustodyError::new(ErrorKind::Conflict, "foreign recovered R import"),
+                proof,
+            ));
+        }
+        self.enqueue(QueuedOperation {
+            id: operation_id,
+            deadline,
+            command: Command::RecoverActiveR { proof },
+        })
+        .map_err(|(error, operation)| match operation.command {
+            Command::RecoverActiveR { proof } => (error, proof),
+            _ => unreachable!("R recovery constructs only an adoption"),
         })
     }
     fn enqueue(

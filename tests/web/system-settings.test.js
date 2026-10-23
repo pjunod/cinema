@@ -157,3 +157,15 @@ test('Storage remeasurement preserves open details and unsaved preference and re
   assert.equal(count,1);
   assert.notEqual(data.sys.storage.ran,false);
 });
+
+test('Resource ownership keeps unknown task and memory peaks distinct from reserved minima',()=>{
+  const h=harness();
+  const html=h.systemResourceOwnershipCard({resource_ownership:{state:'available',unreconciled_custody:true,accounting:{held:2,unknown_held:1,used:{peak_memory_bytes:4096},managed_memory_peak_bytes:{state:'unknown',value:'unbounded'},managed_kernel_task_peak:{state:'unknown',value:'unbounded'},capacity:{kernel_tasks:{state:'known',value:20}},capacity_observation_age_ms:{state:'unknown',value:'first_sample'}}}});
+  assert.match(html,/Known reserved memory/);
+  assert.match(html,/Unknown \(unbounded\)/);
+  assert.match(html,/Other playback paths are outside/);
+  assert.match(html,/Unreconciled custody remains held/);
+  assert.doesNotMatch(html,/type="checkbox"|disabled|>0<|NaN/);
+  assert.match(h.systemResourceOwnershipCard({resource_ownership:{state:'accounting_unavailable',unreconciled_custody:null,accounting:null}}),/Accounting is unknown/);
+  assert.equal(h.systemResourceOwnershipCard({}), '');
+});

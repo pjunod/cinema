@@ -24,12 +24,12 @@ pub fn snapshot(output_root: &Path) -> AdmissionObservation {
     #[cfg(not(target_os = "linux"))]
     let _ = output_root;
     #[cfg(target_os = "linux")]
-    let (handles, processes) = (
+    let (handles, kernel_tasks) = (
         linux_handle_headroom(limits.open_file_ceiling),
-        linux_process_headroom(),
+        linux_task_headroom(),
     );
     #[cfg(not(target_os = "linux"))]
-    let (handles, processes) = (
+    let (handles, kernel_tasks) = (
         Metric::Unknown(UnknownReason::Unsupported),
         Metric::Unknown(UnknownReason::Unsupported),
     );
@@ -45,7 +45,10 @@ pub fn snapshot(output_root: &Path) -> AdmissionObservation {
             cpu_ns_per_second: limits.cpu_ns_per_second,
             memory_bytes: limits.memory_ceiling_bytes,
             handles,
-            processes,
+            // Every root process requires at least one Linux kernel task, so
+            // observed task headroom is a conservative process-count ceiling.
+            processes: kernel_tasks,
+            kernel_tasks,
             hardware_slots: Metric::Unknown(UnknownReason::InsufficientEvidence),
             tuner_slots: Metric::Unknown(UnknownReason::InsufficientEvidence),
             scratch_bytes,
@@ -87,7 +90,7 @@ fn linux_handle_headroom(ceiling: Metric<u64>) -> Metric<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_headroom() -> Metric<u64> {
+fn linux_task_headroom() -> Metric<u64> {
     let Some(global_limit) = read_decimal(Path::new("/proc/sys/kernel/threads-max")) else {
         return Metric::Unknown(UnknownReason::Inaccessible);
     };

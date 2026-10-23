@@ -18,6 +18,9 @@ mod capacity;
 pub use capacity::ResourceCapacity;
 mod memory_claim;
 pub(crate) use memory_claim::MemoryClaim;
+mod task_claim;
+pub(crate) use task_claim::TaskClaim;
+mod history_mix;
 
 pub mod physical_graph;
 mod retained;
@@ -46,6 +49,7 @@ pub enum ResourceDimension {
     Memory,
     Handles,
     Processes,
+    KernelTasks,
     Hardware,
     Tuner,
     Scratch,
@@ -366,6 +370,10 @@ pub struct LedgerSnapshot {
     /// Fresh headroom sample age; unknown for explicit fixed fixture/policy caps.
     pub capacity_observation_age_ms: Metric<u64>,
     pub unknown_peak_producers: usize,
+    /// Active roots have unknown kernel-task peaks until their original
+    /// process owner proves cleanup; this is never reported as a numeric peak.
+    pub unknown_task_peak_producers: usize,
+    pub managed_kernel_task_peak: Metric<u64>,
     /// Complete managed peak is unknown while any producer has an unknown
     /// additional peak. `used` still includes every known reserved component.
     pub managed_memory_peak_bytes: Metric<u64>,
@@ -409,6 +417,23 @@ impl State {
         }
         Ok(())
     }
+    fn task_claims_fit(&self, additional: &[TaskClaim]) -> Result<(), AdmissionRefusal> {
+        let mut active = 0usize;
+        let mut unknown = false;
+        for claim in self
+            .entries
+            .values()
+            .map(|entry| TaskClaim::from_processes(entry.resources.processes))
+            .chain(additional.iter().copied())
+        {
+            active += usize::from(claim.is_active_producer());
+            unknown |= claim == TaskClaim::UnknownProducerPeak;
+        }
+        if unknown && active > 1 {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        Ok(())
+    }
     fn assess(&self, demand: WorkloadDemand) -> Result<ResourceVector, AdmissionRefusal> {
         self.assess_claim(demand, MemoryClaim::default())
     }
@@ -439,6 +464,8 @@ impl State {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
         self.memory_claims_fit(&[claim])?;
+        let task_claim = TaskClaim::from_processes(resources.processes);
+        self.task_claims_fit(&[task_claim])?;
         if demand.trial && self.trial.is_some() {
             return Err(AdmissionRefusal::TrialAlreadyHeld);
         }
@@ -705,6 +732,11 @@ impl ResourceLedger {
             .zip(claims)
             .map(|((_, demand), claim)| state.assess_claim(*demand, *claim))
             .collect::<Result<_, _>>()?;
+        let task_claims: Vec<_> = resources
+            .iter()
+            .map(|resources| TaskClaim::from_processes(resources.processes))
+            .collect();
+        state.task_claims_fit(&task_claims)?;
         let total = resources
             .iter()
             .try_fold(ResourceVector::default(), |sum, role| {
@@ -932,6 +964,22 @@ impl ResourceLedger {
                 .values()
                 .filter(|entry| entry.memory_claim == MemoryClaim::UnknownProducerPeak)
                 .count(),
+            unknown_task_peak_producers: state
+                .entries
+                .values()
+                .filter(|entry| {
+                    TaskClaim::from_processes(entry.resources.processes)
+                        == TaskClaim::UnknownProducerPeak
+                })
+                .count(),
+            managed_kernel_task_peak: if state.entries.values().any(|entry| {
+                TaskClaim::from_processes(entry.resources.processes)
+                    == TaskClaim::UnknownProducerPeak
+            }) {
+                Metric::Unknown(UnknownReason::Unbounded)
+            } else {
+                Metric::Known(0)
+            },
             active_bounded_producers: state
                 .entries
                 .values()

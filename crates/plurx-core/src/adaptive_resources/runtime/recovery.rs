@@ -3,6 +3,9 @@
 //! an old producer, mint a live reservation, or turn disk rows into receipts.
 #![cfg(target_os = "linux")]
 
+mod producer;
+pub(crate) use producer::{ImportedActiveR, NativeActiveRImportProof, RecoveredRAuthority};
+
 use super::*;
 use crate::resource_custody::codec_v2::{self as v2, scratch::OutputKey};
 use crate::resource_custody::recovery::{PositivePreviousOwnerExit, RetainedSImportClaim};

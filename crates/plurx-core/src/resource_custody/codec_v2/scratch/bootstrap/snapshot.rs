@@ -14,6 +14,34 @@ pub(crate) struct FrozenScratchV3 {
     pub files: Vec<FileObservedV1>,
     pub readers: Vec<ReaderLeaseV1>,
 }
+impl FrozenScratchV3 {
+    /// Requested heap capacity for this in-memory inventory, including its
+    /// outer vectors and dynamic identity fields. Excludes allocator metadata,
+    /// serialization buffers, process-wide caches, and RSS overhead.
+    pub(crate) fn resident_inventory_bytes(&self) -> Result<u64, CustodyError> {
+        let file_capacity = u64::try_from(self.files.capacity())
+            .ok()
+            .and_then(|n| n.checked_mul(std::mem::size_of::<FileObservedV1>() as u64))
+            .ok_or_else(codec::invalid)?;
+        let reader_capacity = u64::try_from(self.readers.capacity())
+            .ok()
+            .and_then(|n| n.checked_mul(std::mem::size_of::<ReaderLeaseV1>() as u64))
+            .ok_or_else(codec::invalid)?;
+        let state_bytes = self.state.resident_heap_bytes()?;
+        let mut bytes = u64::try_from(std::mem::size_of::<Self>())
+            .ok()
+            .and_then(|n| n.checked_add(file_capacity))
+            .and_then(|n| n.checked_add(reader_capacity))
+            .and_then(|n| n.checked_add(state_bytes))
+            .ok_or_else(codec::invalid)?;
+        for file in &self.files {
+            bytes = bytes
+                .checked_add(file.resident_heap_bytes()?)
+                .ok_or_else(codec::invalid)?;
+        }
+        Ok(bytes)
+    }
+}
 
 /// Compact disk record; inventory must be recovered from the original journal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

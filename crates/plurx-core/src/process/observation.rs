@@ -186,6 +186,15 @@ impl ProcessObserver {
         self.record(now, read(self.pid))
     }
 
+    /// Return the actual sample instant as well as the possibly cached
+    /// observation. Cost windows must subtract counter samples taken at their
+    /// true instants, not treat a cached value as if it were read now.
+    pub(crate) fn snapshot_stamped(&mut self, now: Instant) -> (ProcessObservation, Instant) {
+        let observation = self.snapshot(now);
+        let sampled_at = self.cached.map_or(now, |(at, _)| at);
+        (observation, sampled_at)
+    }
+
     fn record(&mut self, now: Instant, counters: Metric<ProcessCounters>) -> ProcessObservation {
         let counters = match counters {
             Metric::Known(_) if self.identity.is_none() => {

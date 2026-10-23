@@ -276,7 +276,10 @@ fn frozen_v3_reference_streams_inventory_larger_than_sql_row() {
             },
         },
     );
+    let source_inventory_bytes = fold.resident_inventory_bytes().unwrap();
+    assert!(source_inventory_bytes > 0);
     let mut full = fold.frozen_snapshot(&plan).unwrap();
+    let small_inventory_bytes = full.resident_inventory_bytes().unwrap();
     plan.outputs.first_segment = 0;
     plan.outputs.segment_end_exclusive = 400;
     plan.limits.resident_file_objects = 400;
@@ -304,6 +307,15 @@ fn frozen_v3_reference_streams_inventory_larger_than_sql_row() {
             held_copy_ids: vec![],
         });
     }
+    let large_inventory_bytes = full.resident_inventory_bytes().unwrap();
+    assert!(large_inventory_bytes > small_inventory_bytes);
+    let mut long_identity = String::with_capacity(1024);
+    long_identity.push('x');
+    full.files[0].native_object.device = NativeValue::Unknown {
+        reason: long_identity,
+    };
+    let long_identity_bytes = full.resident_inventory_bytes().unwrap();
+    assert!(long_identity_bytes > large_inventory_bytes);
     full.state.asset.totals.resident_file_objects = 400;
     full.state.asset.totals.logical_bytes = 400;
     full.state.asset.totals.charged_storage_bytes = 8192 + 400 * 4096;

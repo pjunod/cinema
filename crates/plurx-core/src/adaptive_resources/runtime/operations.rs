@@ -911,6 +911,34 @@ impl NodeResourceRuntime {
             )?;
             return Err(AdmissionRefusal::InsufficientEvidence.into());
         };
+        #[cfg(target_os = "linux")]
+        if let crate::resource_custody::RecoveryMethod::TrustedFixedSoftwareSameBootV1 {
+            pid_namespace,
+            ..
+        } = &plan.recovery
+        {
+            let current = crate::resource_custody::recovery::current_pid_namespace_token();
+            let observed = crate::resource_custody::recovery::pid_namespace_token(process.pid);
+            if process.start_marker == 0
+                || current.as_deref() != Some(pid_namespace.as_str())
+                || observed.as_deref() != Some(pid_namespace.as_str())
+                || self.owner.platform_domain.namespace.as_deref() != Some(pid_namespace.as_str())
+            {
+                if let Some(graph) = role.graph.take() {
+                    role.sealed = Some(graph.seal());
+                }
+                start_transition(
+                    &self.journal,
+                    role,
+                    Mutation::Hold {
+                        reason: "root PID namespace identity unavailable".into(),
+                    },
+                    Effect::Hold,
+                    deadline,
+                )?;
+                return Err(AdmissionRefusal::InsufficientEvidence.into());
+            }
+        }
         let identity = ObservedIdentity {
             version: 1,
             member_id: member,

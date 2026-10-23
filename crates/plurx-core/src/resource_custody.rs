@@ -241,9 +241,11 @@ pub struct RecoverySnapshot {
     /// Append-only effective custodians for retained S; historical R→S owners
     /// in obligations and custody documents remain unchanged.
     pub(crate) recovered_s_holders: Vec<RecoveredSHolder>,
+    /// Append-only current custodians for imported, exited fixed producers.
+    pub(crate) recovered_r_holders: Vec<RecoveredRHolder>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecoveredSHolder {
     pub(crate) obligation_id: Uuid,
     pub(crate) adoption_sequence: i64,
@@ -255,6 +257,20 @@ pub(crate) struct RecoveredSHolder {
     pub(crate) frozen_digest: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecoveredRHolder {
+    pub(crate) obligation_id: Uuid,
+    pub(crate) adoption_sequence: i64,
+    pub(crate) operation_id: Uuid,
+    pub(crate) previous_owner_id: Uuid,
+    pub(crate) current_owner_id: Uuid,
+    pub(crate) original_r_sequence: i64,
+    pub(crate) head: codec_v2::scratch::AssetEventRefV1,
+    pub(crate) root_member_id: Uuid,
+    pub(crate) root_pid: u32,
+    pub(crate) root_creation_marker: u64,
+}
+
 /// Private runtime capability, never deserialized from an obligation row.
 #[derive(Clone, Debug)]
 pub(crate) struct ObligationHandle {
@@ -264,14 +280,59 @@ pub(crate) struct ObligationHandle {
     graph_id: Uuid,
     runtime_binding: ReservationBinding,
     #[cfg(target_os = "linux")]
-    recovery: Option<crate::adaptive_resources::runtime::recovery::RecoveredSAuthority>,
+    recovery: Option<RecoveryAuthority>,
+}
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+enum RecoveryAuthority {
+    RetainedS(crate::adaptive_resources::runtime::recovery::RecoveredSAuthority),
+    ProducerR(crate::adaptive_resources::runtime::recovery::RecoveredRAuthority),
+}
+#[cfg(target_os = "linux")]
+impl RecoveryAuthority {
+    fn journal_id(&self) -> Uuid {
+        match self {
+            Self::RetainedS(value) => value.journal_id(),
+            Self::ProducerR(value) => value.journal_id(),
+        }
+    }
+    fn current_owner_id(&self) -> Uuid {
+        match self {
+            Self::RetainedS(value) => value.current_owner_id(),
+            Self::ProducerR(value) => value.current_owner_id(),
+        }
+    }
+    fn obligation_id(&self) -> Uuid {
+        match self {
+            Self::RetainedS(value) => value.obligation_id(),
+            Self::ProducerR(value) => value.obligation_id(),
+        }
+    }
+    fn binding(&self) -> ReservationBinding {
+        match self {
+            Self::RetainedS(value) => value.binding(),
+            Self::ProducerR(value) => value.binding(),
+        }
+    }
 }
 impl ObligationHandle {
     #[cfg(target_os = "linux")]
     pub(crate) fn recovery_authority(
         &self,
     ) -> Option<&crate::adaptive_resources::runtime::recovery::RecoveredSAuthority> {
-        self.recovery.as_ref()
+        match self.recovery.as_ref() {
+            Some(RecoveryAuthority::RetainedS(authority)) => Some(authority),
+            _ => None,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn producer_recovery_authority(
+        &self,
+    ) -> Option<&crate::adaptive_resources::runtime::recovery::RecoveredRAuthority> {
+        match self.recovery.as_ref() {
+            Some(RecoveryAuthority::ProducerR(authority)) => Some(authority),
+            _ => None,
+        }
     }
     pub(crate) fn obligation_id(&self) -> Uuid {
         self.obligation_id
@@ -453,6 +514,10 @@ enum Command {
         proof: crate::adaptive_resources::runtime::recovery::NativeRetainedSImportProof,
         exit: recovery::PositivePreviousOwnerExit,
     },
+    #[cfg(target_os = "linux")]
+    RecoverActiveR {
+        proof: crate::adaptive_resources::runtime::recovery::NativeActiveRImportProof,
+    },
     Prepare {
         batch: PrepareBatch,
         handles: Vec<ObligationHandle>,
@@ -472,6 +537,8 @@ enum Command {
 pub(crate) enum OperationResult {
     #[cfg(target_os = "linux")]
     RecoveredSAdoption(RecoveryAdoptionAck),
+    #[cfg(target_os = "linux")]
+    RecoveredRAdoption(RecoveryAdoptionAck),
     Prepared(PreparedBatch),
     Changed(CommitAck),
     RetiredWithAssets {

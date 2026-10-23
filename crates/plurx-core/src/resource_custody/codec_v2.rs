@@ -50,6 +50,16 @@ pub(crate) enum NativeValue<T> {
     Unknown { reason: String },
 }
 impl<T> NativeValue<T> {
+    fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        match self {
+            Self::Known { .. } => Ok(0),
+            Self::Unknown { reason } => {
+                u64::try_from(reason.capacity()).map_err(|_| codec::invalid())
+            }
+        }
+    }
+}
+impl<T> NativeValue<T> {
     fn validate(&self) -> Result<(), CustodyError> {
         if let Self::Unknown { reason } = self {
             codec::text(reason)?;
@@ -75,6 +85,18 @@ impl FilesystemDomain {
     fn validate(&self) -> Result<(), CustodyError> {
         codec::validate_boot(&self.os_boot)?;
         self.mount_namespace.validate()
+    }
+    fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        let boot = match &self.os_boot {
+            codec::BootIdentity::Known { provider, .. } => {
+                u64::try_from(provider.capacity()).map_err(|_| codec::invalid())?
+            }
+            codec::BootIdentity::Unknown { reason } => {
+                u64::try_from(reason.capacity()).map_err(|_| codec::invalid())?
+            }
+        };
+        boot.checked_add(self.mount_namespace.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +191,19 @@ impl NativeObject {
         self.inode.validate()?;
         self.mount_id.validate()?;
         self.filesystem_domain.validate()
+    }
+    pub(super) fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        let mut bytes = self
+            .device
+            .resident_heap_bytes()?
+            .checked_add(self.inode.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)?;
+        bytes = bytes
+            .checked_add(self.mount_id.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)?;
+        bytes
+            .checked_add(self.filesystem_domain.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

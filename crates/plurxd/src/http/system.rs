@@ -249,6 +249,43 @@ pub async fn setup(
     }))
 }
 
+/// Node-local physical accounting only; absence/failure never means zero usage.
+#[derive(Serialize)]
+pub struct ResourceOwnershipDto {
+    pub state: &'static str,
+    pub scope: &'static str,
+    pub unreconciled_custody: Option<bool>,
+    pub accounting: Option<plurx_core::adaptive_resources::LedgerSnapshot>,
+}
+impl ResourceOwnershipDto {
+    fn read(state: &AppState) -> Self {
+        let scope = "selected_linux_finite_software_vod";
+        let Some(runtime) = state.resource_runtime.as_ref() else {
+            return Self {
+                state: "not_installed",
+                scope,
+                unreconciled_custody: None,
+                accounting: None,
+            };
+        };
+        let unreconciled_custody = Some(runtime.has_unreconciled_custody());
+        match runtime.accounting() {
+            Ok(accounting) => Self {
+                state: "available",
+                scope,
+                unreconciled_custody,
+                accounting: Some(accounting),
+            },
+            Err(_) => Self {
+                state: "accounting_unavailable",
+                scope,
+                unreconciled_custody,
+                accounting: None,
+            },
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct SystemDto {
     pub platform: &'static str,
@@ -256,6 +293,7 @@ pub struct SystemDto {
     /// data is tagged Unknown, never replaced with unconstrained host totals.
     pub resource_limits: plurx_core::resource_limits::EffectiveLimits,
     pub resource_graphs: plurx_core::process::observation::ManagedGraphSnapshot,
+    pub resource_ownership: ResourceOwnershipDto,
     pub application_executable: Option<String>,
     pub runtime_location: Option<String>,
     pub graphics_devices: Vec<plurx_core::transcode::GraphicsDevice>,
@@ -453,6 +491,7 @@ pub async fn system_info(
         platform: std::env::consts::OS,
         resource_limits: plurx_core::resource_limits::snapshot(),
         resource_graphs: plurx_core::process::observation::managed_graphs(),
+        resource_ownership: ResourceOwnershipDto::read(&state),
         application_executable: executable.as_ref().map(|path| path.display().to_string()),
         runtime_location: executable
             .as_ref()

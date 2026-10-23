@@ -234,6 +234,19 @@ pub(super) async fn build(
             },
         ));
     }
+    // Read coherent saved intent before acquisition. Automatic/absent retain
+    // the conservative local default until actual learning authorizes a plan;
+    // this does not rewrite numeric rollback values or provenance.
+    let (_, software) = plurx_core::resource_settings::admission_pair(shared.store.as_ref())
+        .await
+        .map_err(|error| format!("reading finite software pool policy: {error}"))?;
+    let software_pool_threads = software
+        .as_deref()
+        .map(str::trim)
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| "finite software pool policy is invalid".to_owned())?
+        .unwrap_or_else(|| crate::admission::software_budget() as u64);
     let observed_runtime = Arc::clone(runtime);
     let epoch = tokio::task::spawn_blocking(move || observed_runtime.observe_admission_capacity())
         .await
@@ -243,7 +256,15 @@ pub(super) async fn build(
         .accounting()
         .map_err(|error| format!("reading finite admission: {error:?}"))?
         .capacity;
-    let request = finite_profile::compile(shared, key, &recipe, &plan, epoch, capacity)?;
+    let request = finite_profile::compile(
+        shared,
+        key,
+        &recipe,
+        &plan,
+        epoch,
+        capacity,
+        software_pool_threads,
+    )?;
     // No selected source/root/marker has been opened. Core synchronously
     // reserves the complete role and retains its prepare operation before return.
     let owner = runtime

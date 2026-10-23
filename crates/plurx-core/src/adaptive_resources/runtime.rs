@@ -69,11 +69,17 @@ pub struct NodeResourceRuntime {
     owner: OwnerIdentity,
     recovered: RecoverySnapshot,
     ledger: ResourceLedger,
+    /// Advisory cost summaries only. The journal and ledger never consult
+    /// these records for admission, physical closure or refund.
+    #[cfg(target_os = "linux")]
+    history: Arc<Mutex<crate::resource_history::ResourceHistory>>,
     recovered_bindings: BTreeMap<Uuid, ReservationBinding>,
     // Reopened native S owners remain under their complete restored holds.
     // Import alone cannot authorize serving or old-owner journal settlement.
     #[cfg(target_os = "linux")]
     recovered_s: Mutex<BTreeMap<Uuid, Arc<recovery::ImportedRetainedS>>>,
+    #[cfg(target_os = "linux")]
+    recovered_r: Mutex<BTreeMap<Uuid, Arc<recovery::ImportedActiveR>>>,
     #[cfg(target_os = "linux")]
     recovered_adoptions: Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryAdoption>>>>,
     operations: Mutex<operations::Operations>,
@@ -85,8 +91,25 @@ impl NodeResourceRuntime {
     /// Blocking startup composition. There is deliberately no empty fallback on
     /// open or reconstruction failure, and no retry as FirstInstallation.
     pub fn open(options: OpenOptions) -> Result<Self, RuntimeOpenError> {
+        #[cfg(target_os = "linux")]
+        let history_directory = options.data_dir.clone();
         let owner = options.owner.clone();
         let (journal, recovered) = CustodyJournal::open(options)?;
+        #[cfg(target_os = "linux")]
+        let history = {
+            let unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+                .unwrap_or(0);
+            // The journal-restored installation identity persists across daemon
+            // restarts; a fresh daemon owner UUID would discard every prior.
+            Arc::new(Mutex::new(crate::resource_history::ResourceHistory::open(
+                &history_directory,
+                recovered.installation_id,
+                unix_ms,
+            )))
+        };
         // Physical hard bounds have not been observed yet. Unknown is NOT an
         // unbounded cap or zero usage; every recovered cost still counts in full.
         let (ledger, recovered_bindings) = restore_accounting(
@@ -99,9 +122,13 @@ impl NodeResourceRuntime {
             owner,
             recovered,
             ledger,
+            #[cfg(target_os = "linux")]
+            history,
             recovered_bindings,
             #[cfg(target_os = "linux")]
             recovered_s: Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
+            recovered_r: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             recovered_adoptions: Mutex::new(BTreeMap::new()),
             operations: Mutex::new(operations::Operations::default()),
@@ -199,6 +226,16 @@ impl From<AdmissionRefusal> for RuntimeOpenError {
 /// random host identity, configured node ID or sampled wall clock.
 pub(crate) fn daemon_owner(node_id: String, cluster_id: String) -> OwnerIdentity {
     let (owner_id, boot) = physical_graph::daemon_identity();
+    #[cfg(target_os = "linux")]
+    let pid_namespace = crate::resource_custody::recovery::current_pid_namespace_token();
+    #[cfg(not(target_os = "linux"))]
+    let pid_namespace: Option<String> = None;
+    #[cfg(target_os = "linux")]
+    let continuity_provider = pid_namespace
+        .as_ref()
+        .map(|_| crate::resource_custody::recovery::PID_NAMESPACE_PROVIDER.to_owned());
+    #[cfg(not(target_os = "linux"))]
+    let continuity_provider: Option<String> = None;
     let creation_marker = match ProcessObserver::new(std::process::id())
         .snapshot(Instant::now())
         .counters
@@ -238,8 +275,8 @@ pub(crate) fn daemon_owner(node_id: String, cluster_id: String) -> OwnerIdentity
             version: 1,
             platform: std::env::consts::OS.into(),
             host_identity: None,
-            namespace: None,
-            continuity_provider: None,
+            namespace: pid_namespace,
+            continuity_provider,
         },
     }
 }

@@ -154,6 +154,14 @@ impl BootstrapMember {
         }
     }
 
+    pub(super) fn resident_inventory_bytes(&self) -> Result<u64, OperationError> {
+        self.fold
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .resident_inventory_bytes()
+            .map_err(Into::into)
+    }
+
     pub(super) fn frozen_inventory(&self) -> Result<FrozenScratchV3, OperationError> {
         self.fold
             .as_ref()
@@ -220,6 +228,9 @@ impl BootstrapMember {
         }
         let target_fold =
             fold.adopt_frozen(&self.plan, reference, target_obligation, target_member)?;
+        if target_fold.resident_inventory_bytes()? > target_plan.limits.resident_memory_bytes {
+            return Err(OperationError::State);
+        }
         Ok(PreparedBootstrapTransfer {
             target_plan: target_plan.clone(),
             target_fold,

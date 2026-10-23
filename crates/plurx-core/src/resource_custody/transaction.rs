@@ -2,6 +2,7 @@
 mod assets;
 mod inventory;
 mod recovery;
+mod recovery_r;
 mod retained_settlement;
 mod retirement;
 pub(in crate::resource_custody) mod scratch;
@@ -295,6 +296,8 @@ pub(super) fn snapshot(
         &owners,
         next,
     )?;
+    let recovered_r_holders =
+        recovery_r::load_overlay(connection, schema_version, &obligations, &owners, next)?;
     // Validate operation records too: unknown/truncated codecs cannot be ignored.
     let mut stmt =
         connection.prepare("SELECT operation_id,request_json,result_json FROM operations")?;
@@ -302,6 +305,7 @@ pub(super) fn snapshot(
     let mut operation_sequences = BTreeSet::new();
     let mut validated_last = BTreeSet::new();
     let mut validated_holders = BTreeSet::new();
+    let mut validated_r_holders = BTreeSet::new();
     while let Some(row) = rows.next()? {
         let operation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let fingerprint: String = codec::decode(&row.get::<_, String>(1)?)?;
@@ -478,12 +482,29 @@ pub(super) fn snapshot(
                     return Err(codec::invalid());
                 }
             }
+            DiskResult::RecoveredRAdoption(ack) => {
+                let holder = recovered_r_holders
+                    .iter()
+                    .find(|holder| holder.operation_id == operation_id)
+                    .ok_or_else(codec::invalid)?;
+                if ack.operation_id != operation_id
+                    || ack.obligation_id != holder.obligation_id
+                    || ack.previous_owner_id != holder.previous_owner_id
+                    || ack.current_owner_id != holder.current_owner_id
+                    || ack.sequence != holder.adoption_sequence
+                    || !validated_r_holders.insert(operation_id)
+                    || !operation_sequences.insert(ack.sequence)
+                {
+                    return Err(codec::invalid());
+                }
+            }
         }
     }
     // v1 retains all operation history; a gap is missing authority, not a
     // pruned diagnostic. A future pruning format needs an explicit checkpoint.
     if validated_last.len() != all_ids.len()
         || validated_holders.len() != recovered_s_holders.len()
+        || validated_r_holders.len() != recovered_r_holders.len()
         || i64::try_from(operation_sequences.len()).ok() != Some(next)
     {
         return Err(codec::invalid());
@@ -500,6 +521,7 @@ pub(super) fn snapshot(
         protected_paths: protected.into_iter().collect(),
         owners: pending_owners,
         recovered_s_holders,
+        recovered_r_holders,
     })
 }
 
@@ -575,6 +597,7 @@ enum DiskResult {
     AssetChangedV3(scratch::bootstrap::AssetChangedV3),
     RetiredWithAssets(RetirementAck),
     RecoveredSAdoption(RecoveryAdoptionAck),
+    RecoveredRAdoption(RecoveryAdoptionAck),
 }
 
 pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
@@ -674,21 +697,44 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
             let mut value = serde_json::json!({"id":key.handle.obligation_id,"graph":key.handle.graph_id,"owner":key.handle.owner_id,"sequence":key.expected_sequence,"action":action});
             #[cfg(target_os = "linux")]
             if let Some(authority) = &key.handle.recovery {
-                value.as_object_mut().ok_or_else(codec::invalid)?.insert(
-                    "recovered_s_holder".into(),
-                    serde_json::json!({
-                        "journal": authority.journal_id(),
-                        "installation": authority.installation_id(),
-                        "obligation": authority.obligation_id(),
-                        "original_owner": authority.original_owner_id(),
-                        "previous_owner": authority.previous_owner_id(),
-                        "current_owner": authority.current_owner_id(),
-                        "adoption_operation": authority.adoption_operation_id(),
-                        "adoption_sequence": authority.adoption_sequence(),
-                        "import_head": authority.state_head(),
-                        "frozen_inventory": authority.frozen_digest(),
-                    }),
-                );
+                let (name, holder) = match authority {
+                    RecoveryAuthority::RetainedS(authority) => (
+                        "recovered_s_holder",
+                        serde_json::json!({
+                            "journal": authority.journal_id(),
+                            "installation": authority.installation_id(),
+                            "obligation": authority.obligation_id(),
+                            "original_owner": authority.original_owner_id(),
+                            "previous_owner": authority.previous_owner_id(),
+                            "current_owner": authority.current_owner_id(),
+                            "adoption_operation": authority.adoption_operation_id(),
+                            "adoption_sequence": authority.adoption_sequence(),
+                            "import_head": authority.state_head(),
+                            "frozen_inventory": authority.frozen_digest(),
+                        }),
+                    ),
+                    RecoveryAuthority::ProducerR(authority) => (
+                        "recovered_r_holder",
+                        serde_json::json!({
+                            "journal": authority.journal_id(),
+                            "installation": authority.installation_id(),
+                            "obligation": authority.obligation_id(),
+                            "graph": authority.graph_id(),
+                            "original_owner": authority.original_owner_id(),
+                            "current_owner": authority.current_owner_id(),
+                            "adoption_operation": authority.adoption_operation_id(),
+                            "adoption_sequence": authority.adoption_sequence(),
+                            "import_head": authority.state_head(),
+                            "root_member": authority.root_member_id(),
+                            "root_pid": authority.root_pid(),
+                            "root_creation_marker": authority.root_creation_marker(),
+                        }),
+                    ),
+                };
+                value
+                    .as_object_mut()
+                    .ok_or_else(codec::invalid)?
+                    .insert(name.into(), holder);
             }
             value
         }
@@ -703,6 +749,22 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
                 "head": proof.state_head(),
                 "frozen_inventory": proof.frozen_digest(),
                 "exit_owner": exit.owner_id(),
+            }
+        }),
+        #[cfg(target_os = "linux")]
+        Command::RecoverActiveR { proof } => serde_json::json!({
+            "recover_fixed_r_v1": {
+                "journal": proof.journal_id(),
+                "installation": proof.installation_id(),
+                "obligation": proof.obligation_id(),
+                "graph": proof.graph_id(),
+                "previous_owner": proof.previous_owner_id(),
+                "current_owner": proof.current_owner_id(),
+                "original_sequence": proof.original_sequence(),
+                "head": proof.state_head(),
+                "root_member": proof.root_exit().root_member_id(),
+                "root_pid": proof.root_exit().pid(),
+                "root_creation_marker": proof.root_exit().creation_marker(),
             }
         }),
     };
@@ -810,6 +872,10 @@ pub(super) fn execute(
             Command::RecoverRetainedS { proof, exit } => {
                 recovery::adopt(&tx, &storage.witness, owner, operation.id, proof, exit)?
             }
+            #[cfg(target_os = "linux")]
+            Command::RecoverActiveR { proof } => {
+                recovery_r::adopt(&tx, &storage.witness, owner, operation.id, proof)?
+            }
         };
         tx.execute(
             "INSERT INTO operations VALUES(?1,?2,?3)",
@@ -843,7 +909,10 @@ pub(super) fn execute(
         e
     })?;
     #[cfg(target_os = "linux")]
-    if matches!(operation.command, Command::RecoverRetainedS { .. }) {
+    if matches!(
+        operation.command,
+        Command::RecoverRetainedS { .. } | Command::RecoverActiveR { .. }
+    ) {
         snapshot(&storage.connection, &storage.witness).map_err(|mut error| {
             error.certainty = CommitCertainty::Unknown;
             error
@@ -858,6 +927,15 @@ pub(super) fn execute(
                 && ack.current_owner_id == proof.current_owner_id() =>
         {
             Ok(OperationResult::RecoveredSAdoption(ack))
+        }
+        #[cfg(target_os = "linux")]
+        (Command::RecoverActiveR { proof }, DiskResult::RecoveredRAdoption(ack))
+            if ack.operation_id == operation.id
+                && ack.obligation_id == proof.obligation_id()
+                && ack.previous_owner_id == proof.previous_owner_id()
+                && ack.current_owner_id == proof.current_owner_id() =>
+        {
+            Ok(OperationResult::RecoveredRAdoption(ack))
         }
         (
             Command::Change {
@@ -1244,7 +1322,14 @@ fn change(
     }
     #[cfg(target_os = "linux")]
     if let Some(authority) = &h.recovery {
-        return recovery::change(tx, witness, owner, key, mutation, authority);
+        return match authority {
+            RecoveryAuthority::RetainedS(authority) => {
+                recovery::change(tx, witness, owner, key, mutation, authority)
+            }
+            RecoveryAuthority::ProducerR(authority) => {
+                recovery_r::change(tx, witness, owner, key, mutation, authority)
+            }
+        };
     }
     let (graph, recorded_owner, prior_phase, seq, manifest): (Vec<u8>,Vec<u8>,String,i64,String) = tx.query_row("SELECT graph_id,owner_id,phase,sequence,manifest_json FROM obligations WHERE obligation_id=?1",[h.obligation_id.as_bytes()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
     if codec::uuid_from_bytes(&graph)? != h.graph_id

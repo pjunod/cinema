@@ -8,6 +8,11 @@ pub struct ResourceCapacity {
     pub cpu_ns_per_second: Metric<u64>,
     pub memory_bytes: Metric<u64>,
     pub handles: Metric<u64>,
+    /// Kernel task headroom. Process roots are a known minimum task demand;
+    /// producer thread peaks are separately unknown and serialized.
+    pub kernel_tasks: Metric<u64>,
+    /// Conservative upper bound on process roots; Linux derives this from
+    /// task headroom because every root process consumes at least one task.
     pub processes: Metric<u64>,
     pub hardware_slots: Metric<u64>,
     pub tuner_slots: Metric<u64>,
@@ -25,6 +30,7 @@ impl From<Metric<ResourceVector>> for ResourceCapacity {
                 cpu_ns_per_second: Metric::Known(v.cpu_ns_per_second),
                 memory_bytes: Metric::Known(v.peak_memory_bytes),
                 handles: Metric::Known(v.handles),
+                kernel_tasks: Metric::Known(v.processes),
                 processes: Metric::Known(v.processes),
                 hardware_slots: Metric::Known(v.hardware_slots),
                 tuner_slots: Metric::Known(v.tuner_slots),
@@ -34,6 +40,7 @@ impl From<Metric<ResourceVector>> for ResourceCapacity {
                 cpu_ns_per_second: Metric::Unknown(reason),
                 memory_bytes: Metric::Unknown(reason),
                 handles: Metric::Unknown(reason),
+                kernel_tasks: Metric::Unknown(reason),
                 processes: Metric::Unknown(reason),
                 hardware_slots: Metric::Unknown(reason),
                 tuner_slots: Metric::Unknown(reason),
@@ -45,6 +52,8 @@ impl From<Metric<ResourceVector>> for ResourceCapacity {
 impl ResourceCapacity {
     /// Unknown RAM permits only the explicit serialized-cold producer policy.
     /// Its numeric memory remains a bounded component, never a fictitious peak.
+    /// Kernel task headroom independently checks the known minimum process roots;
+    /// unknown producer task peaks are serialized in the ledger.
     pub(super) fn check(
         self,
         total: ResourceVector,
@@ -73,6 +82,12 @@ impl ResourceCapacity {
             (
                 ResourceDimension::Processes,
                 self.processes,
+                total.processes,
+                expansion.processes,
+            ),
+            (
+                ResourceDimension::KernelTasks,
+                self.kernel_tasks,
                 total.processes,
                 expansion.processes,
             ),

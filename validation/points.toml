@@ -379,6 +379,16 @@ missing = "fail"
 timeout_seconds = 600
 
 [[checks]]
+id = "finite-software-vod-lifecycle"
+title = "Ordinary Linux software VOD native custody, counted response, and retained refund"
+command = "cargo test -p plurxd --features hiqlite-store vodserve::tests::ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refunds_on_evict -- --exact --nocapture"
+profiles = ["nightly"]
+platforms = ["linux"]
+requires = ["cargo", "ffmpeg", "ffprobe"]
+missing = "fail"
+timeout_seconds = 1800
+
+[[checks]]
 id = "live-tv-hardware"
 title = "A real HDHomeRun tunes, reports its own busy tuners, and hands them back"
 command = "scripts/live-tv-hardware --self-host --device \"$PLURX_LIVE_TV_DEVICE\" --tuners \"${PLURX_LIVE_TV_TUNERS:-1}\" --out target/live-tv-hardware"
@@ -1755,3 +1765,16 @@ contract = "An eligible local graphical session exposes native server status, li
 paths = ["crates/plurx-tray/**", "vendor/ksni/**"]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
 depends_on = ["desktop.control"]
+
+[[points]]
+id = "playback.finite-software-vod"
+title = "Ordinary finite software VOD lifecycle"
+contract = "An ordinary selected Linux software VOD keeps its actual source, process, files, counted responses, and retained asset under durable resource custody; retirement frees the producer claim while the asset remains charged, and exact native eviction refunds it."
+paths = [
+  "crates/plurxd/src/vod/tests/finite_software.rs",
+  "crates/plurxd/src/vod/finite_software.rs",
+  "crates/plurxd/src/vod/finite_profile.rs",
+  "crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs",
+]
+checks = ["rust-gate", "rust-gate-ci", "finite-software-vod-lifecycle"]
+depends_on = ["playback.pipeline"]

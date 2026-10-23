@@ -105,6 +105,12 @@ pub enum RecoveryMethod {
     LiveOnly {
         reason: String,
     },
+    /// A fixed, no-helper software root. These persisted fields select a
+    /// possible recovery path; they never prove process exit or close custody.
+    TrustedFixedSoftwareSameBootV1 {
+        pid_namespace: String,
+        executable_binding: String,
+    },
     AuthoritativeResource {
         authority: String,
         operation: Uuid,
@@ -331,6 +337,34 @@ pub(super) fn validate_manifest(manifest: &Manifest) -> Result<(), CustodyError>
                 }
             }
             RecoveryMethod::LiveOnly { reason } => text(reason)?,
+            RecoveryMethod::TrustedFixedSoftwareSameBootV1 {
+                pid_namespace,
+                executable_binding,
+            } => {
+                if m.kind != MemberKind::Root || m.adapter != Adapter::ProcessRoot {
+                    return Err(invalid());
+                }
+                text(pid_namespace)?;
+                text(executable_binding)?;
+                let (device, inode) = pid_namespace.split_once(':').ok_or_else(invalid)?;
+                let device = device.parse::<u64>().map_err(|_| invalid())?;
+                let inode = inode.parse::<u64>().map_err(|_| invalid())?;
+                let Some(digest) =
+                    executable_binding.strip_prefix("software-avc-executable-sha256:")
+                else {
+                    return Err(invalid());
+                };
+                if device == 0
+                    || inode == 0
+                    || pid_namespace != &format!("{device}:{inode}")
+                    || digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    return Err(invalid());
+                }
+            }
             RecoveryMethod::AuthoritativeResource {
                 authority,
                 operation,

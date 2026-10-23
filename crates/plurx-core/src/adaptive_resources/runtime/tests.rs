@@ -88,6 +88,7 @@ fn snapshot(phases: &[Phase], trial: bool) -> RecoverySnapshot {
         trial_groups: trial_id.into_iter().collect(),
         protected_paths: Vec::new(),
         recovered_s_holders: Vec::new(),
+        recovered_r_holders: Vec::new(),
         owners: vec![owner],
         retained_assets: Vec::new(),
     }

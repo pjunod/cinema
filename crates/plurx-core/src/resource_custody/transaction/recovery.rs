@@ -198,6 +198,7 @@ fn validate_overlay_history(
             DiskResult::AssetChangedV3(record) => record.ack.sequence,
             DiskResult::RetiredWithAssets(ack) => ack.sequence,
             DiskResult::RecoveredSAdoption(ack) => ack.sequence,
+            DiskResult::RecoveredRAdoption(ack) => ack.sequence,
         };
         sequence = sequence.checked_add(1).ok_or_else(codec::invalid)?;
         if committed_sequence != sequence {
@@ -258,6 +259,7 @@ fn validate_overlay_history(
                     }
                 }
             }
+            DiskResult::RecoveredRAdoption(_) => {}
             DiskResult::Prepared { .. } => {}
         }
     }

@@ -62,6 +62,7 @@ pub(super) fn compile(
     plan: &SegmentPlan,
     limit_epoch: u64,
     capacity: ResourceCapacity,
+    software_pool_threads: u64,
 ) -> Result<SoftwareVodRequest, String> {
     let encoding = recipe
         .encoding
@@ -81,11 +82,11 @@ pub(super) fn compile(
         Metric::Known(_) => return Err("finite software CPU capacity is zero".into()),
         Metric::Unknown(_) => return Err("finite software CPU capacity is unknown".into()),
     };
-    let thread_count = cpu_ns_per_second
-        .div_ceil(1_000_000_000)
-        .clamp(1, u64::from(u32::MAX));
-    let software_threads = u32::try_from(thread_count)
-        .map_err(|_| "finite software thread count overflows".to_owned())?;
+    let software_threads = encoder_threads(
+        cpu_ns_per_second,
+        encoding.options.software_threads,
+        software_pool_threads,
+    )?;
 
     let mut options = encoding.options.clone();
     options.start_seconds = 0.0;
@@ -265,4 +266,48 @@ fn align_up(value: u64, unit: u64) -> Result<u64, String> {
         .checked_add(unit - 1)
         .map(|rounded| rounded / unit * unit)
         .ok_or_else(|| "finite software aligned output bound overflows".into())
+}
+
+/// Encoder creation limit, separate from expected CPU service and total kernel
+/// tasks. Zero pool policy means one serialized producer, not zero threads;
+/// the core's unknown producer claims supply that concurrency restriction.
+#[cfg(target_os = "linux")]
+fn encoder_threads(
+    cpu_ns_per_second: u64,
+    inherited: Option<u32>,
+    pool: u64,
+) -> Result<u32, String> {
+    if cpu_ns_per_second == 0 || inherited == Some(0) {
+        return Err("finite software encoder requires positive CPU and thread limits".into());
+    }
+    let physical = cpu_ns_per_second
+        .div_ceil(1_000_000_000)
+        .min(u64::from(u32::MAX));
+    let recipe = inherited.map(u64::from).unwrap_or(physical);
+    let threads = physical.min(recipe);
+    let threads = if pool == 0 {
+        threads
+    } else {
+        threads.min(pool)
+    };
+    u32::try_from(threads).map_err(|_| "finite software encoder thread count overflows".into())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_pool_and_frozen_recipe_bound_encoder_creation_without_rewriting_cpu_service() {
+        assert_eq!(encoder_threads(16_000_000_000, Some(8), 3).unwrap(), 3);
+        assert_eq!(encoder_threads(16_000_000_000, Some(2), 8).unwrap(), 2);
+        assert_eq!(encoder_threads(1_500_000_000, None, 8).unwrap(), 2);
+    }
+
+    #[test]
+    fn serialized_zero_pool_preserves_one_producers_positive_encoder_threads() {
+        assert_eq!(encoder_threads(4_000_000_000, Some(3), 0).unwrap(), 3);
+        assert!(encoder_threads(0, None, 0).is_err());
+        assert!(encoder_threads(4_000_000_000, Some(0), 0).is_err());
+    }
 }

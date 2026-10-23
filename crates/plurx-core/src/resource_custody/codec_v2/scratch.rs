@@ -141,6 +141,18 @@ pub(crate) struct DirectoryObservedV1 {
     pub acquisition_io_id: Id,
     pub held_copy_ids: Vec<Id>,
 }
+impl DirectoryObservedV1 {
+    pub(super) fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        let mut bytes = u64::try_from(self.held_copy_ids.capacity())
+            .ok()
+            .and_then(|n| n.checked_mul(std::mem::size_of::<Id>() as u64))
+            .ok_or_else(codec::invalid)?;
+        bytes = bytes
+            .checked_add(self.native_object.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)?;
+        Ok(bytes)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AssetEventRefV1 {
@@ -185,6 +197,15 @@ pub(crate) struct ScratchStateV2 {
     #[serde(skip_serializing_if = "is_false")]
     pub directory_synced: bool,
 }
+impl ScratchStateV2 {
+    pub(super) fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        self.directory
+            .as_ref()
+            .map(DirectoryObservedV1::resident_heap_bytes)
+            .transpose()
+            .map(|bytes| bytes.unwrap_or_default())
+    }
+}
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -201,6 +222,17 @@ pub(crate) struct FileObservedV1 {
     pub reported_allocated_bytes: NativeValue<u64>,
     pub charged_bytes: u64,
     pub held_copy_ids: Vec<Id>,
+}
+impl FileObservedV1 {
+    pub(super) fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        let bytes = u64::try_from(self.held_copy_ids.capacity())
+            .ok()
+            .and_then(|n| n.checked_mul(std::mem::size_of::<Id>() as u64))
+            .ok_or_else(codec::invalid)?;
+        bytes
+            .checked_add(self.native_object.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

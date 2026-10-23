@@ -846,6 +846,8 @@ impl NodeResourceRuntime {
         let mut plans = Vec::with_capacity(media_source_count + 4);
         let mut source_members = Vec::with_capacity(media_source_count + 1);
         let mut source_specs = Vec::with_capacity(media_source_count + 1);
+        #[cfg(target_os = "linux")]
+        let history_basis = pump::history_basis(&request);
         let sources = request
             .sources
             .into_iter()
@@ -853,7 +855,7 @@ impl NodeResourceRuntime {
             .chain(std::iter::once((
                 binary_source,
                 Some(binary_digest),
-                binary_binding,
+                binary_binding.clone(),
             )));
         for (source, expected_sha256, recipe_source_binding) in sources {
             let member = id();
@@ -974,8 +976,25 @@ impl NodeResourceRuntime {
                 .to_str()
                 .ok_or_else(invalid)?
                 .to_owned(),
-            recovery: RecoveryMethod::LiveOnly {
-                reason: "fixed software VOD graph; no old-domain release proof".into(),
+            recovery: if cfg!(target_os = "linux")
+                && self.owner.platform_domain.continuity_provider.as_deref()
+                    == Some("linux_kernel_pid_namespace_v1")
+                && matches!(&self.owner.os_boot, BootIdentity::Known { provider, .. }
+                    if provider == "linux_kernel_boot_id")
+            {
+                match &self.owner.platform_domain.namespace {
+                    Some(pid_namespace) => RecoveryMethod::TrustedFixedSoftwareSameBootV1 {
+                        pid_namespace: pid_namespace.clone(),
+                        executable_binding: binary_binding.clone(),
+                    },
+                    None => RecoveryMethod::LiveOnly {
+                        reason: "fixed software VOD root namespace unavailable".into(),
+                    },
+                }
+            } else {
+                RecoveryMethod::LiveOnly {
+                    reason: "fixed software VOD root continuity unavailable".into(),
+                }
             },
             owned_by: None,
             depends_on: vec![],
@@ -1053,8 +1072,23 @@ impl NodeResourceRuntime {
             directory_path: directory_path.clone(),
             encoded_process_marker: request.encoded_process_marker,
         };
+        #[cfg(target_os = "linux")]
+        let history_key = history_basis.and_then(|basis| {
+            self.ledger
+                .actual_history_mix_for(family)
+                .ok()
+                .map(|mix| basis.with_mix(mix))
+        });
         let (pump, events) = pump::SoftwarePump::new(output, request.producer)
             .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;
+        #[cfg(target_os = "linux")]
+        let pump = {
+            let mut pump = pump;
+            if let Some(key) = history_key {
+                pump.bind_history_key(key);
+            }
+            pump
+        };
         let control = Arc::new(FiniteControl::new());
         self.queue_finite_vod(
             &preparation,

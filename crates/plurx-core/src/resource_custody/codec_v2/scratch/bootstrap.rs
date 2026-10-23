@@ -136,6 +136,28 @@ pub(crate) struct BootstrapStateV1 {
     #[serde(skip_serializing_if = "is_false")]
     pub retained_parent_synced: bool,
 }
+impl BootstrapStateV1 {
+    fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        let mut bytes = 0u64;
+        for directory in [self.current.as_ref(), self.parent.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            bytes = bytes
+                .checked_add(directory.observed.resident_heap_bytes()?)
+                .ok_or_else(codec::invalid)?;
+        }
+        if let Some(child) = &self.possible_child {
+            bytes = bytes
+                .checked_add(
+                    u64::try_from(child.child_component.capacity())
+                        .map_err(|_| codec::invalid())?,
+                )
+                .ok_or_else(codec::invalid)?;
+        }
+        Ok(bytes)
+    }
+}
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -145,6 +167,20 @@ pub(crate) struct ScratchStateV3 {
     pub version: u32,
     pub asset: ScratchStateV2,
     pub bootstrap: BootstrapStateV1,
+}
+impl ScratchStateV3 {
+    pub(super) fn resident_heap_bytes(&self) -> Result<u64, CustodyError> {
+        let mut bytes = 0u64;
+        if let Some(directory) = &self.asset.directory {
+            bytes = bytes
+                .checked_add(directory.resident_heap_bytes()?)
+                .ok_or_else(codec::invalid)?;
+        }
+        bytes = bytes
+            .checked_add(self.bootstrap.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)?;
+        Ok(bytes)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]

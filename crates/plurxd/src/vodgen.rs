@@ -9,9 +9,7 @@ use crate::renditiondir::InitIdentity;
 #[cfg(test)]
 use plurx_core::fmp4::{CutPolicy, FragmentReader, Init, Unit};
 #[cfg(test)]
-use plurx_core::segplan::{
-    entry_row, FragmentIndex, PlanEntryKind, SegmentPlan, LANDING_WINDOW,
-};
+use plurx_core::segplan::{entry_row, FragmentIndex, PlanEntryKind, SegmentPlan, LANDING_WINDOW};
 
 #[cfg(test)]
 mod tests {

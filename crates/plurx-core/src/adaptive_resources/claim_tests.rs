@@ -6,6 +6,7 @@ fn capacity(cpu: Metric<u64>, memory: Metric<u64>) -> ResourceCapacity {
         cpu_ns_per_second: cpu,
         memory_bytes: memory,
         handles: Metric::Known(100),
+        kernel_tasks: Metric::Known(100),
         processes: Metric::Known(100),
         hardware_slots: Metric::Known(100),
         tuner_slots: Metric::Known(100),
@@ -220,6 +221,77 @@ fn unknown_nonmemory_capacity_refuses_serialized_cold_work() {
     let snapshot = ledger.snapshot().expect("refusal keeps ledger empty");
     assert_eq!(snapshot.used, ResourceVector::default());
     assert_eq!(snapshot.held, 0);
+}
+
+#[test]
+fn unknown_kernel_task_peak_serializes_process_roots_in_both_orders() {
+    let cap = || capacity(Metric::Known(100), Metric::Known(100));
+    let first = ledger(Metric::Known(100), Metric::Known(100));
+    let mut first_hold = reserve_single(&first, FamilyRole::Video, demand(1, 1, 8), None)
+        .expect("first process root");
+    assert!(matches!(
+        reserve_single(&first, FamilyRole::Audio, demand(1, 1, 8), None),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    let snapshot = first.snapshot().expect("task claim snapshot");
+    assert_eq!(snapshot.unknown_task_peak_producers, 1);
+    assert_eq!(
+        snapshot.managed_kernel_task_peak,
+        Metric::Unknown(UnknownReason::Unbounded)
+    );
+    drop(first_hold.pop());
+    assert_eq!(
+        first
+            .snapshot()
+            .expect("no-spawn reservation releases its derived task claim")
+            .unknown_task_peak_producers,
+        0
+    );
+
+    let second = ResourceLedger::with_capacity(1, cap()).expect("ledger");
+    let mut second_hold = reserve_single(&second, FamilyRole::Audio, demand(1, 1, 8), None)
+        .expect("first process root");
+    assert!(matches!(
+        reserve_single(&second, FamilyRole::Video, demand(1, 1, 8), None),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    drop(second_hold.pop());
+}
+
+#[test]
+fn zero_kernel_task_headroom_refuses_a_new_process_root() {
+    let mut cap = capacity(Metric::Known(100), Metric::Known(100));
+    cap.kernel_tasks = Metric::Known(0);
+    let ledger = ResourceLedger::with_capacity(1, cap).expect("ledger");
+    assert!(matches!(
+        reserve_single(&ledger, FamilyRole::Video, demand(1, 1, 8), None),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::KernelTasks))
+    ));
+    assert_eq!(ledger.snapshot().expect("empty after refusal").held, 0);
+}
+
+#[test]
+fn unknown_kernel_task_batch_is_rejected_atomically() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    let (video_family, video_roles) = one_role(&ledger, FamilyRole::Video, demand(1, 1, 8));
+    let (audio_family, audio_roles) = one_role(&ledger, FamilyRole::Audio, demand(1, 1, 8));
+    assert!(matches!(
+        ledger.reserve_families(&[
+            FamilyDemand {
+                identity: video_family,
+                roles: &video_roles,
+            },
+            FamilyDemand {
+                identity: audio_family,
+                roles: &audio_roles,
+            },
+        ]),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    let snapshot = ledger.snapshot().expect("no partial task admission");
+    assert_eq!(snapshot.held, 0);
+    assert_eq!(snapshot.used, ResourceVector::default());
+    assert_eq!(snapshot.unknown_task_peak_producers, 0);
 }
 
 #[test]

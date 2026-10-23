@@ -466,7 +466,7 @@ of never storing it.
 | GET | `/api/v1/settings` | admin | Full settings snapshot; capacity provenance includes a separate atomic revision snapshot |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
 | PUT | `/api/v1/settings/transcode-capacity` | admin | Explicit Automatic/limit choices in one revision-CAS transaction; returns settings, or 409 on stale form/unavailable schema |
-| GET | `/api/v1/system` | admin | Environment diagnostics and counters |
+| GET | `/api/v1/system` | admin | Environment diagnostics, counters and `resource_ownership` (node-local selected finite software VOD accounting, explicit Unknown peaks and startup custody state; not whole-node coverage) |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
 | POST | `/api/v1/system/video-processing/reprobe` | admin | Requests a new node-local video-processing compatibility generation (macOS processing graphs, or Linux strict Dolby graphs with their per-graph refusal reasons) and returns the current reports. Saved preferences and running plans are unchanged |

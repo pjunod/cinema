@@ -13,6 +13,28 @@ pub(crate) struct BootstrapFold {
     uncertain_copies: BTreeSet<Id>,
 }
 impl BootstrapFold {
+    /// Requested heap capacity of the retained fold's inventory payload.
+    /// This is separate from durable `AssetTotalsV1` audit state.
+    pub(crate) fn resident_inventory_bytes(&self) -> Result<u64, CustodyError> {
+        if self.pending.is_some()
+            || self.output.has_pending()
+            || self.bootstrap.possible_child.is_some()
+            || self.possible_copy.is_some()
+            || !self.uncertain_copies.is_empty()
+        {
+            return Err(codec::invalid());
+        }
+        let output_bytes = self.output.resident_inventory_bytes()?;
+        let bootstrap_bytes = self.bootstrap.resident_heap_bytes()?;
+        let output_payload_bytes = output_bytes
+            .checked_sub(std::mem::size_of::<ScratchFold>() as u64)
+            .ok_or_else(codec::invalid)?;
+        u64::try_from(std::mem::size_of::<Self>())
+            .ok()
+            .and_then(|own| own.checked_add(output_payload_bytes))
+            .and_then(|n| n.checked_add(bootstrap_bytes))
+            .ok_or_else(codec::invalid)
+    }
     pub(crate) fn empty(
         plan: &ScratchPlanV3,
         obligation: Id,

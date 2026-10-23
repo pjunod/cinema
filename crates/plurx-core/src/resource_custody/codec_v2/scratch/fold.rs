@@ -12,6 +12,33 @@ pub(crate) struct ScratchFold {
     pending: Option<(Id, AssetIoV1)>,
 }
 impl ScratchFold {
+    pub(super) fn resident_inventory_bytes(&self) -> Result<u64, CustodyError> {
+        let file_capacity = u64::try_from(self.files.capacity())
+            .ok()
+            .and_then(|n| n.checked_mul(std::mem::size_of::<FileObservedV1>() as u64))
+            .ok_or_else(codec::invalid)?;
+        let mut bytes = u64::try_from(std::mem::size_of::<Self>())
+            .ok()
+            .and_then(|n| n.checked_add(file_capacity))
+            .ok_or_else(codec::invalid)?;
+        bytes = bytes
+            .checked_add(
+                u64::try_from(self.readers.capacity())
+                    .ok()
+                    .and_then(|n| n.checked_mul(std::mem::size_of::<ReaderLeaseV1>() as u64))
+                    .ok_or_else(codec::invalid)?,
+            )
+            .ok_or_else(codec::invalid)?;
+        bytes = bytes
+            .checked_add(self.state.resident_heap_bytes()?)
+            .ok_or_else(codec::invalid)?;
+        for file in &self.files {
+            bytes = bytes
+                .checked_add(file.resident_heap_bytes()?)
+                .ok_or_else(codec::invalid)?;
+        }
+        Ok(bytes)
+    }
     pub(super) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
