@@ -1125,6 +1125,9 @@ mod reader;
 #[path = "vod/ready_file.rs"]
 mod ready_file;
 use reader::*;
+#[cfg(target_os = "linux")]
+#[path = "vod/finite_metadata.rs"]
+mod finite_metadata;
 pub(crate) use ready_file::{ReadyBytes, ReadyFile};
 // split: end vod-reader
 
@@ -1176,6 +1179,10 @@ struct Shared {
     /// for short lookup/install/remove transactions.
     rendition_builds: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
+    /// Exact finite native owner after the rich rendition leaves the serving
+    /// registry. A same-key build must observe this under its build gate.
+    #[cfg(target_os = "linux")]
+    finite_closing: Mutex<HashMap<String, Arc<shared::FiniteClosingOwner>>>,
     head_regeneration_slots: Arc<Semaphore>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.

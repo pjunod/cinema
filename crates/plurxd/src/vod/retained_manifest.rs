@@ -97,7 +97,51 @@ struct LogicalProduction {
     args: Vec<String>,
 }
 
+impl LogicalProduction {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .plan
+            .capacity()
+            .checked_add(self.executable.capacity())?
+            .checked_add(self.build.capacity())?
+            .checked_add(self.dv_processing.as_ref().map_or(0, String::capacity))?
+            .checked_add(self.subtitle.as_ref().map_or(0, String::capacity))?
+            .checked_add(
+                self.args
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<String>())?,
+            )?;
+        for arg in &self.args {
+            bytes = bytes.checked_add(arg.capacity())?;
+        }
+        Some(bytes)
+    }
+}
+
 impl LogicalOutput {
+    pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .copy_video_args
+            .capacity()
+            .checked_mul(std::mem::size_of::<String>())?;
+        for argument in &self.copy_video_args {
+            bytes = bytes.checked_add(argument.capacity())?;
+        }
+        if let Some(value) = &self.owner_node_id {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        if let Some(claim) = &self.audio_claim {
+            bytes = bytes.checked_add(claim.requested_heap_bytes()?)?;
+        }
+        if let Some(audio) = &self.audio_delivery {
+            bytes = bytes.checked_add(audio.requested_heap_bytes()?)?;
+        }
+        if let Some(production) = &self.production {
+            bytes = bytes.checked_add(production.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     /// Audio resolved for this incoming request before a shared rendition can
     /// replace its recipe. An ordinary encoded request carries a claim, not a
     /// final delivery; recheck that claim against the selected source/route.

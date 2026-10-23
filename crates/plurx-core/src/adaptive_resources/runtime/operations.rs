@@ -1382,11 +1382,31 @@ fn refund(
         return Err(OperationError::State);
     }
     #[cfg(unix)]
+    if role
+        .finite_vod
+        .as_ref()
+        .is_some_and(|finite| !finite.prepared_payload_disposable())
+    {
+        // Typed finite settlement already moves its original terminal proof
+        // and clears these payloads. The remaining generic path is a known
+        // never-armed prepared cancellation, never a native-close shortcut.
+        return Err(OperationError::State);
+    }
+    #[cfg(unix)]
     if let Some(budget) = role.response_budget.as_ref() {
         // This also protects prepared cancellation and other generic terminal
         // paths: no live response allocation may survive a ledger refund.
         budget.begin_close_if_empty()?;
         role.response_budget = None;
+    }
+    #[cfg(unix)]
+    if role.finite_vod.is_some() {
+        role.finite_vod = None;
+        role.members.clear();
+        role.typed_members = None;
+        role.sealed = None;
+        role.roots.clear();
+        role.sources.clear();
     }
     let mut state = ledger.inner.lock().map_err(|_| OperationError::State)?;
     let entry = state

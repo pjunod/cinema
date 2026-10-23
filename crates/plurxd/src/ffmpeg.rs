@@ -425,6 +425,18 @@ static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<Executab
     std::sync::OnceLock::new();
 
 impl EncodedExecutable {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .path
+            .capacity()
+            .checked_add(self.digest.capacity())?
+            .checked_add(self.object_version.capacity())?;
+        if let Some(binding) = &self.linux_binding {
+            bytes = bytes.checked_add(binding.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     /// Convert cached executable metadata into a finite-VOD planning value.
     /// This does not open or attest the path; the prearmed source cell later
     /// verifies the exact held file against this identity and digest.
@@ -2370,6 +2382,54 @@ pub(crate) struct EncodedEngine {
 }
 
 impl EncodedEngine {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .digest
+            .capacity()
+            .checked_add(self.process_identity.capacity())?
+            .checked_add(
+                self.stable_software_digest
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )?
+            .checked_add(
+                self.objects
+                    .len()
+                    .checked_mul(std::mem::size_of::<(std::path::PathBuf, String)>())?,
+            )?
+            .checked_add(
+                self.font_objects
+                    .len()
+                    .checked_mul(std::mem::size_of::<(std::path::PathBuf, String)>())?,
+            )?;
+        for (path, version) in self.objects.iter().chain(self.font_objects.iter()) {
+            bytes = bytes
+                .checked_add(path.capacity())?
+                .checked_add(version.capacity())?;
+        }
+        if let Some(environment) = &self.font_env {
+            bytes = bytes
+                .checked_add(std::mem::size_of::<crate::fontenv::FontEnvironment>())?
+                .checked_add(environment.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    /// Own a bounded copy of the attested dependency/reporter versions for
+    /// core's fixed finite command. This carries drift facts, not proof of
+    /// native custody or child closure.
+    pub(crate) fn finite_software_snapshot(
+        &self,
+        executable: &EncodedExecutable,
+    ) -> Result<plurx_core::adaptive_resources::runtime::finite_vod::FiniteEngineSnapshot, String>
+    {
+        plurx_core::adaptive_resources::runtime::finite_vod::FiniteEngineSnapshot::from_captured(
+            &self.objects,
+            executable.linux_binding.clone(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// A deployed Mac parser and producer share the validated package's demux
     /// source/quilt. Legacy pairs retain their exact reporter identity without
     /// claiming a matched-source package. This adds objects to the existing
@@ -2980,43 +3040,7 @@ async fn engine_objects_are_current_batch_with_linux(
 }
 
 fn linux_execution_object_is_current(object: &plurx_core::transcode::LinuxExecutionObject) -> bool {
-    use plurx_core::transcode::LinuxExecutionObjectKind;
-    match object.kind {
-        LinuxExecutionObjectKind::AbsentLookup => std::fs::symlink_metadata(&object.path)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-        LinuxExecutionObjectKind::ProducerExecutable
-        | LinuxExecutionObjectKind::NativeReporterExecutable
-        | LinuxExecutionObjectKind::SealedParserExecutable
-        | LinuxExecutionObjectKind::FollowedFile => {
-            engine_path_version(&object.path).ok().as_ref() == object.version.as_ref()
-        }
-        LinuxExecutionObjectKind::ContentDigest => {
-            use std::io::Read;
-            std::fs::File::open(&object.path).ok().is_some_and(|file| {
-                let mut bytes = Vec::new();
-                file.take(256 * 1024 + 1).read_to_end(&mut bytes).is_ok()
-                    && bytes.len() <= 256 * 1024
-                    && object
-                        .version
-                        .as_ref()
-                        .is_some_and(|expected| hex::encode(Sha256::digest(&bytes)) == *expected)
-            })
-        }
-        LinuxExecutionObjectKind::LookupObject => {
-            #[cfg(unix)]
-            {
-                std::fs::symlink_metadata(&object.path)
-                    .ok()
-                    .and_then(|metadata| engine_object_version(&metadata).ok())
-                    .as_ref()
-                    == object.version.as_ref()
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        }
-    }
+    object.is_current()
 }
 
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {

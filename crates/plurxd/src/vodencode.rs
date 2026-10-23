@@ -294,6 +294,35 @@ pub(crate) struct Encoding {
     pub hooks: Box<dyn EncodingHooks>,
 }
 
+impl Encoding {
+    /// Requested dynamic heap capacity retained by this immutable recipe.
+    /// Mutable admission maps, production windows, and shared service pools
+    /// are owned separately and are not covered by this metadata estimate.
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        // The fixed finite software profile has no runtime DV shader state.
+        // Such state has independently growing ownership and is not counted
+        // by the selected metadata lease.
+        #[cfg(target_os = "linux")]
+        if self.dv_runtime.is_some() {
+            return None;
+        }
+
+        let mut bytes = std::mem::size_of::<Self>()
+            .checked_add(self.source_object_version.capacity())?
+            .checked_add(self.plan.requested_heap_bytes()?)?
+            .checked_add(self.dv_processing.requested_heap_bytes()?)?
+            .checked_add(self.options.requested_heap_bytes()?)?
+            .checked_add(self.subtitle_digest.as_ref().map_or(0, String::capacity))?
+            .checked_add(self.ffmpeg_build.capacity())?
+            .checked_add(self.executable.requested_heap_bytes()?)?
+            .checked_add(self.engine.requested_heap_bytes()?)?;
+        if let Some(audio) = &self.shared_audio {
+            bytes = bytes.checked_add(audio.requested_heap_bytes())?;
+        }
+        Some(bytes)
+    }
+}
+
 /// Recent exact-recipe observations on this worker; this never grants a permit.
 #[derive(Debug, Default)]
 pub(crate) struct CandidateProductionProofs {

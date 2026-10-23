@@ -59,6 +59,7 @@ pub(super) fn compile(
     shared: &Shared,
     key: &str,
     recipe: &Recipe,
+    index: Option<&FragmentIndex>,
     plan: &SegmentPlan,
     limit_epoch: u64,
     capacity: ResourceCapacity,
@@ -71,6 +72,17 @@ pub(super) fn compile(
     if plan.timescale == 0 || plan.entries.is_empty() || key.is_empty() {
         return Err("finite software profile requires a nonempty plan and rendition key".into());
     }
+    let output_path = shared.base.join(key);
+    let retained_metadata_bytes = crate::vodserve::finite_metadata::projected_requested_heap_bytes(
+        recipe,
+        index,
+        plan,
+        key,
+        &output_path,
+    )
+    .and_then(|bytes| u64::try_from(bytes).ok())
+    .filter(|bytes| *bytes > 0)
+    .ok_or("finite retained metadata projection overflows")?;
 
     let object_version = source_version(recipe)?;
     if recipe.file.size < 0 || recipe.file.mtime < 0 {
@@ -119,6 +131,10 @@ pub(super) fn compile(
         encoding.reorder_frames,
         encoding.source_clock,
         executable,
+        encoding
+            .engine
+            .finite_software_snapshot(&encoding.executable)
+            .map_err(|error| format!("capturing the finite engine fence: {error}"))?,
         loader_env,
         shared.runtime_cache.clone(),
     )
@@ -147,6 +163,7 @@ pub(super) fn compile(
         .ok_or_else(|| "finite response-buffer partition overflows".to_owned())?;
     let output = FiniteOutputLimits {
         response_memory_bytes,
+        retained_metadata_bytes,
         resident_file_objects,
         resident_logical_bytes,
         reserved_storage_bytes,
@@ -229,6 +246,8 @@ pub(super) fn compile(
         .and_then(|count| count.checked_mul(3))
         .and_then(|count| count.checked_add(LIVE_HANDLES))
         .and_then(|count| count.checked_add(3))
+        // One registered engine-check worker can hold a package digest File.
+        .and_then(|count| count.checked_add(1))
         .ok_or_else(|| "finite software handle demand overflows".to_owned())?;
     // This charges the selected bounded allocations. FFmpeg's additional
     // peak, parser metadata and framework/runtime overhead remain explicitly

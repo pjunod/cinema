@@ -189,6 +189,31 @@ pub(crate) struct FontEnvironment {
 }
 
 impl FontEnvironment {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .dir
+            .capacity()
+            .checked_add(self.root.capacity())?
+            .checked_add(self.config.capacity())?
+            .checked_add(
+                self.search_path
+                    .as_ref()
+                    .map_or(0, std::ffi::OsString::capacity),
+            )?
+            .checked_add(self.digest.capacity())?
+            .checked_add(
+                self.objects
+                    .len()
+                    .checked_mul(std::mem::size_of::<(PathBuf, String)>())?,
+            )?;
+        for (path, version) in self.objects.iter() {
+            bytes = bytes
+                .checked_add(path.capacity())?
+                .checked_add(version.capacity())?;
+        }
+        Some(bytes)
+    }
+
     /// The child-local variables a producer renders under: the sysroot, and
     /// the root configuration by its original path, which Fontconfig reads
     /// under that sysroot.

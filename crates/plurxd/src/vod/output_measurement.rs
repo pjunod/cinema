@@ -53,6 +53,74 @@ pub(super) struct OutputOrigin {
 }
 
 impl OutputOrigin {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        self.source_version
+            .capacity()
+            .checked_add(self.recipe_key.capacity())?
+            .checked_add(self.playlist.capacity())?
+            .checked_add(self.muxer_init.capacity())?
+            .checked_add(self.served_init.capacity())
+    }
+}
+
+impl OutputObservation {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        self.preimage
+            .requested_heap_bytes()?
+            .checked_add(self.muxer_init.capacity())?
+            .checked_add(self.served_init.capacity())?
+            .checked_add(self.reducer.requested_heap_bytes()?)?
+            .checked_add(
+                self.members
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Option<ObservedOutputMember>>())?,
+            )
+    }
+}
+
+impl PublishedOutputMeasurement {
+    pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.observation
+            .as_ref()
+            .map_or(Some(0), OutputObservation::requested_heap_bytes)
+    }
+}
+
+/// Conservative projection for the optional full-output observation retained
+/// after the first finite publication. It uses the profile's bounded entry
+/// count and precomputed immutable string capacities.
+pub(super) fn projected_observation_bytes(
+    source_version_capacity: usize,
+    recipe_key_capacity: usize,
+    playlist_capacity: usize,
+    muxer_init_capacity: usize,
+    served_init_capacity: usize,
+    entry_count: usize,
+) -> Option<usize> {
+    if entry_count > 8192 {
+        return Some(0);
+    }
+    let origin = std::mem::size_of::<OutputOrigin>()
+        .checked_add(source_version_capacity)?
+        .checked_add(recipe_key_capacity)?
+        .checked_add(playlist_capacity)?
+        .checked_add(muxer_init_capacity)?
+        .checked_add(served_init_capacity)?;
+    let reducer = std::mem::size_of::<FullOutputMeasurement>().checked_add(
+        entry_count.checked_mul(std::mem::size_of::<(WireDuration, Option<u64>)>())?,
+    )?;
+    let observation = std::mem::size_of::<OutputObservation>()
+        .checked_add(origin)?
+        .checked_add(muxer_init_capacity)?
+        .checked_add(served_init_capacity)?
+        .checked_add(reducer)?
+        .checked_add(
+            entry_count.checked_mul(std::mem::size_of::<Option<ObservedOutputMember>>())?,
+        )?;
+    Some(observation)
+}
+
+impl OutputOrigin {
     pub(super) fn identity(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"plurx/vod-published-output/v1\0");

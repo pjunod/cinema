@@ -19,10 +19,13 @@ struct BudgetState {
     live: usize,
     closing: bool,
     failed: bool,
+    metadata_live: bool,
 }
 
 pub(in crate::adaptive_resources::runtime) struct ResponseBudget {
     limit: usize,
+    metadata_limit: usize,
+    drained: tokio::sync::Notify,
     state: Mutex<BudgetState>,
 }
 
@@ -38,18 +41,78 @@ impl ResponseBudget {
     pub(in crate::adaptive_resources::runtime) fn new(
         limit: usize,
     ) -> Result<Arc<Self>, OperationError> {
+        Self::with_metadata(limit, 0)
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn with_metadata(
+        limit: usize,
+        metadata_limit: usize,
+    ) -> Result<Arc<Self>, OperationError> {
         if limit <= BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES {
             return Err(OperationError::State);
         }
         Ok(Arc::new(Self {
             limit,
+            metadata_limit,
+            drained: tokio::sync::Notify::new(),
             state: Mutex::new(BudgetState {
                 used: BASE_OVERHEAD_BYTES,
                 live: 0,
                 closing: false,
                 failed: false,
+                metadata_live: false,
             }),
         }))
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn metadata_limit_bytes(
+        &self,
+    ) -> Result<u64, OperationError> {
+        u64::try_from(self.metadata_limit).map_err(|_| OperationError::State)
+    }
+
+    pub(in crate::adaptive_resources::runtime) async fn wait_drained(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<(), OperationError> {
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            // Register before inspecting state so the last real owner cannot
+            // disappear between the inspection and notification registration.
+            notified.as_mut().enable();
+            {
+                let state = self.state.lock().map_err(|_| OperationError::State)?;
+                if state.failed {
+                    return Err(OperationError::State);
+                }
+                if state.live == 0 && !state.metadata_live && state.used == BASE_OVERHEAD_BYTES {
+                    return Ok(());
+                }
+            }
+            tokio::time::timeout_at(deadline.into(), notified)
+                .await
+                .map_err(|_| OperationError::Deadline)?;
+        }
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn reserve_metadata(
+        self: &Arc<Self>,
+        required: usize,
+    ) -> Result<FiniteMetadataLease, OperationError> {
+        let mut state = self.state.lock().map_err(|_| OperationError::State)?;
+        if required == 0
+            || required > self.metadata_limit
+            || state.metadata_live
+            || state.closing
+            || state.failed
+        {
+            return Err(OperationError::State);
+        }
+        state.metadata_live = true;
+        Ok(FiniteMetadataLease {
+            budget: Arc::clone(self),
+        })
     }
 
     pub(in crate::adaptive_resources::runtime) fn reserve(
@@ -88,7 +151,11 @@ impl ResponseBudget {
         &self,
     ) -> Result<(), OperationError> {
         let mut state = self.state.lock().map_err(|_| OperationError::State)?;
-        if state.failed || state.live != 0 || state.used != BASE_OVERHEAD_BYTES {
+        if state.failed
+            || state.live != 0
+            || state.metadata_live
+            || state.used != BASE_OVERHEAD_BYTES
+        {
             return Err(OperationError::State);
         }
         state.closing = true;
@@ -97,7 +164,11 @@ impl ResponseBudget {
 
     pub(in crate::adaptive_resources::runtime) fn closed_and_empty(&self) -> bool {
         self.state.lock().is_ok_and(|state| {
-            state.closing && !state.failed && state.live == 0 && state.used == BASE_OVERHEAD_BYTES
+            state.closing
+                && !state.failed
+                && state.live == 0
+                && !state.metadata_live
+                && state.used == BASE_OVERHEAD_BYTES
         })
     }
 
@@ -116,6 +187,39 @@ impl ResponseBudget {
                 }
             }
         }
+        self.drained.notify_waiters();
+    }
+}
+
+/// One daemon rendition's admitted metadata lifetime. Place this after all
+/// owned payload fields so Rust destroys them before releasing this in-role
+/// slot. Its destructor never settles a journal row or refunds the ledger.
+pub struct FiniteMetadataLease {
+    budget: Arc<ResponseBudget>,
+}
+
+impl FiniteMetadataLease {
+    pub fn validate_actual(&self, requested_bytes: usize) -> io::Result<()> {
+        if requested_bytes == 0 || requested_bytes > self.budget.metadata_limit {
+            return Err(io::Error::other(
+                "finite rendition metadata exceeds its admitted partition",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FiniteMetadataLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.budget.state.lock() {
+            if !state.metadata_live {
+                state.failed = true;
+                state.closing = true;
+            } else {
+                state.metadata_live = false;
+            }
+        }
+        self.budget.drained.notify_waiters();
     }
 }
 
@@ -279,6 +383,52 @@ mod tests {
         drop(body);
         assert!(budget.begin_close_if_empty().is_err());
         drop(workspace);
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
+    }
+    #[test]
+    fn metadata_lifetime_blocks_settlement_without_spending_response_capacity() {
+        let response_limit = BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64;
+        let budget = ResponseBudget::with_metadata(response_limit, 256).unwrap();
+        assert!(budget.reserve_metadata(257).is_err());
+        let metadata = budget.reserve_metadata(192).unwrap();
+        assert!(metadata.validate_actual(256).is_ok());
+        assert!(metadata.validate_actual(257).is_err());
+        assert!(budget.reserve_metadata(1).is_err());
+        let body = FiniteResponseBuffer::allocate(budget.reserve(64).unwrap(), 64).unwrap();
+        assert!(budget.reserve(1).is_err());
+        drop(body);
+        assert!(budget.begin_close_if_empty().is_err());
+        drop(metadata);
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
+        assert!(budget.reserve_metadata(1).is_err());
+    }
+
+    #[tokio::test]
+    async fn allocation_drain_waits_for_both_real_metadata_and_body_owners() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let budget =
+            ResponseBudget::with_metadata(BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64, 256)
+                .unwrap();
+        let metadata = budget.reserve_metadata(128).unwrap();
+        let body = FiniteResponseBuffer::allocate(budget.reserve(64).unwrap(), 64).unwrap();
+        let wait =
+            budget.wait_drained(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        tokio::pin!(wait);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        drop(metadata);
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        drop(body);
+        assert!(matches!(
+            wait.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        // A drain notification itself cannot grant physical settlement or
+        // close the budget against a subsequent in-flight response race.
+        assert!(!budget.closed_and_empty());
         budget.begin_close_if_empty().unwrap();
         assert!(budget.closed_and_empty());
     }

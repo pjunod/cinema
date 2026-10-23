@@ -32,6 +32,62 @@ pub(super) struct FiniteLaunch {
     pub(super) retiring: bool,
     pub(super) producer_joined: bool,
     pub(super) source_drifted: bool,
+    /// Original registered metadata/digest worker. A cancelled waiter never
+    /// detaches it or drops a transient digest File as positive close proof.
+    engine_check: Option<tokio::task::JoinHandle<EngineCheckOutcome>>,
+    pub(super) engine_check_unknown: bool,
+}
+
+enum EngineCheckOutcome {
+    NeverEntered,
+    Current,
+    Changed,
+    Unknown,
+}
+
+impl FiniteLaunch {
+    pub(super) fn prepared_payload_disposable(&self) -> bool {
+        !self.entered
+            && !self.task_entered
+            && self.engine_check.is_none()
+            && !self.engine_check_unknown
+    }
+
+    async fn join_engine_check(&mut self) -> Result<(), OperationError> {
+        join_engine_check_pending(
+            &mut self.engine_check,
+            &mut self.source_drifted,
+            &mut self.engine_check_unknown,
+        )
+        .await
+    }
+}
+
+async fn join_engine_check_pending(
+    pending: &mut Option<tokio::task::JoinHandle<EngineCheckOutcome>>,
+    drifted: &mut bool,
+    unknown: &mut bool,
+) -> Result<(), OperationError> {
+    let Some(original) = pending.as_mut() else {
+        return if *unknown {
+            Err(OperationError::State)
+        } else {
+            Ok(())
+        };
+    };
+    let joined = original.await;
+    *pending = None;
+    match joined {
+        Ok(EngineCheckOutcome::Current) => Ok(()),
+        Ok(EngineCheckOutcome::NeverEntered | EngineCheckOutcome::Changed) => {
+            *drifted = true;
+            Ok(())
+        }
+        Ok(EngineCheckOutcome::Unknown) | Err(_) => {
+            *unknown = true;
+            Err(OperationError::State)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +106,64 @@ impl FiniteTaskDisposition {
 }
 
 impl NodeResourceRuntime {
+    /// Recheck the captured dependency and reporter versions off the async
+    /// worker. This is a recipe-drift fence; it cannot prove native custody.
+    async fn validate_finite_engine_snapshot(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle.installed {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+        finite.join_engine_check().await?;
+        if role.refunded || finite.source_drifted || finite.engine_check_unknown {
+            return Err(OperationError::State);
+        }
+        let snapshot = finite.command.engine_snapshot();
+        let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
+        let (enter, registered) = tokio::sync::oneshot::channel();
+        finite.engine_check = Some(runtime.spawn_blocking(move || {
+            if registered.blocking_recv().is_err() {
+                return EngineCheckOutcome::NeverEntered;
+            }
+            match snapshot.checked_current() {
+                Some(true) => EngineCheckOutcome::Current,
+                Some(false) => EngineCheckOutcome::Changed,
+                None => EngineCheckOutcome::Unknown,
+            }
+        }));
+        // Registration is now stored in the original role. No await or
+        // cancellation point separates that store from native entry release.
+        let _ = enter.send(());
+        finite.join_engine_check().await?;
+        if finite.source_drifted {
+            return Err(OperationError::State);
+        }
+        Ok(())
+    }
+
+    /// Join only the original registered check; normal producer join and all
+    /// cancellation paths call this before native settlement or refund.
+    pub(in crate::adaptive_resources::runtime) async fn reconcile_finite_engine_check(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        role.finite_vod
+            .as_mut()
+            .ok_or(OperationError::State)?
+            .join_engine_check()
+            .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(in crate::adaptive_resources::runtime) fn queue_finite_vod(
         &self,
@@ -98,6 +212,8 @@ impl NodeResourceRuntime {
             retiring: false,
             producer_joined: false,
             source_drifted: false,
+            engine_check: None,
+            engine_check_unknown: false,
         });
         Ok(())
     }
@@ -110,6 +226,7 @@ impl NodeResourceRuntime {
         owner: &OwnedPreparation,
         index: usize,
     ) -> Result<(), OperationError> {
+        self.validate_finite_engine_snapshot(owner, index).await?;
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.lock().await;
         if !bundle.installed {
@@ -160,6 +277,7 @@ impl NodeResourceRuntime {
         index: usize,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        self.validate_finite_engine_snapshot(owner, index).await?;
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.lock().await;
         if !bundle.installed {
@@ -175,7 +293,7 @@ impl NodeResourceRuntime {
             finite.acquisition_id,
         );
         let source_members = finite.source_members.clone();
-        if role.refunded || finite.retiring {
+        if role.refunded || finite.retiring || finite.source_drifted {
             return Err(OperationError::State);
         }
         // Resume the exact retained journal command, never submit replacement
@@ -465,6 +583,69 @@ impl NodeResourceRuntime {
     }
 }
 
+#[cfg(test)]
+mod engine_check_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_engine_check_waiter_keeps_original_registered_job() {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let mut pending = Some(tokio::task::spawn_blocking(move || {
+            let _ = entered.send(());
+            let _ = release_rx.blocking_recv();
+            EngineCheckOutcome::Current
+        }));
+        entered_rx.await.expect("registered worker entered");
+        let mut drifted = false;
+        let mut unknown = false;
+        tokio::select! {
+            result = join_engine_check_pending(&mut pending, &mut drifted, &mut unknown) => {
+                panic!("blocked original job completed early: {result:?}");
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+        assert!(
+            pending.is_some(),
+            "cancelled waiter retains original JoinHandle"
+        );
+        release.send(()).expect("release original job");
+        join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
+            .await
+            .expect("original job positively joined");
+        assert!(pending.is_none());
+        assert!(!drifted && !unknown);
+    }
+
+    #[tokio::test]
+    async fn engine_check_unknown_and_panic_remain_sticky_after_join() {
+        for panic_job in [false, true] {
+            let mut pending = Some(tokio::task::spawn_blocking(move || {
+                if panic_job {
+                    panic!("native check lost its close result");
+                }
+                EngineCheckOutcome::Unknown
+            }));
+            let mut drifted = false;
+            let mut unknown = false;
+            assert!(
+                join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
+                    .await
+                    .is_err()
+            );
+            assert!(pending.is_none());
+            assert!(unknown);
+            assert!(!drifted);
+            assert!(
+                join_engine_check_pending(&mut pending, &mut drifted, &mut unknown)
+                    .await
+                    .is_err(),
+                "a later settlement cannot erase uncertainty"
+            );
+        }
+    }
+}
+
 pub(super) fn acknowledge_task(
     role: &mut OwnedRole,
     member: Uuid,
@@ -549,6 +730,9 @@ impl NodeResourceRuntime {
         } else {
             None
         };
+        // The writer has stopped issuing checks. A cancelled publication may
+        // still have left its original native check registered in FiniteLaunch.
+        self.reconcile_finite_engine_check(owner, index).await?;
         let mut bundle = owner.state.lock().await;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         role.finite_vod

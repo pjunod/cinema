@@ -3,7 +3,8 @@
 //! the daemon manifest is only a serving index, never settlement authority.
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteFile, FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
+    FiniteFile, FiniteMetadataLease, FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent,
+    SoftwareVodOwner,
 };
 use plurx_core::transcode::{DecodeBackend, Encoder};
 use std::sync::atomic::AtomicU8;
@@ -15,6 +16,10 @@ const RETAINED: u8 = 3;
 const FAILED: u8 = 4;
 const SETTLED: u8 = 5;
 const PREPARING: u8 = 6;
+const DRIVER_UNREGISTERED: u8 = 0;
+const DRIVER_REGISTERED: u8 = 1;
+const DRIVER_RETURNED: u8 = 2;
+const DRIVER_ABORTED: u8 = 3;
 const IDENTITY_METADATA_BYTES: u64 = 64 * 1024;
 const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 
@@ -26,6 +31,32 @@ pub(crate) struct FiniteSoftwareProducer {
     stage: AtomicU8,
     produced_through: AtomicU64,
     suspended: AtomicBool,
+    driver_state: AtomicU8,
+    driver_change: Notify,
+}
+
+/// Registered before spawn. A dropped task ends daemon observations but is
+/// distinct from a successful return and never proves native closure.
+pub(super) struct FiniteDriverCompletion {
+    producer: Arc<FiniteSoftwareProducer>,
+    returned: bool,
+}
+
+impl FiniteDriverCompletion {
+    fn returned(&mut self) {
+        self.returned = true;
+        self.producer.driver_state.store(DRIVER_RETURNED, Release);
+        self.producer.driver_change.notify_waiters();
+    }
+}
+
+impl Drop for FiniteDriverCompletion {
+    fn drop(&mut self) {
+        if !self.returned {
+            self.producer.driver_state.store(DRIVER_ABORTED, Release);
+            self.producer.driver_change.notify_waiters();
+        }
+    }
 }
 impl std::fmt::Debug for FiniteSoftwareProducer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,6 +73,56 @@ impl FiniteSoftwareProducer {
             stage: AtomicU8::new(PREPARED),
             produced_through: AtomicU64::new(0),
             suspended: AtomicBool::new(false),
+            driver_state: AtomicU8::new(DRIVER_UNREGISTERED),
+            driver_change: Notify::new(),
+        }
+    }
+    pub(super) fn begin_driver(self: &Arc<Self>) -> FiniteDriverCompletion {
+        assert_eq!(
+            self.driver_state.compare_exchange(
+                DRIVER_UNREGISTERED,
+                DRIVER_REGISTERED,
+                AcqRel,
+                Acquire,
+            ),
+            Ok(DRIVER_UNREGISTERED),
+            "finite producer has exactly one registered driver"
+        );
+        FiniteDriverCompletion {
+            producer: Arc::clone(self),
+            returned: false,
+        }
+    }
+
+    pub(super) fn driver_never_registered(&self) -> bool {
+        self.driver_state.load(Acquire) == DRIVER_UNREGISTERED
+    }
+
+    /// Wait only for daemon event production to end. Native root/task closure
+    /// is established separately by the original core owner operation.
+    pub(super) async fn wait_driver_quiescent(&self, deadline: Instant) -> io::Result<bool> {
+        loop {
+            let changed = self.driver_change.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            match self.driver_state.load(Acquire) {
+                DRIVER_RETURNED => return Ok(true),
+                DRIVER_ABORTED => return Ok(false),
+                DRIVER_REGISTERED => {}
+                _ => {
+                    return Err(io::Error::other(
+                        "finite producer driver was never registered",
+                    ))
+                }
+            }
+            tokio::time::timeout_at(deadline.into(), changed)
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "finite producer driver remains active",
+                    )
+                })?;
         }
     }
     pub(crate) fn request_stop(&self) -> io::Result<()> {
@@ -106,6 +187,11 @@ impl FiniteSoftwareProducer {
     pub(crate) fn settled(&self) -> bool {
         self.stage.load(Acquire) == SETTLED
     }
+    /// A completed S cannot start another publication for a missing file.
+    /// The live R stages still allow ordinary materialization waits.
+    pub(crate) fn retained_without_producer(&self) -> bool {
+        matches!(self.stage.load(Acquire), RETAINED | SETTLED)
+    }
     async fn cancel_owned(&self, owner: &SoftwareVodOwner, deadline: Instant) -> io::Result<()> {
         if owner.cancel(deadline).await.is_err() {
             owner
@@ -141,6 +227,35 @@ pub(super) fn selected_recipe(recipe: &Recipe, private: bool, ephemeral: bool) -
         })
 }
 
+fn attach_metadata_lease(
+    mut rendition: Arc<Rendition>,
+    lease: FiniteMetadataLease,
+) -> Result<Arc<Rendition>, (String, Arc<Rendition>)> {
+    let checked = (|| {
+        let value = Arc::get_mut(&mut rendition)
+            .ok_or("finite rendition was shared before metadata accounting")?;
+        // Store the lease before measuring. It is the final Rendition field,
+        // so any error drops metadata owners before releasing their charge.
+        value.finite_metadata_lease = Some(lease);
+        let actual = value
+            .requested_retained_metadata_bytes()
+            .ok_or("finite rendition metadata capacity could not be measured")?;
+        value
+            .finite_metadata_lease
+            .as_ref()
+            .ok_or("finite rendition metadata lease disappeared")?
+            .validate_actual(actual)
+            .map_err(|error| {
+                format!("finite rendition metadata exceeded its reservation: {error}")
+            })?;
+        Ok::<(), String>(())
+    })();
+    match checked {
+        Ok(()) => Ok(rendition),
+        Err(error) => Err((error, rendition)),
+    }
+}
+
 pub(super) async fn build(
     shared: &Arc<Shared>,
     key: &str,
@@ -156,6 +271,15 @@ pub(super) async fn build(
     if plan.timescale == 0 || plan.entries.is_empty() || key.is_empty() {
         return Err("finite software profile requires a nonempty plan and rendition key".into());
     }
+    let output_path = shared.base.join(key);
+    let projected_metadata = finite_metadata::projected_requested_heap_bytes(
+        &recipe,
+        index.as_ref(),
+        &plan,
+        key,
+        &output_path,
+    )
+    .ok_or("finite rendition metadata projection overflowed or is unsupported")?;
     let object_version = finite_profile::source_version(&recipe)?;
     let segment_count = u32::try_from(plan.len())
         .map_err(|_| "finite software segment count overflows".to_owned())?;
@@ -165,6 +289,10 @@ pub(super) async fn build(
         .await
         .map_err(|error| format!("recovered finite software output is unresolved: {error}"))?;
     if let Some(output) = recovered {
+        let metadata_lease = output
+            .reserve_metadata_lease(projected_metadata)
+            .await
+            .map_err(|error| format!("reserving recovered finite rendition metadata: {error}"))?;
         let deadline = Instant::now() + settings.materialize_budget;
         let identity_len = output
             .file_len(FiniteFile::IdentityMetadata)
@@ -222,7 +350,7 @@ pub(super) async fn build(
             }
         }
         let dir = RenditionDir::from_finite(output);
-        return Ok(Shared::construct_rendition(
+        let rendition = Shared::construct_rendition(
             key,
             dir,
             recipe,
@@ -238,7 +366,11 @@ pub(super) async fn build(
                 identity: Some(identity),
                 from_disk: true,
             },
-        ));
+        );
+        // A failed recovered fit leaves the original protected S unchanged;
+        // this daemon metadata owner and its lease simply fall away.
+        return attach_metadata_lease(rendition, metadata_lease)
+            .map_err(|(error, _rendition)| error);
     }
     // Read coherent saved intent before acquisition. Automatic/absent retain
     // the conservative local default until actual learning authorizes a plan;
@@ -266,6 +398,7 @@ pub(super) async fn build(
         shared,
         key,
         &recipe,
+        index.as_ref(),
         &plan,
         epoch,
         capacity,
@@ -285,9 +418,24 @@ pub(super) async fn build(
                 format!("preparing finite software VOD: {error}")
             }
         })?;
+    let output = owner.output();
+    let metadata_lease = match output.reserve_metadata_lease(projected_metadata).await {
+        Ok(lease) => lease,
+        Err(error) => {
+            shared
+                .retain_unattached_finite(
+                    key,
+                    None,
+                    output,
+                    Arc::new(FiniteSoftwareProducer::new(owner)),
+                )
+                .await;
+            return Err(format!("reserving finite rendition metadata: {error}"));
+        }
+    };
     let dir = RenditionDir::from_finite_producer(owner);
     let manifest = Manifest::new(plan.clone());
-    Ok(Shared::construct_rendition(
+    let rendition = Shared::construct_rendition(
         key,
         dir,
         recipe,
@@ -300,10 +448,33 @@ pub(super) async fn build(
         None,
         manifest,
         IdentityState::default(),
-    ))
+    );
+    match attach_metadata_lease(rendition, metadata_lease) {
+        Ok(rendition) => Ok(rendition),
+        Err((error, rendition)) => {
+            let producer = rendition
+                .dir
+                .finite_producer()
+                .expect("fresh finite directory retains its original producer");
+            shared
+                .retain_unattached_finite(key, Some(rendition), output, producer)
+                .await;
+            Err(error)
+        }
+    }
 }
 
 pub(super) async fn run(
+    shared: Arc<Shared>,
+    rendition: Arc<Rendition>,
+    producer: Arc<FiniteSoftwareProducer>,
+    mut completion: FiniteDriverCompletion,
+) {
+    run_body(shared, rendition, producer).await;
+    completion.returned();
+}
+
+async fn run_body(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
     producer: Arc<FiniteSoftwareProducer>,
@@ -387,6 +558,16 @@ pub(super) async fn run(
                 writer.outcome == FiniteWriterOutcome::Ran && writer.completed_output
             })
     });
+    if success && rendition.failure().is_none() {
+        if let Err(error) = rendition.validate_retained_metadata().await {
+            fail(
+                &shared,
+                &rendition,
+                &producer,
+                format!("finite retained metadata does not fit: {error}"),
+            );
+        }
+    }
     if !success || rendition.failure().is_some() {
         fail(
             &shared,
@@ -499,6 +680,7 @@ async fn observe(
             shared.working_set.fetch_add(bytes, Relaxed);
             rendition.clear_demand(entry);
             shared.pool.satisfy(&rendition.key, entry);
+            drop(manifest);
         }
     }
     rendition.kick();

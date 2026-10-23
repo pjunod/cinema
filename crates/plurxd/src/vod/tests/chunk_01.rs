@@ -951,6 +951,8 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         handoff_expiry_armed: AtomicBool::new(false),
         demand_since: StdMutex::new(HashMap::new()),
         fragment_received: StdMutex::new(None),
+        #[cfg(target_os = "linux")]
+        finite_metadata_lease: None,
     })
 }
 

@@ -253,6 +253,10 @@ impl SourceFence {
         })
     }
 
+    pub(crate) fn requested_heap_bytes(&self) -> usize {
+        self.object_version.capacity()
+    }
+
     pub(crate) fn object_version(&self) -> &str {
         &self.object_version
     }

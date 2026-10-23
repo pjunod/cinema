@@ -616,6 +616,21 @@ pub struct FragmentIndex {
 }
 
 impl FragmentIndex {
+    /// Requested heap capacity retained by this index, excluding its inline
+    /// value. It includes rows, the muxer init digest, source fingerprint,
+    /// and nested promotion evidence.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .rows
+            .capacity()
+            .checked_mul(std::mem::size_of::<IndexRow>())?;
+        bytes = bytes
+            .checked_add(self.init_sha256.capacity())?
+            .checked_add(self.source.argv_fingerprint.capacity())?
+            .checked_add(self.promotion.requested_heap_bytes()?)?;
+        Some(bytes)
+    }
+
     pub fn new(
         timescale: u32,
         rows: Vec<IndexRow>,
@@ -729,6 +744,14 @@ pub struct SegmentPlan {
 }
 
 impl SegmentPlan {
+    /// Requested heap capacity for this plan's entry allocation, excluding
+    /// its inline value.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.entries
+            .capacity()
+            .checked_mul(std::mem::size_of::<PlanEntry>())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

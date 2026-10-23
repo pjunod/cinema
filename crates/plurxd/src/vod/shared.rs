@@ -1,5 +1,26 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+pub(super) struct FiniteClosingOwner {
+    /// Kept until the real producer driver has stopped reporting output.
+    rich: Mutex<Option<Arc<Rendition>>>,
+    output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+    producer: Option<Arc<super::finite_software::FiniteSoftwareProducer>>,
+    claimed_bytes: AtomicU64,
+    known_closed: AtomicBool,
+    running: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+struct FiniteClosingRun(Arc<FiniteClosingOwner>);
+
+#[cfg(target_os = "linux")]
+impl Drop for FiniteClosingRun {
+    fn drop(&mut self) {
+        self.0.running.store(false, Release);
+    }
+}
+
 /// How many refused titles the local index pass is asked to put first.
 /// More than one pass's worth on purpose, and small, because a viewer whose
 /// start was refused asks again on the next start.
@@ -466,6 +487,10 @@ impl Shared {
         canonical_processing_key: Option<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
     ) -> Result<Option<RenditionAttachment>, String> {
         let key = key.as_str();
+        #[cfg(target_os = "linux")]
+        if self.finite_closing.lock().await.contains_key(key) {
+            return Err("finite rendition cleanup remains in progress".into());
+        }
         // Single-flight only this key. No Store, filesystem, process, manifest,
         // or reader await below owns the node-wide registry mutex.
         let existing = {
@@ -1059,6 +1084,8 @@ impl Shared {
             handoff_expiry_armed: AtomicBool::new(false),
             demand_since: StdMutex::new(HashMap::new()),
             fragment_received: StdMutex::new(None),
+            #[cfg(target_os = "linux")]
+            finite_metadata_lease: None,
         });
         rendition
     }
@@ -1073,6 +1100,7 @@ impl Shared {
     ) {
         if rendition.ephemeral_processing
             || rendition.private_storage.is_some()
+            || rendition.closed.load(Acquire)
             || manifest.is_admitted()
         {
             return;
@@ -1151,6 +1179,14 @@ impl Shared {
         let Ok(build_guard) = self.rendition_build_gate(key).try_lock_owned() else {
             return;
         };
+        #[cfg(target_os = "linux")]
+        let existing_closing = { self.finite_closing.lock().await.get(key).cloned() };
+        #[cfg(target_os = "linux")]
+        if let Some(closing) = existing_closing {
+            drop(build_guard);
+            self.retry_finite_closing(key.to_owned(), closing).await;
+            return;
+        }
         let rendition = {
             let renditions = self.renditions.lock().await;
             renditions.get(key).map(Arc::clone)
@@ -1197,6 +1233,49 @@ impl Shared {
         let counted_finite = rendition.dir.is_finite();
         #[cfg(not(unix))]
         let counted_finite = false;
+        #[cfg(target_os = "linux")]
+        if counted_finite {
+            let Some(output) = rendition.dir.finite_output() else {
+                return;
+            };
+            let closing = Arc::new(FiniteClosingOwner {
+                rich: Mutex::new(Some(Arc::clone(&rendition))),
+                output,
+                producer: rendition.dir.finite_producer(),
+                claimed_bytes: AtomicU64::new(0),
+                known_closed: AtomicBool::new(false),
+                running: AtomicBool::new(false),
+            });
+            let removed = {
+                let mut closings = self.finite_closing.lock().await;
+                let mut renditions = self.renditions.lock().await;
+                if closings.contains_key(key)
+                    || !renditions
+                        .get(key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                {
+                    false
+                } else {
+                    // The tombstone and exact native owner exist before the
+                    // rich registry reference goes away. This gate prevents
+                    // any same-key build between the two short map writes.
+                    closings.insert(key.to_owned(), Arc::clone(&closing));
+                    renditions.remove(key);
+                    rendition.closed.store(true, Release);
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    rendition.kick();
+                    self.pool.close(key);
+                    true
+                }
+            };
+            drop(manifest);
+            drop(rendition);
+            drop(build_guard);
+            if removed {
+                self.retry_finite_closing(key.to_owned(), closing).await;
+            }
+            return;
+        }
         if !counted_finite
             && self
                 .resource_runtime
@@ -1328,6 +1407,171 @@ impl Shared {
             );
         });
         let _ = settlement.await;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_finite_closing(
+        self: &Arc<Shared>,
+        key: String,
+        closing: Arc<FiniteClosingOwner>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if closing.running.swap(true, AcqRel) {
+            return None;
+        }
+        let shared = Arc::clone(self);
+        Some(tokio::spawn(async move {
+            let _running = FiniteClosingRun(Arc::clone(&closing));
+            shared.drive_finite_closing(&key, &closing).await;
+        }))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn retry_finite_closing(
+        self: &Arc<Shared>,
+        key: String,
+        closing: Arc<FiniteClosingOwner>,
+    ) {
+        // The owner and exact operation remain in the map if this waiter is
+        // cancelled, the native result is unknown, or the task fails.
+        if let Some(task) = self.spawn_finite_closing(key, closing) {
+            let _ = task.await;
+        }
+    }
+
+    /// Fresh R was prepared but never reached the serving registry/driver.
+    /// The production caller already holds this key's build gate. Keep the
+    /// original owner discoverable before returning its construction error;
+    /// the detached cleanup must not await that still-held gate here.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn retain_unattached_finite(
+        self: &Arc<Shared>,
+        key: &str,
+        rich: Option<Arc<Rendition>>,
+        output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+        producer: Arc<super::finite_software::FiniteSoftwareProducer>,
+    ) {
+        let closing = Arc::new(FiniteClosingOwner {
+            rich: Mutex::new(rich),
+            output,
+            producer: Some(producer),
+            claimed_bytes: AtomicU64::new(0),
+            known_closed: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+        });
+        {
+            let mut closings = self.finite_closing.lock().await;
+            use std::collections::hash_map::Entry;
+            match closings.entry(key.to_owned()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(Arc::clone(&closing));
+                }
+                Entry::Occupied(_) => {
+                    panic!("fresh finite preparation collided under its exact build gate");
+                }
+            }
+        }
+        let _task = self.spawn_finite_closing(key.to_owned(), closing);
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn drive_finite_closing(
+        self: &Arc<Shared>,
+        key: &str,
+        closing: &Arc<FiniteClosingOwner>,
+    ) {
+        let rich = closing.rich.lock().await.as_ref().cloned();
+        if let Some(rendition) = rich {
+            if let Some(producer) = closing.producer.as_ref() {
+                if let Err(error) = producer.request_stop() {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                        %error, "finite producer stop remains pending");
+                }
+                rendition.kick();
+                if !producer.driver_never_registered() {
+                    match producer
+                        .wait_driver_quiescent(Instant::now() + Duration::from_secs(30))
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                            "finite driver aborted; original native owner still must close"),
+                        Err(error) => {
+                            tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                                %error, "finite driver still owns rendition metadata");
+                            return;
+                        }
+                    }
+                }
+            }
+            // The actual driver no longer reports Materialized events. This
+            // final manifest count is stable even if its early stop raced a
+            // last queued event. The metadata lease remains in the rendition
+            // until every other real Arc (request, session, generation) ends.
+            let claimed = rendition.manifest.lock().await.materialized_bytes();
+            closing.claimed_bytes.store(claimed, Release);
+            closing.rich.lock().await.take();
+            drop(rendition);
+        }
+
+        if !closing.known_closed.load(Acquire) {
+            if closing
+                .producer
+                .as_ref()
+                .is_some_and(|producer| producer.settled())
+            {
+                closing.known_closed.store(true, Release);
+            } else {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                if let Err(error) = closing.output.wait_allocations_release(deadline).await {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                        %error, "finite metadata or response remains live; cleanup retained");
+                    return;
+                }
+                if let Some(producer) = closing.producer.as_ref() {
+                    if let Err(error) = producer
+                        .perform(Step::Terminate {
+                            why: Termination::Idle,
+                        })
+                        .await
+                    {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                            %error, "original finite producer cleanup remains charged");
+                        return;
+                    }
+                }
+                if closing
+                    .producer
+                    .as_ref()
+                    .is_some_and(|producer| producer.settled())
+                {
+                    closing.known_closed.store(true, Release);
+                } else if let Err(error) = closing.output.evict(deadline).await {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                        %error, "finite output cleanup remains charged for retry");
+                    return;
+                } else {
+                    closing.known_closed.store(true, Release);
+                }
+            }
+        }
+
+        let _build_guard = self.rendition_build_gate(key).lock_owned().await;
+        let removed = {
+            let mut closings = self.finite_closing.lock().await;
+            if closings
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, closing))
+            {
+                closings.remove(key);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            sub_saturating(&self.working_set, closing.claimed_bytes.load(Acquire));
+            self.kick_all();
+        }
     }
 
     /// Kick EVERY rendition's driver — for events that change the node-wide

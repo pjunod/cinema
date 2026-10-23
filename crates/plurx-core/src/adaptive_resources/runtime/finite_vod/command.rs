@@ -6,24 +6,173 @@ use std::{
     io,
     mem::size_of,
     path::PathBuf,
+    sync::Arc,
 };
 
 use crate::{
     domain::MediaFile,
     transcode::{
-        vod_pipe_args_with_source_clock, Encoder, FrameDomain, ResolvedTranscode,
-        TranscodeExecution, VodFrameGrid, VodSourceClock,
+        vod_pipe_args_with_source_clock, Encoder, FrameDomain, LinuxDolbyExecutionBinding,
+        ResolvedTranscode, TranscodeExecution, VodFrameGrid, VodSourceClock,
     },
 };
 
 const ITEM_LIMIT: usize = 4_096;
 const COLLECTION_LIMIT: usize = 64 * 1_024;
 const ENV_ENTRY_LIMIT: usize = 32;
+const ENGINE_OBJECT_LIMIT: usize = 65_536;
+// The captured dependency report is capped at 1 MiB, while a validated
+// Linux package binding can carry up to 4,096 paths of 4 KiB each.
+const ENGINE_SNAPSHOT_LIMIT: usize = 32 * 1024 * 1024;
+const ENGINE_VERSION_LIMIT: usize = 256;
+
+/// Captured identity fence for the fixed software encoder's loaded objects.
+/// These path versions detect recipe drift; they are not native custody or
+/// process-closure evidence. The finite profile has no subtitle/font path.
+pub struct FiniteEngineSnapshot {
+    objects: Vec<(PathBuf, String)>,
+    package_binding: Option<LinuxDolbyExecutionBinding>,
+}
+
+impl FiniteEngineSnapshot {
+    /// Copy the already attested engine list with a fixed metadata ceiling.
+    pub fn from_captured(
+        objects: &[(PathBuf, String)],
+        package_binding: Option<LinuxDolbyExecutionBinding>,
+    ) -> io::Result<Self> {
+        if objects.is_empty() || objects.len() > ENGINE_OBJECT_LIMIT {
+            return Err(invalid("finite engine object count is outside its bound"));
+        }
+        let mut bytes = objects
+            .len()
+            .checked_mul(size_of::<(PathBuf, String)>())
+            .ok_or_else(|| invalid("finite engine snapshot size overflow"))?;
+        for (path, version) in objects {
+            let path_bytes = bounded_path_len(path)?;
+            if !path.is_absolute()
+                || path_bytes == 0
+                || version.is_empty()
+                || version.len() > ENGINE_VERSION_LIMIT
+                || !version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b':' || byte == b'-')
+                || version.split(':').count() != 7
+            {
+                return Err(invalid("finite engine object identity is invalid"));
+            }
+            bytes = bytes
+                .checked_add(path_bytes)
+                .and_then(|n| n.checked_add(version.len()))
+                .ok_or_else(|| invalid("finite engine snapshot size overflow"))?;
+        }
+        if bytes > ENGINE_SNAPSHOT_LIMIT {
+            return Err(invalid("finite engine snapshot exceeds its bound"));
+        }
+        let mut copied = Vec::new();
+        copied
+            .try_reserve_exact(objects.len())
+            .map_err(|_| invalid("reserving finite engine snapshot failed"))?;
+        if copied
+            .capacity()
+            .checked_mul(size_of::<(PathBuf, String)>())
+            .is_none_or(|capacity| capacity > ENGINE_SNAPSHOT_LIMIT)
+        {
+            return Err(invalid("finite engine snapshot capacity exceeds its bound"));
+        }
+        copied.extend(objects.iter().cloned());
+        let snapshot = Self {
+            objects: copied,
+            package_binding,
+        };
+        if snapshot.resident_memory_bytes()? > ENGINE_SNAPSHOT_LIMIT {
+            return Err(invalid(
+                "finite engine snapshot allocation exceeds its bound",
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn is_current(&self) -> bool {
+        self.checked_current() == Some(true)
+    }
+
+    /// `None` means the registered check acquired a digest File whose close
+    /// could not be confirmed. Callers must retain the original role charge.
+    pub(in crate::adaptive_resources::runtime) fn checked_current(&self) -> Option<bool> {
+        if !self.objects.iter().all(|(path, expected)| {
+            let Ok(metadata) = std::fs::metadata(path) else {
+                return false;
+            };
+            #[cfg(unix)]
+            let actual = {
+                use std::os::unix::fs::MetadataExt;
+                format!(
+                    "{}:{}:{}:{}:{}:{}:{}",
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.size(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec()
+                )
+            };
+            #[cfg(not(unix))]
+            let actual = String::new();
+            &actual == expected
+        }) {
+            return Some(false);
+        }
+        if let Some(binding) = &self.package_binding {
+            for object in binding.objects().iter() {
+                match object.checked_current() {
+                    Some(true) => {}
+                    result => return result,
+                }
+            }
+        }
+        Some(true)
+    }
+
+    fn resident_memory_bytes(&self) -> io::Result<usize> {
+        let mut bytes = size_of::<Self>()
+            .checked_add(2 * size_of::<usize>()) // Arc strong/weak counters.
+            .and_then(|n| {
+                n.checked_add(
+                    self.objects
+                        .capacity()
+                        .checked_mul(size_of::<(PathBuf, String)>())?,
+                )
+            })
+            .ok_or_else(|| invalid("finite engine snapshot memory overflow"))?;
+        for (path, version) in &self.objects {
+            bytes = bytes
+                .checked_add(path.capacity())
+                .and_then(|n| n.checked_add(version.capacity()))
+                .ok_or_else(|| invalid("finite engine snapshot memory overflow"))?;
+        }
+        if let Some(binding) = &self.package_binding {
+            bytes = bytes
+                .checked_add(size_of::<LinuxDolbyExecutionBinding>())
+                .and_then(|n| n.checked_add(4 * size_of::<usize>()))
+                .and_then(|n| n.checked_add(binding.requested_heap_bytes()?))
+                .ok_or_else(|| invalid("finite package snapshot memory overflow"))?;
+            for object in binding.objects().iter() {
+                let path_bytes = bounded_path_len(&object.path)?;
+                if !object.path.is_absolute() || path_bytes == 0 {
+                    return Err(invalid("finite package object path is invalid"));
+                }
+            }
+        }
+        Ok(bytes)
+    }
+}
 
 /// Immutable argv and child configuration for the fixed ordinary AVC pump.
 /// This owns only planning data; it holds no source descriptor or child proof.
 pub struct SoftwareAvcCommand {
     executable: super::SoftwareAvcExecutable,
+    engine_snapshot: Arc<FiniteEngineSnapshot>,
     source_path: PathBuf,
     source_id: i64,
     scanner_size: i64,
@@ -47,6 +196,7 @@ impl SoftwareAvcCommand {
         reorder: bool,
         source_clock: VodSourceClock,
         executable: super::SoftwareAvcExecutable,
+        engine_snapshot: FiniteEngineSnapshot,
         env: Vec<(OsString, OsString)>,
         runtime_cache: PathBuf,
     ) -> io::Result<Self> {
@@ -142,6 +292,7 @@ impl SoftwareAvcCommand {
         }
         let command = Self {
             executable,
+            engine_snapshot: Arc::new(engine_snapshot),
             source_path: source.path.clone(),
             source_id: source.id,
             scanner_size: source.size,
@@ -185,6 +336,12 @@ impl SoftwareAvcCommand {
         &self.executable
     }
 
+    pub(in crate::adaptive_resources::runtime) fn engine_snapshot(
+        &self,
+    ) -> Arc<FiniteEngineSnapshot> {
+        Arc::clone(&self.engine_snapshot)
+    }
+
     pub(in crate::adaptive_resources::runtime) fn args(&self) -> &[String] {
         &self.args
     }
@@ -208,6 +365,7 @@ impl SoftwareAvcCommand {
     ) -> io::Result<usize> {
         let mut total = size_of::<Self>()
             .checked_add(self.executable.resident_memory_bytes()?)
+            .and_then(|n| n.checked_add(self.engine_snapshot.resident_memory_bytes().ok()?))
             .and_then(|n| n.checked_add(self.source_path.capacity()))
             .and_then(|n| n.checked_add(self.runtime_cache.capacity()))
             .and_then(|n| n.checked_add(self.args.capacity().checked_mul(size_of::<String>())?))
@@ -273,6 +431,82 @@ fn validate_env(env: &[(OsString, OsString)]) -> io::Result<()> {
 mod tests {
     #[cfg(target_os = "linux")]
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_engine_snapshot_detects_changed_dependency_before_publication() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/finite-engine-snapshot-tests");
+        std::fs::create_dir_all(&directory).expect("repo-local test directory");
+        let path = directory.join(format!("dependency-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"first").expect("initial dependency");
+        let metadata = std::fs::metadata(&path).expect("initial identity");
+        let version = format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.size(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        );
+        let snapshot = FiniteEngineSnapshot::from_captured(&[(path.clone(), version)], None)
+            .expect("bounded captured dependency");
+        assert!(snapshot.is_current());
+        std::fs::write(&path, b"replaced dependency bytes").expect("mutated dependency");
+        assert!(!snapshot.is_current());
+        std::fs::remove_file(&path).expect("remove test dependency");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_engine_snapshot_checks_bound_package_objects_too() {
+        use crate::transcode::LinuxExecutionObjectKind;
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/finite-engine-snapshot-tests");
+        std::fs::create_dir_all(&directory).expect("repo-local test directory");
+        let dependency = directory.join(format!("dependency-{}", uuid::Uuid::new_v4()));
+        let package = directory.join(format!("package-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&dependency, b"dependency").expect("captured dependency");
+        std::fs::write(&package, b"package").expect("captured package");
+        let version = |path: &PathBuf| {
+            let metadata = std::fs::metadata(path).expect("captured native identity");
+            format!(
+                "{}:{}:{}:{}:{}:{}:{}",
+                metadata.dev(),
+                metadata.ino(),
+                metadata.size(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec()
+            )
+        };
+        let binding = LinuxDolbyExecutionBinding::new(
+            vec![LinuxExecutionObject {
+                path: package.clone(),
+                version: Some(version(&package)),
+                kind: LinuxExecutionObjectKind::ProducerExecutable,
+            }],
+            Vec::new(),
+        )
+        .expect("valid captured package binding");
+        let snapshot = FiniteEngineSnapshot::from_captured(
+            &[(dependency.clone(), version(&dependency))],
+            Some(binding),
+        )
+        .expect("bounded package fence");
+        assert!(snapshot.is_current());
+        std::fs::write(&package, b"changed package bytes").expect("package drift");
+        assert!(!snapshot.is_current());
+        std::fs::remove_file(&dependency).expect("remove dependency");
+        std::fs::remove_file(&package).expect("remove package");
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

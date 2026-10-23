@@ -67,6 +67,20 @@ pub struct Proof {
 }
 
 impl Proof {
+    /// Requested heap capacity retained by this attestation, excluding its
+    /// inline value.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.source_object_version.capacity();
+        bytes = bytes.checked_add(self.source_node_id.capacity())?;
+        if let Some(digest) = &self.source_sha256 {
+            bytes = bytes.checked_add(digest.capacity())?;
+        }
+        if let Some(refusal) = &self.refusal {
+            bytes = bytes.checked_add(refusal.capacity())?;
+        }
+        Some(bytes)
+    }
+
     /// Called only after authenticated blob/pipeline verification and a
     /// local full-source attestation using this proof revision's regime.
     pub fn bind_equivalent_source(&mut self, digest: &str, node: &str, object: &str) -> bool {

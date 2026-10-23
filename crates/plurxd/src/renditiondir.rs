@@ -130,6 +130,16 @@ impl RenditionDir {
         &self.dir
     }
 
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        Self::projected_heap_bytes(self.dir.capacity())
+    }
+
+    pub(crate) fn projected_heap_bytes(path_capacity: usize) -> Option<usize> {
+        path_capacity
+            .checked_add(std::mem::size_of::<PendingWrites>())?
+            .checked_add(2 * std::mem::size_of::<usize>())
+    }
+
     pub async fn create(&self) -> io::Result<()> {
         tokio::fs::create_dir_all(&self.dir).await
     }

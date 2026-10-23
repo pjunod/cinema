@@ -663,6 +663,70 @@ pub struct SubtitleExecution {
 }
 
 impl MediaFile {
+    /// Requested heap capacity retained by this catalog row, excluding the
+    /// inline `MediaFile` value. This is an allocation-accounting input, not
+    /// a process-RSS estimate.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.path.capacity();
+        for value in [
+            self.container.as_ref(),
+            self.video_codec.as_ref(),
+            self.video_codec_tag.as_ref(),
+            self.field_order.as_ref(),
+            self.video_profile.as_ref(),
+            self.hdr.as_ref(),
+            self.hdr_format.as_ref(),
+            self.luminance_source.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        bytes = bytes
+            .checked_add(allocated_vec_bytes::<AudioStream>(
+                self.audio_streams.capacity(),
+            )?)?
+            .checked_add(allocated_vec_bytes::<SubtitleStream>(
+                self.subtitle_streams.capacity(),
+            )?)?
+            .checked_add(allocated_vec_bytes::<DownloadedSubtitle>(
+                self.downloaded_subtitles.capacity(),
+            )?)?;
+        for stream in &self.audio_streams {
+            bytes = bytes
+                .checked_add(stream.codec.capacity())?
+                .checked_add(option_string_capacity(stream.channel_layout.as_ref()))?
+                .checked_add(option_string_capacity(stream.language.as_ref()))?
+                .checked_add(option_string_capacity(stream.title.as_ref()))?;
+        }
+        for stream in &self.subtitle_streams {
+            bytes = bytes
+                .checked_add(stream.codec.capacity())?
+                .checked_add(option_string_capacity(stream.language.as_ref()))?
+                .checked_add(option_string_capacity(stream.title.as_ref()))?;
+        }
+        for subtitle in &self.downloaded_subtitles {
+            bytes = bytes
+                .checked_add(subtitle.language.capacity())?
+                .checked_add(subtitle.title.capacity())?
+                .checked_add(subtitle.vtt.capacity())?;
+            if let Some(transcription) = &subtitle.transcription {
+                bytes = bytes
+                    .checked_add(transcription.artifact_key.capacity())?
+                    .checked_add(transcription.model_sha256.capacity())?
+                    .checked_add(transcription.pipeline_digest.capacity())?
+                    .checked_add(transcription.adapter.capacity())?;
+                if let Some(execution) = &transcription.execution {
+                    bytes = bytes
+                        .checked_add(execution.engine_sha256.capacity())?
+                        .checked_add(execution.platform.capacity())?;
+                }
+            }
+        }
+        Some(bytes)
+    }
+
     /// Called once by storage decoders. Embedded ordinals remain unchanged.
     pub(crate) fn with_downloaded_subtitles(
         mut self,
@@ -695,6 +759,14 @@ impl MediaFile {
             .checked_sub(self.downloaded_subtitles.len())?;
         self.downloaded_subtitles.get(index.checked_sub(embedded)?)
     }
+}
+
+fn option_string_capacity(value: Option<&String>) -> usize {
+    value.map_or(0, String::capacity)
+}
+
+fn allocated_vec_bytes<T>(capacity: usize) -> Option<usize> {
+    capacity.checked_mul(std::mem::size_of::<T>())
 }
 
 /// Everything the prober learned about one file.

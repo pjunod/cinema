@@ -1228,6 +1228,30 @@ pub struct PromotionInputs {
 }
 
 impl PromotionInputs {
+    /// Requested heap capacity retained by promotion facts, excluding the
+    /// inline value and including each nested parameter-set byte vector.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = vec_storage::<Vec<u8>>(self.parameter_sets.capacity())?
+            .checked_add(vec_storage::<Vec<u8>>(self.dvh1_parameter_sets.capacity())?)?
+            .checked_add(vec_storage::<Vec<u8>>(self.hdr10_sei.capacity())?)?;
+        for values in [
+            &self.parameter_sets,
+            &self.dvh1_parameter_sets,
+            &self.hdr10_sei,
+        ] {
+            for value in values {
+                bytes = bytes.checked_add(value.capacity())?;
+            }
+        }
+        if let Some(proof) = &self.hevc_configuration {
+            bytes = bytes.checked_add(proof.requested_heap_bytes()?)?;
+        }
+        if let Some(record) = &self.dolby_vision {
+            bytes = bytes.checked_add(record.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     /// What promotion would copy out of this fragment.
     ///
     /// Answers empty for every source promotion no-ops on, which is most of
@@ -1298,6 +1322,10 @@ impl PromotionInputs {
             && self.dolby_vision.is_none()
             && !self.strip_dolby_vision
     }
+}
+
+fn vec_storage<T>(capacity: usize) -> Option<usize> {
+    capacity.checked_mul(std::mem::size_of::<T>())
 }
 
 /// Rewrite every video sample in a fragment, correcting every size the
@@ -2150,6 +2178,11 @@ fn out_of_range<T>(field: &str, value: u8, max: u8) -> Result<T, Fmp4Error> {
 }
 
 impl DolbyVisionRecord {
+    /// Requested heap capacity retained by the original record bytes.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        Some(self.raw.capacity())
+    }
+
     /// Build a record from scratch — the conversion's case.
     ///
     /// Refuses rather than truncates. A writer whose output is the contract

@@ -66,6 +66,7 @@ impl NodeResourceRuntime {
             role.retirement.is_none()
         };
         if needs_prepare {
+            self.reconcile_finite_engine_check(owner, index).await?;
             self.join_finite_producer(owner, index).await?;
             self.freeze_finite_output(owner, index, source_member, deadline)
                 .await?;
@@ -189,6 +190,9 @@ impl NodeResourceRuntime {
             })
             .and_then(|bytes| bytes.checked_add(response_memory_bytes))
             .and_then(|bytes| bytes.checked_add(PERSISTENT_METADATA_BYTES))
+            .and_then(|bytes| {
+                bytes.checked_add(role.response_budget.as_ref()?.metadata_limit_bytes().ok()?)
+            })
             .ok_or(OperationError::State)?;
         let retained_handles = u64::from(
             full.state
@@ -197,9 +201,15 @@ impl NodeResourceRuntime {
                 .handles_reserved
                 .max(plan.limits.live_handles),
         );
+        if retained_memory_bytes > source_resources.peak_memory_bytes {
+            return Err(OperationError::State);
+        }
         let retained_resources = ResourceVector {
             cpu_ns_per_second: 0,
-            peak_memory_bytes: retained_memory_bytes,
+            // Daemon rendition metadata remains resident outside the native
+            // scratch inventory. Keep the full original memory component until
+            // its requested-capacity profile covers that complete retained graph.
+            peak_memory_bytes: source_resources.peak_memory_bytes,
             handles: retained_handles,
             processes: 0,
             hardware_slots: 0,

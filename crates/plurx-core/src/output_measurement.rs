@@ -65,6 +65,16 @@ pub struct FullOutputMeasurement {
 }
 
 impl FullOutputMeasurement {
+    /// Requested capacity retained by the reducer's per-entry facts, excluding
+    /// its inline value and allocator/process overhead.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.entries
+            .capacity()
+            .checked_mul(std::mem::size_of::<(WireDuration, Option<u64>)>())
+    }
+}
+
+impl FullOutputMeasurement {
     pub fn new(
         identity: [u8; 32],
         target_duration_seconds: u64,

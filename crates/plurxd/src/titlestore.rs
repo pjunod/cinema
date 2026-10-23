@@ -144,6 +144,17 @@ impl Manifest {
         }
     }
 
+    /// Requested dynamic heap capacity retained by this manifest, excluding
+    /// its inline value. This is a payload-capacity measure, not an allocator
+    /// or process-RSS measurement.
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.plan.requested_heap_bytes()?.checked_add(
+            self.states
+                .capacity()
+                .checked_mul(std::mem::size_of::<SegState>())?,
+        )
+    }
+
     #[allow(dead_code)] // test-facing until a later milestone consumes it
     pub fn plan(&self) -> &SegmentPlan {
         &self.plan

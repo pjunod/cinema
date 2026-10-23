@@ -1,5 +1,24 @@
 use super::*;
 
+/// A successful finite R→S transfer leaves no writer that could satisfy a
+/// missing-file wait. Recovered S has the output selector without a producer;
+/// a same-boot S retains the producer control only for its terminal cleanup.
+#[cfg(target_os = "linux")]
+fn finite_retained_without_producer(rendition: &Rendition) -> bool {
+    rendition.dir.is_finite()
+        && rendition
+            .dir
+            .finite_producer()
+            .is_none_or(|producer| producer.retained_without_producer())
+}
+
+#[cfg(target_os = "linux")]
+fn retained_finite_segment_absent(index: u32) -> VodError {
+    VodError::PublicationFailed(format!(
+        "retained finite segment {index} is absent; no producer can rematerialize it"
+    ))
+}
+
 impl plurx_core::playback::continuous_quality::QualityReservationPublisher for VodServe {
     /// Publish reservations only while their verified bytes cannot be evicted
     /// or replaced. Old dependencies survive takeover even without a producer.
@@ -794,6 +813,24 @@ impl VodServe {
         for (key, ttl) in dormant {
             self.shared.purge_if_dormant(&key, ttl).await;
         }
+        #[cfg(target_os = "linux")]
+        {
+            // A finite owner leaves the rich rendition registry before its
+            // actual metadata and response users drain. Revisit only these
+            // existing owners during the ordinary maintenance pass; unknown
+            // native/journal outcomes retain the same owner and operation.
+            let closing_keys: Vec<String> = self
+                .shared
+                .finite_closing
+                .lock()
+                .await
+                .keys()
+                .cloned()
+                .collect();
+            for key in closing_keys {
+                self.shared.purge_if_dormant(&key, Duration::ZERO).await;
+            }
+        }
 
         // Kick every driver so holds and idle reclaims are re-examined.
         let renditions: Vec<Arc<Rendition>> = {
@@ -989,6 +1026,12 @@ impl VodServe {
             if let Some(cause) = rendition.failure_cause() {
                 return Err(VodError::ProducerFailed(cause));
             }
+            #[cfg(target_os = "linux")]
+            if finite_retained_without_producer(rendition) {
+                return Err(VodError::PublicationFailed(
+                    "retained finite init is absent; no producer can rematerialize it".into(),
+                ));
+            }
             let demand = demand.get_or_insert_with(|| {
                 let demand = self
                     .shared
@@ -1085,6 +1128,10 @@ impl VodServe {
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
+        #[cfg(target_os = "linux")]
+        if finite_retained_without_producer(rendition) {
+            return Err(retained_finite_segment_absent(index));
+        }
         self.blocked_wait_for_with_read_custody(rendition, reader, index, budget, delivery, custody)
             .await
     }
@@ -1167,6 +1214,10 @@ impl VodServe {
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
+        #[cfg(target_os = "linux")]
+        if finite_retained_without_producer(rendition) {
+            return Err(retained_finite_segment_absent(index));
+        }
         if let Some(verdict) = demand.expired_verdict().await {
             return Err(verdict.into_error());
         }
@@ -1189,12 +1240,22 @@ impl VodServe {
                     // An eviction already committed before registration, or an
                     // external unlink, can still remove the file. Publication
                     // during this admitted wait is protected by its narrow pin.
-                    None => Err(VodError::Pending {
-                        retry_after: PENDING_RETRY_AFTER,
-                    }),
+                    None => {
+                        #[cfg(target_os = "linux")]
+                        if finite_retained_without_producer(rendition) {
+                            return Err(retained_finite_segment_absent(index));
+                        }
+                        Err(VodError::Pending {
+                            retry_after: PENDING_RETRY_AFTER,
+                        })
+                    }
                 }
             }
             WaitOutcome::Deadline => {
+                #[cfg(target_os = "linux")]
+                if finite_retained_without_producer(rendition) {
+                    return Err(retained_finite_segment_absent(index));
+                }
                 if let Some(verdict) = demand.expired_verdict().await {
                     return Err(verdict.into_error());
                 }

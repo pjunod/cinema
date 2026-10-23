@@ -5,7 +5,7 @@ mod executable;
 mod initial_unit;
 pub(in crate::adaptive_resources) mod pump;
 pub use super::operations::bootstrap::readers::{FiniteReadChunk, FiniteReader};
-pub use command::SoftwareAvcCommand;
+pub use command::{FiniteEngineSnapshot, SoftwareAvcCommand};
 pub use executable::SoftwareAvcExecutable;
 pub use pump::{
     FiniteWriterCompletion, FiniteWriterFailureKind, FiniteWriterOutcome, SoftwareAvcPumpPlan,
@@ -82,7 +82,9 @@ pub struct FiniteSourceRequest {
 }
 
 use super::response_memory::ResponseBudget;
-pub use super::response_memory::{FiniteResponseBuffer, FiniteResponseWorkspace};
+pub use super::response_memory::{
+    FiniteMetadataLease, FiniteResponseBuffer, FiniteResponseWorkspace,
+};
 
 /// Explicit logical/reported-allocation profile. These are admission bounds,
 /// not a claim that a filesystem or host enforces a physical-byte quota.
@@ -90,6 +92,9 @@ pub struct FiniteOutputLimits {
     /// Fixed same-role partition for buffered response payloads and owners.
     /// Separate from the V3 scratch/native reader resident-memory bound.
     pub response_memory_bytes: u64,
+    /// Selected daemon rendition metadata retained for the entire R/S lifetime.
+    /// Counts requested nested heap capacities; excludes allocator overhead/RSS.
+    pub retained_metadata_bytes: u64,
     pub resident_file_objects: u32,
     pub resident_logical_bytes: u64,
     pub reserved_storage_bytes: u64,
@@ -135,6 +140,8 @@ impl SoftwareVodRequest {
             .and_then(|bytes| bytes.checked_add(64 * 1024))
             .and_then(|bytes| bytes.checked_add(output.resident_memory_bytes))
             .and_then(|bytes| bytes.checked_add(output.response_memory_bytes))
+            .and_then(|bytes| bytes.checked_add(output.bootstrap_memory_bytes))
+            .and_then(|bytes| bytes.checked_add(output.retained_metadata_bytes))
             .ok_or_else(|| std::io::Error::other("finite memory overflow"))
     }
 }
@@ -329,6 +336,27 @@ impl FiniteOutput {
     ) -> Result<FiniteResponseBuffer, FiniteVodError> {
         self.runtime
             .allocate_finite_response_buffer(&self.preparation, 0, self.member, capacity, deadline)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Reserve the selected daemon rendition's separate metadata partition.
+    /// Final native settlement stays charged until this sole lease is dropped.
+    pub async fn reserve_metadata_lease(
+        &self,
+        required_bytes: usize,
+    ) -> Result<FiniteMetadataLease, FiniteVodError> {
+        self.runtime
+            .reserve_finite_metadata_lease(&self.preparation, 0, required_bytes)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Wait for actual daemon metadata and buffered bodies to leave their
+    /// in-role partitions. This event grants no native-close/refund authority.
+    pub async fn wait_allocations_release(&self, deadline: Instant) -> Result<(), FiniteVodError> {
+        self.runtime
+            .wait_finite_allocations_release(&self.preparation, 0, deadline)
             .await
             .map_err(Into::into)
     }
@@ -680,6 +708,9 @@ impl SoftwareVodOwner {
     pub async fn cancel(&self, deadline: Instant) -> Result<(), FiniteVodError> {
         self.runtime
             .cancel_preparation(&self.preparation, deadline)
+            .await?;
+        self.runtime
+            .forget_preparation(self.preparation.clone())
             .await
             .map_err(Into::into)
     }
@@ -785,18 +816,24 @@ impl NodeResourceRuntime {
             .ok_or_else(invalid)?;
         let response_memory = request.output.response_memory_bytes;
         let response_limit = usize::try_from(response_memory).map_err(|_| invalid())?;
-        let total_memory = request
-            .output
-            .resident_memory_bytes
-            .checked_add(task_memory)
-            .and_then(|bytes| bytes.checked_add(response_memory))
-            .ok_or_else(invalid)?;
-        if resources.peak_memory_bytes < total_memory || response_memory == 0 {
+        let total_memory = SoftwareVodRequest::known_memory_component(
+            &request.command,
+            &request.producer,
+            &request.output,
+        )?;
+        if resources.peak_memory_bytes < total_memory
+            || response_memory == 0
+            || request.output.retained_metadata_bytes == 0
+        {
             return Err(invalid());
         }
         // This owner is allocated before the reservation and installed before
         // any selected source/output native entry. Its partition remains in S.
-        let response_budget = ResponseBudget::new(response_limit).map_err(FiniteVodError)?;
+        let response_budget = ResponseBudget::with_metadata(
+            response_limit,
+            usize::try_from(request.output.retained_metadata_bytes).map_err(|_| invalid())?,
+        )
+        .map_err(FiniteVodError)?;
         let namespace = std::fs::metadata("/proc/self/ns/mnt")
             .map_err(|e| FiniteVodError(OperationError::Physical(e)))?
             .ino();

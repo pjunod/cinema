@@ -25,6 +25,17 @@ pub struct LinuxDolbyIdentity {
 }
 
 impl LinuxDolbyIdentity {
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.ffmpeg_sha256
+            .capacity()
+            .checked_add(self.ffprobe_sha256.capacity())?
+            .checked_add(self.source_patch_digest.capacity())?
+            .checked_add(self.linked_libraries_digest.capacity())?
+            .checked_add(self.driver_environment_digest.capacity())?
+            .checked_add(self.kernel_device_digest.capacity())?
+            .checked_add(self.device_path.capacity())
+    }
+
     pub fn new(
         ffmpeg_sha256: String,
         ffprobe_sha256: String,
@@ -125,6 +136,110 @@ pub struct LinuxExecutionObject {
     pub kind: LinuxExecutionObjectKind,
 }
 
+impl LinuxExecutionObject {
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.path
+            .capacity()
+            .checked_add(self.version.as_ref().map_or(0, String::capacity))
+    }
+
+    /// Negative freshness check for a captured Linux package object. This
+    /// does not acquire custody or establish process/asset closure.
+    pub fn is_current(&self) -> bool {
+        self.checked_current() == Some(true)
+    }
+
+    /// `None` means an acquired digest File did not positively close.
+    pub fn checked_current(&self) -> Option<bool> {
+        match self.kind {
+            LinuxExecutionObjectKind::AbsentLookup => Some(
+                std::fs::symlink_metadata(&self.path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            ),
+            LinuxExecutionObjectKind::ProducerExecutable
+            | LinuxExecutionObjectKind::NativeReporterExecutable
+            | LinuxExecutionObjectKind::SealedParserExecutable
+            | LinuxExecutionObjectKind::FollowedFile => package_object_version(&self.path, true)
+                .map(|version| Some(&version) == self.version.as_ref())
+                .or(Some(false)),
+            LinuxExecutionObjectKind::LookupObject => package_object_version(&self.path, false)
+                .map(|version| Some(&version) == self.version.as_ref())
+                .or(Some(false)),
+            LinuxExecutionObjectKind::ContentDigest => {
+                use std::io::Read;
+                let Ok(mut file) = std::fs::File::open(&self.path) else {
+                    return Some(false);
+                };
+                let mut digest = Sha256::new();
+                let mut bytes = [0u8; 8 * 1024];
+                let mut total = 0usize;
+                let mut read_complete = true;
+                loop {
+                    let Ok(read) = file.read(&mut bytes) else {
+                        read_complete = false;
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    total += read;
+                    if total > 256 * 1024 {
+                        read_complete = false;
+                        break;
+                    }
+                    digest.update(&bytes[..read]);
+                }
+                let current = read_complete
+                    && self
+                        .version
+                        .as_ref()
+                        .is_some_and(|expected| hex::encode(digest.finalize()) == *expected);
+                #[cfg(unix)]
+                {
+                    use std::os::fd::IntoRawFd;
+                    let raw = file.into_raw_fd();
+                    if unsafe { libc::close(raw) } != 0 {
+                        return None;
+                    }
+                    Some(current)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = file;
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn package_object_version(path: &std::path::Path, follow: bool) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = if follow {
+            std::fs::metadata(path).ok()?
+        } else {
+            std::fs::symlink_metadata(path).ok()?
+        };
+        Some(format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.size(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, follow);
+        None
+    }
+}
+
 impl std::fmt::Debug for LinuxExecutionObject {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -156,6 +271,14 @@ pub struct LinuxSourceClockAssociation {
 }
 
 impl LinuxSourceClockAssociation {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        self.capsule_digest
+            .capacity()
+            .checked_add(self.source_digest.capacity())?
+            .checked_add(self.native_reporter_digest.capacity())?
+            .checked_add(self.sealed_parser_digest.capacity())
+    }
+
     pub fn new(
         capsule_digest: String,
         source_digest: String,
@@ -210,6 +333,30 @@ impl std::fmt::Debug for LinuxDolbyExecutionBinding {
 }
 
 impl LinuxDolbyExecutionBinding {
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .objects
+            .len()
+            .checked_mul(std::mem::size_of::<LinuxExecutionObject>())?
+            .checked_add(
+                self.child_env
+                    .len()
+                    .checked_mul(std::mem::size_of::<(String, String)>())?,
+            )?;
+        for object in self.objects.iter() {
+            bytes = bytes.checked_add(object.requested_heap_bytes()?)?;
+        }
+        for (key, value) in self.child_env.iter() {
+            bytes = bytes
+                .checked_add(key.capacity())?
+                .checked_add(value.capacity())?;
+        }
+        if let Some(association) = &self.source_clock {
+            bytes = bytes.checked_add(association.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     pub fn new(
         objects: Vec<LinuxExecutionObject>,
         child_env: Vec<(String, String)>,
@@ -367,6 +514,18 @@ pub struct LinuxDolbyContext {
 }
 
 impl LinuxDolbyContext {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.identity.requested_heap_bytes()?.checked_add(
+            self.observations
+                .capacity()
+                .checked_mul(std::mem::size_of::<LinuxDolbyObservation>())?,
+        )?;
+        if let Some(binding) = &self.execution_binding {
+            bytes = bytes.checked_add(binding.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     pub fn new(identity: LinuxDolbyIdentity, observations: Vec<LinuxDolbyObservation>) -> Self {
         Self {
             identity,
@@ -432,6 +591,21 @@ pub struct StrictDolbyPolicy {
 }
 
 impl StrictDolbyPolicy {
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = match &self.implementation {
+            StrictDolbyImplementation::Macos(identity) => identity.requested_heap_bytes()?,
+            StrictDolbyImplementation::LinuxVaapi(identity) => identity.requested_heap_bytes()?,
+        };
+        if let Some(context) = &self.linux_observed_context {
+            // The context and policy share the immutable execution binding via
+            // Arc; the context accounts for that allocation.
+            bytes = bytes.checked_add(context.requested_heap_bytes()?)?;
+        } else if let Some(binding) = &self.linux_execution_binding {
+            bytes = bytes.checked_add(binding.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     pub(crate) fn new(identity: MacosProcessingIdentity) -> Self {
         Self {
             implementation: StrictDolbyImplementation::Macos(identity),

@@ -1,6 +1,6 @@
 //! Rebind a positively imported, committed S to the existing response and
 //! cleanup owner. No new reservation, historical owner rewrite or refund.
-use super::super::response_memory::ResponseBudget;
+use super::super::response_memory::{FiniteResponseBuffer, ResponseBudget};
 use super::*;
 
 impl NodeResourceRuntime {
@@ -52,22 +52,32 @@ impl NodeResourceRuntime {
             }
             (entry.resources, entry.state)
         };
-        // The original S retains the whole nonproducer allowance. Native
-        // metadata/bootstrap stay in their recorded partitions; body buffers
-        // use only the remaining already-charged memory, never fresh credit.
+        // Reconstruct only the finite profile's original two-body response
+        // partition. The rest cannot become fresh buffer credit: it also owns
+        // the daemon rendition metadata and imported inventory.
         let native_memory = claim
             .plan()
             .limits
             .resident_memory_bytes
             .checked_add(claim.plan().bootstrap().bounds.resident_memory_bytes)
             .and_then(|n| n.checked_add(64 * 1024))
+            .and_then(|n| n.checked_add(claim.full().resident_inventory_bytes().ok()?))
             .ok_or(OperationError::State)?;
-        let response_memory = resources
+        let payload_capacity = usize::try_from(claim.plan().limits.one_file_logical_bytes)
+            .map_err(|_| OperationError::State)?;
+        let response_memory = FiniteResponseBuffer::required_partition_bytes(payload_capacity, 2)
+            .ok_or(OperationError::State)?;
+        let metadata_memory = resources
             .peak_memory_bytes
             .checked_sub(native_memory)
+            .and_then(|n| n.checked_sub(response_memory))
             .and_then(|n| usize::try_from(n).ok())
+            .filter(|n| *n > 0)
             .ok_or(OperationError::State)?;
-        let response_budget = ResponseBudget::new(response_memory)?;
+        let response_budget = ResponseBudget::with_metadata(
+            usize::try_from(response_memory).map_err(|_| OperationError::State)?,
+            metadata_memory,
+        )?;
         let role = OwnedRole {
             binding,
             durable_tag: id,

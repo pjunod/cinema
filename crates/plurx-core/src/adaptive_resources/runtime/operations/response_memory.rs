@@ -1,5 +1,5 @@
 //! Bind a buffered response allocation to the SAME admitted finite role.
-use super::super::response_memory::{FiniteResponseBuffer, ResponseBudget};
+use super::super::response_memory::{FiniteMetadataLease, FiniteResponseBuffer, ResponseBudget};
 use super::*;
 
 impl NodeResourceRuntime {
@@ -24,6 +24,44 @@ impl NodeResourceRuntime {
         }
         role.response_budget = Some(budget);
         Ok(())
+    }
+
+    pub(in crate::adaptive_resources::runtime) async fn reserve_finite_metadata_lease(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        required_bytes: usize,
+    ) -> Result<FiniteMetadataLease, OperationError> {
+        self.validate_preparation(owner)?;
+        // The reservation and budget already exist before durable prepare is
+        // resolved. Metadata construction grants no selected native entry.
+        let bundle = owner.state.lock().await;
+        let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+        if role.refunded || role.transition.is_some() {
+            return Err(OperationError::State);
+        }
+        role.response_budget
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .reserve_metadata(required_bytes)
+    }
+
+    pub(in crate::adaptive_resources::runtime) async fn wait_finite_allocations_release(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        deadline: std::time::Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let budget = {
+            let bundle = owner.state.lock().await;
+            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            if role.refunded {
+                return Ok(());
+            }
+            Arc::clone(role.response_budget.as_ref().ok_or(OperationError::State)?)
+        };
+        budget.wait_drained(deadline).await
     }
 
     pub(in crate::adaptive_resources::runtime) async fn allocate_finite_response_buffer(

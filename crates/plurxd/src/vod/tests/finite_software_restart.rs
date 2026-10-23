@@ -115,15 +115,16 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
             .end("finite-software-restart", Terminal::Deleted)
             .await
     );
-    output
-        .evict(Instant::now() + Duration::from_secs(90))
-        .await
-        .expect("imported S native cleanup and exact refund");
+    let final_key = rendition.key.clone();
+    drop(rendition);
+    serve
+        .shared
+        .purge_if_dormant(&final_key, Duration::ZERO)
+        .await;
     let final_snapshot = runtime.accounting().expect("final accounting");
     assert_eq!(final_snapshot.held, 0);
     assert_eq!(final_snapshot.used, Default::default());
     drop(output);
-    drop(rendition);
     drop(serve);
     let runtime =
         Arc::try_unwrap(runtime).unwrap_or_else(|_| panic!("recovered runtime still owned"));

@@ -296,6 +296,9 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
             .unknown_peak_producers,
         1
     );
+    // Prepared cancellation must wait until its actual daemon metadata has
+    // dropped; the original core producer selector remains independently held.
+    drop(second);
     second_producer
         .perform(Step::Terminate {
             why: Termination::Idle,
@@ -312,10 +315,14 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(runtime.accounting().expect("S retained").held, 1);
 
     serve.end("finite-software-client", Terminal::Deleted).await;
-    output
-        .evict(Instant::now() + Duration::from_secs(90))
-        .await
-        .expect("native S cleanup and exact refund");
+    let final_key = rendition.key.clone();
+    drop(rendition);
+    // Exercise the production closing owner: it drains the actual rendition
+    // metadata before native cleanup and the known journal refund.
+    serve
+        .shared
+        .purge_if_dormant(&final_key, Duration::ZERO)
+        .await;
     let final_snapshot = runtime.accounting().expect("final accounting");
     assert_eq!(final_snapshot.held, 0);
     assert_eq!(final_snapshot.unknown_peak_producers, 0);

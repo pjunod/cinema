@@ -1,19 +1,23 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete. Source checkpoint
-`fdda9a593491021e70e74b965c71d5488e5f3436` passed exact native Linux core+daemon
-all-target compilation on Rust 1.97.1 (270.488 seconds; log SHA-256
+**Status:** open · implementation incomplete. Published draft checkpoint
+`c3847b9a069153351438344b7a31367c1fa48a5f` retains the earlier exact native
+Linux source compile `fdda9a593491021e70e74b965c71d5488e5f3436` (Rust 1.97.1,
+EXIT 0/270.488 seconds; log SHA-256
 `2e7cf823d44cf93967aa0e1f06e7a4a89a2f134670d26485c99bc1f4b71c42d0`).
-The host check passed on stable source in 154.805 seconds (log SHA-256
-`58b14a0501b9c55462abb6cbc4d28b7cc597067995fb57ec25b97e3d1913c806`).
-There are 439 authored regression anchors, NOT RUN. The ordinary native lifecycle
-fixture was excluded by an incorrect test-feature name at this checkpoint;
-its body is outside these compile receipts. Its registration is being corrected
-in the next source slice. Stable same-boot finite cache identity, the actual
-process-restart fixture, active-R cleanup/writer integration, extended history
-diagnostics and wider import accounting remain under implementation outside
-these receipts. All V1–V5 and R1/M0–M7 remain OPEN. Final review,
-qualification and merge have not run.
+That compile excluded the native lifecycle fixture because of a wrong feature
+name. Later checks enable the existing cluster-integration-tests feature and
+have exposed source errors; fixes and new source remain outside a passing
+native receipt. Local commits now connect stable finite cache identity,
+recovered-R native cleanup/typed settlement, live history-mix revalidation and
+an actual two-process restart fixture. Current work closes engine-check job
+custody, repeated recovered-R adoption and explicit daemon metadata accounting.
+The full original memory charge remains at S until complete retained metadata
+coverage is proven. A separate metadata lifetime lease must prevent settlement
+while actual daemon allocations survive; native closure alone is insufficient.
+All V1–V5 and R1/M0–M7 remain OPEN. Behavioral tests, final independent actual
+Fable review, qualification and merge have not run. See draft PR #1248 for the
+live owner, published head, exact receipts and pending authored anchors.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker

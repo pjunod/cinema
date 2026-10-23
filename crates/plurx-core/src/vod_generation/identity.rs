@@ -80,6 +80,15 @@ impl std::fmt::Display for InitRefused {
 }
 
 impl InitIdentity {
+    /// Requested dynamic heap retained by the normalized identity strings and
+    /// promotion inputs, excluding this inline value.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.muxer_init
+            .capacity()
+            .checked_add(self.served_init.capacity())?
+            .checked_add(self.promotion.requested_heap_bytes()?)
+    }
+
     /// Establish a rendition's identity from its first generation.
     pub fn establish(muxer: &Init, promotion: PromotionInputs) -> Result<InitIdentity, Fmp4Error> {
         let muxer = normalized_muxer(muxer, &promotion)?;

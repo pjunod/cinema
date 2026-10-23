@@ -894,6 +894,10 @@ pub struct VodSharedAudioRecipe {
 pub const VOD_SHARED_AUDIO_CPU_THREADS: usize = 3;
 
 impl VodSharedAudioRecipe {
+    pub fn requested_heap_bytes(&self) -> usize {
+        self.digest.capacity()
+    }
+
     pub fn from_plan(plan: &ResolvedTranscode) -> Option<Self> {
         use sha2::{Digest, Sha256};
         let media = plan.options();

@@ -404,6 +404,22 @@ pub struct DecodeSurfaceContract {
 }
 
 impl DecodeSurfaceContract {
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for value in [
+            self.decoder_download_format.as_ref(),
+            self.renderer_upload_format.as_ref(),
+            self.renderer_download_format.as_ref(),
+            self.encoder_upload_format.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        Some(bytes)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         decode_domain: FrameDomain,
@@ -606,6 +622,10 @@ impl DecodeSourceIdentity {
 pub struct DecodeCacheIdentity(String);
 
 impl DecodeCacheIdentity {
+    pub fn requested_heap_bytes(&self) -> usize {
+        self.0.capacity()
+    }
+
     /// The catalog row's identity. Length-prefixed so that adjacent values
     /// cannot run together into another row's bytes.
     pub fn from_media_file(file: &MediaFile) -> Self {
@@ -2205,6 +2225,17 @@ pub struct TranscodeMediaOptions {
 }
 
 impl TranscodeMediaOptions {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.cache_identity.requested_heap_bytes();
+        if let Some(audio) = &self.audio {
+            bytes = bytes.checked_add(audio.requested_heap_bytes()?)?;
+        }
+        if let Some(policy) = &self.strict_dolby {
+            bytes = bytes.checked_add(policy.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     /// Copy only media semantics from the legacy aggregate. Attempt-local
     /// paths, positions, pacing, and resource caps stay in execution state.
     pub fn from_options(source: &MediaFile, options: &TranscodeOptions) -> Self {
@@ -2451,6 +2482,28 @@ pub struct PresentationContract {
 }
 
 impl PresentationContract {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = 0usize;
+        for value in [
+            &self.output_codec,
+            &self.output_encoder,
+            &self.output_pixel_format,
+            &self.output_dynamic_range,
+            &self.output_transfer,
+            &self.output_matrix,
+            &self.output_primaries,
+        ] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        if let Some(value) = &self.output_profile {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        if let Some(audio) = &self.audio {
+            bytes = bytes.checked_add(audio.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     pub fn output_grade(&self) -> OutputGrade {
         self.output_grade
     }
@@ -2568,6 +2621,16 @@ pub struct ResolvedDecode {
 }
 
 impl ResolvedDecode {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .software_decoder
+            .as_ref()
+            .map_or(0, String::capacity)
+            .checked_add(self.input_codec.as_ref().map_or(0, String::capacity))?;
+        bytes = bytes.checked_add(self.surface.requested_heap_bytes()?)?;
+        Some(bytes)
+    }
+
     pub fn backend(&self) -> DecodeBackend {
         self.backend
     }
@@ -2671,6 +2734,25 @@ impl<'a> CompletedReconstructedOutputPlan<'a> {
 }
 
 impl ResolvedTranscode {
+    /// Requested heap capacity retained by the immutable semantic plan,
+    /// excluding the inline `ResolvedTranscode` value.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .decode
+            .requested_heap_bytes()?
+            .checked_add(self.options.requested_heap_bytes()?)?
+            .checked_add(self.source_facts_digest.capacity())?
+            .checked_add(self.source_identity.0.capacity())?
+            .checked_add(self.output_contract.requested_heap_bytes()?)?;
+        if let Some(value) = &self.routing_dynamic_range {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        if let Some(identity) = &self.macos_processing_identity {
+            bytes = bytes.checked_add(identity.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
     /// Select only the encode half of an independently reconstructed PQ route.
     /// Source binding, decode, ordinary options and their digest stay unchanged.
     pub fn completed_reconstructed_output(

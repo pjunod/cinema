@@ -888,6 +888,20 @@ pub enum DvSelection {
     Selected(Box<DvProcessingPlan>),
 }
 
+impl DvSelection {
+    /// The fixed finite AVC recipe accepts the no-processing selection. A
+    /// selected DV graph owns a BTreeSet-backed sampled-coverage proof whose
+    /// node allocation is not represented by a requested Vec/String capacity;
+    /// refuse to report a falsely complete byte total for that specialized
+    /// recipe until it has its own bounded accounting contract.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::KeepExisting(_) => Some(0),
+            Self::Selected(_) => None,
+        }
+    }
+}
+
 /// The selected-worker identity is captured by the caller, never controller tools.
 pub struct DvResolutionInput {
     pub existing_route: DvExistingRoute,

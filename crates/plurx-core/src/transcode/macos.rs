@@ -36,6 +36,22 @@ pub struct MacosProcessingIdentity {
 }
 
 impl MacosProcessingIdentity {
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .ffmpeg_sha256
+            .capacity()
+            .checked_add(self.ffprobe_sha256.capacity())?
+            .checked_add(self.patch_digest.capacity())?
+            .checked_add(self.linked_libraries_digest.capacity())?
+            .checked_add(self.os_build.capacity())?
+            .checked_add(self.architecture.capacity())?
+            .checked_add(self.hardware_class.capacity())?;
+        if let Some(value) = &self.text_font_digest {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        Some(bytes)
+    }
+
     pub fn new(
         ffmpeg_sha256: String,
         ffprobe_sha256: String,

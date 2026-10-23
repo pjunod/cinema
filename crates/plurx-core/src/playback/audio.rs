@@ -23,6 +23,32 @@ pub struct AudioClaim {
 }
 
 impl AudioClaim {
+    /// Requested capacities retained by the claim's nested collections.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .decoders
+            .capacity()
+            .checked_mul(std::mem::size_of::<String>())?
+            .checked_add(
+                self.sinks
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<AudioSink>())?,
+            )?;
+        for decoder in &self.decoders {
+            bytes = bytes.checked_add(decoder.capacity())?;
+        }
+        for sink in &self.sinks {
+            bytes = bytes.checked_add(sink.codec.capacity())?.checked_add(
+                sink.sample_rates_hz
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<u32>())?,
+            )?;
+        }
+        Some(bytes)
+    }
+}
+
+impl AudioClaim {
     pub fn from_caps(caps: &super::DeviceCaps) -> Result<Option<Self>, &'static str> {
         if caps.v != super::DeviceCaps::VERSION || caps.audio_sinks.is_empty() {
             return Ok(None);
@@ -233,6 +259,24 @@ pub struct AudioDelivery {
 }
 
 impl AudioDelivery {
+    /// Requested capacities retained by this delivery's variable fields.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.reason.capacity();
+        match &self.action {
+            AudioAction::None => {}
+            AudioAction::Copy { codec, .. } => {
+                bytes = bytes.checked_add(codec.capacity())?;
+            }
+            AudioAction::Encode { codec, layout, .. } => {
+                bytes = bytes.checked_add(codec.capacity())?;
+                if let Some(layout) = layout {
+                    bytes = bytes.checked_add(layout.capacity())?;
+                }
+            }
+        }
+        Some(bytes)
+    }
+
     pub fn parse_encoded_snapshot(snapshot: &str) -> Option<Self> {
         let audio: Self = serde_json::from_str(snapshot).ok()?;
         audio.is_encoded_vod_compatible().then_some(audio)

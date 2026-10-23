@@ -884,6 +884,23 @@ pub struct TranscodeOptions {
     pub software_threads: Option<u32>,
 }
 
+impl TranscodeOptions {
+    /// Requested capacities of path/string values retained by the options.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .subtitle_file
+            .as_ref()
+            .map_or(0, std::path::PathBuf::capacity);
+        if let Some(audio) = &self.audio {
+            bytes = bytes.checked_add(audio.requested_heap_bytes()?)?;
+        }
+        if let Some(policy) = &self.strict_dolby {
+            bytes = bytes.checked_add(policy.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
 /// Attempt-local values consumed by the HLS command builder after semantic
 /// planning is complete. Construction copies only execution fields from the
 /// legacy aggregate; decoder, renderer, encoder, tracks, and output grade come

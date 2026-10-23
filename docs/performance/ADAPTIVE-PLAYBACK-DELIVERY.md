@@ -1,19 +1,23 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete. Source checkpoint
-`fdda9a593491021e70e74b965c71d5488e5f3436` passed exact native Linux core+daemon
-all-target compilation on Rust 1.97.1 (270.488 seconds; log SHA-256
+**Status:** open · implementation incomplete. Published draft checkpoint
+`c3847b9a069153351438344b7a31367c1fa48a5f` retains the earlier exact native
+Linux source compile `fdda9a593491021e70e74b965c71d5488e5f3436` (Rust 1.97.1,
+EXIT 0/270.488 seconds; log SHA-256
 `2e7cf823d44cf93967aa0e1f06e7a4a89a2f134670d26485c99bc1f4b71c42d0`).
-The host check passed on stable source in 154.805 seconds (log SHA-256
-`58b14a0501b9c55462abb6cbc4d28b7cc597067995fb57ec25b97e3d1913c806`).
-There are 439 authored regression anchors, NOT RUN. The ordinary native lifecycle
-fixture was excluded by an incorrect test-feature name at this checkpoint;
-its body is outside these compile receipts. Its registration is being corrected
-in the next source slice. Stable same-boot finite cache identity, the actual
-process-restart fixture, active-R cleanup/writer integration, extended history
-diagnostics and wider import accounting remain under implementation outside
-these receipts. All V1–V5 and R1/M0–M7 remain OPEN. Final review,
-qualification and merge have not run.
+That compile excluded the native lifecycle fixture because of a wrong feature
+name. Later checks enable the existing cluster-integration-tests feature and
+have exposed source errors; fixes and new source remain outside a passing
+native receipt. Local commits now connect stable finite cache identity,
+recovered-R native cleanup/typed settlement, live history-mix revalidation and
+an actual two-process restart fixture. Current work closes engine-check job
+custody, repeated recovered-R adoption and explicit daemon metadata accounting.
+The full original memory charge remains at S until complete retained metadata
+coverage is proven. A separate metadata lifetime lease must prevent settlement
+while actual daemon allocations survive; native closure alone is insufficient.
+All V1–V5 and R1/M0–M7 remain OPEN. Behavioral tests, final independent actual
+Fable review, qualification and merge have not run. See draft PR #1248 for the
+live owner, published head, exact receipts and pending authored anchors.
 Primary owner: direct Codex harness
 (`/root`; actual model unspecified), sole integration writer. Work remains on
 `effort/adaptive-playback-resources`, draft PR #1248. This is a delivery
@@ -35,7 +39,7 @@ this path is not behavior-verified or qualified.
 | V1 — admission/source — OPEN | The selected Linux ordinary software-transcode branch enters finite preparation with its held source and original producer ownership. Other recipes still use the legacy path. The full production capacity/memory profile, partial-start closure and cold restart/cache adoption remain open. |
 | V2 — held output/durability — OPEN | The selected branch uses the same held child, selected-ID publisher and sync jobs. Counted HTTP selection and actual S cleanup/R→S transfer are connected. Full memory accounting and other legacy recipes remain outside this path; this does not close V2. |
 | V3 — producer/stop — OPEN | The selected branch joins its original writer/root and already-registered native jobs outside the bundle lock. Stop retains the original task/control through registration, and source-parent closure uses its original job. Partial-start/inherited-copy closure and the complete memory profile remain unresolved; the branch is not qualified. |
-| V4 — retained output — OPEN | The selected branch connects counted HTTP readers, cleanup and one journal R→S transfer to the retained native output. The whole role reservation remains held for S; unknown cleanup/commit keeps ownership charged. Cold restart/cache adoption and broader recipe integration remain open. |
+| V4 — retained output — OPEN | The selected branch connects counted HTTP readers, cleanup and one journal R→S transfer to the retained native output. The original memory component remains held for S while metadata coverage is completed; storage, process and task components can shrink only through the known transfer. Unknown cleanup/commit keeps ownership charged. Cold restart/cache adoption and broader recipe integration remain open. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
 Current sequence: complete the selected ordinary branch’s remaining capacity,
@@ -140,7 +144,7 @@ No source-ownership transfer or additional permission gate is introduced.
 |---|---|---|---|---|
 | M0 — coverage/contracts | Spawn/resource coverage table; process identity and ledger types; settings writer/import contracts; local journal and M4 request/attempt schemas. | Finish the existing coverage table by mapping each production owner to its concrete M3 adapter and exact regression; reconcile implemented M4 wire/runtime with the approved contract. Depends on the adapters/runtime it inventories, not another repository-wide search campaign. | Every planned pipeline has one identified admission/acquisition/retirement owner and resource domain; no silently excluded spawn, sink or relay. This closes coverage, not playback capacity by itself. | Primary Codex harness (`/root`); resolve only a specific unresolved contract. |
 | M1 — observations/diagnostics | `process/observation.rs`, launcher observations and `resource_observation.rs` provide identity-bound Known/Unknown counters/service windows. | Complete production progress/phase sampling and diagnostic projection for each M3 adapter; bind overhead/platform limits to actual owners. | Operator can see current node/workload CPU, memory, progress and Unknown reasons; pacing is not misreported as low encode capacity. Platform/overhead acceptance remains M7. | Primary Codex harness (`/root`). |
-| M2 — policy/settings/learning | `adaptive_resources.rs` has atomic vectors/families/retained roles; `resource_history.rs` bounded priors; `resource_policy.rs` advisory trial/deadline/cooldown logic; `resource_settings` and `store/planning_capacity.rs` preserve settings provenance/authority. | Wire these components into the live node owner and production planning/admission; feed real service samples/epochs, persist useful history, apply current hard bounds and four-state settings without rewriting saved intent. No daemon `ResourceHistory`/trial-policy consumer was found by the bounded current source query; helper existence is not integration. Depends on M1 and finite M3 owners. | A normal request uses current hard caps and genuine measured evidence; Automatic can learn safely, explicit/legacy caps and both zero meanings retain their contract; failure cooldown and paced workloads cannot invent headroom. | Primary Codex harness (`/root`). |
+| M2 — policy/settings/learning | `adaptive_resources.rs` has atomic vectors/families/retained roles; `resource_history.rs` bounded priors; `resource_policy.rs` advisory trial/deadline/cooldown logic; `resource_settings` and `store/planning_capacity.rs` preserve settings provenance/authority. | Wire these components into the live node owner and production planning/admission; feed real service samples/epochs, persist useful history, apply current hard bounds and four-state settings without rewriting saved intent. The selected finite core owner now records actual identity-bound service windows and projects history diagnostics. Production planning still does not consume those samples or the trial policy; helper existence is not adaptive admission. Depends on M1 and finite M3 owners. | A normal request uses current hard caps and genuine measured evidence; Automatic can learn safely, explicit/legacy caps and both zero meanings retain their contract; failure cooldown and paced workloads cannot invent headroom. | Primary Codex harness (`/root`). |
 | M3a — critical custody/runtime backend | Dedicated node-local journal, lock-bound startup/reconstruction, retained prepare/arm/seal/settlement book, actual root/source/discard-pipe ownership; Windows LIVE original-Job proof plus restricted private local-graph receipt. | C1–C3 below: supported Linux pre-entry/nonescape/object-continuity recovery; exact runtime manifest/member settlement; real production source/writer/scratch adapters and retirement. Current Windows storage/restart unsupported and current Unix cleanup UnknownHeld do not satisfy this. | One finite producer can actually start, stop, commit settlement and free capacity; restart retains/reconciles its original obligations without deleting protected work or leaking every normal slot forever. | Primary Codex harness (`/root`); use existing authorized native compiler/environment evidence. |
 | M3b — all pipeline adapters | VOD/rolling supervisor joins and custody bridges, bounded overlap/family borrowing, real source handles and pipe task helpers are present. Ordinary launches still remain legacy. | After the first finite path: connect finite/rolling/continuous and processed helper graphs, audio/subtitle/copy/cached/direct/range, Live/DVR shared transport plus each sink, fragment/index/background work and ingress relay; replace whole-budget background holders with real yield/retirement; preserve shared-role transfer and paced/producing phases. Depends on M3a plus M1/M2. | Every M0 row uses the service, counts each retained/shared owner once and retains costs until its real terminal event; foreground playback can reclaim background capacity without stealing live work. | Primary Codex harness (`/root`). |
 | M4 — worker runtime (Store is delivered) | Integrated SQLite/Hiqlite attempt/request/domain transactions, Prepared/winner/adoption fences, legacy-writer guards and Source activation guards. | Implement worker Prepare/Adopt/cancel/status handlers and capability advertisement; reconstruct actual source/executable/credit/admission locally, retain cleanup ownership, recheck serving/drain/epoch/winner before publication/activation. Compose ordinary and processed output. Depends on local M3a/M3b owners; Store rows alone are not remote workers. | A same-quality remote preparation really runs on an eligible worker, only one exact winner adopts, losers retain physical cleanup, old peers keep legacy behavior and cannot bypass new authority. | Primary Codex harness (`/root`). |
@@ -224,3 +228,31 @@ must carry that bound and durable evidence before it can relax serialization.
 Reserving an arbitrary count, treating encoder threads as total tasks, and using
 a memory claim to label task uncertainty were rejected because their units or
 evidence do not support admission. No feature switch is introduced.
+
+## Decision — daemon metadata follows its real owner
+
+**Context.** Native scratch closure does not destroy the daemon rendition's
+recipe, immutable plans, manifest, engine references or buffered responses.
+Crediting that memory at native close would permit the next producer while
+those allocations remain resident. A never-started pump also retained a
+back-reference to its own preparation until its planning payload was disposed.
+
+**Decision.** Keep a separate, explicit metadata partition in the original
+finite reservation, with recursively measured requested capacities and a
+nonclone lease held after the rendition's payload fields. The same response
+budget tracks the independent metadata/body lifetimes. Its drain event is a
+factual notification, not native closure or refund authority. The existing
+maintenance owner closes registration under the per-key gate, moves exact
+control/output selectors into a compact closing entry, releases the gate while
+real driver/request owners drain, and settles through the original core
+operation. Unknown outcomes retain the closing entry and block replacement.
+Known cancellation disposes planning payloads before credit and removes its
+settled registry entry. These changes remain unqualified source.
+
+**Limits and next source work.** The estimator covers immutable requested heap
+capacities; it does not establish a whole-RSS or allocator bound. Reader maps,
+per-reader marker state and missing-output demand state still need an enforced
+client-state subpartition. The complete original memory component therefore
+remains charged at S. The native lifecycle fixture's strict producer-memory
+return criterion is intentionally still unmet until this accounting is complete.
+No milestone is closed by the helper, lease or compiler alone.

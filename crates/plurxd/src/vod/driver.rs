@@ -6,7 +6,10 @@ pub(super) fn spawn_driver(
 ) -> tokio::task::JoinHandle<()> {
     #[cfg(target_os = "linux")]
     if let Some(producer) = rendition.dir.finite_producer() {
-        return tokio::spawn(finite_software::run(shared, rendition, producer));
+        let completion = producer.begin_driver();
+        return tokio::spawn(finite_software::run(
+            shared, rendition, producer, completion,
+        ));
     }
     #[cfg(target_os = "linux")]
     if rendition.dir.is_finite() {

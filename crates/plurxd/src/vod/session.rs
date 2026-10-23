@@ -146,6 +146,29 @@ pub(super) struct Rendition {
     /// delivered this entry and publication did not finish" from "the
     /// producer never delivered it".
     pub(super) fragment_received: StdMutex<Option<(u64, u32)>>,
+    /// Holds the in-role metadata partition while any published Arc of this
+    /// immutable rendition remains live. It is intentionally the last field
+    /// so normal field drop releases the lease after the metadata owners.
+    #[cfg(target_os = "linux")]
+    pub(super) finite_metadata_lease:
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteMetadataLease>,
+}
+
+#[cfg(target_os = "linux")]
+impl Rendition {
+    pub(super) fn requested_retained_metadata_bytes(&self) -> Option<usize> {
+        super::finite_metadata::actual_rendition_bytes(self)
+    }
+
+    pub(super) async fn validate_retained_metadata(&self) -> std::io::Result<()> {
+        let Some(lease) = &self.finite_metadata_lease else {
+            return Ok(());
+        };
+        let actual = super::finite_metadata::live_rendition_bytes(self)
+            .await
+            .ok_or_else(|| std::io::Error::other("finite metadata capacity is unavailable"))?;
+        lease.validate_actual(actual)
+    }
 }
 
 /// The points of a [`Rendition`]'s driver that a test observes

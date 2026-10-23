@@ -182,6 +182,10 @@ impl NodeResourceRuntime {
                 return self.finish_transition(bundle_id, role).await;
             }
         }
+        // Join a check abandoned by a cancelled prelaunch or publication
+        // waiter before deciding that no native work remains. Unknown close
+        // or panic retains the original full R and refuses typed settlement.
+        self.reconcile_finite_engine_check(owner, index).await?;
         let initial_member = {
             let bundle = owner.state.lock().await;
             let role = bundle.roles.get(index).ok_or(OperationError::State)?;
@@ -262,6 +266,12 @@ impl NodeResourceRuntime {
         {
             return Err(OperationError::State);
         }
+        // Even a never-acquired output can have a constructed daemon
+        // rendition. Native non-entry is not closure of that heap owner.
+        role.response_budget
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .begin_close_if_empty()?;
         let handle = role.handle.clone().ok_or(OperationError::State)?;
         let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
         let never_root = finite.never_root_closure.as_ref();
@@ -516,9 +526,20 @@ impl NodeResourceRuntime {
             _output: output,
         };
         let receipt = PhysicalCloseReceipt::from_finite_cancel(closure);
+        // Original native closure is now in the one-shot receipt, and the
+        // metadata/body lease fence above is closed. Dispose producer planning
+        // payloads (including the never-started pump's back-reference) while
+        // the complete R reservation is still charged.
         role.bootstrap.clear();
         role.sources.clear();
         role.response_budget = None;
+        role.members.clear();
+        role.typed_members = None;
+        role.armed.clear();
+        role.invoked.clear();
+        role.roots.clear();
+        role.sealed = None;
+        role.finite_vod = None;
         role.transition = Some(Transition {
             operation: JournalOperation::transition(self.journal.change(
                 key,
