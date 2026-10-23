@@ -12,6 +12,7 @@ import uuid
 from validation.knowledge import evaluation_isolation as isolation
 from validation.knowledge.study_driver import isolation_adapter as adapter
 from validation.knowledge.study_driver import operator_workflow as operator
+from validation.knowledge.study_driver import paired_runtime as paired
 from validation.knowledge.study_driver import request_journal as checkpoints
 from validation.knowledge.study_driver import runtime_bindings as bindings
 from validation.knowledge.study_driver import trusted_launcher as launcher
@@ -34,6 +35,7 @@ class StageRetirementTests(unittest.TestCase):
         for name in ("_ISSUED","_STEPS","_QUALIFIED"):
             self.enterContext(patch.object(isolation,name,{}))
         self.enterContext(patch.object(isolation,"_ACTIVE_ROOTS",set()))
+        self.enterContext(patch.object(isolation,"_PROBE_SEQUENCE",0))
         self.enterContext(patch.object(launcher,"_ATOMIC_PRIVATE",checkpoints.atomic_private))
         # Unit fixture models a distinct execution volume without mounting one.
         # Production has no bypass: bind_retirement_evidence checks observed dev.
@@ -63,6 +65,59 @@ class StageRetirementTests(unittest.TestCase):
         self.stager.close(handle)
         return handle,proof
 
+    def issued_tuple_probe(self,handle):
+        private=handle.root/".isolation";private.mkdir(mode=0o700,exist_ok=True)
+        payload={"acceptance_argv":(("/usr/bin/python3","/grader/synthetic.py","/work"),),
+                 "mounts":((str(handle.candidate),"/work",True),(str(handle.runtime),"/work/.runtime",False)),
+                 "environment":(("PYTHONDONTWRITEBYTECODE","1"),("SYNTHETIC","tuple")),
+                 "identity":(handle.root.stat().st_dev,handle.root.stat().st_ino)}
+        # Exercise the real public probe issuance/serialization path, stubbing
+        # only the container boundary. This is not an actual containment proof.
+        with patch.object(isolation,"_prepare",return_value=(private,payload)), \
+             patch.object(isolation,"_configuration_probe",return_value=("synthetic-probe",{"synthetic":True})), \
+             patch.object(isolation,"_cleanup",return_value=True):
+            return isolation.probe(NS())
+
+    def registered_pair(self):
+        sources=self.base/("roles-"+uuid.uuid4().hex);sources.mkdir(mode=0o700)
+        def pinned(name,raw):
+            path=sources/name;path.write_bytes(raw)
+            return paired.PinnedRoleSource(path,hashlib.sha256(raw).hexdigest(),name)
+        protected=pinned("protected.py",b"# synthetic protected driver\n")
+        worker=pinned("worker.py",b"# synthetic worker driver\n")
+        schema=pinned("rpc-contract.json",b'{"synthetic":true}')
+        role=paired.PairedRoleBinding(worker,schema,protected,worker_uid=os.getuid()+1)
+        step=isolation.ExecutionStep("check",("/usr/bin/python3","/grader/protected.py","/work"))
+        prerequisite_step=isolation.ExecutionStep("prepare",step.argv,kind="prerequisite")
+        plan=isolation.FamilyPlanV2("synthetic-paired",(prerequisite_step,),(step,),
+            isolation.TrustedSourceFile(protected.filename,protected.sha256))
+        self.stager.baseline.expected="f"*64;self.stager.baseline.exceptions={};self.stager.baseline.permits={}
+        self.stager.family_recipes=NS(resolve=lambda artifacts,commands:(plan,protected.path))
+        self.stager.paired=paired.PairedRoleStager(self.stager,{plan.family:role})
+        commands=(self.stager.step_command(step),)
+        spec={"id":"synthetic","source_commit":"a"*40,"source_tree":"b"*40,"source_projections":{},
+              "source_transform":None,"source_transform_target":None,"allowed_edit_paths":[]}
+        current=self.stager.prepare(spec,{},(),commands)
+        baseline,config,qualified_plan=self.stager.prerequisite_stage(current,commands)
+        (baseline.runtime/"installed").write_bytes(b"qualified protected runtime")
+        (baseline.worker_runtime/"compiled").write_bytes(b"qualified worker runtime")
+        private=baseline.root/".isolation";private.mkdir(mode=0o700)
+        before={"candidate":self.stager.source_manifest(current.candidate)}
+        after={"runtime":paired.measure_tree(baseline.runtime),"worker_runtime":paired.measure_tree(baseline.worker_runtime)}
+        plan_digest=isolation._digest(isolation._plan_v2_data(qualified_plan))
+        body={"policy_digest":"e"*64,"previous_step_digest":"","before":before,"after":after,
+              "versions":{"python":"3.12.3"},"worker_versions":{"python":"3.12.3"},
+              "baseline_source_digest":before["candidate"],"cleanup_proved":True}
+        path=private/("step-"+uuid.uuid4().hex+".json")
+        digest=isolation._write_private(path,body)
+        completed=isolation.StepReceipt("passed",digest,path,"prerequisite-passed",qualified_plan.family,
+            plan_digest,"d"*64,"prerequisite",0)
+        isolation._STEPS[id(completed)]=(completed,body)
+        # The real API seals and issues this prerequisite; no container executes.
+        prerequisite=isolation.seal_prerequisites(qualified_plan,(completed,))
+        self.stager.record_receipt(baseline,prerequisite)
+        return current,baseline,prerequisite
+
     def pending(self,handle,proof):
         receipt={"status":"passed","isolation_verified":True,"receipt_sha256":proof.digest}
         self.runner._pending_retirements[id(receipt)]={"receipt":receipt,"handle":handle,"proof_digests":(proof.digest,),
@@ -73,6 +128,106 @@ class StageRetirementTests(unittest.TestCase):
         digest=checkpoints.atomic_private(self.output,"acceptance-"+launcher.sha(run_id.encode())+".private.json",receipt,replace=False)
         checkpoint=self.journal.append({"event":"acceptance_finished","run_id":run_id,"receipt_sha256":digest})
         return {"run_id":run_id,"receipt_sha256":digest,"checkpoint_sha256":checkpoint}
+
+    def test_actual_issued_tuple_probe_registers_and_refuses_changed_bytes_body_or_forgery(self):
+        for attack in ("unchanged","bytes","body","forged"):
+            with self.subTest(attack=attack):
+                handle,_=self.stage();proof=self.issued_tuple_probe(handle)
+                issued=isolation._ISSUED[id(proof)][1]
+                self.assertIsInstance(issued["configuration"]["acceptance_argv"],tuple)
+                self.assertIsInstance(json.loads(proof.private_path.read_bytes())["configuration"]["acceptance_argv"],list)
+                if attack=="bytes":proof.private_path.write_bytes(proof.private_path.read_bytes()+b" ")
+                elif attack=="body":issued["configuration"]["environment"]=(("SYNTHETIC","changed"),)
+                elif attack=="forged":proof=isolation.ProbeReceipt(proof.status,proof.digest,proof.private_path,proof.config_digest)
+                if attack=="unchanged":
+                    self.stager.record_receipt(handle,proof)
+                    self.assertIn(proof.private_path.name,self.stager.retirement_evidence(handle)["isolation_receipts"])
+                else:
+                    with self.assertRaises(bindings.BindingRefusal):self.stager.record_receipt(handle,proof)
+                    self.assertTrue(handle.candidate.exists())
+
+    def test_real_paired_adoption_then_issued_capture_close_and_checkpoint_retirement(self):
+        current,baseline,prerequisite=self.registered_pair()
+        old=dict(self.stager._stage_record(current)["children"])
+        self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+        record=self.stager._stage_record(current)
+        for name in ("runtime","worker-runtime"):
+            self.assertNotEqual(record["children"][name],old[name])
+        for name in set(old)-{"runtime","worker-runtime"}:
+            self.assertEqual(record["children"][name],old[name])
+        self.assertEqual(paired.measure_tree(current.runtime),paired.measure_tree(baseline.runtime))
+        self.assertEqual(paired.measure_tree(current.worker_runtime),paired.measure_tree(baseline.worker_runtime))
+        proof=self.issued_tuple_probe(current);self.stager.record_receipt(current,proof)
+        self.stager.close(current)
+        receipt=self.pending(current,proof)
+        launcher.checkpoint_acceptance(self.output,self.journal,self.runner,"adopted-pair",receipt)
+        self.assertTrue(current.retired);self.assertTrue(baseline.runtime.exists())
+        archive=self.output/"stage-evidence"/current.root.name
+        closure=json.loads((archive/"stage-closed.json").read_bytes())
+        self.assertEqual(closure["runtime_adoption"]["prerequisite_sha256"],prerequisite.digest)
+        self.assertEqual(set(closure["runtime_adoption"]["roots"]),{"runtime","worker-runtime"})
+        self.assertEqual((archive/proof.private_path.name).read_bytes(),proof.private_path.read_bytes())
+
+    def test_partial_paired_adoption_does_not_commit_any_replacement_or_allow_retirement(self):
+        current,baseline,prerequisite=self.registered_pair()
+        old=dict(self.stager._stage_record(current)["children"])
+        actual=paired.copy_qualified_runtime
+        def partial(source,target,expected,**kwargs):
+            if target==current.worker_runtime:raise OSError("synthetic worker copy failure")
+            return actual(source,target,expected,**kwargs)
+        with patch.object(paired,"copy_qualified_runtime",side_effect=partial):
+            with self.assertRaises(OSError):self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+        record=self.stager._stages[id(current)]
+        self.assertEqual(record["children"],old);self.assertTrue(record["adoption_failed"])
+        self.assertNotEqual(self.stager._directory_identity(current.runtime),old["runtime"])
+        self.assertTrue(current.worker_runtime.exists());self.assertTrue(current.candidate.exists())
+        proof=self.issued_tuple_probe(current)
+        for operation in (lambda:self.stager.record_receipt(current,proof),lambda:self.stager.close(current),
+                          lambda:self.stager.retire(current,{"receipt_sha256":"a"*64,"checkpoint_sha256":"b"*64,"event":"acceptance_finished"})):
+            with self.assertRaisesRegex(bindings.BindingRefusal,"StageAdoptionUnproved"):operation()
+        self.assertFalse(current.retired)
+
+    def test_adoption_never_commits_a_token_that_does_not_name_the_verified_copy(self):
+        current,baseline,prerequisite=self.registered_pair()
+        old=dict(self.stager._stage_record(current)["children"])
+        actual=paired.copy_qualified_runtime
+        def wrong_token(source,target,expected,**kwargs):
+            device,inode=actual(source,target,expected,**kwargs)
+            return (device,inode+1)
+        with patch.object(paired,"copy_qualified_runtime",side_effect=wrong_token):
+            with self.assertRaisesRegex(bindings.BindingRefusal,"StageChildIdentityChanged"):
+                self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+        self.assertEqual(self.stager._stages[id(current)]["children"],old)
+        self.assertTrue(self.stager._stages[id(current)]["adoption_failed"])
+        self.assertTrue(current.candidate.exists());self.assertFalse(current.retired)
+
+    def test_adoption_refuses_unrelated_root_swap_even_during_real_copy(self):
+        current,baseline,prerequisite=self.registered_pair()
+        actual=paired.copy_qualified_runtime
+        def swapped(source,target,expected,**kwargs):
+            result=actual(source,target,expected,**kwargs)
+            if target==current.runtime:
+                current.grader.rename(current.root/"unexpected-original-grader")
+                current.grader.mkdir(mode=0o700)
+            return result
+        with patch.object(paired,"copy_qualified_runtime",side_effect=swapped):
+            with self.assertRaises(bindings.BindingRefusal):self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+        self.assertTrue(self.stager._stages[id(current)]["adoption_failed"])
+        self.assertTrue((current.root/"unexpected-original-grader").exists());self.assertFalse(current.retired)
+
+    def test_adoption_requires_original_roots_issued_prerequisite_and_qualified_bytes(self):
+        for attack in ("root","runtime-bytes","receipt-bytes","issued-body","forged"):
+            with self.subTest(attack=attack):
+                current,baseline,prerequisite=self.registered_pair()
+                if attack=="root":
+                    current.runtime.rename(current.root/"unexpected-runtime");current.runtime.mkdir(mode=0o700)
+                elif attack=="runtime-bytes":(baseline.runtime/"installed").write_bytes(b"unqualified bytes")
+                elif attack=="receipt-bytes":prerequisite.private_path.write_bytes(prerequisite.private_path.read_bytes()+b" ")
+                elif attack=="issued-body":isolation._QUALIFIED[id(prerequisite)][1]["after"]["runtime"]="f"*64
+                else:prerequisite=isolation.PrerequisiteReceipt(prerequisite.status,prerequisite.digest,prerequisite.private_path,prerequisite.family,prerequisite.binding_digest)
+                with self.assertRaises(bindings.BindingRefusal):self.stager.adopt_qualified_runtime(current,baseline,prerequisite)
+                self.assertTrue(current.candidate.exists());self.assertTrue(current.worker_runtime.exists())
+                self.assertFalse(current.retired)
 
     def test_close_retains_scratch_then_checkpointed_retirement_archives_exact_evidence(self):
         handle,proof=self.stage();receipt=self.pending(handle,proof)

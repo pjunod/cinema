@@ -438,25 +438,63 @@ class SourceStager:
         config=self.configuration(baseline,command,_step=first) if getattr(plan,"schema_version",1)==2 else self.configuration(baseline,command)
         return baseline,config,plan
     def adopt_qualified_runtime(self,handle,baseline_stage,prerequisite):
-        """Use issued final runtimes and pristine initial protected source only."""
+        """Commit only verified, controlled replacements of registered runtimes."""
         from .paired_runtime import copy_qualified_runtime
-        require(prerequisite.status=="qualified" and prerequisite.private_path is not None,"QualifiedRuntimeRequired")
-        receipt=no_links(prerequisite.private_path);require(file_sha(receipt)==prerequisite.digest,"PrerequisiteReceiptChanged")
+        self.admission.assert_current()
+        record=self._stage_record(handle);baseline_record=self._stage_record(baseline_stage)
+        require(handle is not baseline_stage and not handle.closed and not record.get("runtime_adoption")
+                and baseline_record["pinned"],"FreshStageAndPinnedBaselineRequired")
+        require(type(prerequisite) is self.api.PrerequisiteReceipt and prerequisite.status=="qualified"
+                and prerequisite.private_path is not None,"QualifiedRuntimeRequired")
+        issued=self.api._QUALIFIED.get(id(prerequisite))
+        require(issued is not None and issued[0] is prerequisite,"IssuedQualifiedRuntimeRequired")
+        receipt=no_links(prerequisite.private_path);info=receipt.lstat()
+        require(receipt.parent==baseline_stage.root/".isolation" and stat.S_ISREG(info.st_mode) and info.st_nlink==1
+                and file_sha(receipt)==prerequisite.digest,"PrerequisiteReceiptChanged")
         body=private_json(receipt)
+        require(self.api._json(body)==self.api._json(issued[1]),"IssuedPrerequisiteBodyChanged")
         require(body.get("schema_version")==2 and body.get("status")=="qualified","Version2QualifiedRuntimeRequired")
-        require(baseline_stage.root.parent==self.root and handle.root.parent==self.root
-                and baseline_stage.runtime!=handle.runtime,"OwnedDistinctRuntimeRequired")
-        copy_qualified_runtime(baseline_stage.runtime,handle.runtime,body["after"]["runtime"])
-        if handle.paired_role is not None:
-            require(self.paired is not None,"PairedRuntimeBindingRequired")
-            self.paired.adopt(handle,baseline_stage,body)
-        # A copied baseline target must rebuild against this stage's source.
-        now=time.time_ns()
-        roots=(handle.candidate,handle.worker_candidate) if handle.worker_candidate is not None else (handle.candidate,)
-        for root in roots:
-            for directory,folders,files in os.walk(root,followlinks=False):
-                no_links(directory)
-                for name in files:os.utime(Path(directory)/name,ns=(now,now),follow_symlinks=False)
+        names=("runtime","worker-runtime") if handle.paired_role is not None else ("runtime",)
+        require((handle.paired_role is None)==(baseline_stage.paired_role is None),"PairedRuntimeBindingMismatch")
+        for name in names:
+            field="runtime" if name=="runtime" else "worker_runtime"
+            require(getattr(handle,field)==handle.root/name and getattr(baseline_stage,field)==baseline_stage.root/name
+                    and re.fullmatch(r"[a-f0-9]{64}",body["after"][field]),"FixedQualifiedRuntimeRootRequired")
+        replacements={};record["adopting"]=True
+        try:
+            # copy_qualified_runtime checks the issued source/copy manifest before
+            # replacing a target. No arbitrary current inode is adopted as truth.
+            replacements["runtime"]=copy_qualified_runtime(baseline_stage.runtime,handle.runtime,body["after"]["runtime"])
+            require(self._directory_identity(handle.runtime)==replacements["runtime"],"StageChildIdentityChanged")
+            if handle.paired_role is not None:
+                require(self.paired is not None,"PairedRuntimeBindingRequired")
+                require(self._directory_identity(handle.worker_runtime)==record["children"]["worker-runtime"],"StageChildIdentityChanged")
+                replacements["worker-runtime"]=self.paired.adopt(handle,baseline_stage,body)
+                require(self._directory_identity(handle.worker_runtime)==replacements["worker-runtime"],"StageChildIdentityChanged")
+            # A copied baseline target must rebuild against this stage's source.
+            now=time.time_ns()
+            roots=(handle.candidate,handle.worker_candidate) if handle.worker_candidate is not None else (handle.candidate,)
+            for root in roots:
+                for directory,folders,files in os.walk(root,followlinks=False):
+                    no_links(directory)
+                    for name in files:os.utime(Path(directory)/name,ns=(now,now),follow_symlinks=False)
+            self._stage_record(baseline_stage)
+            require(self._directory_identity(self.root)==self._owned_root_identity
+                    and self._directory_identity(handle.root)==record["root"],"StageIdentityChanged")
+            for name,old in record["children"].items():
+                expected=replacements.get(name,old)
+                require(expected[0]==old[0] and self._directory_identity(handle.root/name)==expected,"StageChildIdentityChanged")
+            transition={"prerequisite_sha256":prerequisite.digest,"baseline_stage":baseline_stage.root.name,
+                        "roots":{name:{"before":record["children"][name],"after":identity,
+                                  "runtime_sha256":body["after"]["runtime" if name=="runtime" else "worker_runtime"]}
+                                 for name,identity in replacements.items()}}
+            record["children"].update(replacements);record["runtime_adoption"]=transition
+        except BaseException:
+            # A partially replaced pair has no committed capability transition.
+            # Keep all files for diagnostics and refuse capture/close/retirement.
+            record["adoption_failed"]=True
+            raise
+        finally:record["adopting"]=False
 
     def cache_identity(self,handle,commands,verified_probe,prerequisite):
         require(verified_probe.status=="verified" and verified_probe.private_path is not None,"VerifiedProbeRequired")
@@ -507,6 +545,7 @@ class SourceStager:
     def _stage_record(self,handle):
         record=getattr(self,"_stages",{}).get(id(handle))
         require(record is not None and record["handle"] is handle and not handle.retired,"UnknownOrRetiredStage")
+        require(not record.get("adopting") and not record.get("adoption_failed"),"StageAdoptionUnproved")
         require(handle.root.name==record["name"] and self._directory_identity(self.root)==self._owned_root_identity and handle.root.parent==self.root
                 and self._directory_identity(handle.root)==record["root"],"StageIdentityChanged")
         for name,identity in record["children"].items():
@@ -524,7 +563,8 @@ class SourceStager:
         if handle.closed:return
         if handle.baseline_stage is not None:self.close(handle.baseline_stage)
         closure={"schema_version":1,"closed":True,"candidate_retained_private":True,
-                 "stage":handle.root.name,"source_identity":self._source_closure(handle)}
+                 "stage":handle.root.name,"source_identity":self._source_closure(handle),
+                 "runtime_adoption":record.get("runtime_adoption")}
         record["closure"]=durable(handle.root/"stage-closed.json",closure)
         info=(handle.root/"stage-closed.json").lstat();record["closure_identity"]=(info.st_dev,info.st_ino)
         handle.closed=True
@@ -553,7 +593,7 @@ class SourceStager:
             require(re.fullmatch(r"(?:probe|step|execution|prerequisite)-[a-f0-9]{32}\.json",path.name),"UnknownIsolationReceiptName")
             value=file_sha(path);require(value==issued.digest.removeprefix("sha256:"),"RecordedIsolationReceiptChanged")
             parsed=private_json(path)
-            require(body is None or parsed==body,"IssuedIsolationReceiptChanged")
+            require(body is None or self.api._json(parsed)==self.api._json(body),"IssuedIsolationReceiptChanged")
             prior=record["receipts"].get(path.name)
             require(prior is None or (prior["sha256"]==value and prior["identity"]==(info.st_dev,info.st_ino)),"RecordedIsolationReceiptChanged")
             record["receipts"][path.name]={"sha256":value,"identity":(info.st_dev,info.st_ino),"bytes":info.st_size}

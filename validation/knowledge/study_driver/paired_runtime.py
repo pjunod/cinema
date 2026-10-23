@@ -192,12 +192,17 @@ def copy_qualified_runtime(source, target, expected_sha256, *, max_bytes=32 * 10
                 path = Path(directory) / name
                 current[path.relative_to(source).as_posix()] = _identity(path.lstat())
         require(current == identities and _manifest(rows) == expected_sha256, "QualifiedRuntimeIdentityMismatch")
+        verified_identity=_identity(no_links(staging).lstat())[:2]
         require(measure_tree(staging,max_bytes=max_bytes)==expected_sha256,"CopiedRuntimeIdentityMismatch")
+        require(_identity(no_links(staging).lstat())[:2]==verified_identity,"CopiedRuntimeRootChanged")
         # The target is fresh stage-owned state, never another writer's cache.
         no_links(target)
         shutil.rmtree(target)
         os.replace(staging, target)
+        require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
         runtime_layout(target)
+        require(_identity(no_links(target).lstat())[:2]==verified_identity,"InstalledRuntimeRootChanged")
+        return verified_identity
     finally:
         if staging.exists():
             shutil.rmtree(staging)
@@ -284,9 +289,10 @@ class PairedRoleStager:
     def adopt(self, stage, baseline, body):
         require(stage.paired_role == baseline.paired_role and body["initial_protected_source"] ==
                 self.owner.source_manifest(stage.candidate), "PristineProtectedViewRequired")
-        copy_qualified_runtime(baseline.worker_runtime, stage.worker_runtime, body["after"]["worker_runtime"])
+        verified_identity=copy_qualified_runtime(baseline.worker_runtime, stage.worker_runtime, body["after"]["worker_runtime"])
         # Rebind to this stage, never the baseline candidate/worker configuration.
         stage.family_v2 = self.bind_plan(stage, stage.family_v2)
+        return verified_identity
 
 
 class DependencyImageSeed:

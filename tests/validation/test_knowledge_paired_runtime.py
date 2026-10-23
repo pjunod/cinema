@@ -166,11 +166,14 @@ class PairedRuntimeContracts(unittest.TestCase):
         self.assertEqual(paired.measure_tree(target), expected)
 
     def test_nonidempotent_setup_adopts_runtimes_and_keeps_initial_protected_source(self):
+        import uuid
         owner = object.__new__(bindings.SourceStager)
         owner.root = self.root
+        owner.api = isolation
+        owner.admission = SimpleNamespace(assert_current=lambda: None)
         stages = []
         for name in ('qualified', 'current'):
-            root = self.root / name
+            root = self.root / uuid.uuid4().hex
             root.mkdir(mode=0o700)
             stage = bindings.Stage(root, root / 'candidate', root / 'grader', root / 'runtime')
             for path in (stage.candidate, stage.grader, stage.runtime): path.mkdir()
@@ -179,8 +182,10 @@ class PairedRuntimeContracts(unittest.TestCase):
             stage.worker_runtime = root / 'worker-runtime'; stage.worker_runtime.mkdir()
             stage.worker_candidate = root / 'worker-source'; stage.worker_candidate.mkdir()
             stage.paired_role = object()
+            owner._register_stage(stage)
             stages.append(stage)
         baseline, current = stages
+        owner._stage_record(baseline)["pinned"] = True
         current.paired_role = baseline.paired_role
         initial = owner.source_manifest(current.candidate)
         (baseline.candidate / 'synthetic.py').write_bytes(b'setup rewrote its private helper')
@@ -191,11 +196,14 @@ class PairedRuntimeContracts(unittest.TestCase):
         body = {'schema_version': 2, 'status': 'qualified', 'initial_protected_source': initial,
                 'after': {'runtime': paired.measure_tree(baseline.runtime),
                           'worker_runtime': paired.measure_tree(baseline.worker_runtime)}}
-        receipt = self.root / 'qualified.json'; receipt.write_text(json.dumps(body)); receipt.chmod(0o600)
-        prerequisite = SimpleNamespace(status='qualified', private_path=receipt, digest=bindings.file_sha(receipt))
+        private = baseline.root / '.isolation'; private.mkdir(mode=0o700)
+        receipt = private / ('prerequisite-' + uuid.uuid4().hex + '.json')
+        receipt_digest = isolation._write_private(receipt, body)
+        prerequisite = isolation.PrerequisiteReceipt('qualified', receipt_digest, receipt, 'synthetic', 'f' * 64)
         owner.paired = object.__new__(paired.PairedRoleStager); owner.paired.owner = owner
         owner.paired.bind_plan = lambda stage, plan: plan
-        owner.adopt_qualified_runtime(current, baseline, prerequisite)
+        with patch.dict(isolation._QUALIFIED, {id(prerequisite): (prerequisite, body)}):
+            owner.adopt_qualified_runtime(current, baseline, prerequisite)
         self.assertEqual((current.candidate / 'synthetic.py').read_bytes(), b'initial protected source')
         self.assertEqual(paired.measure_tree(current.runtime), body['after']['runtime'])
         self.assertEqual(paired.measure_tree(current.worker_runtime), body['after']['worker_runtime'])
