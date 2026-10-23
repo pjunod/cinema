@@ -10,7 +10,29 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .with_max_level(tracing::Level::WARN)
         .try_init();
     use plurx_core::store::SqliteStore;
-    use plurx_core::transcode::dv_processing::{DvProcessingMode, DvSelection};
+    use plurx_core::transcode::dv_processing::{
+        DvDisplayTarget, DvDisplayTargetChoice, DvOperation, DvProcessingMode, DvSelection,
+        DISPLAY_TARGET_METHOD,
+    };
+    // Test-only policy injection. Malformed/unsupported requests must not
+    // silently run master and then be reported as target qualification.
+    let target_nits = match std::env::var("PLURX_DV_WINDOW_TARGET_NITS") {
+        Ok(value) => {
+            let nits = value.parse::<u32>().expect("integer target nits");
+            assert!(
+                matches!(nits, 1000 | 1600),
+                "physical target matrix is 1000/1600"
+            );
+            Some(nits)
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("invalid target environment: {error}"),
+    };
+    let profile81 = std::env::var("PLURX_DV_WINDOW_DESTINATION").as_deref() == Ok("profile81");
+    assert!(
+        !(profile81 && target_nits.is_some()),
+        "native Profile 8.1 is never display targeted"
+    );
     let source = PathBuf::from(std::env::var("PLURX_DV_WINDOW_SOURCE").expect("actual source"));
     let base = crate::test_tempdir().expect("isolated runtime");
     let probe = plurx_core::scan::probe::probe(&source)
@@ -47,7 +69,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
     }
     let file = store.get_file(id).await.expect("file").expect("attested");
     let mut manager = TranscodeManager::new(
-        store,
+        Arc::clone(&store),
         base.path().join("runtime"),
         EncoderCaps {
             vaapi: true,
@@ -71,10 +93,54 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         manager.hdr10_passthrough_vaapi,
         "actual P010/Main10 upload proof"
     );
+    let display_target = if let Some(nits) = target_nits {
+        let title_probe = crate::source_probe::probe_title_for_control(&manager, &file)
+            .await
+            .expect("admitted complete-title probe of the held source");
+        let stats = plurx_core::scan::dv_title::DvTitleStats::from_probe_json(
+            title_probe
+                .raw_json
+                .as_deref()
+                .expect("title probe document"),
+        )
+        .expect("actual complete-title scanner facts, not a window sample");
+        assert_eq!(
+            stats.eligibility(),
+            plurx_core::scan::dv_title::TitleEligibility::Eligible
+        );
+        // This isolated fixture store has no background publisher. The real
+        // scanner itself retains the open source fence across probe and scan.
+        store
+            .upsert_file(
+                file.item_id,
+                source.to_str().expect("source path"),
+                file.size,
+                file.mtime,
+                &title_probe,
+            )
+            .await
+            .expect("store current title probe");
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(nits, Some(stats)).expect("supported physical bucket")
+        else {
+            panic!("physical target fixture must exceed its bucket; elision is a separate control");
+        };
+        println!(
+            "{}",
+            serde_json::json!({"title_stats":stats,"requested_target":target})
+        );
+        Some(target)
+    } else {
+        None
+    };
+    let file = store
+        .get_file(id)
+        .await
+        .expect("current file")
+        .expect("stored probe");
     // PLURX_DV_WINDOW_DESTINATION=profile81 takes the Dolby Vision client's
     // route instead: the P7 conversion copy, which FEL re-encode turns into a
     // reconstructed Profile 8.1 rendition at the source raster.
-    let profile81 = std::env::var("PLURX_DV_WINDOW_DESTINATION").as_deref() == Ok("profile81");
     let request = SessionRequest {
         request_id: Some("actual-processed-hdr-window".into()),
         automatic: false,
@@ -145,20 +211,37 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
     );
     let raster = (
-        encoding.plan.output_contract().effective_width().expect("raster width"),
-        encoding.plan.output_contract().effective_height().expect("raster height"),
+        encoding
+            .plan
+            .output_contract()
+            .effective_width()
+            .expect("raster width"),
+        encoding
+            .plan
+            .output_contract()
+            .effective_height()
+            .expect("raster height"),
     );
     let elapsed = started.elapsed();
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
         "{}",
-        serde_json::json!({"entry":0,"elapsed_ms":elapsed.as_millis(),
+        serde_json::json!({"entry":0,"policy":"master-preparation","elapsed_ms":elapsed.as_millis(),
         "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
         "bytes":verified.bytes.len(),"plan":selected.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
     );
+    // Preparation intentionally remains master; never label its receipt as
+    // targeted. Release the private producer before independently admitting0.
+    drop(verified);
     let segment_plan = encoding.grid.plan(file.duration_ms.expect("duration"), 0);
-    for at in [1_usize, 2, 360] {
+    let entries: &[usize] = if display_target.is_some() {
+        &[0, 1, 2, 360]
+    } else {
+        &[1, 2, 360]
+    };
+    let mut target_digest = None;
+    for &at in entries {
         let entry = &segment_plan.entries[at];
         let bundle = crate::vodencode::admit_frozen_preparation(
             &manager.admissions,
@@ -172,7 +255,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .expect("actual graph resources");
         let started = Instant::now();
         let (verified, plan) = match runtime
-            .execute(
+            .execute_policy_until(
                 &file,
                 &encoding.plan,
                 &encoding.options,
@@ -183,6 +266,8 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 Arc::new(crate::prodrun::ProducerSlot::new()),
                 tokio_util::sync::CancellationToken::new(),
                 None,
+                None,
+                display_target,
             )
             .await
             .expect("actual verified window")
@@ -192,11 +277,62 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                 panic!("actual graph was cancelled instead of verifying its window")
             }
         };
-        assert_eq!(
-            plan.semantic_digest(),
-            selected.semantic_digest(),
-            "adjacent/seek recipe identity"
-        );
+        if let Some(target) = display_target {
+            assert_ne!(
+                plan.semantic_digest(),
+                selected.semantic_digest(),
+                "target is not master identity"
+            );
+            let digest = plan.semantic_digest();
+            assert_eq!(
+                target_digest.get_or_insert_with(|| digest.clone()),
+                &digest,
+                "target identity is stable across adjacent/seek windows"
+            );
+            assert_eq!(
+                plan.destination(),
+                plurx_core::transcode::dv_processing::DvDestination::Hdr10
+            );
+            let rows = &verified.observed.display_target_rows;
+            assert_eq!(rows.len(), verified.observed.pictures.len());
+            for (index, (row, picture)) in rows.iter().zip(&verified.observed.pictures).enumerate()
+            {
+                assert_eq!(row["frame"], index);
+                assert_eq!(row["nits"], target.nits());
+                assert_eq!(row["method"], DISPLAY_TARGET_METHOD);
+                assert_eq!(row["title_min_1e4"], target.mastering().min_1e4_nits);
+                assert_eq!(row["title_peak"], target.mastering().max_nits);
+                let (max, avg) = target.validate_rpu(&picture.rpu).expect("raw picture L1");
+                assert_eq!(row["max_pq"], max);
+                assert_eq!(row["avg_pq"], avg);
+                assert_eq!(row["max0_fallback"], max == 0);
+                assert!(
+                    matches!(picture.profile, 7 | 8),
+                    "P7 FEL/P8 physical matrix"
+                );
+                if picture.profile == 7 {
+                    assert_eq!(runtime.mode, DvProcessingMode::Fel);
+                }
+            }
+            let receipt = verified.receipt.as_ref().expect("target receipt");
+            assert_eq!(
+                receipt
+                    .counts()
+                    .operations_applied
+                    .get(&DvOperation::DisplayTargetMapping {
+                        nits: target.nits()
+                    }),
+                Some(&(verified.observed.pictures.len() as u64))
+            );
+        } else {
+            assert_eq!(
+                plan.semantic_digest(),
+                selected.semantic_digest(),
+                "adjacent/seek recipe identity"
+            );
+            assert!(verified.observed.display_target_rows.is_empty());
+        }
+
         assert_eq!(
             verified.observed.pictures.len(),
             usize::try_from(encoding.grid.frames_per_segment).expect("bounded frame count")
@@ -219,7 +355,8 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         let luma = processed_window_luma(&verified.bytes, raster, at == 360);
         println!(
             "{}",
-            serde_json::json!({"entry":at,"elapsed_ms":elapsed.as_millis(),
+            serde_json::json!({"entry":at,"target_nits":target_nits,
+            "target_rows":verified.observed.display_target_rows,"elapsed_ms":elapsed.as_millis(),
             "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
             "bytes":verified.bytes.len(),"plan":plan.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
@@ -240,7 +377,10 @@ fn processed_window_luma(
     let path = directory.path().join("window.mp4");
     std::fs::write(&path, window).expect("window bytes");
     if let Some(dump) = std::env::var_os("PLURX_DV_WINDOW_DUMP") {
-        let _ = std::fs::copy(&path, std::path::Path::new(&dump).join(format!("{expect_picture}-{}.mp4", window.len())));
+        let _ = std::fs::copy(
+            &path,
+            std::path::Path::new(&dump).join(format!("{expect_picture}-{}.mp4", window.len())),
+        );
     }
     // The decoder's own yuv420p10le, so no conversion touches the codes.
     let output = std::process::Command::new(crate::ffmpeg::ffmpeg_bin())
@@ -249,7 +389,11 @@ fn processed_window_luma(
         .args(["-pix_fmt", "yuv420p10le", "-f", "rawvideo", "pipe:1"])
         .output()
         .expect("decode the processed window");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let luma_bytes = width as usize * height as usize * 2;
     let frame_bytes = luma_bytes * 3 / 2;
     assert!(
@@ -264,16 +408,17 @@ fn processed_window_luma(
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     assert!(!codes.is_empty(), "the window decodes to a picture");
-    let (low, high) = codes
-        .iter()
-        .fold((u16::MAX, 0), |(low, high), code| {
-            (low.min(*code), high.max(*code))
-        });
+    let (low, high) = codes.iter().fold((u16::MAX, 0), |(low, high), code| {
+        (low.min(*code), high.max(*code))
+    });
     let mean = codes.iter().map(|code| u64::from(*code)).sum::<u64>() / codes.len() as u64;
     // Encoded pictures may ring into the footroom near black, so the hard
     // bound is the legal 10-bit range; the picture itself must sit in the
     // nominal 64..=940 range. A full-range or bit-shifted export fails both.
-    let nominal = codes.iter().filter(|code| (64..=940).contains(*code)).count();
+    let nominal = codes
+        .iter()
+        .filter(|code| (64..=940).contains(*code))
+        .count();
     assert!(
         (4..=1019).contains(&low) && (4..=1019).contains(&high),
         "luma {low}..{high} uses reserved codes"
@@ -556,7 +701,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
         );
         let request = SessionRequest {
             dv_processing_destination: None,
-        sdr_master_codecs: None,
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -847,7 +992,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         .prepare_vod_encoding(
             &SessionRequest {
                 dv_processing_destination: None,
-        sdr_master_codecs: None,
+                sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -888,7 +1033,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         .prepare_vod_encoding(
             &SessionRequest {
                 dv_processing_destination: None,
-        sdr_master_codecs: None,
+                sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
@@ -1591,7 +1736,8 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         .expect("audio-only capacity");
     // An oversized family may own an idle pool exclusively. Make this
     // refusal phase genuinely non-idle without changing the family budget.
-    let unrelated_live = video.admissions
+    let unrelated_live = video
+        .admissions
         .try_admit_software(3, 1, crate::admission::Priority::Live)
         .expect("unrelated live CPU credit");
     let refused = create(&manager, &request)
@@ -1759,7 +1905,11 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         .put_setting(keys::VOD_LIVE_RECOVERY, "true")
         .await
         .expect("recovery on");
-    let before = store.get_file(file_id).await.expect("file").expect("seeded");
+    let before = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("seeded");
     let manager = Arc::new(TranscodeManager::new(
         Arc::clone(&store),
         base.path().join("manager"),
@@ -1801,13 +1951,28 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
     run(std::process::Command::new(ffmpeg())
         .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
         .arg("testsrc2=size=320x180:rate=24:duration=6")
-        .args(["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=6"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=48000:duration=6",
+        ])
         .args(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"])
-        .args(["-pix_fmt", "yuv420p", "-ac", "2", "-shortest", "-f", "matroska"])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-ac",
+            "2",
+            "-shortest",
+            "-f",
+            "matroska",
+        ])
         .arg(&replacement));
     std::fs::rename(&replacement, &path).expect("replace the source");
     let metadata = std::fs::metadata(&path).expect("replaced metadata");
-    let replaced_probe = plurx_core::scan::probe::probe(&path).await.expect("replaced probe");
+    let replaced_probe = plurx_core::scan::probe::probe(&path)
+        .await
+        .expect("replaced probe");
     store
         .upsert_file(
             before.item_id,
@@ -1818,8 +1983,15 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         )
         .await
         .expect("rescan");
-    let after = store.get_file(file_id).await.expect("file").expect("rescanned");
-    assert_ne!(after.size, before.size, "the replacement is a different file");
+    let after = store
+        .get_file(file_id)
+        .await
+        .expect("file")
+        .expect("rescanned");
+    assert_ne!(
+        after.size, before.size,
+        "the replacement is a different file"
+    );
     assert_ne!(after.duration_ms, before.duration_ms);
     assert_ne!(after.height, before.height);
     held.release();
@@ -1827,7 +1999,10 @@ async fn rolling_fallback_starts_from_a_source_replaced_after_the_vod_attempt() 
         .await
         .expect("create task")
         .expect("the index miss falls back to a rolling start");
-    assert!(!started.vod, "the VOD attempt refused and the rolling engine served");
+    assert!(
+        !started.vod,
+        "the VOD attempt refused and the rolling engine served"
+    );
     assert_eq!(
         started.duration_ms, after.duration_ms,
         "the rolling start took the replaced row's probe facts, not the ones the VOD attempt read"
@@ -1969,13 +2144,28 @@ async fn a_candidate_rolling_fallback_refuses_a_source_replaced_after_the_vod_at
     run(std::process::Command::new(ffmpeg())
         .args(["-y", "-v", "error", "-f", "lavfi", "-i"])
         .arg("testsrc2=size=320x180:rate=24:duration=6")
-        .args(["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=6"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=48000:duration=6",
+        ])
         .args(["-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"])
-        .args(["-pix_fmt", "yuv420p", "-ac", "2", "-shortest", "-f", "matroska"])
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-ac",
+            "2",
+            "-shortest",
+            "-f",
+            "matroska",
+        ])
         .arg(&replacement));
     std::fs::rename(&replacement, &path).expect("replace the source");
     let metadata = std::fs::metadata(&path).expect("replaced metadata");
-    let replaced_probe = plurx_core::scan::probe::probe(&path).await.expect("replaced probe");
+    let replaced_probe = plurx_core::scan::probe::probe(&path)
+        .await
+        .expect("replaced probe");
     store
         .upsert_file(
             planning.file.item_id,
@@ -2056,12 +2246,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         .await;
     let copy = rows
         .iter()
-        .find(|row| {
-            matches!(
-                row.route,
-                CandidateRoute::Remux | CandidateRoute::Original
-            )
-        })
+        .find(|row| matches!(row.route, CandidateRoute::Remux | CandidateRoute::Original))
         .unwrap_or_else(|| panic!("a copy candidate: {rows:?}"));
     // The ordinary request: the bound copy candidate, exactly as the
     // candidate fallback test above dispatches it.
@@ -2090,8 +2275,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         Some(&engine.digest),
         raster,
     );
-    ordinary_context.candidate_id =
-        CandidateId::for_recipe_digest(ordinary_context.recipe_digest);
+    ordinary_context.candidate_id = CandidateId::for_recipe_digest(ordinary_context.recipe_digest);
     ordinary_context.canonical_caps = Some(caps.clone());
     ordinary_context.planning_binding =
         Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
@@ -2141,7 +2325,8 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         height: i64::from(raster.1),
     };
     processed.hdr10 = true;
-    processed.dv_processing_destination = Some(plurx_core::transcode::dv_processing::DvDestination::Profile81);
+    processed.dv_processing_destination =
+        Some(plurx_core::transcode::dv_processing::DvDestination::Profile81);
     processed.candidate_context = Some(Box::new(processed_context.clone()));
 
     // The rolling engine never serves a processed candidate, whoever hands
@@ -2164,7 +2349,10 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
     let started = create_local_vod(&manager, &processed, "test")
         .await
         .expect("the ordinary request the processed candidate enhanced is served");
-    assert!(!started.vod, "the copy has no VOD index; the rolling engine served it");
+    assert!(
+        !started.vod,
+        "the copy has no VOD index; the rolling engine served it"
+    );
     assert!(
         matches!(started.kind, SessionKind::Copy { .. }),
         "the ordinary copy, not the processed transcode: {:?}",
@@ -2318,7 +2506,15 @@ async fn create_local_vod(
     };
     let scope = serde_json::json!(["username", user_name]).to_string();
     Box::pin(manager.create_session_inner(
-        request, user_name, &scope, Some(&identity), None, None, None,
+        request,
+        user_name,
+        &scope,
+        Some(&identity),
+        None,
+        None,
+        None,
         (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
-    )).await.map(|creation| creation.info)
+    ))
+    .await
+    .map(|creation| creation.info)
 }

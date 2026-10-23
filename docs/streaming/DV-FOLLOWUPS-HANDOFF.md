@@ -131,6 +131,79 @@ incident and general remote processed requalification remain out of B scope.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
+**Current qualification (2026-10-22):** original `a49`/`c036` source review is
+retained; scanner controls have 20 passes. Standalone P7 retained the actual
+`c036` listing, 17,983 valid frames, observed maximum 3,441 nits, and passing
+policy results. Owner-interrupted attempt 258 stopped at 137/1,000 for 1,000
+nits; it is neither a product defect nor a pass, and 1,600 nits was not run.
+Additive continuation 259 is running 1,000 nits and proceeds to 1,600 only if
+that cell passes. There are zero new mapped-P7 passes at this snapshot.
+
+Current-main integration is `a316`, plus test-only scanner fixture repair
+`fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8`. Pinned Rust formatting passed on
+`a316`. The original compile's E0063 was in the scanner `/bin/false` fixture;
+failed-only compile 261 passed on pinned Rust 1.97.1 with true outer exit 0,
+checking `plurxd` and `plurx-core` all targets with `hiqlite-contract-tests`
+and running no units. PR B integration `2038269` is queued for pinned compile
+262. Retain the prior 99 Rust passes, receipt regression, 141 shader cases / 866,304 samples,
+70 helper results, and P8 passes under their original attribution; do not replay
+or relabel them.
+
+The separate FEL comparison/interpreter lane is excluded from PR A because no
+reviewed production fix is available to integrate, consistent with the original
+contract §§113–115. Full-app C1 still has a final source-EOF failure; no
+full-clip or general FEL accuracy claim is made. PR #1216 is owned by direct
+GPT/root, with existing full and delta reviews retained. Narrow integration
+review, completed P7 evidence, current fast lane, and API merge with 22 regression
+anchors remain open. B metadata `2038269` is complete but unqualified. C server
+and D clients are being implemented by separate Sol agents in isolated clones;
+E/F remain planned. No setting is exposed before B. Apple peak reporting,
+device acceptance, and deployment are not claimed.
+
+### Historical qualification record (not current status)
+
+**Latest qualification correction (2026-10-21):** the genuine bright P8 excerpt
+reached complete L1 observation and master preparation, but the exact single
+1000-nit test exited 101 on a missing display-target receipt operation count.
+The base-RPU completion receipt used source metadata operations only, omitting
+the mapping already validated by the daemon. Sol's narrow source repair adds
+only that graph operation without inferring conditional reshape applications.
+Its new master/1000/1600 receipt regression awaits compilation and independent
+targeted closure before new/failed-only tests. No mapped cell passed; 1600 was
+unexecuted. Prior software passes remain retained, not repeated. Coordinator
+owns source-bound native compilation, real-input execution and PR publication;
+the remaining mapped cells, separate FEL integration, fast lane and merge are
+not complete. Historical input failures below remain distinguishable.
+
+**Implementation update (2026-10-19):** Sol 6.1 owns current source on
+`codex/cinema-display-target-a`; coordinator owns native/media/publication.
+Full independent Astra review, F1 publication-intent closure, landed-B integration
+review and fixture-repair closures are retained. Native c93 compilation and only
+the two final failed-fixture retries passed with verified source/binary/count/exit
+receipts: 99 distinct Rust passes, 141 Intel shader cases / 866,304 samples, and
+70 full-helper results from 97 commands, worst independent-oracle error one code.
+The initial helper timing refusal and all failed fixtures remain historical
+failures, not passing evidence. No successful unchanged case is repeated.
+
+Actual first real-source matrix failed prerequisites: eligible P7 stats selected
+`TitleFits` at both targets, P8 scanning failed, and its redundant second attempt
+was stopped. Zero mapped-window passes. Exact P8 stderr capture is coordinator-owned.
+Header/short ffprobe diagnostics do not expose actual L1 min/average/max; source
+PQ endpoints must not be substituted for L1. Existing-tool RPU inspection and
+eligible genuine P7 FEL/P8 excerpts above 1600 nits are needed before mapped cells.
+Neither scanner completeness nor target buckets are relaxed. Current main
+`52e66778e7ce` is merged at `1d2ec2967532` with both changelog topics preserved;
+C core/helper/runtime/regression bodies are unchanged. Exact integrated-source
+compilation, four eligible runtime cells, fast lane and API merge remain.
+
+The accepted explicit Annex B.2/B.3 RGB shader supersedes the original built-in
+libplacebo recipe below: API 374 inspection proved modified knee/adaptive/LMS
+behavior. No built-in ST2094-10, perceptual-equivalence, proprietary Dolby or
+display-accuracy claim. Durable title jobs retain source/scanner generations,
+manual-cancel suppression and bounded ordinary-probe priority handoff. Ordinary
+production entrypoints remain master-only; metadata/settings/client selection
+stay later PRs. Paul deploys; agents do not.
+
 1. **Title L1 scan,** stored with the DV facts:
    - L1-max maximum;
    - whether every frame has valid L1;

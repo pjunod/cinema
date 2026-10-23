@@ -29,6 +29,26 @@ The 18 source-boundary IDs are `select.queue_loss`, `select.domain_loss`,
 `release.retry`, `release.ambiguous_fallback`, `retire.claim`,
 `drop.admission`, and `sql.complete_library_work.trigger`.
 
+## Selected source binding refresh — 2026-10-22
+
+The 16 `background_jobs.rs` bindings were compared from their exact prior
+source hash at `a86448723ec67e24ec8c1739e0df209bf4519e9c` to
+`ec8101dc62975b842e50e02e47a36709e5f6400e`. The sole source delta adds the
+Linux `publish_dv_title` method outside the selected library path. Library
+candidate probing/claim dispatch, queue heartbeat authority and renewal,
+queue-token locking, expiry notification, heartbeat join and claim retirement
+retain their prior implementations. Only these 16 source hashes and the
+mapping's containing correspondence hash were refreshed; anchors, trust,
+schedules, gap text, model and configurations are unchanged.
+
+The queue-heartbeat, lock-boundary and durable-expiry gaps below remain open.
+This binding disposition supplies no new schedule execution, qualification,
+state/action/fairness simulation or title-publication/liveness claim. In
+particular, local queue-loss notification still does not establish durable
+queue expiry, and the paired production schedule still proves sequential
+completion after durable claim refusal rather than simultaneous domain
+contention.
+
 ## Event projection — selected orders, not complete traces
 
 The test-only task-local observer in

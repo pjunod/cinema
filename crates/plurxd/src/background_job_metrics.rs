@@ -56,6 +56,7 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::SubtitleModelOperation => 14,
         JobKind::SubtitleTranslationPrepare => 15,
         JobKind::SubtitleTranslationRange => 16,
+        JobKind::DvTitleScan => 17,
     }
 }
 

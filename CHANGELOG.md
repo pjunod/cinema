@@ -10,6 +10,15 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Internal display-targeted HDR10-E groundwork: complete-title L1 coverage,
+  consistent L6/L9 facts, six explicit target identities and a stateless public
+  Annex B.2/B.3 RGB shader with named engineering edge extensions. Exact requested
+  policy and raw-RPU L1 are checked before helper output is accepted. No display
+  selection, metadata writer or targeted playback is exposed yet; no proprietary
+  Dolby, perceptual-equivalence or display-accuracy claim.
+  Title acquisition uses durable source/scanner generations, retains demand on
+  scheduler preemption, suppresses manual cancellation, and yields its one-thread
+  admitted child to runnable ordinary probes before releasing resources.
 - Web playback controls show the current presented resolution and quality mode,
   with a brief quality-change notice that also works in fullscreen.
 
@@ -19,6 +28,29 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Processed P7 FEL rendering uses the same bounded public decoder-metadata
+  mapper as base/RPU rendering, preserving real piecewise polynomial and MMR
+  reshaping instead of requiring the synthetic identity subset. Fresh raw-RPU
+  association, paired enhancement-layer contribution and nonbinding residual
+  clipping checks remain required.
+
+- Processed Dolby Vision windows support an observed nonnegative common
+  source origin instead of requiring literal zero. Absolute picture keys,
+  soundtrack offset and bounded membership checks stay intact; missing or
+  differing held video/FORMAT origins explicitly fall back. The frozen held
+  origin is passed to the helper explicitly, so missing or changing partial
+  demux timestamps cannot replace the epoch used for windows and EOF checks.
+
+- Complete-title Dolby Vision scans compare a selected Matroska track's
+  `DURATION` tag to its timestamp endpoint rather than subtracting a nonzero
+  video origin. Independent selected-video declarations, complete decoder
+  drains and the existing one-tick completeness allowance remain required;
+  unrelated audio or container durations cannot supply missing coverage.
+
+- Internal complete-title scan state survives chapter, HEVC-parameter-set and
+  content-encoding probe decorations, including repeated identical writes and
+  manually cancelled generations. Only actual source changes or fresh ordinary
+  probe publication invalidate it; identical ordinary reprobes still rotate.
 - All playback caches share one disk budget with reader-safe global eviction,
   pre-write capacity reservations and a filesystem free-space reserve, preventing
   completed renditions and concurrent producers from exhausting server disks.
@@ -114,6 +146,7 @@ bump may break compatibility and a **patch** bump never does.
 - Browser startup keeps the requested transport intent when a decoder emits an unexplained pause before the current attachment presents. The original startup deadline remains active, and rejected Play calls retain their cause in diagnostics. Closing during a prepared quality switch drains both session handles through rollback and pending commit acceptance, including after the old decoder retires.
 - Closing an HDR10-E session preserves intentional cancellation through the processing helper and generation owner, so normal cleanup cannot blacklist the backend for the next play. Failed web session releases and failed quality recovery now retain diagnostics under the originating session without marking a replacement playback failed.
 - Web Auto keeps the current HDR10-E recipe through a matching quality-catalog refresh instead of requesting an ordinary HDR10 replacement. Leaving or reloading the page also releases its playback sessions immediately, so abandoned sessions do not hold processing capacity until the idle timeout.
+
 - Settings names the server you are signed in to by its machine name. A server still on the default name `plurx` used to show `plurx` on every node. A new signed-in route, `GET /api/v1/server/node`, gives the answering node's `hostname` and a `display_name` (a chosen name, else the hostname, the same rule as the LAN picker, which now resolves the hostname the same way the roster does). iOS, tvOS and Android Settings show it, adding the hostname after a chosen name, and the web System tab heads with it and lists the Host.
 - HDR10-E at 4K is produced faster. The processing helper renders into 16-bit rather than 32-bit float textures, converts to 10-bit Y'CbCr in one compute pass, and queues each frame's download so the GPU finishes one frame while the next is decoded. On an Intel Alder Lake test node a 2-second 4K window takes 0.9–1.1 s in the helper instead of 1.7 s, and 1.75 s instead of 2.2 s with the hardware encoder (Profile 7 FEL); Profile 8 takes 2.1 s instead of 2.55 s, still short of real time there.
 - Dolby Vision HDR10-E (server-processed HDR10) plays at every resolution. The processing helper decodes on the GPU (VA-API, mapped zero-copy into the renderer, with a software or host-copy fallback it reports) and converts to 10-bit Y'CbCr on the GPU. Reconstructed frames carry their frame duration and BT.2020 PQ colour description, every display-metadata version is accepted, and the 720p cap, the speed qualification, the Auto-only rule and the other silent gates are gone. Every decline after the Developer setting is named in the plan notes, and an explicitly chosen rung is no longer filtered by Auto's link evidence. Receipts and the effective-processing report record whether the window was GPU-decoded.
