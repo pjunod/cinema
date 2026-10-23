@@ -52,7 +52,9 @@ class NativeRoleOwnershipTests(unittest.TestCase):
         if pid==0:
             os.close(incoming)
             try:
-                os.chdir(cwd);os.setgroups([]);os.setgid(user[1]);os.setuid(user[0])
+                os.chdir(cwd)
+                for descriptor in (self.fs.work,self.fs.control,self.fs.records):os.close(descriptor)
+                os.setgroups([]);os.setgid(user[1]);os.setuid(user[0])
                 action()
                 raw=b'{"ok":true}'
             except BaseException as error:raw=json.dumps({"ok":False,"error":type(error).__name__}).encode()
