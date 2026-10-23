@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1271 review repairs: source/test anchors only; execution receipts remain separate.
+[[fixes]]
+id = "android.processed-sdr-candidate-identity"
+commits = ["0e1e4224dfa0fce7cdca9a192d145dfd79d226c1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = 'grade !in listOf("sdr", "hdr10") || processed_hdr10 &&'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "processedSdrIdentityIsAdmittedOnlyForEncodedHevcCandidates"
+
+[[fixes]]
+id = "apple.processed-sdr-candidate-identity"
+commits = []
+supplements = "android.processed-sdr-candidate-identity"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = 'processedHdr10 != true || (route == "encode" && plannedCodec == "hevc")'
+test = "clients/apple/Tests/AutoPreparedCandidateBindingTests.swift"
+test_anchor = "testProcessedSdrIdentityResolvesAutoWhileInvalidRouteCodecAndGradeDoNot"
+
 # PR #1265: physical Select commits the native tvOS timeline preview.
 [[fixes]]
 id = "apple.tv-timeline-native-select"
