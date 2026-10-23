@@ -85,7 +85,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 11] = [
+    let inputs: [(&str, &[u8]); 12] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -93,6 +93,10 @@ fn renderer_source_identity() -> String {
         (
             "display_target.h",
             include_bytes!("../../../tools/dv_processing/display_target.h"),
+        ),
+        (
+            "dv_metadata.h",
+            include_bytes!("../../../tools/dv_processing/dv_metadata.h"),
         ),
         (
             "dv_trace.h",
@@ -1438,6 +1442,19 @@ struct RenderRow {
     mmr_segments: Option<u32>,
     applied_operations: Option<Vec<plurx_core::transcode::dv_processing::DvOperation>>,
 }
+#[cfg(target_os = "linux")]
+impl RenderRow {
+    fn validate_fel_curves(&self, rpu: &[u8], raster: (u32, u32)) -> Result<(), String> {
+        use plurx_core::transcode::dv_processing::DvFelMetadata;
+        let parsed = DvFelMetadata::from_raw_rpu(rpu, raster).map_err(|e| e.to_string())?;
+        if self.polynomial_segments != Some(parsed.polynomial_segments)
+            || self.mmr_segments != Some(parsed.mmr_segments)
+        {
+            return Err("FEL curve counts differ from actual raw RPU".into());
+        }
+        Ok(())
+    }
+}
 /// Exact requested policy and raw-RPU values, not membership in a supported set.
 #[cfg(target_os = "linux")]
 #[derive(Deserialize)]
@@ -1878,10 +1895,7 @@ impl PrivateWindow {
                     .validate(target, &rpu)?;
             }
             let (profile, source_el_kind) = if mode == DvProcessingMode::Fel {
-                let parsed = DvParsedMetadata::from_raw_rpu(&rpu).map_err(|e| e.to_string())?;
-                if !parsed.runtime_supported() {
-                    return Err("unsupported runtime RPU metadata".into());
-                }
+                rendered.validate_fel_curves(&rpu, (pair.bl_width, pair.bl_height))?;
                 (7, DvElKind::Fel)
             } else {
                 let parsed = DvBaseMetadata::from_raw_rpu(&rpu, (pair.bl_width, pair.bl_height))
@@ -1970,6 +1984,29 @@ impl PrivateWindow {
             runtime_device,
             decoder,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fel_mapping_tests {
+    #[test]
+    fn fel_receipt_requires_curve_counts_from_the_original_raw_rpu() {
+        let raw = include_bytes!("../../plurx-core/tests/fixtures/dv-runtime/frame-000.nal");
+        let mut row: super::RenderRow = serde_json::from_value(serde_json::json!({
+            "frame": 0, "pts": "0/24", "duration": "1/24",
+            "width": 64, "height": 64, "el_bound": true,
+            "nlq_active": true, "render_errors": 0,
+            "polynomial_segments": 3, "mmr_segments": 0
+        }))
+        .expect("bounded render trace fixture");
+        row.validate_fel_curves(raw, (64, 64))
+            .expect("raw curves agree");
+        row.polynomial_segments = None;
+        assert!(row.validate_fel_curves(raw, (64, 64)).is_err());
+        row.polynomial_segments = Some(3);
+        row.mmr_segments = Some(1);
+        assert!(row.validate_fel_curves(raw, (64, 64)).is_err());
+        assert!(row.validate_fel_curves(&[], (64, 64)).is_err());
     }
 }
 

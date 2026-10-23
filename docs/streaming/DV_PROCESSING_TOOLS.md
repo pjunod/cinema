@@ -152,6 +152,51 @@ the serving layer must separately verify its output frame grid and packaging.
 NUT preserves source PTS here but does not serialize explicit packet durations;
 `timing.tsv` remains the separate duration record.
 
+### Real P7 curves share the validated public mapper
+
+The [shared metadata validator](../../tools/dv_processing/dv_metadata.h) admits
+actual decoder-attached `AVDOVIMetadata` for both base/RPU and paired FEL.
+The same BL frame must carry a fresh raw RPU; production independently binds
+that original NAL hash, PTS and duration to the coded AU. Decoder metadata alone
+never supplies a missing current RPU. Existing raw-parser refusals for reused
+RPUs, normalization, filtering, partitions, representation and active area stay
+in force. The same validation runs on preroll and emitted pictures, regardless
+of hardware import or host copies.
+
+Each component has 2–9 strictly ordered ten-bit pivots, at most 8 pieces,
+polynomial orders 1–2 or MMR orders 1–3. Fixed coefficients have 23 fractional
+bits and the public API's binary32 projection; exact preservation of every
+fixed-point LSB is not claimed. Bounded section offsets, extension arrays,
+coefficient ranges, rational matrices/offsets and finite projected transforms
+are checked before `pl_map_dovi_metadata`. Signalled pivot clamps and source
+matrices are preserved. FEL also requires decoded NLQ/colors to agree exactly
+with its fresh parsed raw metadata.
+
+Rust independently validates each original raw RPU with `DvFelMetadata`, reusing
+base curve validation plus the fresh P7/FEL and unchanged nonbinding NLQ guards.
+The daemon checks rendered polynomial/MMR counts against that parse; completed
+HDR10 graphs describe conditional methods and per-frame receipts list only
+methods actually signalled. Synthetic scalar predicates and P8.1 authoring stay
+narrow; no helper JSON claim supplies missing source authority.
+
+The pinned [public mapper](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/include/libplacebo/utils/libav_internal.h)
+and [public shader](https://github.com/haasn/libplacebo/blob/0d043c7f6f79cd3687c023454bdacbe615e4d96f/src/shaders/colorspace.c)
+normalize and reshape BL, add the paired EL's LINEAR_DZ residual, then apply
+color transforms. NLQ offset uses code/1023, slope uses 1023*S/2^23 and threshold
+uses (T−S/2)/2^23, with exact neutral code contributing zero. The existing
+[`vdr_in_max` admission](../../tools/dv_processing/nlq_clipping.h) must still
+prove clipping cannot bind for any ten-bit EL code, including its rounding
+reserve. The measured 512/2048/0/1048576 parameter family satisfies that same
+contract; no source-specific override is introduced.
+
+Direct synthetic texture controls without decoder frames retain their original
+manual identity projection. The [metadata-only fixture](../../tools/dv_processing/controls/p7_mapping_fixture.h)
+and [CPU contracts](../../tools/dv_processing/test_decoded_metadata.c) cover the
+observed 8-piece polynomial/third-order MMR shape, coefficient projection, scalar
+samples, clamp endpoints, NLQ and malformed metadata. They are authored, unrun
+pending completed-delta review. Public-source mapping and synthetic arithmetic
+do not establish real-title visual accuracy or independent decoded A/V sync.
+
 ### Three clocks share one observed common origin
 
 The [display-target build ledger](DISPLAY-TARGETED-DV-BUILD.md) records the
