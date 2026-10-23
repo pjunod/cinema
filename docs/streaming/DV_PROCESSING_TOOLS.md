@@ -92,7 +92,7 @@ build.
 ## Streaming interface
 
 ```text
-segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START END MAX_PREROLL]]
+segment_decode_render SOURCE OUTPUT_DIR VIDEO_INDEX MAX_FRAMES BL_W BL_H EL_W EL_H DEBUG OUTPUT_POLICY [NUT_OUTPUT [START END MAX_PREROLL]] [--held-source-origin N/D]
 ```
 
 `SOURCE` is a held descriptor for the original timestamped movie when `START`,
@@ -172,16 +172,37 @@ zero. Missing, negative, overflowing or differing origins explicitly refuse the
 bounded route; the selected-video clock never replaces the soundtrack clock.
 The same held source fence owns the probe and every window, and source drift
 continues to invalidate publication. The observation digest binds the common
-origin, its observed-stream provenance, selected stream, epoch and absolute
-window bounds along with original coded-picture keys and hashes.
+origin, its held FORMAT/selected-video probe provenance, selected stream,
+epoch and absolute window bounds along with original coded-picture keys and
+hashes.
 
 For film boundary `b`, the requested absolute endpoint is
 `O + max(0, b - source_tick)`. Seek uses that absolute endpoint in the selected
 stream's time base, preserving all three-second/frame/byte/preroll limits.
-The helper reports its actual observed stream origin; Rust compares rational
-values exactly with the frozen held origin. A first returned picture never
-establishes a new origin. Video EOF extent keeps its existing absolute endpoint
-rules (`start_time + duration` or the Matroska `DURATION` endpoint).
+Production windows append `--held-source-origin N/D` after any existing
+mode/export/title arguments. The argument comes only from the typed held common
+origin already checked in Rust. The helper requires an exact nonnegative value
+representable in its actual selected stream's tick clock, and requires the
+absolute window to begin at or after that origin. Its completion reports
+`observed_held_format_and_selected_video_probe`; Rust requires that exact
+provenance and rational equality with the frozen origin, including when zero.
+A missing or contradictory held probe still refuses before helper execution.
+
+Partial demux timing is not source-epoch authority. Diagnostic308 observed both
+FORMAT and selected-stream start times missing after bounded discovery; four
+reordered packet reads later changed the stream start to0.208 seconds, while
+the held probe's common origin remained0.125 seconds. Early versus deferred
+discard produced identical results. Reading until nonmissing, taking the first
+packet/minimum sample, increasing budgets or defaulting to zero cannot replace
+the held observation. Original packet/frame PTS and DTS are never rewritten.
+
+The declared-duration EOF endpoint is `frozen_origin_ticks + AVStream.duration`,
+with checked addition and the existing one-tick comparison. A Matroska
+`DURATION` tag remains an absolute endpoint. Neither path uses a mutable partial
+`AVStream.start_time`. The old CLI without the held-origin option exists only
+for private controls with actually observed zero; missing or nonzero legacy
+origins refuse. Its `observed_stream_start_time` provenance cannot satisfy a
+production receipt.
 
 For an observed common origin of 1/8 second at 24000/1001 fps, film window 0
 maps the original first 48 source keys to output frames 0–47. Window 1 starts
@@ -197,7 +218,15 @@ The authored regressions are
 `common_source_origin_bounds_are_absolute_exact_and_seek_stable`,
 `dv_origin_requires_matching_observed_held_format_and_selected_video` and
 `renderer_receipt_requires_exact_observed_held_common_origin`. Execution and
-native acceptance are recorded separately in the build ledger.
+native acceptance are recorded separately in the build ledger. The held CLI
+and strict provenance regressions are
+`held_origin_window_arguments_bind_the_exact_epoch_before_absolute_bounds` and
+`renderer_receipt_requires_exact_observed_held_common_origin`. The CPU-only
+[`test_held_source_origin.py`](../../tools/dv_processing/controls/test_held_source_origin.py)
+control includes the actual helper and checks frozen origins against missing
+and changing demux starts, exact tick representation, bounds, overflow, legacy
+refusal and declared-duration EOF arithmetic. These new controls are authored;
+execution awaits independent review and native qualification.
 
 The encoder must preserve the input time base (`-enc_time_base -1` in the
 exercised FFmpeg path), source PTS and color interpretation. RGB is full-range
