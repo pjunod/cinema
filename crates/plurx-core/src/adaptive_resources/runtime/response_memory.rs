@@ -121,6 +121,13 @@ impl Drop for ResponseSlot {
     }
 }
 
+/// A reserved external parser workspace in the SAME response partition. It
+/// owns no dummy payload allocation and cannot return ledger credit. Callers
+/// must bound their allocations and keep this lease until those values drop.
+pub struct FiniteResponseWorkspace {
+    _slot: ResponseSlot,
+}
+
 /// No raw Vec escape. The complete allocation remains charged until this
 /// owner (possibly inside `Bytes::from_owner`) is actually dropped.
 pub struct FiniteResponseBuffer {
@@ -129,6 +136,17 @@ pub struct FiniteResponseBuffer {
     capacity: usize,
 }
 impl FiniteResponseBuffer {
+    pub fn reserve_metadata_workspace(&self, bytes: usize) -> io::Result<FiniteResponseWorkspace> {
+        let owner = self
+            .slot
+            .as_ref()
+            .ok_or_else(|| io::Error::other("finite payload owner unavailable"))?;
+        let slot = owner
+            .budget
+            .reserve(bytes)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(FiniteResponseWorkspace { _slot: slot })
+    }
     /// Payload plus this core owner's fixed metadata for a chosen number of
     /// simultaneously outstanding bodies. HTTP/allocator framework overhead
     /// must be budgeted separately by the caller's broader profile.
@@ -242,5 +260,18 @@ mod tests {
         budget.begin_close_if_empty().unwrap();
         assert!(budget.closed_and_empty());
         assert!(budget.reserve(1).is_err());
+    }
+    #[test]
+    fn parser_workspace_keeps_partition_held_after_payload_drop() {
+        let budget =
+            ResponseBudget::new(BASE_OVERHEAD_BYTES + 2 * SLOT_OVERHEAD_BYTES + 128).unwrap();
+        let body = FiniteResponseBuffer::allocate(budget.reserve(64).unwrap(), 64).unwrap();
+        let workspace = body.reserve_metadata_workspace(64).unwrap();
+        assert!(body.reserve_metadata_workspace(1).is_err());
+        drop(body);
+        assert!(budget.begin_close_if_empty().is_err());
+        drop(workspace);
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
     }
 }

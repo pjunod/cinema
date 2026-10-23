@@ -81,8 +81,8 @@ pub struct FiniteSourceRequest {
     pub scanner_mtime: i64,
 }
 
-pub use super::response_memory::FiniteResponseBuffer;
 use super::response_memory::ResponseBudget;
+pub use super::response_memory::{FiniteResponseBuffer, FiniteResponseWorkspace};
 
 /// Explicit logical/reported-allocation profile. These are admission bounds,
 /// not a claim that a filesystem or host enforces a physical-byte quota.

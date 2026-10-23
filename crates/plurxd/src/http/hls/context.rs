@@ -320,7 +320,28 @@ pub(super) async fn exact_hls_context_at(
             init = crate::vodserve::ReadyBytes::Local(bytes);
         }
     }
+    // This guard precedes parser allocation and outlives all temporary track
+    // and codec-location vectors. It reserves from the actual finite payload's
+    // partition; local legacy bytes retain their existing ownership path.
+    #[cfg(unix)]
+    let _metadata_memory = init
+        .reserve_metadata_workspace(
+            plurx_core::fmp4::BorrowedInit::metadata_workspace_bytes(init_inspection_bounds())
+                .map_err(|_| HlsInitInspectionError::unavailable())?,
+        )
+        .map_err(|_| HlsInitInspectionError::unavailable())?;
     bind_hls_init_context(context, &init, sample_entry)
+}
+
+fn init_inspection_bounds() -> plurx_core::fmp4::FragmentReaderBounds {
+    let inspection_limit = INIT_INSPECTION_LIMIT_BYTES as usize;
+    plurx_core::fmp4::FragmentReaderBounds {
+        buffer_bytes: inspection_limit,
+        unit_bytes: inspection_limit,
+        max_tracks: 8,
+        max_runs: 1,
+        max_samples: 1,
+    }
 }
 
 fn bind_hls_init_context(
@@ -328,14 +349,7 @@ fn bind_hls_init_context(
     init: &[u8],
     sample_entry: &str,
 ) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
-    let inspection_limit = INIT_INSPECTION_LIMIT_BYTES as usize;
-    let bounds = plurx_core::fmp4::FragmentReaderBounds {
-        buffer_bytes: inspection_limit,
-        unit_bytes: inspection_limit,
-        max_tracks: 8,
-        max_runs: 1,
-        max_samples: 1,
-    };
+    let bounds = init_inspection_bounds();
     let parsed = match plurx_core::fmp4::BorrowedInit::parse(init, bounds) {
         Ok(parsed) => parsed,
         Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {

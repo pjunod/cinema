@@ -1037,6 +1037,7 @@ paths = [
   "crates/plurxd/fixtures/linux-dolby/**",
   "crates/plurxd/src/ffmpeg/linux_dolby.rs",
   "crates/plurx-core/src/fmp4.rs",
+  "crates/plurx-core/src/fmp4/child_iter.rs",
   "crates/plurx-core/src/fmp4/init_view.rs",
   "crates/plurx-core/src/fmp4/bounded_reader.rs",
   "crates/plurx-core/src/fmp4/memory.rs",

@@ -57,6 +57,18 @@ impl<T: AsRef<[u8]>> PartialEq<T> for ReadyBytes {
     }
 }
 impl ReadyBytes {
+    #[cfg(unix)]
+    pub(crate) fn reserve_metadata_workspace(
+        &self,
+        bytes: usize,
+    ) -> io::Result<
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteResponseWorkspace>,
+    > {
+        match self {
+            Self::Local(_) => Ok(None),
+            Self::Finite(payload) => payload.reserve_metadata_workspace(bytes).map(Some),
+        }
+    }
     pub(crate) fn into_bytes(self) -> Bytes {
         match self {
             Self::Local(bytes) => Bytes::from(bytes),

@@ -613,9 +613,11 @@ pub struct FragmentReader {
 }
 
 mod bounded_reader;
+mod child_iter;
 mod init_view;
 mod memory;
 pub use bounded_reader::{BoundedFragmentReader, FragmentReaderBounds};
+use child_iter::iter_children;
 pub use init_view::BorrowedInit;
 
 impl FragmentReader {
@@ -874,21 +876,31 @@ fn peek_box_before(
 type Child = (BoxHeader, usize, usize);
 
 /// Iterate the child boxes of a payload slice.
-fn children(payload: &[u8]) -> Result<Vec<Child>, Fmp4Error> {
+fn metadata_vec<T>(count: usize) -> Result<Vec<T>, Fmp4Error> {
     let mut out = Vec::new();
-    let mut p = 0usize;
-    while p + 8 <= payload.len() {
-        let Some(hdr) = peek_box_before(payload, p, Some(payload.len()))? else {
-            break;
-        };
-        let Some(end) = p.checked_add(hdr.size) else {
-            return malformed("box size overflows");
-        };
-        if end > payload.len() {
-            return malformed(format!("box {} runs past its parent", fourcc(hdr.kind())));
-        }
-        out.push((hdr, p + hdr.header_len, end));
-        p = end;
+    out.try_reserve_exact(count)
+        .map_err(|_| Fmp4Error::Unsupported("fMP4 metadata allocation unavailable".into()))?;
+    if out.capacity() > count {
+        return Err(Fmp4Error::Unsupported(
+            "fMP4 metadata allocation exceeded requested bound".into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Materialize only callers that need random access. Streaming parser callers
+/// use the same iterator directly. Precounting makes the requested allocation
+/// exact and fallible, without a transient chain of geometrically grown Vecs.
+fn children(payload: &[u8]) -> Result<Vec<Child>, Fmp4Error> {
+    let count = child_iter::iter_children(payload).try_fold(0usize, |count, child| {
+        child?;
+        count
+            .checked_add(1)
+            .ok_or_else(|| Fmp4Error::Malformed("child count overflow".into()))
+    })?;
+    let mut out = metadata_vec(count)?;
+    for child in child_iter::iter_children(payload) {
+        out.push(child?);
     }
     Ok(out)
 }
@@ -909,14 +921,36 @@ fn be_u64(b: &[u8], p: usize) -> u64 {
 
 /// Parse the track table out of a `moov` payload.
 fn parse_moov(payload: &[u8]) -> Result<Vec<Track>, Fmp4Error> {
-    let mut tracks = Vec::new();
-    let mut trex: Vec<(u32, u32, u32, u32)> = Vec::new();
-    for (hdr, start, end) in children(payload)? {
+    let mut track_count = 0usize;
+    let mut trex_count = 0usize;
+    for child in child_iter::iter_children(payload) {
+        let (header, start, end) = child?;
+        if header.kind() == b"trak" {
+            track_count = track_count
+                .checked_add(1)
+                .ok_or_else(|| Fmp4Error::Malformed("track count overflow".into()))?;
+        }
+        if header.kind() == b"mvex" {
+            for nested in child_iter::iter_children(&payload[start..end]) {
+                let (header, _, _) = nested?;
+                if header.kind() == b"trex" {
+                    trex_count = trex_count
+                        .checked_add(1)
+                        .ok_or_else(|| Fmp4Error::Malformed("trex count overflow".into()))?;
+                }
+            }
+        }
+    }
+    let mut tracks = metadata_vec(track_count)?;
+    let mut trex: Vec<(u32, u32, u32, u32)> = metadata_vec(trex_count)?;
+    for child in iter_children(payload) {
+        let (hdr, start, end) = child?;
         match hdr.kind() {
             b"trak" => tracks.push(parse_trak(&payload[start..end])?),
             b"mvex" => {
                 let mvex = &payload[start..end];
-                for (h2, s2, e2) in children(mvex)? {
+                for child in iter_children(mvex) {
+                    let (h2, s2, e2) = child?;
                     if h2.kind() != b"trex" {
                         continue;
                     }
@@ -956,7 +990,8 @@ fn parse_trak(payload: &[u8]) -> Result<Track, Fmp4Error> {
         default_sample_size: 0,
         default_sample_flags: 0,
     };
-    for (hdr, start, end) in children(payload)? {
+    for child in iter_children(payload) {
+        let (hdr, start, end) = child?;
         let b = &payload[start..end];
         match hdr.kind() {
             b"tkhd" => {
@@ -984,7 +1019,8 @@ fn parse_trak(payload: &[u8]) -> Result<Track, Fmp4Error> {
 }
 
 fn parse_mdia(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
-    for (hdr, start, end) in children(payload)? {
+    for child in iter_children(payload) {
+        let (hdr, start, end) = child?;
         let b = &payload[start..end];
         match hdr.kind() {
             b"mdhd" => {
@@ -1008,7 +1044,8 @@ fn parse_mdia(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
                 };
             }
             b"minf" => {
-                for (h2, s2, e2) in children(b)? {
+                for child in iter_children(b) {
+                    let (h2, s2, e2) = child?;
                     if h2.kind() == b"stbl" {
                         parse_stbl(&b[s2..e2], track)?;
                     }
@@ -1021,7 +1058,8 @@ fn parse_mdia(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
 }
 
 fn parse_stbl(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
-    for (hdr, start, end) in children(payload)? {
+    for child in iter_children(payload) {
+        let (hdr, start, end) = child?;
         if hdr.kind() != b"stsd" {
             continue;
         }
@@ -1031,7 +1069,8 @@ fn parse_stbl(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
             return malformed("stsd too short");
         }
         let entries = &b[8..];
-        for (entry, estart, eend) in children(entries)? {
+        for child in iter_children(entries) {
+            let (entry, estart, eend) = child?;
             let codec = match entry.kind() {
                 b"hvc1" | b"hev1" | b"dvh1" | b"dvhe" => Some(VideoCodec::Hevc),
                 b"avc1" | b"avc3" | b"dva1" | b"dvav" => Some(VideoCodec::H264),
@@ -1047,7 +1086,8 @@ fn parse_stbl(payload: &[u8], track: &mut Track) -> Result<(), Fmp4Error> {
                 return malformed("visual sample entry too short");
             }
             let extra = &body[78..];
-            for (h2, s2, e2) in children(extra)? {
+            for child in iter_children(extra) {
+                let (h2, s2, e2) = child?;
                 let rec = &extra[s2..e2];
                 match (h2.kind(), codec) {
                     (b"dvcC" | b"dvvC", _) => {
@@ -3162,7 +3202,7 @@ struct HvcCLocation {
     /// rather than assumed.
     dolby_vision: Option<DolbyVisionAt>,
     /// hvcC first, then every enclosing box through moov.
-    ancestors: Vec<BoxAt>,
+    ancestors: [BoxAt; 8],
 }
 
 #[derive(Clone)]
@@ -3174,7 +3214,7 @@ struct AvcCLocation {
     /// `stsd` first, then every enclosing box through `moov`. Fixture-only,
     /// like `entry`.
     #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
-    ancestors: Vec<BoxAt>,
+    ancestors: [BoxAt; 6],
 }
 
 fn track_id_in_trak(bytes: &[u8], trak_body: Range<usize>) -> Result<Option<u32>, Fmp4Error> {
@@ -3236,7 +3276,7 @@ fn locate_avc_sample_entries(
         if entries.len() != declared {
             return malformed("stsd entry_count does not match its sample entries");
         }
-        let mut locations = Vec::new();
+        let mut locations = metadata_vec(entries.len())?;
         for (entry, payload_start, entry_end) in entries {
             if !matches!(entry.kind(), b"avc1" | b"avc3" | b"dva1" | b"dvav") {
                 continue;
@@ -3262,7 +3302,7 @@ fn locate_avc_sample_entries(
                 sample_entry: *entry.kind(),
                 payload,
                 entry: entry_at,
-                ancestors: vec![stsd_at, stbl_at, minf_at, mdia_at, trak_at, moov_at],
+                ancestors: [stsd_at, stbl_at, minf_at, mdia_at, trak_at, moov_at],
             });
         }
         result = Some((declared, locations));
@@ -3301,12 +3341,35 @@ fn locate_hevc_sample_entries(bytes: &[u8]) -> Result<Vec<Option<HvcCLocation>>,
         // Keep every HEVC description. Mutators deliberately reject more than
         // one below; validation must inspect every description before the
         // multi-entry shape may authorize a non-mutating fallback.
-        let hevc_entries: Vec<_> = find_children(bytes, entries_start..entries_end, b"hvc1")?
-            .into_iter()
-            .chain(find_children(bytes, entries_start..entries_end, b"hev1")?)
-            .chain(find_children(bytes, entries_start..entries_end, b"dvh1")?)
-            .chain(find_children(bytes, entries_start..entries_end, b"dvhe")?)
-            .collect();
+        let entry_count = child_iter::iter_children(&bytes[entries_start..entries_end]).try_fold(
+            0usize,
+            |count, child| {
+                let (header, _, _) = child?;
+                if matches!(header.kind(), b"hvc1" | b"hev1" | b"dvh1" | b"dvhe") {
+                    count
+                        .checked_add(1)
+                        .ok_or_else(|| Fmp4Error::Malformed("HEVC entry count overflow".into()))
+                } else {
+                    Ok(count)
+                }
+            },
+        )?;
+        let mut hevc_entries = metadata_vec(entry_count)?;
+        for kind in [b"hvc1", b"hev1", b"dvh1", b"dvhe"] {
+            hevc_entries.extend(find_children(bytes, entries_start..entries_end, kind)?);
+        }
+        let capacity = locations
+            .len()
+            .checked_add(entry_count)
+            .ok_or_else(|| Fmp4Error::Malformed("HEVC location count overflow".into()))?;
+        locations
+            .try_reserve_exact(entry_count)
+            .map_err(|_| Fmp4Error::Unsupported("HEVC locations allocation unavailable".into()))?;
+        if locations.capacity() > capacity {
+            return Err(Fmp4Error::Unsupported(
+                "HEVC locations allocation exceeded requested bound".into(),
+            ));
+        }
         for (entry_at, entry) in hevc_entries {
             let extra_start = entry_at.start + entry.header_len + 78;
             let extra_end = entry_at.start + entry.size;
@@ -3341,7 +3404,7 @@ fn locate_hevc_sample_entries(bytes: &[u8]) -> Result<Vec<Option<HvcCLocation>>,
                     }
                     found
                 },
-                ancestors: vec![
+                ancestors: [
                     hvcc_at, entry_at, stsd_at, stbl_at, minf_at, mdia_at, trak_at, moov_at,
                 ],
             }));
@@ -3744,7 +3807,24 @@ fn find_child(
     range: Range<usize>,
     kind: &[u8; 4],
 ) -> Result<Option<(BoxAt, BoxHeader)>, Fmp4Error> {
-    Ok(find_children(bytes, range, kind)?.into_iter().next())
+    if range.end > bytes.len() || range.start > range.end {
+        return malformed("child-box range runs outside its parent");
+    }
+    let mut first = None;
+    // Validate the whole range as before, including boxes after the first hit.
+    for child in child_iter::iter_children(&bytes[range.clone()]) {
+        let (header, start, _) = child?;
+        if header.kind() == kind && first.is_none() {
+            first = Some((
+                BoxAt {
+                    start: range.start + start - header.header_len,
+                    header_len: header.header_len,
+                },
+                header,
+            ));
+        }
+    }
+    Ok(first)
 }
 
 fn find_children(
@@ -3755,31 +3835,29 @@ fn find_children(
     if range.end > bytes.len() || range.start > range.end {
         return malformed("child-box range runs outside its parent");
     }
-    let mut found = Vec::new();
-    let mut pos = range.start;
-    while pos + 8 <= range.end {
-        let Some(header) = peek_box_before(bytes, pos, Some(range.end))? else {
-            break;
-        };
-        let Some(end) = pos.checked_add(header.size) else {
-            return malformed("box size overflows while locating hvcC");
-        };
-        if end > range.end {
-            return malformed(format!(
-                "box {} runs past its parent while locating hvcC",
-                fourcc(header.kind())
-            ));
+    let payload = &bytes[range.clone()];
+    let count = child_iter::iter_children(payload).try_fold(0usize, |count, child| {
+        let (header, _, _) = child?;
+        if header.kind() == kind {
+            count
+                .checked_add(1)
+                .ok_or_else(|| Fmp4Error::Malformed("matching child count overflow".into()))
+        } else {
+            Ok(count)
         }
+    })?;
+    let mut found = metadata_vec(count)?;
+    for child in child_iter::iter_children(payload) {
+        let (header, start, _) = child?;
         if header.kind() == kind {
             found.push((
                 BoxAt {
-                    start: pos,
+                    start: range.start + start - header.header_len,
                     header_len: header.header_len,
                 },
                 header,
             ));
         }
-        pos = end;
     }
     Ok(found)
 }
@@ -3841,7 +3919,9 @@ fn hvcc_nal_arrays(record: &[u8]) -> Result<(Vec<u8>, bool), Fmp4Error> {
     if record.len() < 23 {
         return malformed("hvcC too short for its NAL arrays");
     }
-    let mut found = Vec::new();
+    // NAL types are six bits. This exact fixed allocation also bounds the
+    // temporary used by borrowed init validation.
+    let mut found = metadata_vec(64)?;
     let mut complete = true;
     let mut pos = 23usize;
     for _ in 0..record[22] {
