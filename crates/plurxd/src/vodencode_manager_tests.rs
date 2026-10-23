@@ -28,7 +28,21 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => panic!("invalid target environment: {error}"),
     };
-    let profile81 = std::env::var("PLURX_DV_WINDOW_DESTINATION").as_deref() == Ok("profile81");
+    let destination = match std::env::var("PLURX_DV_WINDOW_DESTINATION") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => "hdr10".into(),
+        Err(error) => panic!("invalid destination environment: {error}"),
+    };
+    assert!(matches!(
+        destination.as_str(),
+        "hdr10" | "profile81" | "sdr"
+    ));
+    let profile81 = destination == "profile81";
+    let sdr = destination == "sdr";
+    assert!(
+        !sdr || target_nits.is_none(),
+        "SDR always uses its frozen 100-nit policy"
+    );
     assert!(
         !(profile81 && target_nits.is_some()),
         "native Profile 8.1 is never display targeted"
@@ -82,6 +96,17 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .await
             .expect("actual sealed source probe"),
     ));
+    if sdr {
+        manager = manager.with_cache(
+            base.path().join("cache"),
+            crate::ffmpeg::ffmpeg_build().await,
+            "node".into(),
+        );
+        store
+            .put_setting(keys::DV_DISPLAY_TARGET, "1")
+            .await
+            .expect("SDR targeting enabled");
+    }
     manager.dovi_reshape = crate::ffmpeg::has_dovi_reshape().await;
     manager.decoders =
         plurx_core::transcode::detect_video_decoders(&crate::ffmpeg::ffmpeg_bin()).await;
@@ -93,7 +118,7 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         manager.hdr10_passthrough_vaapi,
         "actual P010/Main10 upload proof"
     );
-    let display_target = if let Some(nits) = target_nits {
+    let display_target = if target_nits.is_some() || sdr {
         let title_probe = crate::source_probe::probe_title_for_control(&manager, &file)
             .await
             .expect("admitted complete-title probe of the held source");
@@ -120,9 +145,12 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             )
             .await
             .expect("store current title probe");
-        let DvDisplayTargetChoice::Target(target) =
-            DvDisplayTarget::for_title(nits, Some(stats)).expect("supported physical bucket")
-        else {
+        let DvDisplayTargetChoice::Target(target) = (if sdr {
+            DvDisplayTarget::for_sdr_title(Some(stats))
+        } else {
+            DvDisplayTarget::for_title(target_nits.expect("HDR bucket"), Some(stats))
+        })
+        .expect("supported physical bucket") else {
             panic!("physical target fixture must exceed its bucket; elision is a separate control");
         };
         println!(
@@ -167,11 +195,21 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         ..reopen_request(id, "actual-hdr-probe", "unused", "unused")
     };
     let started = Instant::now();
-    let encoding = manager
-        .prepare_vod_encoding(&request, &file)
-        .await
-        .expect("actual native preparation")
-        .expect("encoded route");
+    let (encoding, prepared_root) = if sdr {
+        // Fresh durable admission, canonical catalog restoration and normal
+        // one-shot lease/source validation precede genuine SDR rendering.
+        let root = admit_native_sdr_window_control(&manager, &store, request, &file).await;
+        (Arc::clone(&root.encoding), Some(root))
+    } else {
+        (
+            manager
+                .prepare_vod_encoding(&request, &file)
+                .await
+                .expect("actual native preparation")
+                .expect("encoded route"),
+            None,
+        )
+    };
     let DvSelection::Selected(selected) = &encoding.dv_processing else {
         panic!(
             "actual processing preparation refused: {:?}",
@@ -182,8 +220,18 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         selected.destination(),
         if profile81 {
             plurx_core::transcode::dv_processing::DvDestination::Profile81
+        } else if sdr {
+            plurx_core::transcode::dv_processing::DvDestination::Sdr
         } else {
             plurx_core::transcode::dv_processing::DvDestination::Hdr10
+        }
+    );
+    assert_eq!(
+        encoding.delivered_output_grade(),
+        if sdr {
+            OutputGrade::Sdr
+        } else {
+            OutputGrade::Hdr10
         }
     );
     assert_eq!(encoding.preserves_processed_dv(), profile81);
@@ -191,11 +239,21 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .dv_runtime
         .as_ref()
         .expect("owned processing runtime");
-    let display_target = display_target.map(|target| {
-        runtime
-            .resolve_display_target(target)
-            .expect("single effective source/mastering policy before targeted windows")
-    });
+    let display_target = if sdr {
+        let frozen = runtime.display_target.expect("admitted SDR policy");
+        assert!(frozen.is_sdr());
+        assert_eq!(frozen.nits(), 100);
+        frozen
+            .resolved_sdr_floor()
+            .expect("admission froze the source floor");
+        Some(frozen)
+    } else {
+        display_target.map(|target| {
+            runtime
+                .resolve_display_target(target)
+                .expect("single effective source/mastering policy before targeted windows")
+        })
+    };
     assert_eq!(runtime.encoder, Encoder::Vaapi);
     // The plan is resolved with the software source decoder; the windows
     // are encoded by the graph's admitted encoder, and every report says so.
@@ -228,17 +286,22 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .expect("raster height"),
     );
     let elapsed = started.elapsed();
+    if sdr {
+        assert_native_sdr_window(&verified.bytes, raster, encoding.grid).await;
+    }
     let luma = processed_window_luma(&verified.bytes, raster, false);
     println!(
         "{}",
-        serde_json::json!({"entry":0,"policy":"master-preparation","elapsed_ms":elapsed.as_millis(),
+        serde_json::json!({"entry":0,"policy":if sdr { "fresh-owner-sdr100" } else { "master-preparation" },"elapsed_ms":elapsed.as_millis(),
         "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
         "bytes":verified.bytes.len(),"plan":selected.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
     );
-    // Preparation intentionally remains master; never label its receipt as
-    // targeted. Release the private producer before independently admitting0.
+    // HDR controls prepare master and then inject their explicit test policy;
+    // SDR prepares its actual frozen 100-nit destination through fresh admission.
+    // Release the first physical owner before independently admitting each window.
     drop(verified);
+    drop(prepared_root);
     let segment_plan = encoding.grid.plan(file.duration_ms.expect("duration"), 0);
     let entries: &[usize] = if display_target.is_some() {
         &[0, 1, 2, 360]
@@ -283,11 +346,20 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             }
         };
         if let Some(target) = display_target {
-            assert_ne!(
-                plan.semantic_digest(),
-                selected.semantic_digest(),
-                "target is not master identity"
-            );
+            if sdr {
+                assert_eq!(
+                    plan.semantic_digest(),
+                    selected.semantic_digest(),
+                    "frozen SDR admission identity"
+                );
+                assert_native_sdr_window(&verified.bytes, raster, encoding.grid).await;
+            } else {
+                assert_ne!(
+                    plan.semantic_digest(),
+                    selected.semantic_digest(),
+                    "target is not master identity"
+                );
+            }
             let digest = plan.semantic_digest();
             assert_eq!(
                 target_digest.get_or_insert_with(|| digest.clone()),
@@ -296,7 +368,11 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             );
             assert_eq!(
                 plan.destination(),
-                plurx_core::transcode::dv_processing::DvDestination::Hdr10
+                if sdr {
+                    plurx_core::transcode::dv_processing::DvDestination::Sdr
+                } else {
+                    plurx_core::transcode::dv_processing::DvDestination::Hdr10
+                }
             );
             let rows = &verified.observed.display_target_rows;
             assert_eq!(rows.len(), verified.observed.pictures.len());
@@ -329,6 +405,15 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
                     }),
                 Some(&(verified.observed.pictures.len() as u64))
             );
+            if sdr {
+                assert_eq!(
+                    receipt
+                        .counts()
+                        .operations_applied
+                        .get(&DvOperation::Bt709Gamma24Conversion),
+                    Some(&(verified.observed.pictures.len() as u64))
+                );
+            }
         } else {
             assert_eq!(
                 plan.semantic_digest(),
@@ -360,13 +445,242 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         let luma = processed_window_luma(&verified.bytes, raster, at == 360);
         println!(
             "{}",
-            serde_json::json!({"entry":at,"target_nits":target_nits,
+            serde_json::json!({"entry":at,"target_nits":display_target.map(|target| target.nits()),
             "target_rows":verified.observed.display_target_rows,"elapsed_ms":elapsed.as_millis(),
             "decoder":format!("{:?}", verified.observed.decoder),"luma":luma,
             "bytes":verified.bytes.len(),"plan":plan.semantic_digest(),"receipt_frames":verified.receipt.as_ref().map(|receipt| receipt.served_frames().len()),
         "fel_frames":verified.receipt.as_ref().map(|receipt| receipt.counts().el_accepted)})
         );
     }
+}
+
+/// Bounded physical coverage, not HTTP playback or full-app EOF: the shared
+/// processed-root regression separately verifies registry, HLS and replay facts.
+#[cfg(target_os = "linux")]
+async fn admit_native_sdr_window_control(
+    manager: &TranscodeManager,
+    store: &Arc<dyn Store>,
+    mut request: SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+) -> crate::vodserve::PreparedRootAdmission {
+    use plurx_core::playback::{
+        audio::{resolve_audio, AudioClaim, AudioRoute},
+        candidate::CandidateRoute,
+    };
+    let planning = store
+        .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("atomic planning snapshot")
+        .expect("source");
+    let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+        "v":2,"video":[
+            {"codec":"h264","profiles":["high"],"present":["sdr"]},
+            {"codec":"hevc","profiles":["main10"],"present":["sdr"]}],
+        "display":{"hdr":false,"dolby_vision":false},
+        "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],
+        "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
+    }))
+    .expect("explicit SDR display and Main10 decoder");
+    request.hdr10 = false;
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.audio_index = TranscodeManager::candidate_audio_from_snapshot(&planning, None);
+    request.audio_claim = AudioClaim::from_caps(&caps).expect("canonical audio claim");
+    let track = request.audio_index.and_then(|index| {
+        planning
+            .file
+            .audio_streams
+            .iter()
+            .find(|track| track.index == index)
+    });
+    request.audio_delivery = Some(resolve_audio(
+        track,
+        &request.audio_claim.as_ref().expect("claim").profile(),
+        AudioRoute::EncodedVod,
+        request.audio_offset_ms,
+    ));
+    let query = crate::media_pool::QualityCatalogRequest {
+        file_id: file.id,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        caps: caps.clone(),
+        audio_index: request.audio_index,
+        audio_offset_ms: request.audio_offset_ms,
+        audio_claim: request.audio_claim.clone(),
+        audio_delivery: request.audio_delivery.clone(),
+        subtitle_burn: None,
+        presentation: Presentation::Vod,
+        copy_contract: None,
+    };
+    let catalog = manager
+        .quality_catalog_from_snapshot_progress(
+            &planning,
+            &caps,
+            request.audio_index,
+            request.audio_offset_ms,
+            None,
+            Presentation::Vod,
+            None,
+            request.audio_delivery.as_ref(),
+            request.audio_claim.as_ref(),
+            None,
+            None,
+        )
+        .await;
+    let SessionKind::Transcode { height } = request.kind else {
+        panic!("SDR encoded height")
+    };
+    let candidate = catalog
+        .candidates
+        .iter()
+        .find(|candidate| {
+            !candidate.processed_dv
+                && candidate.decoder_compatible
+                && candidate.route == CandidateRoute::Encode
+                && candidate.grade == OutputGrade::Sdr
+                && i64::from(candidate.target_height) == height
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "ordinary SDR candidate at {height}: {:?}",
+                catalog.candidates
+            )
+        })
+        .clone();
+    let bound = crate::media_sessions::CandidateCatalogContext {
+        caps,
+        candidate: candidate.clone(),
+        binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
+    };
+    let mut context = manager
+        .restore_catalog_context(
+            &request,
+            &bound,
+            candidate.id,
+            file.size,
+            file.mtime,
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .expect("canonical candidate restoration");
+    context.catalog_query = Some(query);
+    request.candidate_context = Some(Box::new(context));
+    let user = store
+        .create_user("native-sdr-control", "hash", false)
+        .await
+        .expect("real principal");
+    let principal =
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
+    let incarnation_id = uuid::Uuid::new_v4().to_string();
+    request.request_id = Some(incarnation_id.clone());
+    let now = crate::media_sessions::unix_ms();
+    let claim = store
+        .claim_media_session_request(
+            &principal,
+            &incarnation_id,
+            &request.durable_intent_fingerprint(&principal),
+            &request.playback_id,
+            &incarnation_id,
+            now,
+            now + 60_000,
+        )
+        .await
+        .expect("durable create admission");
+    assert!(matches!(
+        claim,
+        plurx_core::domain::MediaSessionRequestClaim::Acquired { .. }
+    ));
+    let recovery = SessionRecoveryIdentity {
+        principal,
+        incarnation_id,
+        recovery_epoch: uuid::Uuid::new_v4().to_string(),
+    };
+    let (processed, candidate) = manager
+        .prepare_processed_hdr10(&request, &recovery, false)
+        .await
+        .expect("fresh processed owner qualification")
+        .expect("SDR processed candidate");
+    assert!(candidate.processed_dv);
+    assert_eq!(candidate.grade, OutputGrade::Sdr);
+    let root = manager
+        .admit_processed_window_control(&processed, &recovery, file)
+        .await
+        .expect("normal lease and source/recipe validation");
+    assert!(
+        manager
+            .admit_processed_window_control(&processed, &recovery, file)
+            .await
+            .is_err(),
+        "same prepared owner lease cannot be consumed twice"
+    );
+    root
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_native_sdr_window(
+    bytes: &[u8],
+    raster: (u32, u32),
+    grid: plurx_core::transcode::VodFrameGrid,
+) {
+    let temporary = crate::test_tempdir().expect("SDR verification");
+    let path = temporary.path().join("window.mp4");
+    std::fs::write(&path, bytes).expect("actual completed SDR window");
+    let output = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+        .args(["-v", "error", "-show_streams", "-of", "json"])
+        .arg(&path)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .expect("probe actual SDR window");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("SDR probe");
+    let streams = document["streams"].as_array().expect("streams");
+    let video = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "video")
+        .expect("video");
+    assert_eq!(video["codec_name"], "hevc");
+    assert_eq!(video["profile"], "Main 10");
+    assert_eq!(video["width"], raster.0);
+    assert_eq!(video["height"], raster.1);
+    assert_eq!(video["pix_fmt"], "yuv420p10le");
+    assert_eq!(video["color_range"], "tv");
+    for field in ["color_transfer", "color_primaries", "color_space"] {
+        assert_eq!(video[field], "bt709");
+    }
+    let (num, den) = video["r_frame_rate"]
+        .as_str()
+        .expect("cadence")
+        .split_once('/')
+        .expect("rational cadence");
+    assert_eq!(
+        num.parse::<u64>().expect("numerator") * u64::from(grid.denominator),
+        den.parse::<u64>().expect("denominator") * u64::from(grid.numerator)
+    );
+    for side in video["side_data_list"].as_array().into_iter().flatten() {
+        let kind = side["side_data_type"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            !kind.contains("dovi")
+                && !kind.contains("mastering")
+                && !kind.contains("content light"),
+            "{side}"
+        );
+    }
+    let audio = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "audio")
+        .expect("canonical encoded audio");
+    assert_eq!(audio["codec_name"], "aac");
+    assert_eq!(audio["channels"], 2);
+    assert_eq!(audio["sample_rate"], "48000");
 }
 
 /// Decode a processed window and check its luma is a limited-range picture:

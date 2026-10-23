@@ -660,7 +660,9 @@ impl VodActivityObservation {
         self.display_target.as_ref().is_none_or(|target| {
             target.note.len() <= 512
                 && target.bucket_nits.is_none_or(|nits| {
-                    plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS.contains(&nits)
+                    nits == 100
+                        || plurx_core::transcode::dv_processing::DISPLAY_TARGET_BUCKETS
+                            .contains(&nits)
                 })
         }) && [
             &self.control_demand,

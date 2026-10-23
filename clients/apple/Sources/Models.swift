@@ -839,7 +839,7 @@ struct QualityCandidate: Codable, Identifiable {
         guard recipeDigest.count == 32, (1...16_384).contains(width), (1...16_384).contains(height),
               (0...16_384).contains(targetHeight), ["original", "remux", "encode"].contains(route),
               ["sdr", "hdr10"].contains(grade),
-              processedHdr10 != true || (route == "encode" && grade == "hdr10" && plannedCodec == "hevc") else { return false }
+              processedHdr10 != true || (route == "encode" && plannedCodec == "hevc") else { return false }
         var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
         bytes.append(contentsOf: recipeDigest)
         let expected = SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()

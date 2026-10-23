@@ -85,7 +85,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 12] = [
+    let inputs: [(&str, &[u8]); 13] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -129,6 +129,10 @@ fn renderer_source_identity() -> String {
         (
             "segment_decode_render.c",
             include_bytes!("../../../tools/dv_processing/segment_decode_render.c"),
+        ),
+        (
+            "title_constants.h",
+            include_bytes!("../../../tools/dv_processing/title_constants.h"),
         ),
         (
             "yuv420p10.h",

@@ -8,6 +8,16 @@ import unittest
 
 
 class MetadataAdmission(unittest.TestCase):
+    def test_title_mastering_constants_survive_missing_blocks(self):
+        """Run the production accumulator, including nonadjacent conflicts."""
+        source = Path(__file__).with_name("test_title_constants.c")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "title-constants"
+            subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall",
+                            "-Wextra", "-Werror", str(source), "-o", str(binary)],
+                           check=True, timeout=30)
+            subprocess.run([str(binary)], check=True, timeout=10)
+
     def test_nonbinding_residual_limit(self):
         source = Path(__file__).with_name("test_nlq_clipping.c")
         with tempfile.TemporaryDirectory() as directory:

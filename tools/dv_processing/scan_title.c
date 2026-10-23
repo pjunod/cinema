@@ -13,14 +13,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "title_constants.h"
 
 struct title_stats {
   uint64_t frames, valid, missing, invalid;
   unsigned max_pq;
-  // 0: unseen, 1: consistent, 2: unknown, 3: inconsistent.
-  int l6_state, l9_state;
-  unsigned min_luma, max_luma, primary_index;
-  uint16_t xy[8];
+  struct dv_title_constants mastering;
 };
 static struct title_stats stats;
 static int64_t first_pts = AV_NOPTS_VALUE, last_end = AV_NOPTS_VALUE;
@@ -31,9 +29,9 @@ static void need(bool ok, const char *why) {
   }
 }
 static void unknown_constants(void) {
-  if (stats.l6_state != 3) stats.l6_state = 2;
-  if (stats.l9_state != 3) stats.l9_state = 2;
+  dv_title_constants_unknown(&stats.mastering);
 }
+
 static void observe(AVFrame *frame) {
   need(!(frame->flags & AV_FRAME_FLAG_CORRUPT) && !frame->decode_error_flags,
        "corrupt decoded display frame");
@@ -86,24 +84,11 @@ static void observe(AVFrame *frame) {
     if (dm->dm_data.level1->max_pq > stats.max_pq)
       stats.max_pq = dm->dm_data.level1->max_pq;
   }
-  if (!dm->dm_data.level6 || !dm->dm_data.level6->max_display_mastering_luminance ||
-      dm->dm_data.level6->max_display_mastering_luminance > 10000 ||
-      dm->dm_data.level6->min_display_mastering_luminance > 10000) {
-    if (stats.l6_state != 3) stats.l6_state = 2;
-  } else {
-    unsigned min = dm->dm_data.level6->min_display_mastering_luminance;
-    unsigned max = dm->dm_data.level6->max_display_mastering_luminance;
-    if (!stats.l6_state) {
-      stats.min_luma = min;
-      stats.max_luma = max;
-      stats.l6_state = 1;
-    } else if (stats.l6_state == 1 &&
-               (stats.min_luma != min || stats.max_luma != max)) {
-      stats.l6_state = 3;
-    }
-  }
+  dv_title_observe_l6(&stats.mastering, dm->dm_data.level6 != NULL,
+      dm->dm_data.level6 ? dm->dm_data.level6->min_display_mastering_luminance : 0,
+      dm->dm_data.level6 ? dm->dm_data.level6->max_display_mastering_luminance : 0);
   if (!dm->dm_data.level9) {
-    if (stats.l9_state != 3) stats.l9_state = 2;
+    dv_title_observe_l9(&stats.mastering, false, 0, NULL);
   } else {
     unsigned index = dm->dm_data.level9->source_primary_index;
     uint16_t xy[8] = {0};
@@ -117,14 +102,7 @@ static void observe(AVFrame *frame) {
       xy[6] = dm->dm_data.level9->source_primary_white_x;
       xy[7] = dm->dm_data.level9->source_primary_white_y;
     }
-    if (!stats.l9_state) {
-      stats.primary_index = index;
-      memcpy(stats.xy, xy, sizeof(xy));
-      stats.l9_state = 1;
-    } else if (stats.l9_state == 1 &&
-               (stats.primary_index != index || memcmp(stats.xy, xy, sizeof(xy)))) {
-      stats.l9_state = 3;
-    }
+    dv_title_observe_l9(&stats.mastering, true, index, xy);
   }
 done:
   if (dm) dovi_rpu_free_vdr_dm_data(dm);
@@ -247,20 +225,20 @@ int main(int argc, char **argv) {
          stats.frames, stats.valid, stats.missing, stats.invalid);
   if (stats.valid) printf("%u", stats.max_pq); else printf("null");
   printf(",\"mastering_luminance\":{");
-  if (stats.l6_state == 1)
+  if (stats.mastering.l6_state == 1)
     printf("\"state\":\"consistent\",\"value\":{\"min_1e4_nits\":%u,\"max_nits\":%u}",
-           stats.min_luma, stats.max_luma);
-  else printf("\"state\":\"%s\"", stats.l6_state == 3 ? "inconsistent" : "unknown");
+           stats.mastering.min_luma, stats.mastering.max_luma);
+  else printf("\"state\":\"%s\"", stats.mastering.l6_state == 3 ? "inconsistent" : "unknown");
   printf("},\"mastering_primaries\":{");
-  if (stats.l9_state == 1) {
-    printf("\"state\":\"consistent\",\"value\":{\"index\":%u,\"custom_xy\":", stats.primary_index);
-    if (stats.primary_index == 255) {
+  if (stats.mastering.l9_state == 1) {
+    printf("\"state\":\"consistent\",\"value\":{\"index\":%u,\"custom_xy\":", stats.mastering.primary_index);
+    if (stats.mastering.primary_index == 255) {
       printf("[");
-      for (unsigned i = 0; i < 8; i++) printf("%s%u", i ? "," : "", stats.xy[i]);
+      for (unsigned i = 0; i < 8; i++) printf("%s%u", i ? "," : "", stats.mastering.xy[i]);
       printf("]");
     } else printf("null");
     printf("}");
-  } else printf("\"state\":\"%s\"", stats.l9_state == 3 ? "inconsistent" : "unknown");
+  } else printf("\"state\":\"%s\"", stats.mastering.l9_state == 3 ? "inconsistent" : "unknown");
   printf("}}\n");
   need(!ferror(stdout) && fflush(stdout) == 0, "aggregate output");
   av_frame_free(&frame);

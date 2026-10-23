@@ -3040,6 +3040,23 @@ impl TranscodeManager {
         Ok(prepared)
     }
 
+    /// Physical window controls consume the same one-shot owner lease and
+    /// source/recipe validation as dispatch, without starting a registry driver.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) async fn admit_processed_window_control(
+        &self,
+        request: &SessionRequest,
+        recovery: &SessionRecoveryIdentity,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<crate::vodserve::PreparedRootAdmission, String> {
+        let context = request
+            .candidate_context
+            .as_ref()
+            .ok_or("processed context missing")?;
+        self.admit_prepared_processing(request, context, Some(recovery), file)
+            .await
+    }
+
     /// Rebuild descriptive inputs only under a verified first-preparation
     /// expectation, borrowing custody from its exact process-local predecessor.
     /// This does not relax generic serialized catalog restoration.
@@ -3442,7 +3459,7 @@ impl TranscodeManager {
         let codec_qualification = encoding.as_ref().map(|encoding| {
             (
                 encoding.plan.encoder(),
-                encoding.options.pipeline.output_grade(),
+                encoding.delivered_output_grade(),
                 encoding.options.pipeline,
             )
         });

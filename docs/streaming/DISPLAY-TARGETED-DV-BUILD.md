@@ -14,7 +14,7 @@ new source head.
 |---|---|---|
 | A · title scan/HDR10-E | #1216 merged into the effort at `3fbb3f669`. P7 driver348 passed1000/1600 on source503619eb, with frame/audio/cadence/geometry/seek receipts. | Integrated P7/P8 adoption after changed C inputs; earlier P8 passes retain their sources. |
 | B–D · metadata, controls, clients | #1266/#1267/#1268 are closed folded records in #1269. Seven Rust312, ten Rust316,14 badge/72 settings,27 web and compiler361/362/363 passes retain their sources. | Final behavior checks only where failed/materially invalidated, plus applicable final-gate requirements. |
-| Clients | Android30 and Apple13 plus test-build passed on F7eed; client inputs remain unchanged. Current compile-only gate5889 passed Android and Xcode27.1 Apple builds. | Physical-device acceptance. |
+| Clients | Android30 and Apple13 plus test-build passed on F7eed; client inputs were unchanged through83c; review398 now repairs SDR identities. Current compile-only gate5889 passed Android and Xcode27.1 Apple builds. | Physical-device acceptance. |
 | E · trims | Reference349 completed42 vendor commands with exit0. Comparison353 completed14 observations; baseline PQ error.110077 and trim-delta errors.44085/.48964 fail creative acceptance. | Full CM4/L8 implementation/contract and creative accuracy remain unfinished; no vendor contact authorized. |
 | F · SDR | Source6d48d4c retains ten Rust, two web and pixel325 (61440 samples, max1code/limit2). Repairba8df0e7 shares fresh FEL admission/receipts with SDR, preserving BT.709 gamma2.4 and100-nit mapping. | Changed factory regression and integrated delivery acceptance. |
 
@@ -22,8 +22,7 @@ A/#1216 and integration#1269 are merged into `effort/display-targeted-dv`;
 #1269 landed `3cc264068` with all78 regression fields. Its tree matches gated
 candidatee6473332f. Compile-only gate5889 passed all8 jobs. Actual sourceba8df0e7
 passed pinned Rust1.97.1 fmt/check/all-target Clippy382, production C link384
-and final-input trim-candidate link393. All1237 protected runtime/Cargo inputs
-match that source. These compiler runs executed zero product tests, controls,
+and final-input trim-candidate link393. At83c all1237 protected inputs matched that source; review fixes need new compilation. These compiler runs executed zero product tests, controls,
 media or GPU work; tooling compilation establishes no trim accuracy.
 
 Root chose to qualify/promote completed HDR/SDR under the user's standing
@@ -566,17 +565,21 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 ## Delivery
 
-| Stage | Contents | Recorded state |
-|---|---|---|
-| A | Title scan, target policy, mapping, report and controls | #1216 merged into the effort at3fbb3f669; source-bound P7 passes retained. Integrated adoption remains open. |
-| B–D | Output metadata, server controls, client presentation | Batched #1269 merged into the effort at3cc264068 after compile-only gate5889 PASS. Smaller PRs are folded records. |
-| E | Trim reference/comparison prototype | Integrated tooling compiles; known numerical errors fail creative accuracy. Implementation/acceptance remain unfinished, creative false and L1-only truthful. |
-| F | SDR target | Integrated in #1269; source-bound Rust/web/pixel passes retained. Changed FEL factory regression and final delivery qualification remain open. |
+#1216/#1269 are integrated into the effort at3cc264068, preserving all78
+original regression fields. The [current matrix](#current-qualification--source-bound-evidence-through-f)
+owns source-bound evidence. Root's delivery decision covers HDR/SDR with E
+unfinished, not all A–F completion.
 
-Root's delivery decision under standing user authority covers completed HDR/SDR;
-the whole A–F programme is not declared complete. Main promotion retains final
-review, applicable tests and exact-candidate qualification. The promotion-test
-policy conflict awaits user reconciliation; no validator is weakened.
+Review398 requested four repairs: resolved SDR presentation/replay grade with
+Main10 codec facts preserved; L6/L9 contradictions across missing blocks;
+native processed-SDR identity; activitySDR100 bounds. Fixes and focused cases
+are authored, uncompiled/unexecuted; the same reviewer must confirm closure
+before tests. The bounded native harness adds SDR through real title policy,
+fresh durable admission and normal lease/source validation, not HTTP/full-app
+EOF. The original two-destination reuse test remains; a new SDR-only case avoids
+replaying valid cases. Both source digests include the scanner accumulator;
+existing scanner-binding rotation clears prior title facts.
+Main qualification and promotion-test policy reconciliation remain open.
 
 ### Stage PRs target one effort branch
 
