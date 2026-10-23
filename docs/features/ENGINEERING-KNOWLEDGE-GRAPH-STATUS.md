@@ -10,72 +10,60 @@ execution instructions. No benchmark savings are established.
 
 ## Current work — frozen comparative study continuation
 
-Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`. The
-source-only implementation checkpoint is
-`a39882f9277e881ccd2cb332ca190d749ffe1029`, tree
-`066daff596b8c5d7e7a8ddac199a6841b0533446`. Actual Astra R13 reviewed the earlier
-candidate
-543dda0b5a99c9512631431b6d486535ff3d216f and requested three source repairs.
-Those repairs are now integrated; exact-content recheck, environment admission
-and new-head CI remain pending.
+Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`.
+PR #1262 publishes source/test checkpoint
+`03407896227c776f74982b0187a59eb5c6ce1c6e`, tree
+`ea08d620f55ab072079e50037a4153de9f10fd3f`, based on main
+`1eb11783956b15cb5838effa2df4344e2e750743`. The source is independently
+reviewed; current required CI, native execution and the comparison remain open.
 
-Published PR #1262 remains at B8, b8df5282d435b687a708230c7e58d7e62e319cde.
-Required CI 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
-(2,147 retained plus 26 new retirement checks), two expected opt-in OCI skips
-and zero fixture errors. Do not apply those results to the new local head.
-Astra R10 approved only the prior exact 46 production execution buffers;
-the B8 fixture-prefix correction has a separate narrow Luna review. Neither
-review approves the integrated native filesystem source.
+Actual Astra R14 t_cca41dd7 closed R13's immutable-file mode, trusted role
+ownership and fresh-sentinel compatibility findings. After CI exposed a
+file/directory type-confusion boundary, Sol fixed its explicit expected kind
+without weakening no-symlink/type checks; Luna corrected one malformed
+base64 fixture. A fresh independent gpt-6-luna reviewer approved this bounded
+three-file R15 repair. R15 changes one of 48 execution buffers; the other
+47 retain R14 bytes. The exact report/map digests, ownership and limits are
+in the [study ledger](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md#current-admission--r13-source-repairs-and-native-disk-diagnosis).
 
-The initial native delta added six production and five test files with 14 new cases:
-13 in new test files and one host-checkpoint regression in the existing
-retirement module. Two existing actual OCI controls and one compatibility
-selector are affected. No changed check has run on this head. For R13 the integrator
-verified 37 modules, 11 assets and 48 host buffers; R13 independently matched
-all 48. Five buffers changed in the repairs and require a refreshed exact map.
-Sol completed immutable grader mode support, trusted role ownership
-through publication/adoption and fresh-sentinel compatibility comparisons. Luna
-supplied focused regressions. The repair adds six methods across four test
-files, including an opt-in real Linux root/non-root ownership check, and adds
-writable preflight to the native OCI control. Default skips are not passes;
-required CI supplies affected generic unit results without duplicate local
-runs. Exact-source closure and environment admission remain pending. The guest pack
-is limited to its
-seven-module helper closure and excludes provider/launcher modules and
-credentials. Outer entry/provider bytes are unchanged; runtime.native_store
-adds metadata only.
+Run 5912/UI 5883 recorded 2,152 passes (25 new) and three opt-in skips, but
+failed with 45 type errors and one fixture assertion. Those two causes are
+repaired. Its separate fixture_errors field was zero, not zero test errors.
+New-head run 5913/UI 5884 stopped before tests when curl could not resolve
+github.com; the exact fetching component is undetermined. Read-only runner
+DNS diagnosis is active. The passing journal remains preserved for valid
+adoption, with failed/new/genuinely invalidated checks still required. No
+local unit suite or CI job was rerun. Neither run qualified Rust/promotion.
+Historical B8 run 5848/UI 5819 had 2,173 passes, two OCI skips and successful
+Rust/Main promotion; it does not qualify revised source.
 
-Separate host- and guest-origin unlink contrasts left a visible Apple
-Virtualization descriptor holding the deleted 4 MiB inode while the VM ran.
-Guest unlink reached link count zero. After VM stop, before unmount, each
-trial had recovered 4,194,304 bytes versus its during-write sample and
-4,177,920 bytes versus its last pre-stop sample. Unattributed baseline
-residuals were 16,384 and 4,096 bytes respectively. This does not establish
-an exclusive retainer or full-study capacity fit.
-The original fixed 36 GiB APFS volume is physically reserved and the prior thin
-backing remains offline. The distinct native-guest disk/configuration
-operation received contextual human approval and normal tool approval.
-Full write/readback verified a separate physically reserved 36 GiB native raw
-backing. Pre-attachment trim checks passed, but the first native attach made a
-partition without a valid ext4 superblock; the expected mount was absent.
-The owned VM was gracefully stopped and all partial disk/configuration/logs
-retained. The third diagnostic boot detached that disk but an overbroad vdb-absence
-guard stopped log extraction; the read-only configuration ISO can use that
-name. The VM stopped gracefully. All three authorized starts are used; one
-corrected log-only diagnostic requires additional human authorization.
-No format retry or study code ran.
-Actual Astra R13 task t_e7332bfa requested changes; source and runtime authority
-are both false. No R12 or alternate review route was used. The report digest
-and numbered findings are recorded in the [study ledger](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md#current-admission--r13-source-repairs-and-native-disk-diagnosis).
+There are 14 initial native regression methods, six R13 additions and one
+mount-kind addition. The real Linux root/non-root ownership/adoption test and
+two native OCI controls require separately admitted no-skip execution; the
+OCI definition now covers genuine writable-source preflight. The guest pack
+contains only seven reviewed modules; host receipt/outcome/journal/budget and
+retirement authority remains protected. Source review is not runtime admission.
 
-The earlier Rust qualification's exact cause remains unknown because its
-streams were discarded. A separate 4 GiB diagnostic confirmed OOM with debug
-symbols disabled and one Cargo job; it does not attribute the prior failure.
-Full-study fit and runtime acceptance remain unproven. The frozen 3,000,000-
-token ceiling, 108 solver contexts, 216 blind-scorer contexts, cases and
-scoring rules are unchanged. Calibration/count/inference/solver/scorer calls
-remain zero; no comparison result exists. The ten-eligible-PR/14-day process
-observation remains open.
+Public host- and guest-unlink contrasts retained the exact deleted 4 MiB
+inode in a visible Apple Virtualization process while the VM ran; guest link
+count zero did not cure it. Post-stop recovery was 4,194,304 bytes versus each
+during-write sample and 4,177,920 versus its last pre-stop sample. Residual
+16,384/4,096 bytes are unattributed. No exclusive retainer or full-fit claim.
+
+The approved native operation passed 36 GiB physical write/readback and
+pre-attachment trim policy, but first attach made a partition without valid
+ext4/mount. The VM stopped gracefully and all state remains. Third/last
+permitted detached diagnostic stopped on an overly broad vdb-absence guard;
+the read-only configuration ISO can use that name. One corrected log-only
+fourth boot is prepared/parent-reviewed and awaits specific human approval.
+It leaves configuration unchanged and the native disk detached. No format
+retry, study helper or provider call has run. Native resource/runtime proof
+and all four families/twelve views/five navigation modes remain required.
+
+Calibration/count/inference/solver/scorer calls remain zero. The frozen
+3,000,000-token ceiling, 108 solver/216 blind-scorer contexts and study rules
+are unchanged; no comparative token or reliability result exists. The
+ten-eligible-PR/14-day process observation remains separate and open.
 
 ## Previous pilot qualification snapshot — retained historical evidence
 

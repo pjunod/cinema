@@ -375,91 +375,95 @@ follow-up, rather than a claimed repair.
 
 ## Current admission — R13 source repairs and native disk diagnosis
 
-The source-only implementation checkpoint is commit
-`a39882f9277e881ccd2cb332ca190d749ffe1029`, tree
-`066daff596b8c5d7e7a8ddac199a6841b0533446`. It contains the completed R13 repairs and six additional regression drafts.
-Independent exact-content closure, environment admission and new-head CI remain
-open. The published PR #1262 remains at b8df5282d435b687a708230c7e58d7e62e319cde; its
-required CI run 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
-(2,147 retained plus 26 new retirement checks), two expected opt-in OCI skips
-and zero fixture errors. Those results apply to B8, not the integrated source.
-No new-head CI is claimed.
+The committed source/test checkpoint is
+`03407896227c776f74982b0187a59eb5c6ce1c6e`, tree
+`ea08d620f55ab072079e50037a4153de9f10fd3f`, based on main
+`1eb11783956b15cb5838effa2df4344e2e750743`. Source reviews are closed for
+these exact buffers; required CI and native execution qualification remain
+open. Study calibration/count/inference/solver/scorer calls remain zero.
 
-Astra R10 approval remains historical and limited to its exact prior 46
-production execution buffers at 885dd5d7e, map
-923682bc4eab4b851fd20199dcfa9d1cdeb99df8727b3b4b61667e237a40a286. The B8
-fixture-prefix correction has a separate narrow Luna review. Neither review
-approves the new source. The initial native delta changed six production and
-five test files with 14 new cases: 13 in new test files and one host
-checkpoint regression in the existing retirement module. Two existing actual
-OCI controls and one compatibility selector are also affected. None has run
-against this new head.
+Actual Astra R13 requested three repairs: preserving genuine immutable 0444
+exports, carrying trusted non-root role ownership through publication and
+qualified adoption, and comparing stable isolation facts while retaining
+fresh sentinel challenge evidence. Sol implemented those repairs and actual
+role/consumer regression drafts; Luna supplied focused mode/probe drafts.
+Actual Astra R14 task t_cca41dd7 independently matched all 48 execution
+buffers and closed R13-B1/B2/B3 at candidate 7a8242589. Its report SHA-256 is
+`be63d65c430b2bd93f000c37876b715d86cd02ef2b4f2cf07cfdd6209606cf9a`.
 
-For R13, the integrator verified the static closure of 37 modules, 11 assets and
-48 host buffers: 42 R10 keys are unchanged, four changed and two are new.
-The historical R13 closure-file digest is
-`f060d3b5e2eea57d25087f7ecdbee2510c1094fff49dbe1774e2b5a263518254`;
-actual Astra R13 verified all 48 execution buffers but requested changes.
-Five execution buffers changed in the repairs; the exact map must be refreshed
-and independently checked before use. The guest pack
-is limited to seven modules, including knowledge.model, and excludes provider
-and launcher modules and credentials. The outer entry/provider bytes remain
-unchanged; the added runtime.native_store value is metadata-only. These
-implementation boundaries do not establish runtime acceptance or qualification.
-R13-B1 requires preserving real immutable 0444 grader files. R13-B2 requires
-explicit trusted non-root role ownership through publication and qualified
-adoption. R13-B3 requires stable compatibility comparisons while retaining each
-fresh sentinel challenge as exact evidence. Sol completed the five-file production
-repair and actual-role/consumer drafts;
-Luna supplied focused mode/probe drafts. Four test files add six methods,
-including one opt-in real Linux root/non-root ownership check. The two native
-OCI controls now include genuine writable preflight and exact role identities.
-No revised checks have run. Required CI will supply affected generic unit
-results once; root/native controls remain separate and default skips are not
-passes. The exact revised source will receive narrow independent closure
-before CI.
+Required run 5912/UI 5883 then recorded 2,152 passes, including 25 new passes,
+and three opt-in skips, but failed with 45 test errors and one assertion
+failure. The separate receipt field fixture_errors was zero; it does not
+mean zero test errors. The 45 errors shared one cause: the new mount-stat
+helper used a regular-file default for directory mount roots. Sol made the
+expected kind explicit at all eight call expressions, preserving no-symlink
+and actual type checks for both local and native metadata. One focused
+negative regression covers file/directory inversions, symlinks and invalid
+kind flags. Luna corrected a malformed expected base64 fixture without
+weakening its challenge or protocol assertions.
 
-Two separate public contrasts observed the live Apple Virtualization process
-holding the exact deleted 4 MiB inode. Guest-origin unlink reached link count
-zero and closed its file descriptor; lookup in both namespaces still found no
-file while the virtualization descriptor remained. In each trial, post-stop
-free space was 4,194,304 bytes above the during-write sample, but only
-4,177,920 bytes above the last pre-stop sample: 16,384 bytes had already
-returned. The remaining baseline deficits were 16,384 bytes for host unlink
-and 4,096 bytes for guest unlink, both unattributed. VM stop occurred before
-unmount. This observes a retainer and recovery contrast, not an exclusive
-cause or full-study fit proof.
-The original fixed 36 GiB APFS execution volume is physically reserved; the
-prior thin backing is preserved offline. The distinct native-guest disk and
-configuration operation received contextual human approval and normal tool
-approval. Full write/fsync/readback verified 36 GiB of logical and allocated
-native backing. A separate boot verified the persistent trim policy before
-attachment. The first attach created a partition but no valid ext4 primary
-superblock; the missing-mount check stopped execution. The owned VM was
-gracefully stopped, with all partial disk/configuration/log state preserved.
-The third permitted diagnostic boot used the reviewed trim-only configuration
-with the new disk detached. An overbroad vdb-absence guard stopped it before
-log extraction: the read-only configuration ISO can legitimately use that
-name. The VM stopped gracefully; all three authorized starts are used. A
-corrected fourth log-only diagnostic is being prepared and requires specific
-additional human authorization. No format retry or study helper has run. Physical reservation
-is not filesystem reuse or full-study fit evidence. Astra R13 reviewed the
-source separately under the same contextual approval; no R12 was dispatched.
+A fresh independent gpt-6-luna reviewer approved that bounded three-file R15
+repair at the exact source/test checkpoint above. Its report SHA-256 is
+`ec427cd0c34f430cc135cf3a7dc073c69e0a380bf6d935ca2c26b293fdc99e08`;
+this is distinct from Astra's R14 review. The R15 execution map has 37
+modules and 11 assets, with 47 of 48 R14 buffers unchanged. Its digest is
+`c108264ae6a6b654542163c601f85640f8792cd65dd087a66a990ac1c83bd371`.
+The seven-module guest pack is unchanged since R14 and excludes provider,
+launcher and credentials. Outer provider/entry bytes and host-held receipt,
+outcome, journal, retirement and budget authority remain unchanged.
 
-Actual R13 task: t_e7332bfa, hdr-astra / gpt-6-astra. Verdict: request changes,
-source_authorized=false and runtime_authorized=false. Reviewed candidate:
-543dda0b5a99c9512631431b6d486535ff3d216f. Report SHA-256:
-1b726e835dcbc8cecac36050c21d39519098bbbd169fb166395ccfc33350d022.
-This review grants no approval to the completed repairs awaiting recheck.
+New-head required run 5913/UI 5884 failed before any unit receipt or test
+execution: curl could not resolve github.com. The bounded log does not show
+the full command or URL, so its exact fetching component is undetermined.
+No code failure or new test pass is inferred from that run. Runner/network
+diagnosis is read-only. The prior 2,152-pass journal is preserved for normal
+authenticated adoption of still-valid checks; failed, new or genuinely
+invalidated checks remain. No failed CI job or local unit suite was rerun.
+Historical B8 run 5848/UI 5819 passed 2,173 checks, two OCI skips, Rust and
+Main promotion; those results are separately scoped. Neither 5912 nor 5913
+qualified Rust or promotion for the revised candidate.
 
-The exact Rust failure cause in the earlier qualification remains unknown
-because its original streams were discarded. A separate 4 GiB diagnostic
-confirmed an OOM with debug symbols disabled and one Cargo job; it does not
-attribute the earlier failure. Full-study resource fit and runtime admission
-remain unproven. The frozen 3,000,000-token ceiling, 108 solver contexts,
-216 blind-scorer contexts, cases, commands, model settings and assertions are
-unchanged. Calibration, count, inference, solver and scorer calls remain zero.
-No savings or reliability result exists.
+The initial native delta added 14 regression methods; R13 repairs added six,
+including an opt-in real Linux root/non-root ownership/adoption check; the
+mount-kind fix adds one. Two actual native OCI definitions also include
+writable preflight and exact role identities. These root/native controls
+still need separately admitted no-skip execution; their default skips are
+not passes. Synthetic tests and source reviews do not prove containment,
+filesystem reuse, full-study fit or runtime acceptance.
+
+Separate public host- and guest-origin unlink contrasts observed the live
+Apple Virtualization process retaining the exact deleted 4 MiB inode.
+Guest-origin unlink reached link count zero and closed its file descriptor,
+but the virtualization descriptor remained while the VM ran. Post-stop
+free space recovered 4,194,304 bytes versus each during-write sample and
+4,177,920 versus its last pre-stop sample. Unattributed baseline residuals
+were 16,384 and 4,096 bytes respectively. VM stop preceded unmount. This
+identifies an observed retainer/recovery contrast, not an exclusive cause.
+The native guest filesystem route avoids that execution share; it adds no
+per-case restart, cache flush or watchdog.
+
+The original fixed 36 GiB APFS volume and prior thin backing remain preserved.
+The separately approved native operation passed full 36 GiB physical raw
+write/fsync/readback and persistent trim checks before attachment. First
+attach created a GPT partition but no valid ext4 primary superblock/mount.
+The owned VM stopped gracefully; partial disk/configuration/logs remain.
+A third, detached diagnostic boot stopped before log extraction on an
+overly broad vdb-absence guard: the read-only configuration ISO can use that
+name. All three authorized starts are used. A minimal corrected fourth,
+log-only diagnostic leaves configuration unchanged and native disk detached;
+it is prepared and parent-reviewed, pending specific human authorization.
+It performs no format, package download, study helper or provider operation.
+The exact formatter error, native UUID/alias/reuse, helper transport/installed
+pack and finalized runtime data-plan evidence remain missing.
+
+The earlier Rust qualification's exact failure cause remains unknown because
+its original streams were discarded. A separate 4 GiB diagnostic confirmed
+OOM with debug symbols disabled and one Cargo job; it does not attribute
+the earlier failure. Both current source reviews keep runtime_authorized=false.
+All four families, twelve views and five navigation modes must qualify before
+study calls. The frozen 3,000,000-token aggregate ceiling, 108 solver contexts,
+216 blind-scorer contexts, cases, commands, model settings, Gold and assertions
+remain unchanged. No savings or documentation-reliability result exists.
 
 ## Results and interpretation
 
