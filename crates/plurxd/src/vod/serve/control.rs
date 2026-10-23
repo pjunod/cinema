@@ -416,7 +416,7 @@ impl VodServe {
                         return Some(Err(crate::playback_control::ControlStateError::Unavailable));
                     };
                     let slot = match lease.reserve(required) {
-                        Ok(slot) => super::super::client_state::ClientSlot(slot),
+                        Ok(slot) => crate::vodserve::client_state::ClientSlot(slot),
                         Err(_) => {
                             return Some(Err(
                                 crate::playback_control::ControlStateError::Unavailable,
