@@ -112,6 +112,10 @@ pub(super) struct MarkerPrewarmLedger {
     pending_skip: Option<MarkerPendingSkip>,
     pub(super) awaiting_beacon: Option<MarkerAwaitingBeacon>,
     last_settled_skip: Option<MarkerPrewarmRequest>,
+    // A control/delivery alias may outlive its Reader table entry. Retain the
+    // same original finite slot until this Arc's final payload is gone.
+    #[cfg(target_os = "linux")]
+    pub(super) _finite_slot: Option<super::client_state::ClientSlot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +164,10 @@ pub(super) struct MarkerPrewarmControl {
     pub(super) sequence: u64,
     pub(super) file_id: i64,
     pub(super) kind: SessionKind,
+    /// A detached control can outlive its Session while marker work awaits.
+    /// Drop this alias after its cloned snapshot and destinations.
+    #[cfg(target_os = "linux")]
+    pub(super) _finite_control_slot: Option<super::client_state::ClientSlot>,
 }
 
 impl MarkerPrewarmLedger {
@@ -196,16 +204,15 @@ impl MarkerPrewarmLedger {
             .round()
             .clamp(0.0, i64::MAX as f64) as i64;
         let approach_end_ms = snapshot.position_ms.saturating_add(approach_ms);
-        let approaching = destinations
+        let approaching = |destination: &MarkerDestination| {
+            destination.eligible
+                && snapshot.position_ms < destination.end_ms
+                && destination.start_ms <= approach_end_ms
+        };
+        for destination in destinations
             .iter()
-            .copied()
-            .filter(|destination| {
-                destination.eligible
-                    && snapshot.position_ms < destination.end_ms
-                    && destination.start_ms <= approach_end_ms
-            })
-            .collect::<Vec<_>>();
-        for destination in &approaching {
+            .filter(|destination| approaching(destination))
+        {
             let existing = self
                 .records
                 .iter()
@@ -239,8 +246,9 @@ impl MarkerPrewarmLedger {
                 }
             }
         }
-        let mut approach_requests = approaching
+        let mut approach_requests = destinations
             .iter()
+            .filter(|destination| approaching(destination))
             .filter_map(|destination| self.request_for(*destination));
         let approach_request = approach_requests.next();
         self.approach_skip = approach_requests
@@ -275,12 +283,15 @@ impl MarkerPrewarmLedger {
         }) {
             self.awaiting_beacon = None;
         }
-        let inside = approaching.iter().copied().find(|destination| {
-            snapshot.position_ms >= destination.start_ms
-                && snapshot.position_ms < destination.end_ms
-        });
-        self.armed_skip = inside.and_then(|destination| self.request_for(destination));
-        self.enabled &= !approaching.is_empty();
+        let inside = destinations
+            .iter()
+            .filter(|destination| approaching(destination))
+            .find(|destination| {
+                snapshot.position_ms >= destination.start_ms
+                    && snapshot.position_ms < destination.end_ms
+            });
+        self.armed_skip = inside.and_then(|destination| self.request_for(*destination));
+        self.enabled &= destinations.iter().any(approaching);
         if !self.enabled {
             self.deactivate();
         } else {

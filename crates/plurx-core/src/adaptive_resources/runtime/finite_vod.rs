@@ -83,7 +83,8 @@ pub struct FiniteSourceRequest {
 
 use super::response_memory::ResponseBudget;
 pub use super::response_memory::{
-    FiniteMetadataLease, FiniteResponseBuffer, FiniteResponseWorkspace,
+    FiniteClientSlot, FiniteClientStateLease, FiniteMetadataLease, FiniteResponseBuffer,
+    FiniteResponseWorkspace,
 };
 
 /// Explicit logical/reported-allocation profile. These are admission bounds,
@@ -95,6 +96,8 @@ pub struct FiniteOutputLimits {
     /// Selected daemon rendition metadata retained for the entire R/S lifetime.
     /// Counts requested nested heap capacities; excludes allocator overhead/RSS.
     pub retained_metadata_bytes: u64,
+    /// Enforced in-role mutable reader, marker and demand-state partition.
+    pub client_state_bytes: u64,
     pub resident_file_objects: u32,
     pub resident_logical_bytes: u64,
     pub reserved_storage_bytes: u64,
@@ -142,6 +145,7 @@ impl SoftwareVodRequest {
             .and_then(|bytes| bytes.checked_add(output.response_memory_bytes))
             .and_then(|bytes| bytes.checked_add(output.bootstrap_memory_bytes))
             .and_then(|bytes| bytes.checked_add(output.retained_metadata_bytes))
+            .and_then(|bytes| bytes.checked_add(output.client_state_bytes))
             .ok_or_else(|| std::io::Error::other("finite memory overflow"))
     }
 }
@@ -342,12 +346,18 @@ impl FiniteOutput {
 
     /// Reserve the selected daemon rendition's separate metadata partition.
     /// Final native settlement stays charged until this sole lease is dropped.
-    pub async fn reserve_metadata_lease(
+    pub async fn reserve_metadata_partitions(
         &self,
-        required_bytes: usize,
-    ) -> Result<FiniteMetadataLease, FiniteVodError> {
+        immutable_required: usize,
+        client_limit: usize,
+    ) -> Result<(FiniteMetadataLease, FiniteClientStateLease), FiniteVodError> {
         self.runtime
-            .reserve_finite_metadata_lease(&self.preparation, 0, required_bytes)
+            .reserve_finite_metadata_partitions(
+                &self.preparation,
+                0,
+                immutable_required,
+                client_limit,
+            )
             .await
             .map_err(Into::into)
     }
@@ -824,6 +834,7 @@ impl NodeResourceRuntime {
         if resources.peak_memory_bytes < total_memory
             || response_memory == 0
             || request.output.retained_metadata_bytes == 0
+            || request.output.client_state_bytes == 0
         {
             return Err(invalid());
         }
@@ -831,7 +842,14 @@ impl NodeResourceRuntime {
         // any selected source/output native entry. Its partition remains in S.
         let response_budget = ResponseBudget::with_metadata(
             response_limit,
-            usize::try_from(request.output.retained_metadata_bytes).map_err(|_| invalid())?,
+            usize::try_from(
+                request
+                    .output
+                    .retained_metadata_bytes
+                    .checked_add(request.output.client_state_bytes)
+                    .ok_or_else(invalid)?,
+            )
+            .map_err(|_| invalid())?,
         )
         .map_err(FiniteVodError)?;
         let namespace = std::fs::metadata("/proc/self/ns/mnt")

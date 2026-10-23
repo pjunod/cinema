@@ -622,6 +622,10 @@ pub(super) fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiErr
                 &reason,
             )
         }
+        VodError::FiniteMaterialization(failure) => {
+            log(failure.diagnostic_code(), failure.message());
+            ApiError::FiniteMaterialization(failure)
+        }
         VodError::Gone(cause) => {
             log("media_session_ended", &format!("{cause:?}"));
             ApiError::typed(

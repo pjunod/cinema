@@ -2699,6 +2699,10 @@
                 control_end: None,
                 control_end_snapshot: None,
                 prepared_incarnation: None,
+                #[cfg(target_os = "linux")]
+                finite_session_slot: None,
+                #[cfg(target_os = "linux")]
+                finite_control_slot: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -2842,6 +2846,10 @@
                 control_end: None,
                 control_end_snapshot: None,
                 prepared_incarnation: None,
+                #[cfg(target_os = "linux")]
+                finite_session_slot: None,
+                #[cfg(target_os = "linux")]
+                finite_control_slot: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },

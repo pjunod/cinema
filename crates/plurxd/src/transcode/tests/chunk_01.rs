@@ -1533,8 +1533,8 @@ async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
         .wait()
         .await
         .expect("second recovered terminal response");
-    assert_eq!(committed_a, committed_b);
-    assert_eq!(committed_a.server_time_unix_ms, 1);
+    assert_eq!(committed_a.response, committed_b.response);
+    assert_eq!(committed_a.response.server_time_unix_ms, 1);
     assert!(matches!(
         fixture
             .state

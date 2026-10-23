@@ -149,8 +149,9 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         let reference = frozen_snapshot_ref(plan, &full)?;
-        // The first adapter has no response/native reader owner. Never invent
-        // a retained reader from a serialized lease identifier.
+        // Only the same native inventory can transfer. Counted response and
+        // client allocations keep their original in-role budgets through S;
+        // serialized lease identifiers cannot mint a replacement reader.
         if full.obligation_id.uuid() != source.obligation_id()
             || full.member_id != source_slot.member_id
         {
@@ -206,10 +207,11 @@ impl NodeResourceRuntime {
         }
         let retained_resources = ResourceVector {
             cpu_ns_per_second: 0,
-            // Daemon rendition metadata remains resident outside the native
-            // scratch inventory. Keep the full original memory component until
-            // its requested-capacity profile covers that complete retained graph.
-            peak_memory_bytes: source_resources.peak_memory_bytes,
+            // Immutable metadata plus separately enforced mutable client/body
+            // partitions remain charged, including every escaping real owner.
+            // Producer-only buffers return only with this known R→S commit.
+            // These explicit requested capacities are not a whole-RSS ceiling.
+            peak_memory_bytes: retained_memory_bytes,
             handles: retained_handles,
             processes: 0,
             hardware_slots: 0,

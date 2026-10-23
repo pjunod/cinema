@@ -1,5 +1,7 @@
 //! Bind a buffered response allocation to the SAME admitted finite role.
-use super::super::response_memory::{FiniteMetadataLease, FiniteResponseBuffer, ResponseBudget};
+use super::super::response_memory::{
+    FiniteClientStateLease, FiniteMetadataLease, FiniteResponseBuffer, ResponseBudget,
+};
 use super::*;
 
 impl NodeResourceRuntime {
@@ -26,12 +28,13 @@ impl NodeResourceRuntime {
         Ok(())
     }
 
-    pub(in crate::adaptive_resources::runtime) async fn reserve_finite_metadata_lease(
+    pub(in crate::adaptive_resources::runtime) async fn reserve_finite_metadata_partitions(
         &self,
         owner: &OwnedPreparation,
         index: usize,
         required_bytes: usize,
-    ) -> Result<FiniteMetadataLease, OperationError> {
+        client_limit: usize,
+    ) -> Result<(FiniteMetadataLease, FiniteClientStateLease), OperationError> {
         self.validate_preparation(owner)?;
         // The reservation and budget already exist before durable prepare is
         // resolved. Metadata construction grants no selected native entry.
@@ -43,7 +46,7 @@ impl NodeResourceRuntime {
         role.response_budget
             .as_ref()
             .ok_or(OperationError::State)?
-            .reserve_metadata(required_bytes)
+            .reserve_metadata_partitions(required_bytes, client_limit)
     }
 
     pub(in crate::adaptive_resources::runtime) async fn wait_finite_allocations_release(

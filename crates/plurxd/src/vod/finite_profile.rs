@@ -31,6 +31,10 @@ const READER_LEASES: u32 = 8;
 const LIVE_HANDLES: u32 = 24;
 const RESIDENT_MEMORY_BYTES: u64 = 128 * MIB;
 const BOOTSTRAP_MEMORY_BYTES: u64 = MIB;
+/// An explicit, independently enforced partition for finite client tables,
+/// reader ledgers and materialization-clock tasks. Table admission derives
+/// its slot count from this byte partition, not from a guessed viewer count.
+pub(super) const CLIENT_STATE_BYTES: u64 = 16 * MIB;
 const ALLOCATION_UNIT_BYTES: u64 = 4096;
 const PER_OBJECT_RESERVE_BYTES: u64 = 16 * 1024;
 const CHILD_DIRECTORY_RESERVE_BYTES: u64 = 64 * 1024;
@@ -164,6 +168,7 @@ pub(super) fn compile(
     let output = FiniteOutputLimits {
         response_memory_bytes,
         retained_metadata_bytes,
+        client_state_bytes: CLIENT_STATE_BYTES,
         resident_file_objects,
         resident_logical_bytes,
         reserved_storage_bytes,

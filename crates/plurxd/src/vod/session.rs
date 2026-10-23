@@ -52,7 +52,7 @@ pub(super) struct Rendition {
     /// Capacity can be shared by parents of this exact immutable rendition,
     /// without keeping a cache-only rendition admitted after the final reap.
     pub(super) retained_admission: crate::vodencode::RetainedEncodeAdmission,
-    pub(super) readers: Mutex<HashMap<String, Reader>>,
+    pub(super) readers: Mutex<ReaderTable>,
     /// Monotonic identity of each successful segment publication. The ledger
     /// stores this beside an entry index so eviction followed by ordinary
     /// rematerialization cannot inherit stale prewarm credit.
@@ -140,7 +140,7 @@ pub(super) struct Rendition {
     /// One expiry wake-up task per parked episode.
     pub(super) handoff_expiry_armed: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
-    pub(super) demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
+    pub(super) demand_since: StdMutex<DemandTable>,
     /// The last fragment the output writer received, as (generation epoch,
     /// plan entry). An expired deadline uses it to tell "the producer
     /// delivered this entry and publication did not finish" from "the
@@ -152,6 +152,11 @@ pub(super) struct Rendition {
     #[cfg(target_os = "linux")]
     pub(super) finite_metadata_lease:
         Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteMetadataLease>,
+    /// Client allocations retain their own slots after reader/ledger aliases
+    /// leave the rendition. Keep the sole top lease after both tables.
+    #[cfg(target_os = "linux")]
+    pub(super) finite_client_lease:
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientStateLease>,
 }
 
 #[cfg(target_os = "linux")]
@@ -234,6 +239,20 @@ impl RenditionHooks for RenditionTestHooks {
 }
 
 impl Rendition {
+    pub(super) fn prepare_client_reader(
+        &self,
+        key: &str,
+        frontier: u32,
+        priority: crate::admission::Priority,
+    ) -> Result<(String, Reader), String> {
+        #[cfg(target_os = "linux")]
+        if let Some(lease) = &self.finite_client_lease {
+            return Reader::with_priority_finite(key, frontier, priority, lease)
+                .map_err(|error| format!("finite reader capacity refused: {error}"));
+        }
+        Ok((key.to_owned(), Reader::with_priority(frontier, priority)))
+    }
+
     /// Diagnostic producer belief for user-facing state. Finite VOD retains
     /// its persistent executor after setup; it does not replace core's
     /// physical closure or settlement authority.
@@ -432,6 +451,10 @@ impl Rendition {
             .lock()
             .expect("demand lock")
             .remove(&index);
+    }
+
+    pub(super) fn clear_all_demands(&self) {
+        self.demand_since.lock().expect("demand lock").clear();
     }
 
     #[cfg(test)]
@@ -753,7 +776,7 @@ pub(super) fn deferred_terminal_commit(
                 receipt.retry();
             }
             tokio::spawn(async move {
-                attempt.complete(receipt.wait().await);
+                attempt.complete_answer(receipt.wait().await);
             });
         }
     });
@@ -888,6 +911,14 @@ pub(super) struct Session {
     /// prepared successor. A predecessor hands its encoder permit only to the
     /// session whose incarnation its own preparation slot names.
     pub(super) prepared_incarnation: Option<String>,
+    /// The finite attachment's original identity, marker and initial fence
+    /// payload. Keep its provenance after all fields whose heap it charges.
+    #[cfg(target_os = "linux")]
+    pub(super) finite_session_slot: Option<super::client_state::ClientSlot>,
+    /// Replaced only after a complete control candidate fits. In-flight
+    /// marker controls keep aliases of the old slot until their payload drops.
+    #[cfg(target_os = "linux")]
+    pub(super) finite_control_slot: Option<super::client_state::ClientSlot>,
 }
 
 impl Session {
@@ -1184,6 +1215,27 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
             if session.tombstone.is_some() {
                 return false;
             }
+            #[cfg(target_os = "linux")]
+            if session
+                .rendition
+                .as_ref()
+                .and_then(|rendition| rendition.finite_client_lease.as_ref())
+                .is_some()
+            {
+                let growth = session
+                    .control
+                    .lock()
+                    .expect("control lock")
+                    .finite_stage_growth_bytes(
+                        &staged_incarnation_id,
+                        &predecessor_incarnation_id,
+                        desired_digest.as_deref(),
+                    );
+                let Some(growth) = growth else { return false };
+                if session.reserve_finite_control_growth(growth).is_err() {
+                    return false;
+                }
+            }
             let staged = session
                 .control
                 .lock()
@@ -1275,6 +1327,20 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
             let Some(session) = self.bound(&mut sessions) else {
                 return false;
             };
+            #[cfg(target_os = "linux")]
+            if session
+                .rendition
+                .as_ref()
+                .and_then(|rendition| rendition.finite_client_lease.as_ref())
+                .is_some()
+            {
+                let Some(growth) = staged_incarnation_id.len().checked_mul(2) else {
+                    return false;
+                };
+                if session.reserve_finite_control_growth(growth).is_err() {
+                    return false;
+                }
+            }
             let rejected = session
                 .control
                 .lock()
@@ -1400,4 +1466,139 @@ where
         let _ = result_tx.send(result);
     });
     result_rx
+}
+
+#[cfg(target_os = "linux")]
+impl Session {
+    /// Charge the fully constructed attachment before it replaces any prior
+    /// session or reader. The inline Session and the separately cloned media
+    /// metadata are included; reader and table slots have their own owners.
+    pub(super) fn reserve_finite_session_state(&mut self, table_key: &str) -> Result<(), String> {
+        let Some(rendition) = self.rendition.as_ref() else {
+            return Ok(());
+        };
+        let Some(lease) = rendition.finite_client_lease.as_ref() else {
+            return Ok(());
+        };
+        let mut bytes = std::mem::size_of::<Self>()
+            .checked_add(table_key.len())
+            .and_then(|value| {
+                value.checked_add(
+                    self.children
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<ParentMediaReader>())?,
+                )
+            })
+            .ok_or("finite session size overflow")?;
+        for text in [
+            &self.rendition_key,
+            &self.playback_id,
+            &self.user_name,
+            &self.item_title,
+            &self.supersession_user,
+        ] {
+            bytes = bytes
+                .checked_add(text.capacity())
+                .ok_or("finite session size overflow")?;
+        }
+        if let Some(value) = &self.prepared_incarnation {
+            bytes = bytes
+                .checked_add(value.capacity())
+                .ok_or("finite session size overflow")?;
+        }
+        bytes = bytes
+            .checked_add(
+                self.marker_destinations
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<MarkerDestination>())
+                    .ok_or("finite marker capacity overflow")?,
+            )
+            .ok_or("finite session size overflow")?;
+        bytes = bytes
+            .checked_add(
+                self.control
+                    .lock()
+                    .map_err(|_| "finite control lock poisoned")?
+                    .requested_heap_bytes()
+                    .ok_or("finite control size overflow")?,
+            )
+            .ok_or("finite session size overflow")?;
+        bytes = bytes
+            .checked_add(
+                std::mem::size_of::<MediaFile>()
+                    .checked_add(
+                        self.file
+                            .requested_heap_bytes()
+                            .ok_or("finite media size overflow")?,
+                    )
+                    .and_then(|value| value.checked_add(2 * std::mem::size_of::<usize>()))
+                    .ok_or("finite media size overflow")?,
+            )
+            .ok_or("finite session size overflow")?;
+        let slot = super::client_state::ClientSlot(
+            lease
+                .reserve(bytes)
+                .map_err(|error| format!("finite session capacity refused: {error}"))?,
+        );
+        slot.validate_actual(bytes)
+            .map_err(|error| format!("finite session capacity refused: {error}"))?;
+        self.finite_session_slot = Some(slot);
+        Ok(())
+    }
+
+    /// Reserve a replacement state slot before a preparation or durable-ask
+    /// mutation. The former slot stays alive through any marker-control alias.
+    pub(super) fn reserve_finite_control_growth(&mut self, extra: usize) -> Result<(), String> {
+        let Some(rendition) = self.rendition.as_ref() else {
+            return Ok(());
+        };
+        let Some(lease) = rendition.finite_client_lease.as_ref() else {
+            return Ok(());
+        };
+        let mut bytes = self
+            .control
+            .lock()
+            .map_err(|_| "finite control lock poisoned")?
+            .requested_heap_bytes()
+            .ok_or("finite control size overflow")?;
+        bytes = bytes
+            .checked_add(extra)
+            .ok_or("finite control size overflow")?;
+        if let Some(snapshot) = &self.last_control_snapshot {
+            bytes = bytes
+                .checked_add(
+                    snapshot
+                        .requested_heap_bytes()
+                        .ok_or("finite snapshot size overflow")?,
+                )
+                .ok_or("finite control size overflow")?;
+        }
+        if let Some(snapshot) = &self.control_end_snapshot {
+            bytes = bytes
+                .checked_add(
+                    snapshot
+                        .requested_heap_bytes()
+                        .ok_or("finite snapshot size overflow")?,
+                )
+                .ok_or("finite control size overflow")?;
+        }
+        if let Some(result) = &self.control_end {
+            bytes = bytes
+                .checked_add(
+                    result
+                        .requested_vod_heap_bytes()
+                        .ok_or("finite terminal size overflow")?,
+                )
+                .ok_or("finite control size overflow")?;
+        }
+        let slot = super::client_state::ClientSlot(
+            lease
+                .reserve(bytes)
+                .map_err(|error| format!("finite control capacity refused: {error}"))?,
+        );
+        slot.validate_actual(bytes)
+            .map_err(|error| format!("finite control capacity refused: {error}"))?;
+        self.finite_control_slot = Some(slot);
+        Ok(())
+    }
 }

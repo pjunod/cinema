@@ -36,6 +36,7 @@ fn public_failure(error: ApiError) -> ApiError {
         ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
         ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         ApiError::Internal(_) => StatusCode::BAD_GATEWAY,
+        ApiError::FiniteMaterialization(failure) => failure.status(),
     };
     ApiError::typed(
         status,

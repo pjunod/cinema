@@ -76,8 +76,184 @@ pub enum WaitOutcome {
     /// fragment but before publication made it servable → typed
     /// `segment_publication_failed` 502.
     PublicationFailed(String),
+    /// Shared charged finite failure, retained through each HTTP body.
+    FiniteMaterialization(Arc<FiniteWaitFailure>),
     /// The rendition went terminal mid-wait → 410.
     Gone,
+}
+
+/// The same finite diagnostic is shared by every woken request and its HTTP
+/// body. Its original client slot remains live through the last body alias;
+/// no String or serialized payload is cloned once per waiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiniteFailureKind {
+    Capacity,
+    Producer,
+    Publication,
+}
+
+pub struct FiniteWaitFailure {
+    kind: FiniteFailureKind,
+    message: String,
+    body: Vec<u8>,
+    // Destroy both payload allocations before releasing their original slot.
+    _slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+}
+
+impl std::fmt::Debug for FiniteWaitFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FiniteWaitFailure")
+            .field("kind", &self.kind)
+            .field("message", &self.message)
+            .finish_non_exhaustive()
+    }
+}
+impl PartialEq for FiniteWaitFailure {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.message == other.message && self.body == other.body
+    }
+}
+impl Eq for FiniteWaitFailure {}
+
+impl FiniteWaitFailure {
+    pub(crate) const MESSAGE_BYTES: usize = 512;
+    const WIRE_MESSAGE_BYTES: usize = Self::MESSAGE_BYTES + 64;
+    const BODY_BYTES: usize = 4096;
+
+    pub(crate) fn required_payload_bytes() -> Option<usize> {
+        std::mem::size_of::<Self>()
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(Self::MESSAGE_BYTES)?
+            .checked_add(Self::WIRE_MESSAGE_BYTES)?
+            .checked_add(Self::BODY_BYTES)
+    }
+
+    pub(crate) fn new(
+        kind: FiniteFailureKind,
+        message: String,
+        retry_after: Duration,
+        slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+    ) -> std::io::Result<Arc<Self>> {
+        use std::fmt::Write as _;
+        if message.capacity() > Self::MESSAGE_BYTES {
+            return Err(std::io::Error::other(
+                "finite failure message exceeds its partition",
+            ));
+        }
+        // Reserve the complete escaped JSON capacity before writing. A fixed
+        // writer refuses growth, including for six-byte JSON escapes.
+        let mut wire_message = String::new();
+        wire_message
+            .try_reserve_exact(Self::WIRE_MESSAGE_BYTES)
+            .map_err(std::io::Error::other)?;
+        if wire_message.capacity() > Self::WIRE_MESSAGE_BYTES {
+            return Err(std::io::Error::other(
+                "finite wire message capacity exceeds its partition",
+            ));
+        }
+        wire_message.push_str(&message);
+        if kind == FiniteFailureKind::Capacity {
+            write!(
+                &mut wire_message,
+                "; retry in {}s",
+                retry_after.as_secs().max(1)
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        let mut body = Vec::new();
+        body.try_reserve_exact(Self::BODY_BYTES)
+            .map_err(std::io::Error::other)?;
+        if body.capacity() > Self::BODY_BYTES {
+            return Err(std::io::Error::other(
+                "finite error body capacity exceeds its partition",
+            ));
+        }
+        struct FixedWriter<'a>(&'a mut Vec<u8>);
+        impl std::io::Write for FixedWriter<'_> {
+            fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+                if self
+                    .0
+                    .len()
+                    .checked_add(input.len())
+                    .is_none_or(|len| len > self.0.capacity())
+                {
+                    return Err(std::io::Error::other(
+                        "finite error JSON exceeds its partition",
+                    ));
+                }
+                self.0.extend_from_slice(input);
+                Ok(input.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            code: &'static str,
+            message: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            cause: Option<&'static str>,
+        }
+        let (code, cause) = match kind {
+            FiniteFailureKind::Capacity => ("segment_pending", Some("transcode_capacity_pending")),
+            FiniteFailureKind::Producer => ("producer_failed", None),
+            FiniteFailureKind::Publication => ("segment_publication_failed", None),
+        };
+        serde_json::to_writer(
+            FixedWriter(&mut body),
+            &Wire {
+                code,
+                message: &wire_message,
+                cause,
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        slot.validate_actual(
+            Self::required_payload_bytes()
+                .ok_or_else(|| std::io::Error::other("finite failure size overflow"))?,
+        )?;
+        drop(wire_message);
+        Ok(Arc::new(Self {
+            kind,
+            message,
+            body,
+            _slot: slot,
+        }))
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+    pub(crate) fn code(&self) -> &'static str {
+        match self.kind {
+            FiniteFailureKind::Capacity => "segment_pending",
+            FiniteFailureKind::Producer => "producer_failed",
+            FiniteFailureKind::Publication => "segment_publication_failed",
+        }
+    }
+    pub(crate) fn diagnostic_code(&self) -> &'static str {
+        if self.kind == FiniteFailureKind::Capacity {
+            "transcode_capacity_pending"
+        } else {
+            self.code()
+        }
+    }
+    pub(crate) fn status(&self) -> axum::http::StatusCode {
+        match self.kind {
+            FiniteFailureKind::Capacity => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            _ => axum::http::StatusCode::BAD_GATEWAY,
+        }
+    }
+    pub(crate) fn body(self: &Arc<Self>) -> bytes::Bytes {
+        struct BodyOwner(Arc<FiniteWaitFailure>);
+        impl AsRef<[u8]> for BodyOwner {
+            fn as_ref(&self) -> &[u8] {
+                &self.0.body
+            }
+        }
+        bytes::Bytes::from_owner(BodyOwner(Arc::clone(self)))
+    }
 }
 
 /// Why a wait was refused at the door. A refused wait touched no state:

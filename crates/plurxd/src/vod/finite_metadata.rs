@@ -1,6 +1,8 @@
 //! Requested heap accounting for the immutable metadata retained by one VOD
-//! rendition. This is not a process-RSS bound: mutable reader/demand maps,
-//! allocator bookkeeping, Tokio state, and native process memory are separate.
+//! rendition. Finite reader/demand table Vec allocations and their mutable
+//! payloads use the separate client-state partition. This is not a process-RSS
+//! bound: allocator bookkeeping, Tokio internals and native process memory
+//! are outside this requested-capacity accounting.
 
 use super::{reader::Recipe, Rendition};
 use crate::renditiondir::RenditionDir;

@@ -792,6 +792,8 @@ impl TranscodeManager {
                 terminal_handoff,
                 terminal_commit: None,
                 selection,
+                #[cfg(target_os = "linux")]
+                finite_client_slot: None,
             };
             if acknowledged_end {
                 if let Some(committer) = terminal_committer {

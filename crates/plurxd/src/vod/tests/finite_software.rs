@@ -253,6 +253,109 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert!(retained.used.handles > 0);
     assert!(retained.used.peak_memory_bytes > 0);
     assert!(retained.used.scratch_bytes > 0);
+    // Exercise finite map replacement/removal/refusal with its actual paid
+    // allocation; sorted lookup must retain ordinary map semantics.
+    {
+        let lease = rendition.finite_client_lease.as_ref().unwrap();
+        let mut table = client_state::ClientTable::<u32, u32>::finite(3, lease).unwrap();
+        for (key, value) in [(9, 90), (1, 10), (5, 50)] {
+            assert_eq!(table.try_insert(key, value), Ok(None));
+        }
+        assert_eq!(table.try_insert(5, 51), Ok(Some(50)));
+        assert_eq!(table.try_insert(3, 30), Err((3, 30)));
+        assert_eq!(table.get(&5), Some(&51));
+        assert_eq!(table.remove(&1), Some(10));
+        assert_eq!(table.try_insert(3, 30), Ok(None));
+        assert_eq!(table.keys().copied().collect::<Vec<_>>(), vec![3, 5, 9]);
+        assert_eq!(table.len(), 3);
+    }
+    // Removing a completed demand cancels the SAME obsolete deadline task.
+    // Its future's slot, rather than an abort request, proves actual release.
+    {
+        let demand = serve
+            .shared
+            .arm_materialize_watchdog(&rendition, 0)
+            .expect("finite demand task admission");
+        let slot = {
+            let clocks = rendition.demand_since.lock().expect("demand lock");
+            Arc::downgrade(&clocks[&0]._finite_slot.as_ref().unwrap().0)
+        };
+        assert!(slot.upgrade().is_some());
+        rendition.clear_demand(0);
+        drop(demand);
+        wait_until(
+            "obsolete finite deadline future drops its original slot",
+            Duration::from_secs(5),
+            || async { slot.upgrade().is_none() },
+        )
+        .await;
+    }
+    // A finite deadline wakes every waiter with the SAME charged payload.
+    // Its fully escaped HTTP body must retain that slot after clock/outcome
+    // owners have gone, and cancellation of the final body releases it.
+    {
+        use crate::waitpool::{
+            FiniteFailureKind, FiniteWaitFailure, WaitKey, WaitOutcome, WaitPool,
+        };
+        let client_lease = rendition
+            .finite_client_lease
+            .as_ref()
+            .expect("finite client partition");
+        let slot = client_lease
+            .reserve(FiniteWaitFailure::required_payload_bytes().unwrap())
+            .expect("finite error payload admission");
+        let weak_slot = Arc::downgrade(&slot);
+        let failure = FiniteWaitFailure::new(
+            FiniteFailureKind::Capacity,
+            "\0".repeat(FiniteWaitFailure::MESSAGE_BYTES),
+            MATERIALIZE_EXPIRY_RETAINED,
+            Arc::clone(&slot),
+        )
+        .expect("bounded maximally escaped diagnostic");
+        let pool = WaitPool::new(2, 1);
+        let key = WaitKey {
+            rendition: rendition.key.clone(),
+            index: 0,
+        };
+        let mut first = pool.register(key.clone(), "finite-deadline-a").unwrap();
+        let mut second = pool.register(key, "finite-deadline-b").unwrap();
+        pool.expire_entry(
+            &rendition.key,
+            0,
+            WaitOutcome::FiniteMaterialization(Arc::clone(&failure)),
+        );
+        let first_outcome = first.wait(Duration::from_secs(1)).await;
+        let second_outcome = second.wait(Duration::from_secs(1)).await;
+        let (
+            WaitOutcome::FiniteMaterialization(first_failure),
+            WaitOutcome::FiniteMaterialization(second_failure),
+        ) = (first_outcome, second_outcome)
+        else {
+            panic!("finite wake lost its original failure owner")
+        };
+        assert!(Arc::ptr_eq(&first_failure, &second_failure));
+        let body = failure.body();
+        let wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(wire["code"], "segment_pending");
+        assert_eq!(wire["cause"], "transcode_capacity_pending");
+        assert!(wire["message"]
+            .as_str()
+            .unwrap()
+            .starts_with(&"\0".repeat(512)));
+        drop((slot, failure, first_failure, second_failure, first, second));
+        assert!(
+            weak_slot.upgrade().is_some(),
+            "HTTP body still owns its admitted payload"
+        );
+        let last_body = body.clone();
+        drop(body);
+        assert!(weak_slot.upgrade().is_some());
+        drop(last_body);
+        assert!(
+            weak_slot.upgrade().is_none(),
+            "last actual body releases the in-role slot"
+        );
+    }
     let retained_len = output
         .file_len(FiniteFile::Segment(0))
         .await
@@ -296,6 +399,25 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
             .unknown_peak_producers,
         1
     );
+    // Closing before the first wake must let the actual registered driver
+    // return while this test still holds the rendition's metadata. The driver
+    // cannot wait for a lease it owns; the existing cleanup owner settles it
+    // only after those real metadata references have dropped.
+    second.closed.store(true, Release);
+    let completion = second_producer.begin_driver();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        finite_software::run(
+            Arc::clone(&serve.shared),
+            Arc::clone(&second),
+            Arc::clone(&second_producer),
+            completion,
+        ),
+    )
+    .await
+    .expect("closed-before-entry driver returns without waiting on its own metadata");
+    assert!(!second_producer.settled());
+    assert_eq!(runtime.accounting().unwrap().unknown_peak_producers, 1);
     // Prepared cancellation must wait until its actual daemon metadata has
     // dropped; the original core producer selector remains independently held.
     drop(second);
@@ -317,6 +439,7 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     serve.end("finite-software-client", Terminal::Deleted).await;
     let final_key = rendition.key.clone();
     drop(rendition);
+    expire_finite_session_tombstone(&serve, "finite-software-client").await;
     // Exercise the production closing owner: it drains the actual rendition
     // metadata before native cleanup and the known journal refund.
     serve
@@ -327,4 +450,31 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     assert_eq!(final_snapshot.held, 0);
     assert_eq!(final_snapshot.unknown_peak_producers, 0);
     assert_eq!(final_snapshot.used, Default::default());
+}
+
+/// Advance only the existing terminal-response retention policy after actual
+/// cleanup completed. Native exit/join/close proofs above use the real kernel;
+/// no clock advance supplies resource extinction or settlement authority.
+async fn expire_finite_session_tombstone(serve: &VodServe, session_id: &str) {
+    let cleanup = {
+        let sessions = serve.shared.sessions.lock().await;
+        sessions
+            .get(session_id)
+            .expect("terminal session")
+            .terminal_cleanup
+            .as_ref()
+            .cloned()
+            .expect("original cleanup owner")
+    };
+    cleanup.wait().await;
+    drop(cleanup);
+    tokio::time::pause();
+    tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    // Ordinary maintenance must also obtain its fresh durable non-live check.
+    serve.maintain().await;
+    assert!(
+        serve.shared.sessions.lock().await.get(session_id).is_none(),
+        "expired terminal state must release its actual finite client owners"
+    );
 }

@@ -130,12 +130,12 @@ impl VodServe {
                         crate::playback_control::ControlStateError::SessionEnded,
                     ));
                 };
-                let Some(mut result) = session.control_end.clone() else {
+                let Some(stored_result) = session.control_end.as_ref() else {
                     return Some(Err(
                         crate::playback_control::ControlStateError::SessionEnded,
                     ));
                 };
-                if result
+                if stored_result
                     .terminal_commit
                     .as_ref()
                     .is_some_and(|commit| commit.is_expired())
@@ -147,6 +147,27 @@ impl VodServe {
                     return Some(Err(
                         crate::playback_control::ControlStateError::SessionEnded,
                     ));
+                }
+                #[cfg(target_os = "linux")]
+                let replay_slot = if let Some(slot) = stored_result.finite_client_slot.as_ref() {
+                    let Some(bytes) = stored_result.requested_clone_heap_bytes() else {
+                        return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                    };
+                    match slot.reserve_related(bytes) {
+                        Ok(copy) => Some(copy),
+                        Err(_) => {
+                            return Some(Err(
+                                crate::playback_control::ControlStateError::Unavailable,
+                            ))
+                        }
+                    }
+                } else {
+                    None
+                };
+                let mut result = stored_result.clone();
+                #[cfg(target_os = "linux")]
+                if let Some(slot) = replay_slot {
+                    result.finite_client_slot = Some(slot);
                 }
                 debug_assert_eq!(result.accepted_sequence, accepted_sequence);
                 debug_assert_eq!(result.action, action);
@@ -219,6 +240,10 @@ impl VodServe {
                 selection: crate::playback_control::SelectionObservation,
                 lease_expires_at_unix_ms: i64,
                 marker_prewarm: Option<Box<MarkerPrewarmControl>>,
+                #[cfg(target_os = "linux")]
+                finite_client_slot: Option<
+                    Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+                >,
             },
         }
         let outcome = {
@@ -291,38 +316,164 @@ impl VodServe {
             // two reads of the same fence, and taking the lock twice would let
             // another exchange land between them and be measured against a
             // selection this one had already replaced.
+            // Build finite control copies before publishing the sequence. The
+            // detached fence step does not touch the live observation tokens;
+            // a refused budget therefore preserves the previous sequence.
+            let mut preflight_session_snapshot = None;
+            let mut preflight_marker_payload = None;
             let (accepted, selection, preparation_directive) = {
                 let mut fence = session.control.lock().expect("control lock");
-                let accepted = fence.accept(
-                    control.generation,
-                    control.owner_epoch,
-                    control.client_instance_id,
-                    control.sequence,
-                    crate::playback_control::ControlAcceptance::observed(
-                        control.snapshot.platform(),
+                #[cfg(target_os = "linux")]
+                let finite_outcome = if let Some(lease) = &control_rendition.finite_client_lease {
+                    // Reserve the peak for all input and detached-state clones
+                    // before ControlAcceptance::observed or the step can allocate.
+                    // It stays live alongside the eventual retained-state slot
+                    // until adoption and the post-reserve copies have ended.
+                    let transient_required = fence.finite_prepare_transient_bytes(
+                        control.generation,
+                        &control.snapshot,
                         &control.prepared_successor,
-                        control.snapshot.acknowledgement.as_ref(),
-                        control.snapshot.request_fingerprint.as_deref(),
-                        &control.snapshot.selection,
-                        control.snapshot.capabilities.as_ref(),
-                    ),
-                );
-                // Only for an accepted exchange: a replay is the same exchange
-                // arriving twice, and it changed the selection the first time
-                // or not at all.
-                let observation = if matches!(
-                    &accepted,
-                    Ok((crate::playback_control::ControlDisposition::Accepted, ..))
-                ) {
-                    fence.observe(
-                        &control.snapshot.selection,
-                        control.snapshot.capabilities.as_ref(),
-                    )
+                    );
+                    let Some(transient_required) = transient_required else {
+                        return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                    };
+                    let _transient_slot = match lease.reserve(transient_required) {
+                        Ok(slot) => slot,
+                        Err(_) => {
+                            return Some(Err(
+                                crate::playback_control::ControlStateError::Unavailable,
+                            ));
+                        }
+                    };
+                    let prepared = fence.prepare_finite_control(
+                        crate::playback_control::ControlRequestView {
+                            generation: control.generation,
+                            owner_epoch: control.owner_epoch,
+                            client_instance_id: control.client_instance_id,
+                            sequence: control.sequence,
+                            acceptance: crate::playback_control::ControlAcceptance::observed(
+                                control.snapshot.platform(),
+                                &control.prepared_successor,
+                                control.snapshot.acknowledgement.as_ref(),
+                                control.snapshot.request_fingerprint.as_deref(),
+                                &control.snapshot.selection,
+                                control.snapshot.capabilities.as_ref(),
+                            ),
+                        },
+                        &control.snapshot,
+                    );
+                    let prepared_accepted = prepared.accepted();
+                    let marker_payload_needed = prepared_accepted
+                        && source.is_none()
+                        && control.snapshot.demand != crate::playback_control::PlaybackDemand::End;
+                    let required = (|| -> Option<usize> {
+                        let mut bytes = prepared.requested_heap_bytes()?;
+                        // One fixed-capacity JSON body remains live with this
+                        // exchange until the final HTTP Bytes owner drops.
+                        if prepared.returns_result() {
+                            bytes =
+                                bytes.checked_add(crate::playback_control::MAX_RESPONSE_BYTES)?;
+                        }
+                        if prepared_accepted {
+                            bytes = bytes.checked_add(control.snapshot.requested_heap_bytes()?)?;
+                        }
+                        if marker_payload_needed {
+                            bytes = bytes.checked_add(control.snapshot.requested_heap_bytes()?)?;
+                            bytes = bytes.checked_add(
+                                session
+                                    .marker_destinations
+                                    .capacity()
+                                    .checked_mul(std::mem::size_of::<MarkerDestination>())?,
+                            )?;
+                        }
+                        if prepared_accepted
+                            && control.snapshot.demand
+                                == crate::playback_control::PlaybackDemand::End
+                        {
+                            let committer = terminal_committer.as_ref()?;
+                            bytes = bytes.checked_add(committer.requested_heap_bytes()?)?;
+                            let status = ending_status.as_ref()?;
+                            let status_copy =
+                                std::mem::size_of::<crate::vodserve::VodSessionInfo>()
+                                    .checked_add(status.requested_heap_bytes()?)?;
+                            bytes = bytes.checked_add(status_copy.checked_mul(2)?)?;
+                            bytes = bytes.checked_add(prepared.external_payload_bytes()?)?;
+                            // The original cleanup task owns this exact id
+                            // after Session detaches and may outlive it.
+                            bytes = bytes.checked_add(control.session_id.len())?;
+                            bytes = bytes.checked_add(
+                                std::mem::size_of::<TerminalCleanup>()
+                                    .checked_add(2 * std::mem::size_of::<usize>())?,
+                            )?;
+                            bytes = bytes.checked_add(
+                                std::mem::size_of::<crate::playback_control::LocalControlResult>()
+                                    .checked_mul(2)?,
+                            )?;
+                        }
+                        Some(bytes)
+                    })();
+                    let Some(required) = required else {
+                        return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                    };
+                    let slot = match lease.reserve(required) {
+                        Ok(slot) => super::super::client_state::ClientSlot(slot),
+                        Err(_) => {
+                            return Some(Err(
+                                crate::playback_control::ControlStateError::Unavailable,
+                            ));
+                        }
+                    };
+                    if slot.validate_actual(required).is_err() {
+                        return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                    }
+                    let outcome = prepared.adopt(&mut fence);
+                    if prepared_accepted {
+                        preflight_session_snapshot = Some(control.snapshot.clone());
+                        if marker_payload_needed {
+                            preflight_marker_payload = Some((
+                                control.snapshot.clone(),
+                                session.marker_destinations.clone(),
+                            ));
+                        }
+                    }
+                    session.finite_control_slot = Some(slot);
+                    Some(outcome)
                 } else {
-                    crate::playback_control::SelectionObservation::default()
+                    None
                 };
-                let preparation_directive = fence.preparation_directive();
-                (accepted, observation, preparation_directive)
+                #[cfg(not(target_os = "linux"))]
+                let finite_outcome: Option<_> = None;
+                if let Some(outcome) = finite_outcome {
+                    outcome
+                } else {
+                    let accepted = fence.accept(
+                        control.generation,
+                        control.owner_epoch,
+                        control.client_instance_id,
+                        control.sequence,
+                        crate::playback_control::ControlAcceptance::observed(
+                            control.snapshot.platform(),
+                            &control.prepared_successor,
+                            control.snapshot.acknowledgement.as_ref(),
+                            control.snapshot.request_fingerprint.as_deref(),
+                            &control.snapshot.selection,
+                            control.snapshot.capabilities.as_ref(),
+                        ),
+                    );
+                    let observation = if matches!(
+                        &accepted,
+                        Ok((crate::playback_control::ControlDisposition::Accepted, ..))
+                    ) {
+                        fence.observe(
+                            &control.snapshot.selection,
+                            control.snapshot.capabilities.as_ref(),
+                        )
+                    } else {
+                        crate::playback_control::SelectionObservation::default()
+                    };
+                    let preparation_directive = fence.preparation_directive();
+                    (accepted, observation, preparation_directive)
+                }
             };
             let (disposition, accepted_sequence, action, platform, action_suppressed) =
                 match accepted {
@@ -417,6 +568,11 @@ impl VodServe {
                     terminal_handoff: None,
                     terminal_commit: None,
                     selection: selection.clone(),
+                    #[cfg(target_os = "linux")]
+                    finite_client_slot: session
+                        .finite_control_slot
+                        .as_ref()
+                        .map(|slot| Arc::clone(&slot.0)),
                 };
                 let terminal_commit = terminal_committer
                     .as_ref()
@@ -426,7 +582,11 @@ impl VodServe {
                 session.tombstone = Some(Terminal::Deleted);
                 session.abort_staged_preparation();
                 session.control_end = Some(result.clone());
-                session.control_end_snapshot = Some(control.snapshot.clone());
+                session.control_end_snapshot = Some(
+                    preflight_session_snapshot
+                        .take()
+                        .unwrap_or_else(|| control.snapshot.clone()),
+                );
                 Ok::<_, crate::playback_control::ControlStateError>(AppliedControl::End {
                     terminal_commit: terminal_commit.map(Box::new),
                     result,
@@ -439,16 +599,27 @@ impl VodServe {
             } else {
                 let marker_prewarm = (source.is_none()
                     && disposition == crate::playback_control::ControlDisposition::Accepted)
-                    .then(|| MarkerPrewarmControl {
-                        rendition: session
-                            .live_rendition()
-                            .map(Arc::clone)
-                            .expect("a live VOD control has a rendition"),
-                        snapshot: control.snapshot.clone(),
-                        destinations: session.marker_destinations.clone(),
-                        sequence: control.sequence,
-                        file_id: session.file.id,
-                        kind: session.kind,
+                    .then(|| {
+                        let (snapshot, destinations) =
+                            preflight_marker_payload.take().unwrap_or_else(|| {
+                                (
+                                    control.snapshot.clone(),
+                                    session.marker_destinations.clone(),
+                                )
+                            });
+                        MarkerPrewarmControl {
+                            rendition: session
+                                .live_rendition()
+                                .map(Arc::clone)
+                                .expect("a live VOD control has a rendition"),
+                            snapshot,
+                            destinations,
+                            sequence: control.sequence,
+                            file_id: session.file.id,
+                            kind: session.kind,
+                            #[cfg(target_os = "linux")]
+                            _finite_control_slot: session.finite_control_slot.clone(),
+                        }
                     });
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
                     #[cfg(target_os = "linux")]
@@ -461,7 +632,11 @@ impl VodServe {
                             runtime.invalidate_report_owner(&session.incarnation);
                         }
                     }
-                    session.last_control_snapshot = Some(control.snapshot.clone());
+                    session.last_control_snapshot = Some(
+                        preflight_session_snapshot
+                            .take()
+                            .unwrap_or_else(|| control.snapshot.clone()),
+                    );
                     session.control_observed_at = Some(Instant::now());
                 }
                 let mut last_touch = session.last_touch.lock().expect("touch lock");
@@ -503,6 +678,11 @@ impl VodServe {
                     selection: selection.clone(),
                     lease_expires_at_unix_ms,
                     marker_prewarm: marker_prewarm.map(Box::new),
+                    #[cfg(target_os = "linux")]
+                    finite_client_slot: session
+                        .finite_control_slot
+                        .as_ref()
+                        .map(|slot| Arc::clone(&slot.0)),
                 })
             }
         };
@@ -521,6 +701,7 @@ impl VodServe {
             selection,
             lease_expires_at_unix_ms,
             marker_prewarm,
+            _finite_client_slot,
         ) = match outcome {
             AppliedControl::End {
                 result,
@@ -540,6 +721,8 @@ impl VodServe {
                     kind,
                     Terminal::Deleted,
                     terminal_commit,
+                    #[cfg(target_os = "linux")]
+                    result.finite_client_slot.as_ref().map(Arc::clone),
                 );
                 cleanup.wait().await;
                 return Some(Ok(result));
@@ -554,6 +737,8 @@ impl VodServe {
                 selection,
                 lease_expires_at_unix_ms,
                 marker_prewarm,
+                #[cfg(target_os = "linux")]
+                finite_client_slot,
             } => (
                 disposition,
                 accepted_sequence,
@@ -564,6 +749,16 @@ impl VodServe {
                 selection,
                 lease_expires_at_unix_ms,
                 marker_prewarm.map(|prewarm| *prewarm),
+                {
+                    #[cfg(target_os = "linux")]
+                    {
+                        finite_client_slot
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        None::<Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>>
+                    }
+                },
             ),
         };
         if let Some(marker_prewarm) = marker_prewarm {
@@ -600,6 +795,8 @@ impl VodServe {
             terminal_handoff: None,
             terminal_commit: None,
             selection,
+            #[cfg(target_os = "linux")]
+            finite_client_slot: _finite_client_slot,
         }))
     }
 }

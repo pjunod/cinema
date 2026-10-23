@@ -18,6 +18,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::transcode::{HlsSessionInfo, SessionKind};
 
+#[path = "playback_control/finite_memory.rs"]
+mod finite_memory;
+
 pub(crate) const PROTOCOL_V1: &str = "plurx-playback-control-v1";
 pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_RELAY_BYTES: usize = 20 * 1024;
@@ -2573,6 +2576,11 @@ pub(crate) struct LocalControlResult {
     /// one implementation, and it is on `ControlState` precisely so both
     /// engines can answer it.
     pub selection: SelectionObservation,
+    /// The original finite control slot follows every cloned local result.
+    /// HTTP carries it into the final serialized body owner.
+    #[cfg(target_os = "linux")]
+    pub finite_client_slot:
+        Option<Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>>,
 }
 
 #[derive(Clone)]
@@ -2597,9 +2605,43 @@ impl TerminalResponseHandoff {
 
 #[derive(Clone)]
 pub(crate) struct TerminalCommitReceipt {
-    result: tokio::sync::watch::Receiver<Option<Result<ControlResponseV1, ()>>>,
+    result: tokio::sync::watch::Receiver<Option<Result<Arc<TerminalControlAnswer>, ()>>>,
     retry: Option<Arc<TerminalCommitRetry>>,
     expiry: Arc<TerminalCommitExpiry>,
+}
+
+/// One immutable watch publication. Its DTO is shared between waiters; each
+/// waiter that needs an owned response reserves its own finite copy first.
+pub(crate) struct TerminalControlAnswer {
+    pub response: ControlResponseV1,
+    #[cfg(target_os = "linux")]
+    pub finite_slot:
+        Option<Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>>,
+}
+
+impl TerminalControlAnswer {
+    fn plain(response: ControlResponseV1) -> Self {
+        Self {
+            response,
+            #[cfg(target_os = "linux")]
+            finite_slot: None,
+        }
+    }
+
+    fn try_clone_owned(&self) -> Result<Self, ()> {
+        #[cfg(target_os = "linux")]
+        let finite_slot = if let Some(source) = self.finite_slot.as_ref() {
+            let bytes = self.response.requested_heap_bytes().ok_or(())?;
+            Some(source.reserve_related(bytes).map_err(|_| ())?)
+        } else {
+            None
+        };
+        Ok(Self {
+            response: self.response.clone(),
+            #[cfg(target_os = "linux")]
+            finite_slot,
+        })
+    }
 }
 
 struct TerminalCommitExpiry {
@@ -2654,7 +2696,7 @@ impl TerminalCommitExpiry {
 }
 
 struct TerminalCommitRetry {
-    result: tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
+    result: tokio::sync::watch::Sender<Option<Result<Arc<TerminalControlAnswer>, ()>>>,
     running: Arc<AtomicBool>,
     transition: Arc<std::sync::Mutex<()>>,
     start: Arc<dyn Fn(TerminalCommitAttempt) + Send + Sync>,
@@ -2662,7 +2704,7 @@ struct TerminalCommitRetry {
 }
 
 pub(crate) struct TerminalCommitAttempt {
-    result: tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
+    result: tokio::sync::watch::Sender<Option<Result<Arc<TerminalControlAnswer>, ()>>>,
     running: Arc<AtomicBool>,
     transition: Arc<std::sync::Mutex<()>>,
     expiry: Arc<TerminalCommitExpiry>,
@@ -2673,7 +2715,11 @@ impl TerminalCommitAttempt {
         self.expiry.set(expires_at_unix_ms);
     }
 
-    pub(crate) fn complete(self, mut outcome: Result<ControlResponseV1, ()>) {
+    pub(crate) fn complete(self, outcome: Result<ControlResponseV1, ()>) {
+        self.complete_answer(outcome.map(TerminalControlAnswer::plain));
+    }
+
+    pub(crate) fn complete_answer(self, mut outcome: Result<TerminalControlAnswer, ()>) {
         let _transition = self
             .transition
             .lock()
@@ -2682,7 +2728,7 @@ impl TerminalCommitAttempt {
             outcome = Err(());
         }
         self.running.store(false, Ordering::Release);
-        let _ = self.result.send(Some(outcome));
+        let _ = self.result.send(Some(outcome.map(Arc::new)));
     }
 }
 
@@ -2717,7 +2763,7 @@ impl TerminalCommitRetry {
 impl TerminalCommitReceipt {
     pub(crate) fn pending() -> (
         Self,
-        tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
+        tokio::sync::watch::Sender<Option<Result<Arc<TerminalControlAnswer>, ()>>>,
     ) {
         let (sender, result) = tokio::sync::watch::channel(None);
         (
@@ -2799,14 +2845,14 @@ impl TerminalCommitReceipt {
         }
     }
 
-    pub(crate) async fn wait(&self) -> Result<ControlResponseV1, ()> {
+    pub(crate) async fn wait(&self) -> Result<TerminalControlAnswer, ()> {
         let mut result = self.result.clone();
         loop {
             if let Some(mut outcome) = result.borrow().clone() {
                 if outcome.is_ok() && self.expiry.expired() {
                     outcome = Err(());
                 }
-                return outcome;
+                return outcome.and_then(|answer| answer.try_clone_owned());
             }
             result.changed().await.map_err(|_| ())?;
         }
@@ -3098,6 +3144,12 @@ impl PreparationGate for RollingControlHandle {
 }
 
 pub(crate) trait TerminalControlCommitter: Send + Sync {
+    /// Requested heap retained by this committer after the exchange. A finite
+    /// session requires an explicit measurement before accepting End; unknown
+    /// implementations may still serve the legacy unbudgeted path.
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        None
+    }
     /// Start the continuation synchronously. The returned receipt may be
     /// awaited by HTTP, but dropping every waiter cannot cancel the commit.
     fn start(&self, result: &LocalControlResult) -> TerminalCommitReceipt;

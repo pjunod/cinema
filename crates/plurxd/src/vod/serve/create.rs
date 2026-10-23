@@ -1545,9 +1545,16 @@ impl VodServe {
             control_end: None,
             control_end_snapshot: None,
             prepared_incarnation: None,
+            #[cfg(target_os = "linux")]
+            finite_session_slot: None,
+            #[cfg(target_os = "linux")]
+            finite_control_slot: None,
             terminal_cleanup: None,
             tombstone: None,
         };
+
+        #[cfg(target_os = "linux")]
+        replacement.reserve_finite_session_state(&session_id)?;
 
         // Acquire every async lock before changing either the reader graph or
         // the registry. Cancellation while resurrecting is therefore a clean
@@ -1628,6 +1635,22 @@ impl VodServe {
                 ));
             }
         }
+        // The selected finite recipe has no private child rendition. Refuse
+        // any future expansion before changing the predecessor graph; each
+        // private child still uses the legacy map until it has its own finite
+        // accounting contract.
+        #[cfg(target_os = "linux")]
+        if private_media
+            .iter()
+            .any(|child| child.rendition.finite_client_lease.is_some())
+        {
+            return Err("finite private child has no client-state attachment contract".into());
+        }
+        if !replacement_readers.has_room_for(&session_id) {
+            return Err("finite reader table has no remaining slot".into());
+        }
+        let prepared_authority =
+            rendition.prepare_client_reader(&session_id, start_entry, admission_priority)?;
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {
@@ -1669,11 +1692,13 @@ impl VodServe {
                 (req.start_seconds.max(0.0) * 1000.0) as i64,
             );
             if Arc::ptr_eq(&child.rendition, &rendition) {
-                replacement_readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
-                    reader.nonpreemptive_trial = nonpreemptive_trial;
-                    reader
-                });
+                replacement_readers
+                    .try_insert(child.reader_id.clone(), {
+                        let mut reader = Reader::with_priority(entry, admission_priority);
+                        reader.nonpreemptive_trial = nonpreemptive_trial;
+                        reader
+                    })
+                    .expect("private-media reader uses the legacy table");
             } else {
                 let readers = if companion_rendition
                     .as_ref()
@@ -1684,19 +1709,25 @@ impl VodServe {
                     audio_readers.as_mut().or(previous_readers.as_mut())
                 }
                 .expect("private media reader guard");
-                readers.insert(child.reader_id.clone(), {
-                    let mut reader = Reader::with_priority(entry, admission_priority);
-                    reader.nonpreemptive_trial = nonpreemptive_trial;
-                    reader
-                });
+                readers
+                    .try_insert(child.reader_id.clone(), {
+                        let mut reader = Reader::with_priority(entry, admission_priority);
+                        reader.nonpreemptive_trial = nonpreemptive_trial;
+                        reader
+                    })
+                    .expect("private-media reader uses the legacy table");
                 *child.rendition.dormant_since.lock().expect("dormant lock") = None;
             }
         }
         replacement.children = std::mem::take(&mut private_media);
-        let mut authority = replacement.attachment_reader(start_entry);
+        let mut authority = prepared_authority.1;
+        authority.authority_only = replacement.retained_output.is_some()
+            || replacement.children.iter().any(|child| child.controlled);
         authority.admission_priority = admission_priority;
         authority.nonpreemptive_trial = nonpreemptive_trial;
-        replacement_readers.insert(session_id.clone(), authority);
+        replacement_readers
+            .try_insert(prepared_authority.0, authority)
+            .expect("preflighted authority insertion remains within guarded table");
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the
         // replacement carries a fresh `ControlState` — so a staged M6
@@ -1948,7 +1979,8 @@ impl ReservedSourceVodRendition {
     ) -> Result<SourceCopyReadiness, String> {
         let demand = serve
             .shared
-            .arm_materialize_watchdog(&self.rendition, INIT_DEMAND_INDEX);
+            .arm_materialize_watchdog(&self.rendition, INIT_DEMAND_INDEX)
+            .map_err(|error| format!("reserving init demand: {error}"))?;
         self.rendition.kick();
         let mut compared: Option<String> = None;
         loop {
@@ -2328,7 +2360,7 @@ impl VodServe {
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
-        let replacement = Session {
+        let mut replacement = Session {
             children: Vec::new(),
             root_admission: None,
             processed_reuse_scope: None,
@@ -2387,9 +2419,16 @@ impl VodServe {
             control_end: None,
             control_end_snapshot: None,
             prepared_incarnation: None,
+            #[cfg(target_os = "linux")]
+            finite_session_slot: None,
+            #[cfg(target_os = "linux")]
+            finite_control_slot: None,
             terminal_cleanup: None,
             tombstone: None,
         };
+
+        #[cfg(target_os = "linux")]
+        replacement.reserve_finite_session_state(&session_id)?;
 
         // Acquire every async lock before changing either the reader graph or
         // the registry. Cancellation while resurrecting is therefore a clean
@@ -2430,6 +2469,17 @@ impl VodServe {
         } else {
             None
         };
+        // Construct and charge the new finite reader before removing the
+        // predecessor or committing the session. The guarded Vec cannot grow
+        // during the later synchronous insertion.
+        if !replacement_readers.has_room_for(&session_id) {
+            return Err("finite reader table has no remaining slot".into());
+        }
+        let prepared_reader = rendition.prepare_client_reader(
+            &session_id,
+            start_entry,
+            crate::admission::Priority::Live,
+        )?;
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {
@@ -2464,7 +2514,9 @@ impl VodServe {
             // and the stop is left alone.
             obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
-        replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
+        replacement_readers
+            .try_insert(prepared_reader.0, prepared_reader.1)
+            .expect("preflighted reader insertion remains within guarded table");
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the
         // replacement carries a fresh `ControlState` — so a staged M6

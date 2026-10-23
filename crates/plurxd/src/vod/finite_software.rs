@@ -3,8 +3,8 @@
 //! the daemon manifest is only a serving index, never settlement authority.
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteFile, FiniteMetadataLease, FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent,
-    SoftwareVodOwner,
+    FiniteClientStateLease, FiniteFile, FiniteMetadataLease, FiniteWriterOutcome,
+    SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
 };
 use plurx_core::transcode::{DecodeBackend, Encoder};
 use std::sync::atomic::AtomicU8;
@@ -227,16 +227,27 @@ pub(super) fn selected_recipe(recipe: &Recipe, private: bool, ephemeral: bool) -
         })
 }
 
-fn attach_metadata_lease(
+fn attach_metadata_partitions(
     mut rendition: Arc<Rendition>,
-    lease: FiniteMetadataLease,
+    metadata: FiniteMetadataLease,
+    client: FiniteClientStateLease,
 ) -> Result<Arc<Rendition>, (String, Arc<Rendition>)> {
     let checked = (|| {
         let value = Arc::get_mut(&mut rendition)
             .ok_or("finite rendition was shared before metadata accounting")?;
-        // Store the lease before measuring. It is the final Rendition field,
-        // so any error drops metadata owners before releasing their charge.
-        value.finite_metadata_lease = Some(lease);
+        // Install both sole top leases before allocating either client table.
+        // They follow the tables in Rendition's field order, so aliases retain
+        // their charge through the final owner Drop.
+        value.finite_metadata_lease = Some(metadata);
+        value.finite_client_lease = Some(client);
+        let client = value
+            .finite_client_lease
+            .as_ref()
+            .ok_or("finite client-state lease disappeared")?;
+        let (readers, demands) = super::client_state::finite_tables(value.plan.len(), client)
+            .map_err(|error| format!("finite client tables exceed their partition: {error}"))?;
+        *value.readers.get_mut() = readers;
+        *value.demand_since.get_mut().expect("finite demand lock") = demands;
         let actual = value
             .requested_retained_metadata_bytes()
             .ok_or("finite rendition metadata capacity could not be measured")?;
@@ -289,8 +300,11 @@ pub(super) async fn build(
         .await
         .map_err(|error| format!("recovered finite software output is unresolved: {error}"))?;
     if let Some(output) = recovered {
-        let metadata_lease = output
-            .reserve_metadata_lease(projected_metadata)
+        let (metadata_lease, client_lease) = output
+            .reserve_metadata_partitions(
+                projected_metadata,
+                finite_profile::CLIENT_STATE_BYTES as usize,
+            )
             .await
             .map_err(|error| format!("reserving recovered finite rendition metadata: {error}"))?;
         let deadline = Instant::now() + settings.materialize_budget;
@@ -369,7 +383,7 @@ pub(super) async fn build(
         );
         // A failed recovered fit leaves the original protected S unchanged;
         // this daemon metadata owner and its lease simply fall away.
-        return attach_metadata_lease(rendition, metadata_lease)
+        return attach_metadata_partitions(rendition, metadata_lease, client_lease)
             .map_err(|(error, _rendition)| error);
     }
     // Read coherent saved intent before acquisition. Automatic/absent retain
@@ -419,8 +433,14 @@ pub(super) async fn build(
             }
         })?;
     let output = owner.output();
-    let metadata_lease = match output.reserve_metadata_lease(projected_metadata).await {
-        Ok(lease) => lease,
+    let (metadata_lease, client_lease) = match output
+        .reserve_metadata_partitions(
+            projected_metadata,
+            finite_profile::CLIENT_STATE_BYTES as usize,
+        )
+        .await
+    {
+        Ok(leases) => leases,
         Err(error) => {
             shared
                 .retain_unattached_finite(
@@ -449,7 +469,7 @@ pub(super) async fn build(
         manifest,
         IdentityState::default(),
     );
-    match attach_metadata_lease(rendition, metadata_lease) {
+    match attach_metadata_partitions(rendition, metadata_lease, client_lease) {
         Ok(rendition) => Ok(rendition),
         Err((error, rendition)) => {
             let producer = rendition
@@ -486,12 +506,10 @@ async fn run_body(
     }
     let mut owner = producer.owner.lock().await;
     if rendition.closed.load(Acquire) {
-        if let Err(error) = producer
-            .cancel_owned(&owner, Instant::now() + rendition.materialize_budget)
-            .await
-        {
-            tracing::warn!(target: "plurxd::vodserve", rendition=%rendition.key, %error, "finite preparation remains held during cancellation");
-        }
+        // This driver still owns the rendition's metadata lease. Final
+        // cancellation waits for that lease, so only the existing compact
+        // cleanup owner may settle AFTER this driver returns and drops it.
+        let _ = producer.request_stop();
         return;
     }
     producer.stage.store(PREPARING, Release);
@@ -510,46 +528,15 @@ async fn run_body(
             &producer,
             format!("starting finite software VOD: {error}"),
         );
-        let _ = owner.stop_producer().await;
-        if let Err(error) = producer
-            .cancel_owned(&owner, Instant::now() + rendition.materialize_budget)
-            .await
-        {
-            tracing::warn!(target: "plurxd::vodserve", rendition=%rendition.key, %error, "finite failed start remains charged");
-        }
+        let _ = producer.request_stop();
+        // A partial start may already have a writer blocked on this original
+        // event channel. Drain it while joining; awaiting stop/join alone here
+        // would strand the writer behind its still-live receiver.
+        let _ = join_and_observe(&shared, &rendition, &producer, &owner, &mut events).await;
         return;
     }
     producer.stage.store(RUNNING, Release);
-    let completion = {
-        let joined = owner.join_producer();
-        tokio::pin!(joined);
-        let mut channel_open = true;
-        loop {
-            tokio::select! {
-                completion = &mut joined => break completion,
-                event = events.recv(), if channel_open => match event {
-                    Some(event) => if let Err(error) = observe(&shared, &rendition, event).await {
-                        fail(&shared, &rendition, &producer, format!("indexing finite output: {error}"));
-                    },
-                    None => channel_open = false,
-                },
-                _ = rendition.wake.notified() => {
-                    if rendition.closed.load(Acquire) { let _ = producer.request_stop(); }
-                },
-            }
-        }
-    };
-    // The writer can finish before the final metadata event wins select.
-    while let Ok(event) = events.try_recv() {
-        if let Err(error) = observe(&shared, &rendition, event).await {
-            fail(
-                &shared,
-                &rendition,
-                &producer,
-                format!("indexing finite output: {error}"),
-            );
-        }
-    }
+    let completion = join_and_observe(&shared, &rendition, &producer, &owner, &mut events).await;
     let success = completion.as_ref().is_ok_and(|completion| {
         completion
             .root_status
@@ -575,14 +562,15 @@ async fn run_body(
             &producer,
             format!("finite producer did not complete: {completion:?}"),
         );
-        if let Err(error) = producer
-            .cancel_owned(&owner, Instant::now() + rendition.materialize_budget)
-            .await
-        {
-            tracing::warn!(target: "plurxd::vodserve", rendition=%rendition.key, %error, "finite failed producer remains charged");
-        }
+        // The original root/writer have joined above. Their physical closure
+        // remains in core; leave settlement to the existing cleanup owner once
+        // this driver and the remaining client metadata actually drop.
         return;
     }
+    // A completed output has no missing entry to rematerialize. Abort every
+    // surviving clock before S; its original task slot remains charged until
+    // Tokio actually drops the cancelled future.
+    rendition.clear_all_demands();
     producer.stage.store(RETIRING, Release);
     let deadline = Instant::now() + rendition.materialize_budget;
     let retired = async {
@@ -609,6 +597,49 @@ async fn run_body(
     }
 }
 
+async fn join_and_observe(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    producer: &FiniteSoftwareProducer,
+    owner: &SoftwareVodOwner,
+    events: &mut tokio::sync::mpsc::Receiver<SoftwareVodEvent>,
+) -> Result<
+    plurx_core::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion,
+    plurx_core::adaptive_resources::runtime::finite_vod::FiniteVodError,
+> {
+    let completion = {
+        let joined = owner.join_producer();
+        tokio::pin!(joined);
+        let mut channel_open = true;
+        loop {
+            tokio::select! {
+                completion = &mut joined => break completion,
+                event = events.recv(), if channel_open => match event {
+                    Some(event) => if let Err(error) = observe(shared, rendition, event).await {
+                        fail(shared, rendition, producer, format!("indexing finite output: {error}"));
+                    },
+                    None => channel_open = false,
+                },
+                _ = rendition.wake.notified() => {
+                    if rendition.closed.load(Acquire) { let _ = producer.request_stop(); }
+                },
+            }
+        }
+    };
+    // The writer can finish before the final metadata event wins select.
+    while let Ok(event) = events.try_recv() {
+        if let Err(error) = observe(shared, rendition, event).await {
+            fail(
+                shared,
+                rendition,
+                producer,
+                format!("indexing finite output: {error}"),
+            );
+        }
+    }
+    completion
+}
+
 fn fail(
     shared: &Arc<Shared>,
     rendition: &Arc<Rendition>,
@@ -633,6 +664,7 @@ async fn observe(
     match event {
         SoftwareVodEvent::Initialized(identity) => {
             rendition.identity.lock().await.identity = Some(identity);
+            rendition.clear_demand(INIT_DEMAND_INDEX);
             rendition.init_notify.notify_waiters();
         }
         SoftwareVodEvent::Materialized {

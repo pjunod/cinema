@@ -1032,13 +1032,15 @@ impl VodServe {
                     "retained finite init is absent; no producer can rematerialize it".into(),
                 ));
             }
-            let demand = demand.get_or_insert_with(|| {
-                let demand = self
+            if demand.is_none() {
+                let clock = self
                     .shared
-                    .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
+                    .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX)
+                    .map_err(VodError::Io)?;
                 rendition.kick();
-                demand
-            });
+                demand = Some(clock);
+            }
+            let demand = demand.as_ref().expect("init demand was just armed");
             if let Some(verdict) = demand.expired_verdict().await {
                 return Err(verdict.into_error());
             }
@@ -1195,7 +1197,8 @@ impl VodServe {
                 .map_err(VodError::Busy)?;
             let demand = self
                 .shared
-                .arm_materialize_watchdog_locked(rendition, index, &mut clocks);
+                .arm_materialize_watchdog_locked(rendition, index, &mut clocks)
+                .map_err(VodError::Io)?;
             (wait, demand)
         };
 
@@ -1270,6 +1273,9 @@ impl VodServe {
                 retry_after: MATERIALIZE_EXPIRY_RETAINED,
             }),
             WaitOutcome::PublicationFailed(cause) => Err(VodError::PublicationFailed(cause)),
+            WaitOutcome::FiniteMaterialization(failure) => {
+                Err(VodError::FiniteMaterialization(failure))
+            }
             // The rendition went away under the wait; the session's own
             // tombstone (if any) is the more precise cause on the next GET.
             WaitOutcome::Gone => Err(VodError::Gone(Terminal::Deleted)),

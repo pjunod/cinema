@@ -55,6 +55,7 @@ pub(super) struct Reader {
     /// deliberately separate from the ordinary reader frontier: moving the
     /// frontier to a marker would make speculative work outrank the playhead.
     pub(super) marker_prewarm: Arc<StdMutex<MarkerPrewarmLedger>>,
+    pub(super) _finite_slot: Option<super::client_state::ClientSlot>,
 }
 
 impl Reader {
@@ -77,7 +78,68 @@ impl Reader {
             control_sequence: None,
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
+            _finite_slot: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_priority_finite(
+        key: &str,
+        frontier: u32,
+        admission_priority: crate::admission::Priority,
+        lease: &plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientStateLease,
+    ) -> std::io::Result<(String, Self)> {
+        use plurx_core::segplan::MAX_TIMELINE_ANNOTATIONS;
+        let records_bytes = MAX_TIMELINE_ANNOTATIONS
+            .checked_mul(std::mem::size_of::<MarkerPrewarmRecord>())
+            .ok_or_else(|| std::io::Error::other("finite marker records overflow"))?;
+        let projected = key
+            .len()
+            .checked_add(std::mem::size_of::<StdMutex<MarkerPrewarmLedger>>())
+            .and_then(|bytes| bytes.checked_add(records_bytes))
+            .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+            .ok_or_else(|| std::io::Error::other("finite reader size overflow"))?;
+        let slot = super::client_state::ClientSlot(lease.reserve(projected)?);
+        let mut stored_key = String::new();
+        stored_key
+            .try_reserve_exact(key.len())
+            .map_err(std::io::Error::other)?;
+        stored_key.push_str(key);
+        let mut ledger = MarkerPrewarmLedger::default();
+        ledger
+            .records
+            .try_reserve_exact(MAX_TIMELINE_ANNOTATIONS)
+            .map_err(std::io::Error::other)?;
+        let actual = stored_key
+            .capacity()
+            .checked_add(std::mem::size_of::<StdMutex<MarkerPrewarmLedger>>())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    ledger
+                        .records
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<MarkerPrewarmRecord>())?,
+                )
+            })
+            .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+            .ok_or_else(|| std::io::Error::other("finite reader capacity overflow"))?;
+        slot.validate_actual(actual)?;
+        ledger._finite_slot = Some(slot.clone());
+        Ok((
+            stored_key,
+            Self {
+                admission_priority,
+                nonpreemptive_trial: false,
+                authority_only: false,
+                draining_after_prepared_commit: false,
+                frontier,
+                preparation_frontier: None,
+                control_sequence: None,
+                last_served: None,
+                marker_prewarm: Arc::new(StdMutex::new(ledger)),
+                _finite_slot: Some(slot),
+            },
+        ))
     }
 
     pub(super) fn may_request_predecessor_handoff(&self) -> bool {
@@ -119,6 +181,7 @@ pub(super) struct MaterializeClock {
     /// What the deadline found when it expired. Recorded once, so the parked
     /// waiters and every retry inside the same episode get the same answer.
     pub(super) verdict: Option<MaterializeVerdict>,
+    pub(super) _finite_slot: Option<super::client_state::ClientSlot>,
 }
 
 /// Which phase an expired materialize deadline actually caught.
@@ -138,6 +201,7 @@ pub(super) enum MaterializeVerdict {
     /// The producer delivered the entry's fragment; publication did not make
     /// it servable.
     Publication(String),
+    Finite(Arc<crate::waitpool::FiniteWaitFailure>),
 }
 
 impl MaterializeVerdict {
@@ -146,7 +210,29 @@ impl MaterializeVerdict {
             Self::Capacity(message) | Self::Producer(message) | Self::Publication(message) => {
                 message
             }
+            Self::Finite(failure) => failure.message(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn into_finite(
+        self,
+        slot: &super::client_state::ClientSlot,
+    ) -> std::io::Result<Self> {
+        use crate::waitpool::{FiniteFailureKind, FiniteWaitFailure};
+        let (kind, message) = match self {
+            Self::Capacity(message) => (FiniteFailureKind::Capacity, message),
+            Self::Producer(message) => (FiniteFailureKind::Producer, message),
+            Self::Publication(message) => (FiniteFailureKind::Publication, message),
+            Self::Finite(failure) => return Ok(Self::Finite(failure)),
+        };
+        FiniteWaitFailure::new(
+            kind,
+            message,
+            MATERIALIZE_EXPIRY_RETAINED,
+            Arc::clone(&slot.0),
+        )
+        .map(Self::Finite)
     }
 
     pub(super) fn wait_outcome(&self) -> WaitOutcome {
@@ -154,6 +240,7 @@ impl MaterializeVerdict {
             Self::Capacity(message) => WaitOutcome::CapacityUnavailable(message),
             Self::Producer(message) => WaitOutcome::ProducerFailed(message),
             Self::Publication(message) => WaitOutcome::PublicationFailed(message),
+            Self::Finite(failure) => WaitOutcome::FiniteMaterialization(failure),
         }
     }
 
@@ -165,7 +252,145 @@ impl MaterializeVerdict {
             },
             Self::Producer(message) => VodError::ProducerFailed(message),
             Self::Publication(message) => VodError::PublicationFailed(message),
+            Self::Finite(failure) => VodError::FiniteMaterialization(failure),
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) const FINITE_VERDICT_BYTES: usize = 512;
+
+/// Format into a pre-reserved string. A producer refusal may contain variable
+/// diagnostics; a long message is visibly truncated at a UTF-8 boundary
+/// without changing its phase or growing the retained allocation.
+#[cfg(target_os = "linux")]
+struct BoundedVerdict(String, bool);
+
+#[cfg(target_os = "linux")]
+impl BoundedVerdict {
+    fn new() -> std::io::Result<Self> {
+        let mut value = String::new();
+        value
+            .try_reserve_exact(FINITE_VERDICT_BYTES)
+            .map_err(std::io::Error::other)?;
+        if value.capacity() > FINITE_VERDICT_BYTES {
+            return Err(std::io::Error::other(
+                "finite verdict allocation exceeded its slot",
+            ));
+        }
+        Ok(Self(value, false))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Write for BoundedVerdict {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if self.1 {
+            return Ok(());
+        }
+        if self
+            .0
+            .len()
+            .checked_add(value.len())
+            .is_some_and(|length| length <= FINITE_VERDICT_BYTES)
+        {
+            self.0.push_str(value);
+            return Ok(());
+        }
+        // Preserve the original phase/classification and a useful diagnostic
+        // prefix. Truncating text cannot turn capacity into producer failure.
+        const SUFFIX: &str = "…";
+        let max_prefix = FINITE_VERDICT_BYTES - SUFFIX.len();
+        let mut retained = self.0.len().min(max_prefix);
+        while !self.0.is_char_boundary(retained) {
+            retained -= 1;
+        }
+        self.0.truncate(retained);
+        let mut added = value.len().min(max_prefix - retained);
+        while !value.is_char_boundary(added) {
+            added -= 1;
+        }
+        self.0.push_str(&value[..added]);
+        self.0.push_str(SUFFIX);
+        self.1 = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Rendition {
+    pub(super) fn finite_materialize_verdict_bounded(
+        &self,
+        index: u32,
+        belief: Producer,
+    ) -> std::io::Result<MaterializeVerdict> {
+        use std::fmt::Write as _;
+        let mut text = BoundedVerdict::new()?;
+        macro_rules! append {
+            ($($args:tt)*) => {
+                write!(&mut text, $($args)*)
+                    .map_err(|_| std::io::Error::other("finite verdict exceeds client-state slot"))?
+            };
+        }
+        if index == INIT_DEMAND_INDEX {
+            append!("materializing {INIT_NAME}");
+        } else {
+            append!("materializing seg{index:05}.m4s");
+        }
+        append!(
+            " exceeded the {:.1}s producer deadline",
+            self.materialize_budget.as_secs_f64()
+        );
+        let producer_present =
+            matches!(belief, Producer::Running { .. } | Producer::Stopped { .. });
+        if !producer_present {
+            if let Some(refusal) = self
+                .recipe
+                .encoding
+                .as_ref()
+                .filter(|encoding| encoding.is_waiting())
+                .and_then(|encoding| encoding.last_refusal())
+            {
+                append!(" waiting for an encoder permit; no producer ran for it ({refusal})");
+                return Ok(MaterializeVerdict::Capacity(text.0));
+            }
+        }
+        let epoch = self.gen_epoch.load(Relaxed);
+        let received = *self
+            .fragment_received
+            .lock()
+            .expect("fragment receipt lock");
+        let received = received
+            .filter(|(at, _)| *at == epoch)
+            .map(|(_, entry)| entry);
+        if index != INIT_DEMAND_INDEX && received == Some(index) {
+            append!(": the producer delivered it, but publication did not complete");
+            return Ok(MaterializeVerdict::Publication(text.0));
+        }
+        match belief {
+            Producer::Running { positioned_at, .. } => {
+                append!(": the producer started at seg{positioned_at:05}.m4s did not deliver it; ");
+            }
+            Producer::Stopped {
+                positioned_at,
+                reason,
+                ..
+            } => {
+                append!(
+                    ": the producer started at seg{positioned_at:05}.m4s is stopped ({reason:?}); "
+                );
+            }
+            Producer::Absent { .. } => {
+                append!(": no producer is running for it");
+                return Ok(MaterializeVerdict::Producer(text.0));
+            }
+        }
+        if let Some(entry) = received {
+            append!("its last delivered fragment was seg{entry:05}.m4s");
+        } else {
+            append!("it delivered no fragment");
+        }
+        Ok(MaterializeVerdict::Producer(text.0))
     }
 }
 
@@ -175,6 +400,8 @@ pub(super) const MATERIALIZE_EXPIRY_RETAINED: Duration = PENDING_RETRY_AFTER.sat
 
 impl Drop for MaterializeClock {
     fn drop(&mut self) {
+        // Cancel this original obsolete episode. Its future keeps the actual
+        // client slot until Tokio destroys it; abort itself grants no credit.
         if let Some(watchdog) = &self.watchdog {
             watchdog.abort();
         }
@@ -224,6 +451,38 @@ impl MaterializeDemand {
             return recorded;
         }
         let belief = self.rendition.producer_belief().await;
+        #[cfg(target_os = "linux")]
+        if self.rendition.finite_client_lease.is_some() {
+            // The awaited belief precedes this short lock. Construct at most
+            // one charged payload even when many retries observe expiry before
+            // the registered deadline task is scheduled.
+            let mut clocks = self.rendition.demand_since.lock().expect("demand lock");
+            let clock = clocks
+                .get_mut(&self.index)
+                .filter(|clock| clock.started == self.started)?;
+            if let Some(verdict) = &clock.verdict {
+                return Some(verdict.clone());
+            }
+            let verdict = self
+                .rendition
+                .finite_materialize_verdict_bounded(self.index, belief)
+                .and_then(|verdict| {
+                    verdict.into_finite(clock._finite_slot.as_ref().ok_or_else(|| {
+                        std::io::Error::other("finite demand has no original client slot")
+                    })?)
+                });
+            return match verdict {
+                Ok(verdict) => {
+                    clock.verdict = Some(verdict.clone());
+                    Some(verdict)
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve", %error,
+                        "finite materialization verdict remains unavailable");
+                    None
+                }
+            };
+        }
         Some(self.rendition.materialize_verdict(self.index, belief))
     }
 }
@@ -240,5 +499,27 @@ impl Drop for MaterializeDemand {
                 demands.remove(&self.index);
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn finite_deadline_diagnostic_bounds_unicode_without_changing_capacity_class() {
+    use std::fmt::Write as _;
+    let mut text = BoundedVerdict::new().unwrap();
+    write!(
+        &mut text,
+        "encoder permit unavailable: {}",
+        "🎞".repeat(1024)
+    )
+    .unwrap();
+    write!(&mut text, "ignored after truncation").unwrap();
+    let verdict = MaterializeVerdict::Capacity(text.0);
+    assert!(matches!(&verdict, MaterializeVerdict::Capacity(_)));
+    assert!(verdict.message().starts_with("encoder permit unavailable:"));
+    assert!(verdict.message().ends_with('…'));
+    assert!(verdict.message().len() <= FINITE_VERDICT_BYTES);
+    if let MaterializeVerdict::Capacity(message) = verdict {
+        assert_eq!(message.capacity(), FINITE_VERDICT_BYTES);
     }
 }

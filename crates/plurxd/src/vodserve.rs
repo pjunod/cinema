@@ -1081,6 +1081,8 @@ pub enum VodError {
     /// The producer delivered the entry's fragment; publication did not make
     /// it servable within the deadline. Typed `segment_publication_failed` 502.
     PublicationFailed(String),
+    /// Original charged diagnostic and serialized body shared across waiters.
+    FiniteMaterialization(Arc<crate::waitpool::FiniteWaitFailure>),
     /// 410 — the session ended for good.
     Gone(Terminal),
     /// A wait-pool cap was hit → typed 503, no wait.
@@ -1120,8 +1122,11 @@ pub struct SegmentReady {
 }
 
 // split: begin vod-reader
+#[path = "vod/client_state.rs"]
+mod client_state;
 #[path = "vod/reader.rs"]
 mod reader;
+use client_state::{DemandTable, ReaderTable};
 #[path = "vod/ready_file.rs"]
 mod ready_file;
 use reader::*;

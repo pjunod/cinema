@@ -194,6 +194,10 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 control_end: None,
                 control_end_snapshot: None,
                 prepared_incarnation: None,
+                #[cfg(target_os = "linux")]
+                finite_session_slot: None,
+                #[cfg(target_os = "linux")]
+                finite_control_slot: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -249,6 +253,10 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 control_end: None,
                 control_end_snapshot: None,
                 prepared_incarnation: None,
+                #[cfg(target_os = "linux")]
+                finite_session_slot: None,
+                #[cfg(target_os = "linux")]
+                finite_control_slot: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },
@@ -530,7 +538,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             .wait()
             .await
             .expect("recovered VOD terminal response");
-        assert_eq!(committed.server_time_unix_ms, 1);
+        assert_eq!(committed.response.server_time_unix_ms, 1);
         assert_eq!(committer.attempts.load(Acquire), 2);
 
         let active_same_sequence = crate::playback_control::LocalControlRequest {
@@ -3600,7 +3608,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         Arc::get_mut(&mut rendition)
             .expect("unshared")
             .materialize_budget = Duration::from_secs(5);
-        let old = serve.shared.arm_materialize_watchdog(&rendition, 10);
+        let old = serve.shared.arm_materialize_watchdog(&rendition, 10).expect("old demand");
         let old_started = old.started;
         let old_task = rendition.demand_since.lock().expect("demand lock")[&10]
             .watchdog
@@ -3614,7 +3622,7 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
             async || old_task.is_finished(),
         )
         .await;
-        let new = serve.shared.arm_materialize_watchdog(&rendition, 10);
+        let new = serve.shared.arm_materialize_watchdog(&rendition, 10).expect("new demand");
         assert!(new.started > old_started);
         let request = serve
             .shared
@@ -3776,6 +3784,10 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
                 control_end: None,
                 control_end_snapshot: None,
                 prepared_incarnation: None,
+                #[cfg(target_os = "linux")]
+                finite_session_slot: None,
+                #[cfg(target_os = "linux")]
+                finite_control_slot: None,
                 terminal_cleanup: None,
                 tombstone: None,
             },

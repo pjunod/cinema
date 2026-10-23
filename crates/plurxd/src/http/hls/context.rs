@@ -242,7 +242,8 @@ pub(super) async fn exact_hls_context_at(
                 Err(
                     error @ (crate::vodserve::VodError::ProducerFailed(_)
                     | crate::vodserve::VodError::CapacityUnavailable { .. }
-                    | crate::vodserve::VodError::PublicationFailed(_)),
+                    | crate::vodserve::VodError::PublicationFailed(_)
+                    | crate::vodserve::VodError::FiniteMaterialization(_)),
                 ),
             ..
         })

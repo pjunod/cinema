@@ -143,9 +143,14 @@ impl VodServe {
         kind: SessionKind,
         cause: Terminal,
         terminal_commit: Option<Box<crate::playback_control::TerminalCommitReceipt>>,
+        #[cfg(target_os = "linux")] finite_cleanup_slot: Option<
+            Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+        >,
     ) {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
+            #[cfg(target_os = "linux")]
+            let _finite_cleanup_slot = finite_cleanup_slot;
             let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
             shared.hooks.get().before_terminal_detach().await;
             let (children, root_admission) = {
@@ -352,6 +357,8 @@ impl VodServe {
                 kind,
                 cause,
                 None,
+                #[cfg(target_os = "linux")]
+                None,
             );
         }
         Some(cleanup)
@@ -556,6 +563,8 @@ impl VodServe {
                 kind,
                 Terminal::Superseded,
                 None,
+                #[cfg(target_os = "linux")]
+                None,
             );
         }
         drop(lifecycle_guards);
@@ -566,10 +575,20 @@ impl VodServe {
     /// the session. `false` means it does not, and the caller should ask the
     /// other one.
     pub(crate) async fn record_desired_persisted(&self, session_id: &str, digest: &str) -> bool {
-        let sessions = self.shared.sessions.lock().await;
-        let Some(session) = sessions.get(session_id) else {
+        let mut sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id) else {
             return false;
         };
+        #[cfg(target_os = "linux")]
+        if session
+            .rendition
+            .as_ref()
+            .and_then(|rendition| rendition.finite_client_lease.as_ref())
+            .is_some()
+            && session.reserve_finite_control_growth(digest.len()).is_err()
+        {
+            return false;
+        }
         session
             .control
             .lock()

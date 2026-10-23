@@ -781,6 +781,10 @@ async fn insert_control_session(
             control_end: None,
             control_end_snapshot: None,
             prepared_incarnation: None,
+            #[cfg(target_os = "linux")]
+            finite_session_slot: None,
+            #[cfg(target_os = "linux")]
+            finite_control_slot: None,
             terminal_cleanup: None,
             tombstone: None,
         },
@@ -838,6 +842,10 @@ async fn insert_terminal_session(
             control_end: None,
             control_end_snapshot: None,
             prepared_incarnation: None,
+            #[cfg(target_os = "linux")]
+            finite_session_slot: None,
+            #[cfg(target_os = "linux")]
+            finite_control_slot: None,
             terminal_cleanup: Some(cleanup),
             tombstone: Some(Terminal::Deleted),
         },
@@ -927,7 +935,7 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         slot: Arc::new(ProducerSlot::new()),
         source_owners: SourceRenditionOwners::default(),
         retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
-        readers: Mutex::new(HashMap::new()),
+        readers: Mutex::new(ReaderTable::legacy()),
         publication_serial: AtomicU64::new(0),
         publication_versions: StdMutex::new(vec![None; plan_len]),
         marker_prewarm_dispatch: StdMutex::new(None),
@@ -949,10 +957,12 @@ pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         permit_wait_logged: AtomicBool::new(false),
         handoff: StdMutex::new(None),
         handoff_expiry_armed: AtomicBool::new(false),
-        demand_since: StdMutex::new(HashMap::new()),
+        demand_since: StdMutex::new(DemandTable::legacy()),
         fragment_received: StdMutex::new(None),
         #[cfg(target_os = "linux")]
         finite_metadata_lease: None,
+        #[cfg(target_os = "linux")]
+        finite_client_lease: None,
     })
 }
 

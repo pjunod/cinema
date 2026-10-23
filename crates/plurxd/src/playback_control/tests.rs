@@ -17444,3 +17444,63 @@ fn accept_step_retires_outstanding_fences_only_on_adoption() {
         "the fence is still attached to the adopted state's token"
     );
 }
+
+#[test]
+fn finite_control_preflight_refusal_preserves_prior_sequence_and_observation_token() {
+    let client = "22222222-2222-4222-8222-222222222222";
+    let first = web_snapshot_request("incumbent_while_replacement_pending", "finite-control", 1);
+    let first_snapshot = PlaybackDemandSnapshot::from(&first);
+    let mut state = ControlState::default();
+    let original = state
+        .accept(
+            "finite-control",
+            1,
+            client,
+            1,
+            ControlAcceptance::observed(
+                first_snapshot.platform(),
+                &PreparedSuccessorObservation::NotRequested,
+                first_snapshot.acknowledgement.as_ref(),
+                first_snapshot.request_fingerprint.as_deref(),
+                &first_snapshot.selection,
+                first_snapshot.capabilities.as_ref(),
+            ),
+        )
+        .expect("first accepted control");
+    assert_eq!(original.0, ControlDisposition::Accepted);
+    state.observe(
+        &first_snapshot.selection,
+        first_snapshot.capabilities.as_ref(),
+    );
+    let published_live = Arc::clone(&state.observational_live);
+    let second = web_snapshot_request("incumbent_after_250ms_of_progress", "finite-control", 2);
+    let second_snapshot = PlaybackDemandSnapshot::from(&second);
+    let request = || ControlRequestView {
+        generation: "finite-control",
+        owner_epoch: 1,
+        client_instance_id: client,
+        sequence: 2,
+        acceptance: ControlAcceptance::observed(
+            second_snapshot.platform(),
+            &PreparedSuccessorObservation::NotRequested,
+            second_snapshot.acknowledgement.as_ref(),
+            second_snapshot.request_fingerprint.as_deref(),
+            &second_snapshot.selection,
+            second_snapshot.capabilities.as_ref(),
+        ),
+    };
+    let refused_for_budget = state.prepare_finite_control(request(), &second_snapshot);
+    assert!(refused_for_budget.accepted());
+    assert!(refused_for_budget.requested_heap_bytes().is_some());
+    drop(refused_for_budget); // reserve failure: no adoption
+    assert_eq!(state.last_sequence, 1);
+    assert!(Arc::ptr_eq(&published_live, &state.observational_live));
+    assert!(published_live.load(Ordering::Acquire));
+    let admitted = state.prepare_finite_control(request(), &second_snapshot);
+    let (outcome, _, _) = admitted.adopt(&mut state);
+    assert_eq!(
+        outcome.expect("charged acceptance").0,
+        ControlDisposition::Accepted
+    );
+    assert_eq!(state.last_sequence, 2);
+}

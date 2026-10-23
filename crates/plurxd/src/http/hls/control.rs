@@ -1,5 +1,98 @@
 use super::*;
 
+#[path = "control/terminal_memory.rs"]
+mod terminal_memory;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct FiniteControlHold(
+    Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+);
+
+/// The body, rather than a handler-local DTO or response header, owns the
+/// exchange's original client slot through the last streamed byte.
+#[cfg(target_os = "linux")]
+struct FiniteControlBody {
+    bytes: Vec<u8>,
+    _slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+}
+
+#[cfg(target_os = "linux")]
+impl AsRef<[u8]> for FiniteControlBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct FixedControlJson<'a> {
+    bytes: &'a mut Vec<u8>,
+    maximum: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl std::io::Write for FixedControlJson<'_> {
+    fn write(&mut self, value: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(value.len())
+            .ok_or_else(|| std::io::Error::other("control JSON length overflow"))?;
+        if next > self.maximum || next > self.bytes.capacity() {
+            return Err(std::io::Error::other(
+                "finite control JSON exceeds reserved capacity",
+            ));
+        }
+        self.bytes.extend_from_slice(value);
+        Ok(value.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fixed_finite_control_json(value: &impl serde::Serialize) -> Option<Vec<u8>> {
+    let maximum = crate::playback_control::MAX_RESPONSE_BYTES;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(maximum).ok()?;
+    if bytes.capacity() > maximum {
+        return None;
+    }
+    serde_json::to_writer(
+        &mut FixedControlJson {
+            bytes: &mut bytes,
+            maximum,
+        },
+        value,
+    )
+    .ok()?;
+    Some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn finite_control_body_response(
+    bytes: Vec<u8>,
+    slot: Arc<plurx_core::adaptive_resources::runtime::finite_vod::FiniteClientSlot>,
+) -> Response {
+    let body = axum::body::Body::from(Bytes::from_owner(FiniteControlBody {
+        bytes,
+        _slot: Arc::clone(&slot),
+    }));
+    let mut response = (
+        StatusCode::OK,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        body,
+    )
+        .into_response();
+    response.extensions_mut().insert(FiniteControlHold(slot));
+    response
+}
+
 /// GET /api/v1/files/:id/hls/start — **deprecated**; use `POST …/hls/sessions`.
 ///
 /// Kept as a bridge for clients that predate the POST route, and implemented
@@ -161,6 +254,20 @@ async fn public_control_processing(mut response: Response) -> Response {
     if response.status() != StatusCode::OK {
         return response;
     }
+    #[cfg(target_os = "linux")]
+    let finite_hold = response.extensions().get::<FiniteControlHold>().cloned();
+    #[cfg(target_os = "linux")]
+    let finite_rewrite_slot = if let Some(hold) = finite_hold.as_ref() {
+        match hold
+            .0
+            .reserve_related(crate::playback_control::MAX_RESPONSE_BYTES)
+        {
+            Ok(slot) => Some(slot),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        None
+    };
     let (mut parts, body) = response.into_parts();
     let bytes = match axum::body::to_bytes(body, crate::playback_control::MAX_RESPONSE_BYTES).await
     {
@@ -191,6 +298,16 @@ async fn public_control_processing(mut response: Response) -> Response {
         }
     }
     parts.headers.remove(header::CONTENT_LENGTH);
+    #[cfg(target_os = "linux")]
+    if let Some(slot) = finite_rewrite_slot {
+        let Some(bytes) = fixed_finite_control_json(&value) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        return Response::from_parts(
+            parts,
+            axum::body::Body::from(Bytes::from_owner(FiniteControlBody { bytes, _slot: slot })),
+        );
+    }
     Response::from_parts(
         parts,
         axum::body::Body::from(serde_json::to_vec(&value).expect("control JSON")),
@@ -242,6 +359,39 @@ mod dv_processing_wire_tests {
 pub(super) struct RetainedTerminalResponse {
     pub(super) platform: crate::playback_control::ClientPlatform,
     pub(super) response: crate::playback_control::ControlResponseV1,
+}
+
+#[derive(serde::Serialize)]
+struct RetainedTerminalResponseRef<'a> {
+    platform: crate::playback_control::ClientPlatform,
+    response: &'a crate::playback_control::ControlResponseV1,
+}
+
+#[cfg(target_os = "linux")]
+fn terminal_ack_clone_heap_bytes(ack: &MediaSessionTerminalAck) -> Option<usize> {
+    let mut bytes = std::mem::size_of::<MediaSessionTerminalAck>();
+    for value in [
+        &ack.incarnation_id,
+        &ack.session_id,
+        &ack.owner_node_id,
+        &ack.client_instance_id,
+        &ack.request_fingerprint,
+        &ack.response_json,
+    ] {
+        bytes = bytes.checked_add(value.capacity())?;
+    }
+    Some(bytes)
+}
+
+fn unavailable_terminal_commit(
+    handoff: Option<crate::playback_control::TerminalResponseHandoff>,
+) -> crate::playback_control::TerminalCommitReceipt {
+    let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
+    if let Some(handoff) = handoff {
+        handoff.complete();
+    }
+    let _ = sender.send(Some(Err(())));
+    receipt
 }
 
 /// Resolve the selected native text track's cache state for the control
@@ -718,6 +868,8 @@ async fn settle_preparation_control(
                 terminal_handoff: None,
                 terminal_commit: None,
                 selection: outcome.selection.clone(),
+                #[cfg(target_os = "linux")]
+                finite_client_slot: None,
             };
             let mut response =
                 local_control_response(route, start, recipe, request, &result, response_time, None);
@@ -1325,10 +1477,26 @@ pub(super) async fn persist_terminal_ack_with_faults(
 }
 
 impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommitter {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        terminal_memory::committer(self)
+    }
+
     fn start(
         &self,
         result: &crate::playback_control::LocalControlResult,
     ) -> crate::playback_control::TerminalCommitReceipt {
+        #[cfg(target_os = "linux")]
+        let finite_terminal_slot = if let Some(source) = result.finite_client_slot.as_ref() {
+            let Some(payload) = crate::playback_control::MAX_RESPONSE_BYTES.checked_mul(4) else {
+                return unavailable_terminal_commit(result.terminal_handoff.clone());
+            };
+            match source.reserve_related(payload) {
+                Ok(slot) => Some(slot),
+                Err(_) => return unavailable_terminal_commit(result.terminal_handoff.clone()),
+            }
+        } else {
+            None
+        };
         let server_time_unix_ms = unix_ms();
         let mut response = local_control_response(
             &self.route,
@@ -1374,24 +1542,28 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
                 crate::telemetry::emit(Arc::clone(&self.store), event);
             }
         }
-        let response_json = serde_json::to_string(&RetainedTerminalResponse {
+        let retained_response = RetainedTerminalResponseRef {
             platform: result.platform,
-            response: response.clone(),
-        });
+            response: &response,
+        };
+        #[cfg(target_os = "linux")]
+        let response_json = if finite_terminal_slot.is_some() {
+            fixed_finite_control_json(&retained_response)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        } else {
+            serde_json::to_string(&retained_response).ok()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let response_json = serde_json::to_string(&retained_response).ok();
         let identity = (
             i64::try_from(self.request.sequence),
             self.request.fingerprint(),
         );
         let handoff = result.terminal_handoff.clone();
-        let (Ok(response_json), (Ok(sequence), Some(request_fingerprint))) =
+        let (Some(response_json), (Ok(sequence), Some(request_fingerprint))) =
             (response_json, identity)
         else {
-            let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
-            if let Some(handoff) = handoff {
-                handoff.complete();
-            }
-            let _ = sender.send(Some(Err(())));
-            return receipt;
+            return unavailable_terminal_commit(handoff);
         };
         let acknowledgement = MediaSessionTerminalAck {
             incarnation_id: self.route.incarnation_id.clone(),
@@ -1405,6 +1577,31 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             expires_at_ms: server_time_unix_ms
                 .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),
             updated_at_ms: server_time_unix_ms,
+        };
+        #[cfg(target_os = "linux")]
+        let finite_retry_payload = if let Some(slot) = finite_terminal_slot.as_ref() {
+            let Some(payload) = response
+                .requested_heap_bytes()
+                .and_then(|bytes| {
+                    bytes.checked_add(terminal_ack_clone_heap_bytes(&acknowledgement)?)
+                })
+                .and_then(|bytes| bytes.checked_add(self.route.session_id.capacity()))
+            else {
+                return unavailable_terminal_commit(handoff);
+            };
+            let Some(initial) = response.requested_heap_bytes().and_then(|bytes| {
+                bytes.checked_add(terminal_ack_clone_heap_bytes(&acknowledgement)?)
+            }) else {
+                return unavailable_terminal_commit(handoff);
+            };
+            if acknowledgement.response_json.len() > crate::playback_control::MAX_RESPONSE_BYTES
+                || slot.validate_actual(initial).is_err()
+            {
+                return unavailable_terminal_commit(handoff);
+            }
+            Some(payload)
+        } else {
+            None
         };
         let store = Arc::clone(&self.store);
         let faults = self.faults.clone();
@@ -1439,6 +1636,18 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         crate::playback_control::TerminalCommitReceipt::retryable_until(
             acknowledgement.expires_at_ms,
             move |attempt| {
+                #[cfg(target_os = "linux")]
+                let finite_retry_slot = if let Some(source) = finite_terminal_slot.as_ref() {
+                    match source.reserve_related(finite_retry_payload.expect("finite retry size")) {
+                        Ok(slot) => Some(slot),
+                        Err(_) => {
+                            attempt.complete(Err(()));
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let store = Arc::clone(&store);
                 let acknowledgement = acknowledgement.clone();
                 let response = response.clone();
@@ -1472,7 +1681,15 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
                     if let Some(handoff) = handoff {
                         handoff.complete();
                     }
-                    attempt.complete(if persisted { Ok(response) } else { Err(()) });
+                    attempt.complete_answer(if persisted {
+                        Ok(crate::playback_control::TerminalControlAnswer {
+                            response,
+                            #[cfg(target_os = "linux")]
+                            finite_slot: finite_retry_slot,
+                        })
+                    } else {
+                        Err(())
+                    });
                 });
             },
         )
@@ -2827,6 +3044,38 @@ async fn control_local_with_observation(
             );
         }
     };
+    // Each finite HTTP exchange owns its own response DTO and serialized body.
+    // Reserve from the still-live control slot before constructing either;
+    // concurrent replays cannot reuse the same allocation's charge.
+    #[cfg(target_os = "linux")]
+    let finite_response_slot = if let Some(source) = result.finite_client_slot.as_ref() {
+        let Some(payload) = crate::playback_control::MAX_RESPONSE_BYTES
+            .checked_mul(3)
+            .and_then(|value| {
+                value.checked_add(std::mem::size_of::<
+                    crate::playback_control::ControlResponseV1,
+                >())
+            })
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match source.reserve_related(payload) {
+            Ok(slot) => Some(slot),
+            Err(_) => {
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "finite control response capacity is unavailable",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                )
+            }
+        }
+    } else {
+        None
+    };
     let retained_preparation_response = if result.preparation_directive.is_some() {
         let settlement = match preparation_admission
             .as_ref()
@@ -2875,6 +3124,8 @@ async fn control_local_with_observation(
     // replay differ, which is the one property §4 says must always hold.
     let durable_receipt_response =
         retained_preparation_response.is_some() || result.lease_state == "ended";
+    #[cfg(target_os = "linux")]
+    let mut _finite_terminal_answer_slot = None;
     let mut response = if let Some(response) = retained_preparation_response {
         response
     } else if result.lease_state == "ended" {
@@ -2903,7 +3154,13 @@ async fn control_local_with_observation(
             );
         };
         match commit.wait().await {
-            Ok(response) => response,
+            Ok(answer) => {
+                #[cfg(target_os = "linux")]
+                {
+                    _finite_terminal_answer_slot = answer.finite_slot;
+                }
+                answer.response
+            }
             Err(()) => {
                 crate::playback_control::record(
                     crate::playback_control::MetricOutcome::Unavailable,
@@ -3272,6 +3529,30 @@ async fn control_local_with_observation(
         lease_timeout_ms = result.lease_timeout_ms,
         "playback control exchange"
     );
+    #[cfg(target_os = "linux")]
+    if let Some(slot) = finite_response_slot {
+        let Some(actual) = response
+            .requested_heap_bytes()
+            .and_then(|bytes| bytes.checked_add(crate::playback_control::MAX_RESPONSE_BYTES))
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        if slot.validate_actual(actual).is_err() {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        return match fixed_finite_control_json(&response) {
+            Some(bytes) => finite_control_body_response(bytes, slot),
+            None => control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the finite control response exceeds its reserved capacity",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            ),
+        };
+    }
     (
         StatusCode::OK,
         [(header::CACHE_CONTROL, "no-store")],

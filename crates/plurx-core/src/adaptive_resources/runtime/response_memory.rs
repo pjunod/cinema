@@ -20,6 +20,15 @@ struct BudgetState {
     closing: bool,
     failed: bool,
     metadata_live: bool,
+    client_live: bool,
+    client_limit: usize,
+    client_used: usize,
+    client_slots: usize,
+}
+
+enum ClientReservationSource {
+    Lease(usize),
+    ExistingSlot(usize),
 }
 
 pub(in crate::adaptive_resources::runtime) struct ResponseBudget {
@@ -61,6 +70,10 @@ impl ResponseBudget {
                 closing: false,
                 failed: false,
                 metadata_live: false,
+                client_live: false,
+                client_limit: 0,
+                client_used: 0,
+                client_slots: 0,
             }),
         }))
     }
@@ -86,7 +99,13 @@ impl ResponseBudget {
                 if state.failed {
                     return Err(OperationError::State);
                 }
-                if state.live == 0 && !state.metadata_live && state.used == BASE_OVERHEAD_BYTES {
+                if state.live == 0
+                    && !state.metadata_live
+                    && !state.client_live
+                    && state.client_slots == 0
+                    && state.client_used == 0
+                    && state.used == BASE_OVERHEAD_BYTES
+                {
                     return Ok(());
                 }
             }
@@ -96,23 +115,49 @@ impl ResponseBudget {
         }
     }
 
-    pub(in crate::adaptive_resources::runtime) fn reserve_metadata(
+    pub(in crate::adaptive_resources::runtime) fn reserve_metadata_partitions(
         self: &Arc<Self>,
-        required: usize,
-    ) -> Result<FiniteMetadataLease, OperationError> {
+        immutable_required: usize,
+        client_limit: usize,
+    ) -> Result<(FiniteMetadataLease, FiniteClientStateLease), OperationError> {
+        let total = immutable_required
+            .checked_add(client_limit)
+            .ok_or(OperationError::State)?;
         let mut state = self.state.lock().map_err(|_| OperationError::State)?;
-        if required == 0
-            || required > self.metadata_limit
+        if immutable_required == 0
+            || total > self.metadata_limit
             || state.metadata_live
+            || state.client_live
+            || state.client_slots != 0
+            || state.client_used != 0
             || state.closing
             || state.failed
         {
             return Err(OperationError::State);
         }
         state.metadata_live = true;
-        Ok(FiniteMetadataLease {
-            budget: Arc::clone(self),
-        })
+        state.client_live = true;
+        state.client_limit = client_limit;
+        Ok((
+            FiniteMetadataLease {
+                budget: Arc::clone(self),
+                limit: immutable_required,
+            },
+            FiniteClientStateLease {
+                budget: Arc::clone(self),
+                limit: client_limit,
+            },
+        ))
+    }
+
+    #[cfg(test)]
+    fn reserve_metadata(
+        self: &Arc<Self>,
+        required: usize,
+    ) -> Result<FiniteMetadataLease, OperationError> {
+        let (metadata, client) = self.reserve_metadata_partitions(required, 0)?;
+        drop(client);
+        Ok(metadata)
     }
 
     pub(in crate::adaptive_resources::runtime) fn reserve(
@@ -154,6 +199,9 @@ impl ResponseBudget {
         if state.failed
             || state.live != 0
             || state.metadata_live
+            || state.client_live
+            || state.client_slots != 0
+            || state.client_used != 0
             || state.used != BASE_OVERHEAD_BYTES
         {
             return Err(OperationError::State);
@@ -168,6 +216,9 @@ impl ResponseBudget {
                 && !state.failed
                 && state.live == 0
                 && !state.metadata_live
+                && !state.client_live
+                && state.client_slots == 0
+                && state.client_used == 0
                 && state.used == BASE_OVERHEAD_BYTES
         })
     }
@@ -196,11 +247,12 @@ impl ResponseBudget {
 /// slot. Its destructor never settles a journal row or refunds the ledger.
 pub struct FiniteMetadataLease {
     budget: Arc<ResponseBudget>,
+    limit: usize,
 }
 
 impl FiniteMetadataLease {
     pub fn validate_actual(&self, requested_bytes: usize) -> io::Result<()> {
-        if requested_bytes == 0 || requested_bytes > self.budget.metadata_limit {
+        if requested_bytes == 0 || requested_bytes > self.limit {
             return Err(io::Error::other(
                 "finite rendition metadata exceeds its admitted partition",
             ));
@@ -217,6 +269,146 @@ impl Drop for FiniteMetadataLease {
                 state.closing = true;
             } else {
                 state.metadata_live = false;
+            }
+        }
+        self.budget.drained.notify_waiters();
+    }
+}
+
+/// Allocation authority for mutable finite client state. This lease is not
+/// cloneable; individual slots may be shared through the real owning objects.
+/// Neither top-lease nor slot Drop returns durable ledger credit.
+pub struct FiniteClientStateLease {
+    budget: Arc<ResponseBudget>,
+    limit: usize,
+}
+
+impl FiniteClientStateLease {
+    pub fn limit_bytes(&self) -> usize {
+        self.limit
+    }
+
+    pub fn reserve(&self, payload_bytes: usize) -> io::Result<Arc<FiniteClientSlot>> {
+        self.budget
+            .reserve_client_slot(payload_bytes, ClientReservationSource::Lease(self.limit))
+    }
+}
+
+impl ResponseBudget {
+    fn reserve_client_slot(
+        self: &Arc<Self>,
+        payload_bytes: usize,
+        source: ClientReservationSource,
+    ) -> io::Result<Arc<FiniteClientSlot>> {
+        let charge = FiniteClientSlot::required_bytes(payload_bytes)
+            .ok_or_else(|| io::Error::other("finite client-state size overflow"))?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("finite client-state budget unavailable"))?;
+        let source_live = match source {
+            ClientReservationSource::Lease(limit) => {
+                state.metadata_live && state.client_live && state.client_limit == limit
+            }
+            // The borrowed original slot cannot drop while this method runs.
+            // Its charge is still part of this SAME bounded partition, even
+            // if the rendition and both top leases have already disappeared.
+            ClientReservationSource::ExistingSlot(charge) => {
+                state.client_slots > 0 && state.client_used >= charge && state.client_limit > 0
+            }
+        };
+        if !source_live || state.failed || state.closing {
+            return Err(io::Error::other("finite client-state owner is closed"));
+        }
+        let used = state
+            .client_used
+            .checked_add(charge)
+            .ok_or_else(|| io::Error::other("finite client-state size overflow"))?;
+        let slots = state
+            .client_slots
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("finite client-state count overflow"))?;
+        if used > state.client_limit {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "finite client-state memory capacity is full",
+            ));
+        }
+        state.client_used = used;
+        state.client_slots = slots;
+        drop(state);
+        Ok(Arc::new(FiniteClientSlot {
+            budget: Arc::clone(self),
+            payload_bytes,
+            charge,
+        }))
+    }
+}
+
+impl Drop for FiniteClientStateLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.budget.state.lock() {
+            if !state.client_live || state.client_limit != self.limit {
+                state.failed = true;
+                state.closing = true;
+            } else {
+                state.client_live = false;
+            }
+        }
+        self.budget.drained.notify_waiters();
+    }
+}
+
+/// Keep the same Arc slot after all payload fields in every retaining owner.
+/// Its last Drop only reuses bytes inside the original admitted partition.
+pub struct FiniteClientSlot {
+    budget: Arc<ResponseBudget>,
+    payload_bytes: usize,
+    charge: usize,
+}
+
+impl FiniteClientSlot {
+    pub fn required_bytes(payload_bytes: usize) -> Option<usize> {
+        payload_bytes
+            .checked_add(std::mem::size_of::<Self>())?
+            .checked_add(2 * std::mem::size_of::<usize>())
+    }
+    /// Reserve a DISTINCT allocation before cloning an escaping control result
+    /// or serializing its response. The original slot keeps the same role's
+    /// partition alive after its rendition drops; this grants no native entry
+    /// or durable credit, and total outstanding bytes remain bounded.
+    pub fn reserve_related(&self, payload_bytes: usize) -> io::Result<Arc<FiniteClientSlot>> {
+        self.budget.reserve_client_slot(
+            payload_bytes,
+            ClientReservationSource::ExistingSlot(self.charge),
+        )
+    }
+
+    pub fn validate_actual(&self, actual_payload_bytes: usize) -> io::Result<()> {
+        if actual_payload_bytes > self.payload_bytes {
+            return Err(io::Error::other(
+                "finite client-state allocation exceeds its reserved slot",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FiniteClientSlot {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.budget.state.lock() {
+            match (
+                state.client_used.checked_sub(self.charge),
+                state.client_slots.checked_sub(1),
+            ) {
+                (Some(used), Some(slots)) => {
+                    state.client_used = used;
+                    state.client_slots = slots;
+                }
+                _ => {
+                    state.failed = true;
+                    state.closing = true;
+                }
             }
         }
         self.budget.drained.notify_waiters();
@@ -392,8 +584,8 @@ mod tests {
         let budget = ResponseBudget::with_metadata(response_limit, 256).unwrap();
         assert!(budget.reserve_metadata(257).is_err());
         let metadata = budget.reserve_metadata(192).unwrap();
-        assert!(metadata.validate_actual(256).is_ok());
-        assert!(metadata.validate_actual(257).is_err());
+        assert!(metadata.validate_actual(192).is_ok());
+        assert!(metadata.validate_actual(193).is_err());
         assert!(budget.reserve_metadata(1).is_err());
         let body = FiniteResponseBuffer::allocate(budget.reserve(64).unwrap(), 64).unwrap();
         assert!(budget.reserve(1).is_err());
@@ -429,6 +621,93 @@ mod tests {
         // A drain notification itself cannot grant physical settlement or
         // close the budget against a subsequent in-flight response race.
         assert!(!budget.closed_and_empty());
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
+    }
+    #[test]
+    fn client_partition_refusal_is_atomic_and_does_not_spend_response_credit() {
+        let response_limit = BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64;
+        let client_limit = FiniteClientSlot::required_bytes(80).unwrap();
+        let budget = ResponseBudget::with_metadata(response_limit, 128 + client_limit).unwrap();
+        assert!(budget
+            .reserve_metadata_partitions(129, client_limit)
+            .is_err());
+        let (metadata, clients) = budget
+            .reserve_metadata_partitions(128, client_limit)
+            .unwrap();
+        assert!(budget.reserve_metadata_partitions(1, 1).is_err());
+        let client = clients.reserve(80).unwrap();
+        assert!(client.validate_actual(80).is_ok());
+        assert!(client.validate_actual(81).is_err());
+        assert_eq!(
+            clients.reserve(1).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let body = FiniteResponseBuffer::allocate(budget.reserve(64).unwrap(), 64).unwrap();
+        drop(client);
+        let replacement = clients.reserve(80).unwrap();
+        drop((body, replacement, clients, metadata));
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
+    }
+
+    #[tokio::test]
+    async fn escaped_client_alias_blocks_drain_after_rendition_owners_drop() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let client_limit = FiniteClientSlot::required_bytes(64).unwrap();
+        let budget = ResponseBudget::with_metadata(
+            BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64,
+            128 + client_limit,
+        )
+        .unwrap();
+        let (metadata, clients) = budget
+            .reserve_metadata_partitions(128, client_limit)
+            .unwrap();
+        let client = clients.reserve(64).unwrap();
+        let session_alias = Arc::clone(&client);
+        drop((client, metadata));
+        assert!(clients.reserve(1).is_err());
+        drop(clients);
+        assert!(budget.begin_close_if_empty().is_err());
+        assert!(budget
+            .reserve_metadata_partitions(128, client_limit)
+            .is_err());
+        let wait =
+            budget.wait_drained(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        tokio::pin!(wait);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        drop(session_alias);
+        assert!(matches!(
+            wait.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(!budget.closed_and_empty());
+        budget.begin_close_if_empty().unwrap();
+        assert!(budget.closed_and_empty());
+    }
+    #[test]
+    fn related_control_copies_remain_bounded_after_top_leases_drop() {
+        let one = FiniteClientSlot::required_bytes(80).unwrap();
+        let budget = ResponseBudget::with_metadata(
+            BASE_OVERHEAD_BYTES + SLOT_OVERHEAD_BYTES + 64,
+            128 + 2 * one,
+        )
+        .unwrap();
+        let (metadata, clients) = budget.reserve_metadata_partitions(128, 2 * one).unwrap();
+        let original = clients.reserve(80).unwrap();
+        drop((metadata, clients));
+        let copy = original.reserve_related(80).unwrap();
+        assert_eq!(
+            original.reserve_related(1).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(budget.begin_close_if_empty().is_err());
+        drop(original);
+        let body = copy.reserve_related(80).unwrap();
+        assert!(budget.begin_close_if_empty().is_err());
+        drop((copy, body));
         budget.begin_close_if_empty().unwrap();
         assert!(budget.closed_and_empty());
     }

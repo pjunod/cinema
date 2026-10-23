@@ -1041,7 +1041,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
 pub(super) fn reader_admission_priority(
     pool: &WaitPool,
     rendition: &Rendition,
-    readers: &HashMap<String, Reader>,
+    readers: &ReaderTable,
 ) -> Option<crate::admission::Priority> {
     use crate::admission::Priority;
     let mut priority = None;
@@ -1069,7 +1069,7 @@ pub(super) fn reader_admission_priority(
 pub(super) fn playback_demands(
     pool: &WaitPool,
     rendition: &Rendition,
-    readers: &HashMap<String, Reader>,
+    readers: &ReaderTable,
     manifest: &Manifest,
 ) -> Vec<Demand> {
     let blocked = pool

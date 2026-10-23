@@ -45,6 +45,8 @@ pub enum ApiError {
         message: String,
         detail: serde_json::Map<String, serde_json::Value>,
     },
+    /// Shares the original charged diagnostic through HTTP body cancellation.
+    FiniteMaterialization(std::sync::Arc<crate::waitpool::FiniteWaitFailure>),
     Internal(String),
 }
 
@@ -92,6 +94,7 @@ impl ApiError {
             ApiError::Typed { code, .. }
             | ApiError::TypedRetry { code, .. }
             | ApiError::TypedDetail { code, .. } => Some(code),
+            ApiError::FiniteMaterialization(failure) => Some(failure.code()),
             _ => None,
         }
     }
@@ -116,6 +119,9 @@ impl ApiError {
             | ApiError::TypedRetry {
                 status, message, ..
             } => (*status, message.clone()),
+            ApiError::FiniteMaterialization(failure) => {
+                (failure.status(), failure.message().to_owned())
+            }
             ApiError::Internal(msg) => {
                 // Detail is logged, not leaked to the client.
                 tracing::error!(error = %msg, "internal error");
@@ -130,6 +136,14 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::FiniteMaterialization(failure) = self {
+            return (
+                failure.status(),
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                failure.body(),
+            )
+                .into_response();
+        }
         if let ApiError::Unprocessable(body) = self {
             return (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response();
         }

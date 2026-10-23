@@ -252,7 +252,7 @@ impl Shared {
         self: &Arc<Self>,
         rendition: &Arc<Rendition>,
         index: u32,
-    ) -> MaterializeDemand {
+    ) -> std::io::Result<MaterializeDemand> {
         let mut clocks = rendition.demand_since.lock().expect("demand lock");
         self.arm_materialize_watchdog_locked(rendition, index, &mut clocks)
     }
@@ -261,134 +261,210 @@ impl Shared {
         self: &Arc<Self>,
         rendition: &Arc<Rendition>,
         index: u32,
-        demands: &mut HashMap<u32, MaterializeClock>,
-    ) -> MaterializeDemand {
+        demands: &mut DemandTable,
+    ) -> std::io::Result<MaterializeDemand> {
         let started = Instant::now();
         if let Some(clock) = demands.get_mut(&index) {
             clock.owners += 1;
             clock.retry_pending = false;
-            return MaterializeDemand {
+            return Ok(MaterializeDemand {
                 rendition: Arc::clone(rendition),
                 index,
                 started: clock.started,
-            };
+            });
         }
-        demands.insert(
-            index,
-            MaterializeClock {
-                started,
-                owners: 1,
-                retry_pending: false,
-                watchdog: None,
-                verdict: None,
-            },
-        );
+        if !demands.has_room_for(&index) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "finite demand table has no remaining slot",
+            ));
+        }
+        let watchdog_future = |task_slot: Option<super::client_state::ClientSlot>| {
+            let shared = Arc::clone(self);
+            let rendition = Arc::clone(rendition);
+            async move {
+                // The task and its clock share this same original budget slot.
+                let _task_slot = task_slot;
+                tokio::time::sleep_until(tokio::time::Instant::from_std(
+                    started + rendition.materialize_budget,
+                ))
+                .await;
+                if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
+                    rendition.clear_demand(index);
+                    return;
+                }
+                let expired = if index == INIT_DEMAND_INDEX {
+                    if rendition.dir.has_init().await {
+                        rendition.clear_demand(index);
+                        false
+                    } else {
+                        rendition
+                            .demand_since
+                            .lock()
+                            .expect("demand lock")
+                            .get(&index)
+                            .is_some_and(|clock| clock.started == started)
+                    }
+                } else {
+                    // The sink takes these locks in the same order and clears the
+                    // demand before releasing the manifest, closing the
+                    // deadline/materialization race.
+                    let manifest = rendition.manifest.lock().await;
+                    if manifest.state(index).is_some_and(SegState::is_materialized) {
+                        rendition.clear_demand(index);
+                        false
+                    } else {
+                        rendition
+                            .demand_since
+                            .lock()
+                            .expect("demand lock")
+                            .get(&index)
+                            .is_some_and(|clock| clock.started == started)
+                    }
+                };
+                if !expired || rendition.failure().is_some() {
+                    return;
+                }
+                // Name the phase the deadline caught rather than calling every
+                // expiry a producer failure: a rendition parked on a refused
+                // encoder permit never had a producer to fail.
+                #[cfg(target_os = "linux")]
+                let verdict = if rendition.finite_client_lease.is_some() {
+                    match rendition.finite_materialize_verdict_bounded(
+                        index,
+                        rendition.producer_belief().await,
+                    ) {
+                        Ok(verdict) => verdict,
+                        Err(error) => {
+                            tracing::warn!(target: "plurxd::vodserve", entry = index,
+                            %error, "finite materialization verdict exceeds client partition");
+                            // Allocation uncertainty is not evidence that a
+                            // producer failed. Keep the original owner/charge;
+                            // normal request deadlines can still answer pending.
+                            return;
+                        }
+                    }
+                } else {
+                    rendition.materialize_verdict(index, rendition.producer_belief().await)
+                };
+                #[cfg(not(target_os = "linux"))]
+                let verdict =
+                    rendition.materialize_verdict(index, rendition.producer_belief().await);
+                #[cfg(target_os = "linux")]
+                let verdict = if let Some(slot) = _task_slot.as_ref() {
+                    match verdict.into_finite(slot) {
+                        Ok(verdict) => verdict,
+                        Err(error) => {
+                            tracing::warn!(target: "plurxd::vodserve", %error,
+                            "finite materialization failure allocation refused");
+                            return;
+                        }
+                    }
+                } else {
+                    verdict
+                };
+                let verdict = {
+                    let mut clocks = rendition.demand_since.lock().expect("demand lock");
+                    let Some(clock) = clocks
+                        .get_mut(&index)
+                        .filter(|clock| clock.started == started)
+                    else {
+                        return;
+                    };
+                    if let Some(recorded) = &clock.verdict {
+                        recorded.clone()
+                    } else {
+                        clock.verdict = Some(verdict.clone());
+                        verdict
+                    }
+                };
+                tracing::warn!(
+                    target: "plurxd::vodserve",
+                    rendition = %rendition.key,
+                    entry = index,
+                    verdict = ?verdict,
+                    "materialize deadline expired"
+                );
+                if index != INIT_DEMAND_INDEX {
+                    // A slow, cancelled, or superseded segment request cannot
+                    // prove that this shared producer is unhealthy. Settle only
+                    // currently admitted waiters for this entry; if all callers
+                    // disappeared, this is a no-op. Real child failures still
+                    // use record_failure to answer the whole rendition.
+                    // Keep the episode fence through the synchronous wake. A
+                    // cancelled old watchdog must not wake a newly registered
+                    // request for this same index after it acquired a new clock.
+                    let clocks = rendition.demand_since.lock().expect("demand lock");
+                    if !clocks
+                        .get(&index)
+                        .is_some_and(|clock| clock.started == started)
+                    {
+                        return;
+                    }
+                    shared
+                        .pool
+                        .expire_entry(&rendition.key, index, verdict.wait_outcome());
+                    drop(clocks);
+                    rendition.kick();
+                } else {
+                    // Init waiters inspect their own captured clock after this wake.
+                    rendition.init_notify.notify_waiters();
+                }
+                // Preserve expiry long enough for a normal Retry-After cycle to
+                // receive its typed failure, then forget an abandoned HTTP retry.
+                // An old task never removes a newer episode for this same entry.
+                tokio::time::sleep(MATERIALIZE_EXPIRY_RETAINED).await;
+                let mut demands = rendition.demand_since.lock().expect("demand lock");
+                if demands
+                    .get(&index)
+                    .is_some_and(|clock| clock.started == started && clock.owners == 0)
+                {
+                    demands.remove(&index);
+                }
+            }
+        };
+        let prototype = watchdog_future(None);
+        let future_bytes = std::mem::size_of_val(&prototype);
+        drop(prototype);
+        #[cfg(target_os = "linux")]
+        let slot = if let Some(lease) = rendition.finite_client_lease.as_ref() {
+            // One watchdog and one immediate-expiry request may construct a
+            // payload concurrently. The chosen immutable diagnostic/body then
+            // shares this same slot through every waiter and HTTP body.
+            let payload = crate::waitpool::FiniteWaitFailure::required_payload_bytes()
+                .and_then(|bytes| bytes.checked_mul(2))
+                .and_then(|bytes| future_bytes.checked_add(bytes))
+                .ok_or_else(|| std::io::Error::other("finite watchdog size overflow"))?;
+            Some(super::client_state::ClientSlot(lease.reserve(payload)?))
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let slot: Option<super::client_state::ClientSlot> = None;
+        demands
+            .try_insert(
+                index,
+                MaterializeClock {
+                    started,
+                    owners: 1,
+                    retry_pending: false,
+                    watchdog: None,
+                    verdict: None,
+                    _finite_slot: slot.clone(),
+                },
+            )
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "finite demand table filled after preflight",
+                )
+            })?;
         let owner = MaterializeDemand {
             rendition: Arc::clone(rendition),
             index,
             started,
         };
-        let shared = Arc::clone(self);
-        let rendition = Arc::clone(rendition);
-        let watchdog = tokio::spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(
-                started + rendition.materialize_budget,
-            ))
-            .await;
-            if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
-                rendition.clear_demand(index);
-                return;
-            }
-            let expired = if index == INIT_DEMAND_INDEX {
-                if rendition.dir.has_init().await {
-                    rendition.clear_demand(index);
-                    false
-                } else {
-                    rendition
-                        .demand_since
-                        .lock()
-                        .expect("demand lock")
-                        .get(&index)
-                        .is_some_and(|clock| clock.started == started)
-                }
-            } else {
-                // The sink takes these locks in the same order and clears the
-                // demand before releasing the manifest, closing the
-                // deadline/materialization race.
-                let manifest = rendition.manifest.lock().await;
-                if manifest.state(index).is_some_and(SegState::is_materialized) {
-                    rendition.clear_demand(index);
-                    false
-                } else {
-                    rendition
-                        .demand_since
-                        .lock()
-                        .expect("demand lock")
-                        .get(&index)
-                        .is_some_and(|clock| clock.started == started)
-                }
-            };
-            if !expired || rendition.failure().is_some() {
-                return;
-            }
-            // Name the phase the deadline caught rather than calling every
-            // expiry a producer failure: a rendition parked on a refused
-            // encoder permit never had a producer to fail.
-            let verdict = rendition.materialize_verdict(index, rendition.producer_belief().await);
-            tracing::warn!(
-                target: "plurxd::vodserve",
-                rendition = %rendition.key,
-                entry = index,
-                verdict = ?verdict,
-                "materialize deadline expired"
-            );
-            {
-                let mut clocks = rendition.demand_since.lock().expect("demand lock");
-                let Some(clock) = clocks
-                    .get_mut(&index)
-                    .filter(|clock| clock.started == started)
-                else {
-                    return;
-                };
-                clock.verdict = Some(verdict.clone());
-            }
-            if index != INIT_DEMAND_INDEX {
-                // A slow, cancelled, or superseded segment request cannot
-                // prove that this shared producer is unhealthy. Settle only
-                // currently admitted waiters for this entry; if all callers
-                // disappeared, this is a no-op. Real child failures still
-                // use record_failure to answer the whole rendition.
-                // Keep the episode fence through the synchronous wake. A
-                // cancelled old watchdog must not wake a newly registered
-                // request for this same index after it acquired a new clock.
-                let clocks = rendition.demand_since.lock().expect("demand lock");
-                if !clocks
-                    .get(&index)
-                    .is_some_and(|clock| clock.started == started)
-                {
-                    return;
-                }
-                shared
-                    .pool
-                    .expire_entry(&rendition.key, index, verdict.wait_outcome());
-                drop(clocks);
-                rendition.kick();
-            } else {
-                // Init waiters inspect their own captured clock after this wake.
-                rendition.init_notify.notify_waiters();
-            }
-            // Preserve expiry long enough for a normal Retry-After cycle to
-            // receive its typed failure, then forget an abandoned HTTP retry.
-            // An old task never removes a newer episode for this same entry.
-            tokio::time::sleep(MATERIALIZE_EXPIRY_RETAINED).await;
-            let mut demands = rendition.demand_since.lock().expect("demand lock");
-            if demands
-                .get(&index)
-                .is_some_and(|clock| clock.started == started && clock.owners == 0)
-            {
-                demands.remove(&index);
-            }
-        });
+        let watchdog = tokio::spawn(watchdog_future(slot));
         if let Some(clock) = demands
             .get_mut(&index)
             .filter(|clock| clock.started == started)
@@ -397,7 +473,7 @@ impl Shared {
         } else {
             watchdog.abort();
         }
-        owner
+        Ok(owner)
     }
 
     /// Find or build the rendition for `key`, spawning its driver. `None`
@@ -1056,7 +1132,7 @@ impl Shared {
             slot: Arc::new(ProducerSlot::new()),
             source_owners: SourceRenditionOwners::default(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
-            readers: Mutex::new(HashMap::new()),
+            readers: Mutex::new(ReaderTable::legacy()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),
             marker_prewarm_dispatch: StdMutex::new(None),
@@ -1082,10 +1158,12 @@ impl Shared {
             permit_wait_logged: AtomicBool::new(false),
             handoff: StdMutex::new(None),
             handoff_expiry_armed: AtomicBool::new(false),
-            demand_since: StdMutex::new(HashMap::new()),
+            demand_since: StdMutex::new(DemandTable::legacy()),
             fragment_received: StdMutex::new(None),
             #[cfg(target_os = "linux")]
             finite_metadata_lease: None,
+            #[cfg(target_os = "linux")]
+            finite_client_lease: None,
         });
         rendition
     }

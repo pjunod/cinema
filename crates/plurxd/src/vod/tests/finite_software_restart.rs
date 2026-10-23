@@ -117,6 +117,7 @@ async fn ordinary_selected_finite_vod_reuses_dormant_s_after_process_restart() {
     );
     let final_key = rendition.key.clone();
     drop(rendition);
+    expire_finite_session_tombstone(&serve, "finite-software-restart").await;
     serve
         .shared
         .purge_if_dormant(&final_key, Duration::ZERO)
