@@ -262,6 +262,11 @@ impl DvSourceOrigin {
         self.value
     }
 
+    /// Exact frozen origin for the private helper protocol, never a sampled PTS.
+    pub fn exact(self) -> (i64, u32) {
+        (self.value.numerator, self.value.denominator)
+    }
+
     /// O + max(0, film boundary - source tick), in the untouched source clock.
     pub fn source_boundary(
         self,
