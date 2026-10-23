@@ -4161,7 +4161,27 @@ impl HiqliteAuthStore {
             .query_consistent_map::<RemoteShapeRow, _>(schema::CATALOG_SQL, params!())
             .await?;
         if !rows.is_empty() {
-            // Partial/future/unknown installations remain unavailable, unchanged.
+            let actual = rows
+                .into_iter()
+                .map(|row| (row.name, row.sql))
+                .collect::<Vec<_>>();
+            // Only the exact historical v1 adjunct is admitted for the
+            // additive close upgrade. Partial/future objects stay untouched.
+            if schema::verify_legacy_shape(&actual, layout) {
+                let statements = schema::close_upgrade_statements(layout)
+                    .into_iter()
+                    .map(|sql| (sql, params!()))
+                    .collect::<Vec<_>>();
+                admit_schema_migration(admission)?;
+                let attempted = self.schema_migration_transaction(statements).await;
+                if self.adaptive_attempt_schema().await? == AttemptSchemaReadiness::Ready {
+                    return Ok(());
+                }
+                attempted?;
+                return Err(StoreError::Migration(
+                    "adaptive close upgrade did not settle".into(),
+                ));
+            }
             return Ok(());
         }
         let mut statements = vec![(
@@ -4178,7 +4198,7 @@ impl HiqliteAuthStore {
                 .map(|(_, sql)| (sql, params!())),
         );
         statements.push((format!(
-            "INSERT INTO media_resource_schema(singleton,version,layout,revision) VALUES(1,1,'{}',0)",layout.tag()
+            "INSERT INTO media_resource_schema(singleton,version,layout,revision) VALUES(1,1,'{}',1)",layout.tag()
         ),params!()));
         admit_schema_migration(admission)?;
         let attempted = self.schema_migration_transaction(statements).await;

@@ -36,6 +36,7 @@ const TABLES: &[(&str, &str)] = &[
     ("media_resource_requests", "CREATE TABLE media_resource_requests (owner_key TEXT NOT NULL CHECK(length(CAST(owner_key AS BLOB)) BETWEEN 1 AND 256), request_id TEXT NOT NULL CHECK(length(CAST(request_id AS BLOB)) BETWEEN 1 AND 128), request_incarnation_id TEXT NOT NULL CHECK(length(request_incarnation_id)=36), binding_json TEXT NOT NULL CHECK(json_valid(binding_json) AND length(CAST(binding_json AS BLOB))<=8192), next_ordinal INTEGER NOT NULL CHECK(next_ordinal BETWEEN 2 AND 4), winner_attempt_id TEXT CHECK(winner_attempt_id IS NULL OR length(winner_attempt_id)=36), disposition TEXT NOT NULL CHECK(disposition IN('open','cancelled','adopted')), sequence INTEGER NOT NULL CHECK(sequence>0), last_operation_id TEXT NOT NULL CHECK(length(last_operation_id)=36), last_payload_digest TEXT NOT NULL CHECK(length(last_payload_digest)=64), PRIMARY KEY(owner_key,request_id,request_incarnation_id), UNIQUE(owner_key,request_id)) STRICT"),
     ("media_resource_attempts", "CREATE TABLE media_resource_attempts (attempt_id TEXT PRIMARY KEY CHECK(length(attempt_id)=36), owner_key TEXT NOT NULL, request_id TEXT NOT NULL, request_incarnation_id TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 3), route_incarnation_id TEXT NOT NULL UNIQUE CHECK(length(route_incarnation_id)=36), session_id TEXT NOT NULL UNIQUE CHECK(length(session_id)=36), worker_node_id TEXT NOT NULL CHECK(length(CAST(worker_node_id AS BLOB)) BETWEEN 1 AND 256), owner_epoch INTEGER NOT NULL CHECK(owner_epoch=ordinal), key_json TEXT NOT NULL CHECK(json_valid(key_json) AND length(CAST(key_json AS BLOB))<=2048), worker_instance_id TEXT NOT NULL CHECK(length(worker_instance_id)=36), serving_generation BLOB NOT NULL CHECK(length(serving_generation)=8), domains_json TEXT NOT NULL CHECK(json_valid(domains_json) AND json_type(domains_json)='array' AND json_array_length(domains_json) BETWEEN 1 AND 32 AND length(CAST(domains_json AS BLOB))<=16384), worker_json TEXT CHECK(worker_json IS NULL OR (json_valid(worker_json) AND length(CAST(worker_json AS BLOB))<=4096)), phase TEXT NOT NULL CHECK(phase IN('provisional','prepared','winner','losing','cleanup','closed')), sequence INTEGER NOT NULL CHECK(sequence>0), last_operation_id TEXT NOT NULL CHECK(length(last_operation_id)=36), last_payload_digest TEXT NOT NULL CHECK(length(last_payload_digest)=64), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>0), CHECK(phase NOT IN('prepared','winner') OR worker_json IS NOT NULL), UNIQUE(owner_key,request_id,request_incarnation_id,ordinal), UNIQUE(owner_key,request_id,request_incarnation_id,worker_node_id), FOREIGN KEY(owner_key,request_id,request_incarnation_id) REFERENCES media_resource_requests(owner_key,request_id,request_incarnation_id)) STRICT"),
     ("media_resource_operations", "CREATE TABLE media_resource_operations (operation_id TEXT PRIMARY KEY CHECK(length(operation_id)=36), owner_key TEXT NOT NULL, request_id TEXT NOT NULL, request_incarnation_id TEXT NOT NULL, attempt_id TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN('claim','prepared','winner','adopt','fence')), payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64), request_sequence INTEGER NOT NULL CHECK(request_sequence>0), attempt_sequence INTEGER NOT NULL CHECK(attempt_sequence>0), FOREIGN KEY(attempt_id) REFERENCES media_resource_attempts(attempt_id)) STRICT"),
+    ("media_resource_close_operations", "CREATE TABLE media_resource_close_operations (operation_id TEXT PRIMARY KEY CHECK(length(operation_id)=36), owner_key TEXT NOT NULL, request_id TEXT NOT NULL, request_incarnation_id TEXT NOT NULL, attempt_id TEXT NOT NULL, action TEXT NOT NULL CHECK(action='close'), payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64), request_sequence INTEGER NOT NULL CHECK(request_sequence>0), attempt_sequence INTEGER NOT NULL CHECK(attempt_sequence>0), FOREIGN KEY(attempt_id) REFERENCES media_resource_attempts(attempt_id)) STRICT"),
     ("media_resource_assertions", "CREATE TABLE media_resource_assertions (singleton INTEGER PRIMARY KEY CHECK(singleton=1), passed INTEGER NOT NULL CHECK(passed=1)) STRICT"),
     ("media_resource_worker_inventory", "CREATE INDEX media_resource_worker_inventory ON media_resource_attempts(worker_node_id,attempt_id) WHERE phase!='closed'"),
 ];
@@ -59,7 +60,7 @@ fn scoped(alias: &str) -> String {
     )
 }
 
-pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
+fn trigger_objects_for(layout: Layout, close_capable: bool) -> Vec<(String, String)> {
     let mut objects = Vec::new();
     let mut trigger = |name: &str, event: &str, table: &str, predicate: String| {
         let name = format!("media_resource_{name}");
@@ -70,7 +71,10 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
         ("media_resource_requests", "request"),
         ("media_resource_attempts", "attempt"),
         ("media_resource_operations", "operation"),
-    ] {
+    ]
+    .into_iter()
+    .chain(close_capable.then_some(("media_resource_close_operations", "close_operation")))
+    {
         trigger(&format!("{short}_delete"), "DELETE", table, "1".into());
         let authorized = claim(&scoped("NEW"));
         trigger(
@@ -96,6 +100,21 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
             "request" => "NEW.owner_key!=OLD.owner_key OR NEW.request_id!=OLD.request_id OR NEW.request_incarnation_id!=OLD.request_incarnation_id OR NEW.binding_json!=OLD.binding_json",
             "attempt" => "NEW.attempt_id!=OLD.attempt_id OR NEW.owner_key!=OLD.owner_key OR NEW.request_id!=OLD.request_id OR NEW.request_incarnation_id!=OLD.request_incarnation_id OR NEW.ordinal!=OLD.ordinal OR NEW.owner_epoch!=OLD.owner_epoch OR NEW.route_incarnation_id!=OLD.route_incarnation_id OR NEW.session_id!=OLD.session_id OR NEW.worker_node_id!=OLD.worker_node_id OR NEW.key_json!=OLD.key_json OR NEW.worker_instance_id!=OLD.worker_instance_id OR NEW.serving_generation!=OLD.serving_generation OR NEW.domains_json!=OLD.domains_json OR (OLD.worker_json IS NOT NULL AND NEW.worker_json IS NOT OLD.worker_json) OR NEW.phase='closed'",
             _ => "1",
+        };
+        let immutable = if short == "attempt" && close_capable {
+            immutable.replace(
+                "NEW.phase='closed'",
+                &format!(
+                    "(NEW.phase='closed' AND NOT(OLD.phase IN('losing','cleanup') AND {}))",
+                    claim(&format!(
+                        "{}=NEW.attempt_id AND {}='close'",
+                        field("attempt_id"),
+                        field("action")
+                    ))
+                ),
+            )
+        } else {
+            immutable.to_owned()
         };
         trigger(
             &format!("{short}_update"),
@@ -138,7 +157,11 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
             ""
         };
         let affected = format!("EXISTS(SELECT 1 FROM media_resource_attempts a WHERE a.route_incarnation_id={alias}.incarnation_id OR a.session_id={alias}.session_id{proposed})");
-        let permitted = claim(&format!("{}={alias}.incarnation_id AND {}={alias}.session_id AND {} IN('claim','adopt','fence')",field("route_incarnation_id"),field("session_id"),field("action")));
+        let permitted = if close_capable && event == "UPDATE" {
+            claim(&format!("{}={alias}.incarnation_id AND {}={alias}.session_id AND {} IN('claim','adopt','fence','close')",field("route_incarnation_id"),field("session_id"),field("action")))
+        } else {
+            claim(&format!("{}={alias}.incarnation_id AND {}={alias}.session_id AND {} IN('claim','adopt','fence')",field("route_incarnation_id"),field("session_id"),field("action")))
+        };
         let ordinary = if event == "UPDATE" {
             let principal = if layout == Layout::Principal {
                 " AND NEW.principal_kind IS OLD.principal_kind AND NEW.share_grant_id IS OLD.share_grant_id AND NEW.share_viewer_key IS OLD.share_viewer_key"
@@ -161,11 +184,19 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
             ""
         };
         let lease_affected = format!("EXISTS(SELECT 1 FROM media_resource_attempts a WHERE {alias}.resource='session:'||a.route_incarnation_id{lease_proposed})");
-        let lease_permitted = claim(&format!(
-            "{alias}.resource='session:'||{} AND {} IN('claim','adopt','fence')",
-            field("route_incarnation_id"),
-            field("action")
-        ));
+        let lease_permitted = if close_capable && event == "UPDATE" {
+            claim(&format!(
+                "{alias}.resource='session:'||{} AND {} IN('claim','adopt','fence','close')",
+                field("route_incarnation_id"),
+                field("action")
+            ))
+        } else {
+            claim(&format!(
+                "{alias}.resource='session:'||{} AND {} IN('claim','adopt','fence')",
+                field("route_incarnation_id"),
+                field("action")
+            ))
+        };
         let lease_ordinary = if event == "UPDATE" {
             "EXISTS(SELECT 1 FROM media_resource_attempts a JOIN media_resource_requests r USING(owner_key,request_id,request_incarnation_id) WHERE OLD.resource='session:'||a.route_incarnation_id AND r.disposition='adopted' AND r.winner_attempt_id=a.attempt_id AND NEW.resource=OLD.resource AND NEW.owner_node_id=OLD.owner_node_id AND NEW.fence=OLD.fence)"
         } else {
@@ -195,6 +226,19 @@ pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
     objects
 }
 
+pub fn trigger_objects(layout: Layout) -> Vec<(String, String)> {
+    trigger_objects_for(layout, true)
+}
+
+pub(crate) fn legacy_objects(layout: Layout) -> Vec<(String, String)> {
+    TABLES
+        .iter()
+        .filter(|(name, _)| *name != "media_resource_close_operations")
+        .map(|(name, sql)| ((*name).to_owned(), (*sql).to_owned()))
+        .chain(trigger_objects_for(layout, false))
+        .collect()
+}
+
 pub fn objects(layout: Layout) -> Vec<(String, String)> {
     TABLES
         .iter()
@@ -205,8 +249,7 @@ pub fn objects(layout: Layout) -> Vec<(String, String)> {
 
 pub const CATALOG_SQL: &str = "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*') ORDER BY name";
 
-pub fn exact_objects_guard(layout: Layout) -> String {
-    let objects = objects(layout);
+fn objects_guard(objects: Vec<(String, String)>) -> String {
     let predicates = objects
         .iter()
         .map(|(name, sql)| {
@@ -218,6 +261,49 @@ pub fn exact_objects_guard(layout: Layout) -> String {
         })
         .collect::<Vec<_>>();
     format!("(SELECT count(*) FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'media_resource_*' OR tbl_name GLOB 'media_resource_*'))={} AND ({})",objects.len(),predicates.join(") AND ("))
+}
+
+pub fn exact_objects_guard(layout: Layout) -> String {
+    objects_guard(objects(layout))
+}
+
+pub fn legacy_exact_objects_guard(layout: Layout) -> String {
+    objects_guard(legacy_objects(layout))
+}
+
+/// Upgrade only an exact historical adjunct. The existing request, attempt,
+/// operation and native session rows are never rewritten.
+pub fn close_upgrade_statements(layout: Layout) -> Vec<String> {
+    let old = legacy_objects(layout);
+    let new = objects(layout);
+    let mut sql = vec![assertion(&format!("({}) AND EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND version=1 AND layout={} AND revision>=0 AND mutation_claim IS NULL) AND ({})",legacy_exact_objects_guard(layout),quote(layout.tag()),session_shape_guard(layout)))];
+    sql.push(
+        TABLES
+            .iter()
+            .find(|(name, _)| *name == "media_resource_close_operations")
+            .expect("close table")
+            .1
+            .to_owned(),
+    );
+    for (name, statement) in &new {
+        match old.iter().find(|(prior, _)| prior == name) {
+            Some((_, prior)) if prior == statement => {}
+            Some(_) => {
+                sql.push(format!("DROP TRIGGER {name}"));
+                sql.push(statement.clone());
+            }
+            None if name != "media_resource_close_operations" => sql.push(statement.clone()),
+            None => {}
+        }
+    }
+    sql.push("UPDATE media_resource_schema SET revision=revision+1 WHERE singleton=1 AND version=1 AND mutation_claim IS NULL AND revision<9223372036854775807".into());
+    sql.push(assertion(&ready_guard(layout)));
+    sql
+}
+
+pub fn verify_legacy_shape(rows: &[(String, String)], layout: Layout) -> bool {
+    let expected = legacy_objects(layout);
+    rows.len() == expected.len() && expected.iter().all(|object| rows.contains(object))
 }
 
 /// Names only support the main-owned baseline count. Admission ALSO requires
@@ -303,7 +389,7 @@ pub fn session_shape_guard(layout: Layout) -> String {
 
 /// For use INSIDE the same transaction/snapshot as the coordination read/write.
 pub fn ready_guard(layout: Layout) -> String {
-    format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND version=1 AND layout={} AND revision>=0 AND mutation_claim IS NULL) AND NOT EXISTS(SELECT 1 FROM media_resource_assertions)",exact_objects_guard(layout),session_shape_guard(layout),quote(layout.tag()))
+    format!("({}) AND ({}) AND EXISTS(SELECT 1 FROM media_resource_schema WHERE singleton=1 AND version=1 AND layout={} AND revision>=1 AND mutation_claim IS NULL) AND NOT EXISTS(SELECT 1 FROM media_resource_assertions)",exact_objects_guard(layout),session_shape_guard(layout),quote(layout.tag()))
 }
 
 pub fn absent_guard() -> &'static str {
@@ -389,6 +475,16 @@ pub fn install_sqlite(conn: &Connection, layout: Layout) -> Result<(), StoreErro
     let tx = conn.unchecked_transaction()?;
     let absent: bool = tx.query_row(&format!("SELECT ({})", absent_guard()), [], |r| r.get(0))?;
     if !absent {
+        let rows = tx
+            .prepare(CATALOG_SQL)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<(String, String)>, _>>()?;
+        if verify_legacy_shape(&rows, layout) {
+            for sql in close_upgrade_statements(layout) {
+                tx.execute(&sql, [])?;
+            }
+            tx.commit()?;
+        }
         return Ok(());
     }
     let recognized: bool = tx.query_row(
@@ -404,7 +500,7 @@ pub fn install_sqlite(conn: &Connection, layout: Layout) -> Result<(), StoreErro
     }
     tx.execute(
         &format!(
-            "INSERT INTO media_resource_schema(singleton,version,layout,revision) VALUES(1,1,{},0)",
+            "INSERT INTO media_resource_schema(singleton,version,layout,revision) VALUES(1,1,{},1)",
             quote(layout.tag())
         ),
         [],

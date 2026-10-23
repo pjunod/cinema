@@ -173,3 +173,40 @@ fn partial_future_and_extra_schema_objects_remain_unavailable_without_repair() {
         assert_eq!(before, after, "{mode}: no destructive repair");
     }
 }
+
+#[tokio::test]
+async fn exact_v1_attempt_adjunct_upgrades_without_rewriting_history() {
+    let (store, claim) = fixture().await;
+    store
+        .claim_adaptive_attempt(&claim)
+        .await
+        .expect("historical operation");
+    store.with_conn(|conn| {
+        let before: (String,String,String,String) = conn.query_row("SELECT r.binding_json,a.key_json,a.last_payload_digest,o.payload_digest FROM media_resource_requests r JOIN media_resource_attempts a USING(owner_key,request_id,request_incarnation_id) JOIN media_resource_operations o ON o.operation_id=a.last_operation_id", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+        let old = schema::legacy_objects(schema::Layout::Legacy);
+        let current = schema::objects(schema::Layout::Legacy);
+        let tx = conn.unchecked_transaction()?;
+        for (name, sql) in &current {
+            match old.iter().find(|(candidate, _)| candidate == name) {
+                Some((_, historical)) if historical != sql => {
+                    tx.execute(&format!("DROP TRIGGER {name}"), [])?;
+                    tx.execute(historical, [])?;
+                }
+                None if name != "media_resource_close_operations" => {
+                    tx.execute(&format!("DROP TRIGGER {name}"), [])?;
+                }
+                _ => {}
+            }
+        }
+        tx.execute("DROP TABLE media_resource_close_operations", [])?;
+        tx.execute("UPDATE media_resource_schema SET revision=0", [])?;
+        tx.commit()?;
+        let rows = conn.prepare(schema::CATALOG_SQL)?.query_map([], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<Result<Vec<(String,String)>,_>>()?;
+        assert!(schema::verify_legacy_shape(&rows,schema::Layout::Legacy));
+        schema::install_sqlite_checked(conn)?;
+        assert!(schema::sqlite_ready(conn,schema::Layout::Legacy)?);
+        let after: (String,String,String,String) = conn.query_row("SELECT r.binding_json,a.key_json,a.last_payload_digest,o.payload_digest FROM media_resource_requests r JOIN media_resource_attempts a USING(owner_key,request_id,request_incarnation_id) JOIN media_resource_operations o ON o.operation_id=a.last_operation_id", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+        assert_eq!(before,after,"immutable v1 rows survived exact additive upgrade");
+        Ok(())
+    }).await.expect("recognized v1 upgrade");
+}

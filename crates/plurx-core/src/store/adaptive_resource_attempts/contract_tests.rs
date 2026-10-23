@@ -411,6 +411,223 @@ async fn drain_includes_every_unclosed_attempt() {
     .await;
 }
 
+#[tokio::test]
+async fn closed_cleanup_requires_exact_worker_and_prior_fence_then_replays() {
+    for_each_backend(|store, _| async move {
+        let fixture = AttemptFixture::new(store.as_ref()).await;
+        let claimed = applied(
+            store
+                .claim_adaptive_attempt(&fixture.claim)
+                .await
+                .expect("claim"),
+        );
+        let prepared = fixture.prepared(&claimed);
+        let sealed = applied(
+            store
+                .record_adaptive_prepared(&prepared)
+                .await
+                .expect("prepared"),
+        );
+        let selected = applied(
+            store
+                .select_adaptive_winner(&WinnerSelection {
+                    context: MutationContext {
+                        operation_id: Uuid::new_v4(),
+                        expected_request_sequence: sealed.sequence,
+                        expected_attempt_sequence: sealed.attempts[0].sequence,
+                        now_ms: 10_003,
+                    },
+                    binding: prepared.binding.clone(),
+                    key: prepared.key.clone(),
+                    worker: prepared.worker.clone(),
+                })
+                .await
+                .expect("selected winner"),
+        );
+        let fence = AttemptFence {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: selected.sequence,
+                expected_attempt_sequence: selected.attempts[0].sequence,
+                now_ms: 20_001,
+            },
+            binding: fixture.claim.binding.clone(),
+            key: fixture.claim.key.clone(),
+            cancel_request: true,
+        };
+        let held = applied(store.fence_adaptive_attempt(&fence).await.expect("fence"));
+        let mut close = AttemptClose {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: held.sequence,
+                expected_attempt_sequence: held.attempts[0].sequence,
+                now_ms: 20_002,
+            },
+            binding: fixture.claim.binding.clone(),
+            key: fixture.claim.key.clone(),
+            worker_instance_id: fixture.claim.worker_instance_id,
+            serving_generation: fixture.claim.serving_generation,
+            cleanup_operation_id: fence.context.operation_id,
+        };
+        let original = close.clone();
+        close.worker_instance_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .close_adaptive_attempt(&close)
+                .await
+                .expect("wrong worker"),
+            AttemptMutation::Refused(AttemptRefusal::StaleBinding)
+        );
+        close = original.clone();
+        close.cleanup_operation_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .close_adaptive_attempt(&close)
+                .await
+                .expect("wrong fence"),
+            AttemptMutation::Refused(AttemptRefusal::StaleBinding)
+        );
+        close = original.clone();
+        close.context.operation_id = fence.context.operation_id;
+        assert_eq!(
+            store
+                .close_adaptive_attempt(&close)
+                .await
+                .expect("old action UUID collision"),
+            AttemptMutation::Refused(AttemptRefusal::Conflict)
+        );
+        let closed = applied(
+            store
+                .close_adaptive_attempt(&original)
+                .await
+                .expect("logical close"),
+        );
+        assert_eq!(closed.attempts[0].phase, AttemptPhase::Closed);
+        assert_eq!(closed.disposition, RequestDisposition::Cancelled);
+        assert!(matches!(
+            store
+                .close_adaptive_attempt(&original)
+                .await
+                .expect("same operation"),
+            AttemptMutation::Replay(_)
+        ));
+        let mut future_claim = fixture.second(&closed, false);
+        future_claim.context.operation_id = original.context.operation_id;
+        assert_eq!(
+            store
+                .claim_adaptive_attempt(&future_claim)
+                .await
+                .expect("new action UUID collision"),
+            AttemptMutation::Refused(AttemptRefusal::Conflict)
+        );
+        let inventory = store
+            .unclosed_adaptive_attempts(&AttemptInventoryQuery {
+                worker_node_id: fixture.claim.key.worker_node_id.clone(),
+                after_attempt_id: None,
+                limit: 128,
+            })
+            .await
+            .expect("closed excluded");
+        assert!(inventory.entries.is_empty());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn adopted_winner_does_not_block_exact_losing_worker_close() {
+    for_each_backend(|store, _| async move {
+        let fixture = AttemptFixture::new(store.as_ref()).await;
+        let first = applied(
+            store
+                .claim_adaptive_attempt(&fixture.claim)
+                .await
+                .expect("first"),
+        );
+        let second = fixture.second(&first, false);
+        let two = applied(store.claim_adaptive_attempt(&second).await.expect("second"));
+        let mut prepared = fixture.prepared(&two);
+        prepared.worker.selected_recipe_digest = selected_recipe_digest("{}").expect("recipe");
+        let sealed = applied(
+            store
+                .record_adaptive_prepared(&prepared)
+                .await
+                .expect("prepared"),
+        );
+        let selection = WinnerSelection {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: sealed.sequence,
+                expected_attempt_sequence: sealed.attempts[0].sequence,
+                now_ms: 10_003,
+            },
+            binding: prepared.binding.clone(),
+            key: prepared.key.clone(),
+            worker: prepared.worker.clone(),
+        };
+        let won = applied(
+            store
+                .select_adaptive_winner(&selection)
+                .await
+                .expect("winner"),
+        );
+        let adoption = adoption_from_won(prepared, won, "{}");
+        assert!(matches!(
+            store.adopt_adaptive_winner(&adoption).await.expect("adopt"),
+            AttemptAdoption::Applied(_)
+        ));
+        let adopted = store
+            .adaptive_request_status(&fixture.claim.binding.key, &fixture.claim.binding.principal)
+            .await
+            .expect("status")
+            .expect("request");
+        assert_eq!(adopted.disposition, RequestDisposition::Adopted);
+        let losing = adopted
+            .attempts
+            .iter()
+            .find(|attempt| attempt.key == second.key)
+            .expect("loser");
+        assert_eq!(losing.phase, AttemptPhase::Losing);
+        let close = AttemptClose {
+            context: MutationContext {
+                operation_id: Uuid::new_v4(),
+                expected_request_sequence: adopted.sequence,
+                expected_attempt_sequence: losing.sequence,
+                now_ms: 10_005,
+            },
+            binding: second.binding.clone(),
+            key: second.key.clone(),
+            worker_instance_id: second.worker_instance_id,
+            serving_generation: second.serving_generation,
+            cleanup_operation_id: selection.context.operation_id,
+        };
+        let closed = applied(
+            store
+                .close_adaptive_attempt(&close)
+                .await
+                .expect("loser close"),
+        );
+        assert_eq!(closed.disposition, RequestDisposition::Adopted);
+        assert_eq!(closed.winner_attempt_id, Some(fixture.claim.key.attempt_id));
+        assert_eq!(closed.attempts[1].phase, AttemptPhase::Closed);
+        let mut forbidden = close;
+        forbidden.context.operation_id = Uuid::new_v4();
+        forbidden.context.expected_request_sequence = closed.sequence;
+        forbidden.context.expected_attempt_sequence = closed.attempts[0].sequence;
+        forbidden.key = fixture.claim.key.clone();
+        forbidden.worker_instance_id = fixture.claim.worker_instance_id;
+        forbidden.serving_generation = fixture.claim.serving_generation;
+        forbidden.cleanup_operation_id = closed.attempts[0].last_operation_id;
+        assert_eq!(
+            store
+                .close_adaptive_attempt(&forbidden)
+                .await
+                .expect("winner stays active"),
+            AttemptMutation::Refused(AttemptRefusal::WinnerLost)
+        );
+    })
+    .await;
+}
+
 async fn ready_adoption(store: &dyn Store, fixture: &AttemptFixture) -> AdaptiveAdoption {
     ready_adoption_recipe(store, fixture, "{}").await
 }
@@ -452,6 +669,14 @@ async fn ready_adoption_recipe(
             .await
             .expect("winner"),
     );
+    adoption_from_won(prepared, won, recipe)
+}
+
+fn adoption_from_won(
+    prepared: PreparedAttempt,
+    won: RequestStatus,
+    recipe: &str,
+) -> AdaptiveAdoption {
     AdaptiveAdoption {
         context: MutationContext {
             operation_id: Uuid::new_v4(),

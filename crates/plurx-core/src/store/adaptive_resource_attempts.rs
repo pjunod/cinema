@@ -141,6 +141,21 @@ pub struct AttemptFence {
     pub cancel_request: bool,
 }
 
+/// Logical Store closure after the original worker has positively finished its
+/// native and application-owned cleanup. This record cannot refund a resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptClose {
+    pub context: MutationContext,
+    pub binding: RequestBinding,
+    pub key: AttemptKey,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub worker_instance_id: Uuid,
+    pub serving_generation: u64,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub cleanup_operation_id: Uuid,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptPhase {
@@ -265,6 +280,10 @@ pub trait AdaptiveResourceAttemptStore: Send + Sync {
     async fn fence_adaptive_attempt(
         &self,
         fence: &AttemptFence,
+    ) -> Result<AttemptMutation, StoreError>;
+    async fn close_adaptive_attempt(
+        &self,
+        close: &AttemptClose,
     ) -> Result<AttemptMutation, StoreError>;
     async fn adaptive_request_status(
         &self,
@@ -422,6 +441,17 @@ impl AttemptClaim {
         self.key.validate(&self.binding)?;
         validate_domains(&self.domains)?;
         if self.worker_instance_id.is_nil() || self.context.expected_attempt_sequence != 0 {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
+impl AttemptClose {
+    pub fn validate(&self) -> Result<(), StoreError> {
+        self.context.validate()?;
+        self.key.validate(&self.binding)?;
+        if self.worker_instance_id.is_nil() || self.cleanup_operation_id.is_nil() {
             return Err(invalid());
         }
         Ok(())
