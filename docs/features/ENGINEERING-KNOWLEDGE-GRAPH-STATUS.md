@@ -12,10 +12,12 @@ execution instructions. No benchmark savings are established.
 
 Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`. The
 source-only implementation checkpoint is
-`de7ce78ef671338eb8744cf4e20035a2ce963542`, tree
-`bf962c9dfba269637badd5d0c8338b547031bdd8`. Actual Astra R13 reviewed candidate
+`a39882f9277e881ccd2cb332ca190d749ffe1029`, tree
+`066daff596b8c5d7e7a8ddac199a6841b0533446`. Actual Astra R13 reviewed the earlier
+candidate
 543dda0b5a99c9512631431b6d486535ff3d216f and requested three source repairs.
-It is not source-approved, environment-admitted or CI-qualified.
+Those repairs are now integrated; exact-content recheck, environment admission
+and new-head CI remain pending.
 
 Published PR #1262 remains at B8, b8df5282d435b687a708230c7e58d7e62e319cde.
 Required CI 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
@@ -25,15 +27,20 @@ Astra R10 approved only the prior exact 46 production execution buffers;
 the B8 fixture-prefix correction has a separate narrow Luna review. Neither
 review approves the integrated native filesystem source.
 
-The new route contains six production and five test files with 14 new cases:
+The initial native delta added six production and five test files with 14 new cases:
 13 in new test files and one host-checkpoint regression in the existing
 retirement module. Two existing actual OCI controls and one compatibility
-selector are affected. No changed check has run on this head. The integrator
+selector are affected. No changed check has run on this head. For R13 the integrator
 verified 37 modules, 11 assets and 48 host buffers; R13 independently matched
-all 48. Sol is repairing immutable grader mode support, trusted role ownership
+all 48. Five buffers changed in the repairs and require a refreshed exact map.
+Sol completed immutable grader mode support, trusted role ownership
 through publication/adoption and fresh-sentinel compatibility comparisons. Luna
-is drafting focused regressions; exact-source closure and environment admission
-remain pending. The guest pack is limited to its
+supplied focused regressions. The repair adds six methods across four test
+files, including an opt-in real Linux root/non-root ownership check, and adds
+writable preflight to the native OCI control. Default skips are not passes;
+required CI supplies affected generic unit results without duplicate local
+runs. Exact-source closure and environment admission remain pending. The guest pack
+is limited to its
 seven-module helper closure and excludes provider/launcher modules and
 credentials. Outer entry/provider bytes are unchanged; runtime.native_store
 adds metadata only.

@@ -376,11 +376,10 @@ follow-up, rather than a claimed repair.
 ## Current admission — R13 source repairs and native disk diagnosis
 
 The source-only implementation checkpoint is commit
-`de7ce78ef671338eb8744cf4e20035a2ce963542`, tree
-`bf962c9dfba269637badd5d0c8338b547031bdd8`. It is committed but
-received independent R13 source review, which requested three repairs; exact
-environment admission and new-head CI remain open. The
-published PR #1262 remains at b8df5282d435b687a708230c7e58d7e62e319cde; its
+`a39882f9277e881ccd2cb332ca190d749ffe1029`, tree
+`066daff596b8c5d7e7a8ddac199a6841b0533446`. It contains the completed R13 repairs and six additional regression drafts.
+Independent exact-content closure, environment admission and new-head CI remain
+open. The published PR #1262 remains at b8df5282d435b687a708230c7e58d7e62e319cde; its
 required CI run 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
 (2,147 retained plus 26 new retirement checks), two expected opt-in OCI skips
 and zero fixture errors. Those results apply to B8, not the integrated source.
@@ -390,17 +389,19 @@ Astra R10 approval remains historical and limited to its exact prior 46
 production execution buffers at 885dd5d7e, map
 923682bc4eab4b851fd20199dcfa9d1cdeb99df8727b3b4b61667e237a40a286. The B8
 fixture-prefix correction has a separate narrow Luna review. Neither review
-approves the new source. The integrated native route changes six production and
+approves the new source. The initial native delta changed six production and
 five test files with 14 new cases: 13 in new test files and one host
 checkpoint regression in the existing retirement module. Two existing actual
 OCI controls and one compatibility selector are also affected. None has run
 against this new head.
 
-The integrator verified the static closure of 37 modules, 11 assets and
+For R13, the integrator verified the static closure of 37 modules, 11 assets and
 48 host buffers: 42 R10 keys are unchanged, four changed and two are new.
-The closure-file digest is
+The historical R13 closure-file digest is
 `f060d3b5e2eea57d25087f7ecdbee2510c1094fff49dbe1774e2b5a263518254`;
-actual Astra R13 verified all 48 execution buffers but requested changes. The guest pack
+actual Astra R13 verified all 48 execution buffers but requested changes.
+Five execution buffers changed in the repairs; the exact map must be refreshed
+and independently checked before use. The guest pack
 is limited to seven modules, including knowledge.model, and excludes provider
 and launcher modules and credentials. The outer entry/provider bytes remain
 unchanged; the added runtime.native_store value is metadata-only. These
@@ -408,9 +409,15 @@ implementation boundaries do not establish runtime acceptance or qualification.
 R13-B1 requires preserving real immutable 0444 grader files. R13-B2 requires
 explicit trusted non-root role ownership through publication and qualified
 adoption. R13-B3 requires stable compatibility comparisons while retaining each
-fresh sentinel challenge as exact evidence. Sol owns the production repairs;
-Luna owns focused mode/probe regression drafts. No revised checks have run.
-The exact revised source will receive narrow independent closure before CI.
+fresh sentinel challenge as exact evidence. Sol completed the five-file production
+repair and actual-role/consumer drafts;
+Luna supplied focused mode/probe drafts. Four test files add six methods,
+including one opt-in real Linux root/non-root ownership check. The two native
+OCI controls now include genuine writable preflight and exact role identities.
+No revised checks have run. Required CI will supply affected generic unit
+results once; root/native controls remain separate and default skips are not
+passes. The exact revised source will receive narrow independent closure
+before CI.
 
 Two separate public contrasts observed the live Apple Virtualization process
 holding the exact deleted 4 MiB inode. Guest-origin unlink reached link count
@@ -443,7 +450,7 @@ Actual R13 task: t_e7332bfa, hdr-astra / gpt-6-astra. Verdict: request changes,
 source_authorized=false and runtime_authorized=false. Reviewed candidate:
 543dda0b5a99c9512631431b6d486535ff3d216f. Report SHA-256:
 1b726e835dcbc8cecac36050c21d39519098bbbd169fb166395ccfc33350d022.
-This review grants no approval to the repairs now in progress.
+This review grants no approval to the completed repairs awaiting recheck.
 
 The exact Rust failure cause in the earlier qualification remains unknown
 because its original streams were discarded. A separate 4 GiB diagnostic
