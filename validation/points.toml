@@ -496,6 +496,8 @@ paths = [
   "crates/plurx-core/src/adaptive_resources/capacity.rs",
   "crates/plurx-core/src/adaptive_resources/claim_tests.rs",
   "crates/plurx-core/src/adaptive_resources/memory_claim.rs",
+  "crates/plurx-core/src/adaptive_resources/task_claim.rs",
+  "crates/plurx-core/src/adaptive_resources/history_mix.rs",
   "crates/plurx-core/src/adaptive_resources/retained.rs",
   "crates/plurx-core/src/adaptive_resources/retained/**",
   "crates/plurx-core/src/adaptive_resources/physical_graph.rs",

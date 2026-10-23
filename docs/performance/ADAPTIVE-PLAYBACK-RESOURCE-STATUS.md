@@ -1,14 +1,18 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete. Source checkpoint
-`c816041edb6425722013d11e4a24bcbbefa9a5d9` passed exact native Linux core+daemon
-all-target compilation on Rust 1.97.1 (190.849 seconds; log SHA-256
-`2cf5c0896760d4293a55a93d139ee5f9924ab2875fbfcc6d1cc6f17b40d4a1d0`).
-It includes the ordinary cold-cache caller, protected legacy cleanup and counted
-recovered-S metadata lifetime. The 428 published regression anchors are authored,
-NOT RUN. Later PID-namespace/root-exit proof, native lifecycle fixture, producer
-telemetry, task-unit accounting and active-R recovery are under implementation
-outside that receipt. All V1–V5 and R1/M0–M7 remain OPEN. Final review,
+`fdda9a593491021e70e74b965c71d5488e5f3436` passed exact native Linux core+daemon
+all-target compilation on Rust 1.97.1 (270.488 seconds; log SHA-256
+`2e7cf823d44cf93967aa0e1f06e7a4a89a2f134670d26485c99bc1f4b71c42d0`).
+The host check passed on stable source in 154.805 seconds (log SHA-256
+`58b14a0501b9c55462abb6cbc4d28b7cc597067995fb57ec25b97e3d1913c806`).
+There are 439 authored regression anchors, NOT RUN. The ordinary native lifecycle
+fixture was excluded by an incorrect test-feature name at this checkpoint;
+its body is outside these compile receipts. Its registration is being corrected
+in the next source slice. Stable same-boot finite cache identity, the actual
+process-restart fixture, active-R cleanup/writer integration, extended history
+diagnostics and wider import accounting remain under implementation outside
+these receipts. All V1–V5 and R1/M0–M7 remain OPEN. Final review,
 qualification and merge have not run.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
