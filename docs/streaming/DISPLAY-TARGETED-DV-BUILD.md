@@ -18,25 +18,27 @@ new source head.
 | E · trims | Reference349 completed42 vendor commands with exit0. Comparison353 completed14 observations; baseline PQ error.110077 and trim-delta errors.44085/.48964 fail creative acceptance. | Full CM4/L8 implementation/contract and creative accuracy remain unfinished; no vendor contact authorized. |
 | F · SDR | Source6d48d4c retains ten Rust, two web and pixel325 (61440 samples, max1code/limit2). Repairba8df0e7 shares fresh FEL admission/receipts with SDR, preserving BT.709 gamma2.4 and100-nit mapping. | Changed factory regression and integrated delivery acceptance. |
 
-A/#1216 and integration#1269 are merged into `effort/display-targeted-dv`;
-#1269 landed `3cc264068` with all78 regression fields. Its tree matches gated
-candidatee6473332f. Compile-only gate5889 passed all8 jobs. Actual sourceba8df0e7
-passed pinned Rust1.97.1 fmt/check/all-target Clippy382, production C link384
-and final-input trim-candidate link393. Review fixes at a7642100 pass pinned fmt/check/all-target Clippy403. These compiler runs execute no product tests, controls or media; compilation establishes no trim accuracy.
+A/#1216 and integration#1269 landed in `effort/display-targeted-dv`;
+#1269 is `3cc264068`, with78 regression fields and all8 compile-gate jobs
+passing. Sourcea7642100 passes Rust1.97.1 fmt/check/Clippy403; helper404
+and binary415 link without tests. Review398 closed four production findings
+and its harness follow-up.
 
-Root chose to qualify/promote completed HDR/SDR under the user's standing
-instruction to use judgment while away. E remains explicitly unfinished;
-`creative_trims_applied:false` and “L1 only” remain truthful. This does not
-complete all A–F or lower creative acceptance. Retain valid source-bound passes;
-repeat failed/materially invalidated cases and the applicable final-gate suite.
+Native SDR418 failed once after scanning17983 frames: source comparison omitted
+the application-owned title enrichment from normalization and rejected fresh
+publication. The repair excludes that exact typed key beside existing app
+measurements, preserving strict media comparison and independent title fences.
+Its focused regression and native retry remain pending. CI5903 retains2044
+Python passes; a web fixture omitted its display-peak script. Review398 closed both repairs424; qualification remains pending; no media pass is inferred.
 
-Main promotion still needs completed-candidate adversarial review, resulting
-fixes and exact-candidate qualification. Current main1eb117839 is already an
-ancestor of the effort. The user is reconciling fast-lane/selective-rerun policy
-with the repository's full manual promotion qualification; no main merge or
-validator change is inferred while pending. Physical-display acceptance remains
-open. The separate full-app FEL EOF interpreter lane is excluded from bounded
-source qualification, not claimed complete.
+Root chose HDR/SDR delivery under standing authority to use judgment while away.
+E remains unfinished, `creative_trims_applied:false` and “L1 only” truthful;
+this does not complete A–F. Retain source-bound passes and retry failed or
+materially invalidated cases. Main1eb117839 is an ancestor. Main promotion needs
+repair review and exact-candidate qualification. Test-policy reconciliation
+remains pending: user fast-lane/selective reruns versus full manual promotion.
+No merge or validator waiver is inferred. Physical-display and separate full-app
+FEL EOF acceptance remain open; bounded source qualification proves neither.
 
 ## PR B implementation checkpoint
 
