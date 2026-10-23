@@ -439,7 +439,7 @@ test('continuous Auto selection uses bound video and shared audio delivery budge
  assert.throws(()=>context.continuousQualityBoundCatalog(raw,{...family,audio:{peak_bps:Number.MAX_SAFE_INTEGER}}),/budget shape/);
 });
 
-test('processed SDR and HDR10 Auto preference requires production proof, decoder and link admission',()=>{
+test('processed HDR10 Auto preference requires production proof, decoder and link admission',()=>{
  const policy=require('../../crates/plurxd/src/web/playback-policy.js');
  const original={id:'1'.repeat(32),recipe_digest:Array(32).fill(1),route:'remux',
   width:3840,height:2160,target_height:2160,grade:'hdr10',decoder_compatible:true,sustainable:true};
