@@ -6735,3 +6735,6 @@ mod sharing_recovery_principal_tests;
 
 #[cfg(test)]
 mod async_driver_refinement;
+
+#[cfg(test)]
+mod async_driver_product;

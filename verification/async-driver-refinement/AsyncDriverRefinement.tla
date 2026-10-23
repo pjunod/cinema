@@ -325,7 +325,7 @@ NoFictitiousRelease == \A n \in Nodes : w[n].dropped => w[n].joined \/ ~w[n].wor
    Reply before a later DriverReturn can mark revocation. This is not an
    independent proof of the adapter publication-lock implementation. *)
 GuardBeforeRevoke == \A n \in Nodes : w[n].stage = "driver" => ~(D(n).revoked /\ w[n].readLock)
-AllStoreSafety == \A i \in 1..Len(StoreStates) :
+ImportedOracleSafety == \A i \in 1..Len(StoreStates) :
  LET s == StoreStates[i] IN
  /\ Cardinality({j \in Nodes : s.jobs[j+1].active}) <= 1
  /\ \A j \in Nodes :
@@ -336,7 +336,7 @@ AllStoreSafety == \A i \in 1..Len(StoreStates) :
 DriverRank == \A e \in DriverEdges : DriverStates[e.dst+1].rank < DriverStates[e.src+1].rank
 NoStaleCommit == \A e \in StoreEdges : e.fresh
 MonotoneFence == \A e \in StoreEdges : e.monotone
-Safety == DriverRank /\ AllStoreSafety /\ NoStaleCommit /\ MonotoneFence /\ TypeOK /\ NoTwoSourceReaders /\ ResultAtomicity /\ LastRequestAtomicRetirement
+Safety == DriverRank /\ ImportedOracleSafety /\ NoStaleCommit /\ MonotoneFence /\ TypeOK /\ NoTwoSourceReaders /\ ResultAtomicity /\ LastRequestAtomicRetirement
  /\ ReservationConservation /\ AdmissionUntilJoined /\ JoinBeforeRelease /\ NoFictitiousRelease /\ GuardBeforeRevoke
 (* No finite-D trace can promise to execute an operation whose input budget is
    already excluded. This premise is about an actual available relation edge,
@@ -363,4 +363,129 @@ ConditionalAttemptCleanup == ([]WithinEpisodeCapacity) => AttemptCleanup
 BothSelectedCompletion == <> (DoneJobs(sql) = Nodes)
 BothDoneAndDropped == DoneJobs(sql) = Nodes /\ \A n \in Nodes : w[n].dropped /\ ~w[n].admission
 NonvacuityWitness == ~BothDoneAndDropped
+
+(* Coverage predicates are obligations, never guards on Init/Next/fairness.
+   DInputs is independently derived before consulting Edges. Capacity-only
+   ready/sent retirement requests are included to prevent vacuous cleanup. *)
+SeqSet(xs) == {xs[k] : k \in 1..Len(xs)}
+I == S.input_domain
+NodeNames == <<"node-a","node-b","foreign-holder">>
+Tok(j) == I.captured_tokens[j+1]
+Ti(j) == 0..(Len(Tok(j))-1)
+Li == 0..(Len(I.captured_leases)-1)
+Latest(j,i) == ~\E k \in (i+1)..(Len(Tok(j))-1) : Tok(j)[k+1].claim_id = Tok(j)[i+1].claim_id
+Claims(j) == IF I.budgets.claims[j+1] < 2
+ THEN {[op |-> "claim",job |-> j,node |-> n] : n \in Nodes} ELSE {}
+Renewals(j,i) == IF Latest(j,i) /\ Tok(j)[i+1].claim_id \notin SeqSet(I.budgets.renewed_claims)
+ THEN {[op |-> "renew",job |-> j,token |-> i]} ELSE {}
+Settlements(j,i) == {[op |-> "settle",job |-> j,token |-> i,disposition |-> 3]}
+ \cup (IF Latest(j,i) THEN {[op |-> "settle",job |-> j,token |-> i,disposition |-> d] : d \in 0..2} ELSE {})
+Bindings(j,i) == IF Latest(j,i)
+ THEN {[op |-> op,job |-> j,token |-> i,lease |-> l] :
+       op \in {"bind","complete"},l \in {k \in Li : I.captured_leases[k+1].owner_node_id = Tok(j)[i+1].node_id}}
+ ELSE {}
+TokenInputs(j,i) == Renewals(j,i) \cup Settlements(j,i) \cup Bindings(j,i)
+ \cup {[op |-> "resolve",job |-> j,token |-> i]}
+OwnsQueue(n) == n = 2 \/ (\E j \in Nodes : I.jobs[j+1].state = "running" /\ I.jobs[j+1].owner = NodeNames[n+1])
+Acquires == {[op |-> "acquire_domain",node |-> n] : n \in {k \in 0..2 : ~I.budgets.domain_acquired[k+1] /\ OwnsQueue(k)}}
+Releases == {[op |-> "release_domain",lease |-> l] : l \in Li}
+Removals == {[op |-> "remove_owner",node |-> n] : n \in {k \in Nodes : ~I.budgets.removed[k+1]}}
+Expiries == {I.jobs[j+1].expiry : j \in {k \in Nodes : I.jobs[k+1].expiry # ""}}
+ \cup UNION {{Tok(j)[i+1].lease_expires_ms : i \in Ti(j)} : j \in Nodes}
+ \cup {I.captured_leases[l+1].expires_at_unix_ms : l \in Li}
+ \cup (IF I.domain = "" THEN {} ELSE {I.domain.expiry})
+LaterBoundaries == {x \in {e+d : e \in Expiries,d \in {(-1),0,1}} :
+ x > I.now /\ x >= (-9223372036854775808) /\ x <= 9223372036854775807}
+Clocks == IF LaterBoundaries = {} THEN {}
+ ELSE {[op |-> "clock_advance",now |-> CHOOSE x \in LaterBoundaries : \A y \in LaterBoundaries : x <= y]}
+DInputs == UNION {Claims(j) \cup UNION {TokenInputs(j,i) : i \in Ti(j)} : j \in Nodes}
+ \cup Acquires \cup Releases \cup Removals \cup Clocks
+
+CallInput(n,pending) ==
+ CASE pending = "AcquireDomain" -> [op |-> "acquire_domain",node |-> n]
+ [] pending = "Bind" -> IF w[n].token = -1 \/ w[n].lease = -1 THEN ""
+       ELSE [op |-> "bind",job |-> w[n].job,token |-> w[n].token,lease |-> w[n].lease]
+ [] pending \in {"SettleYield","SettleRetry"} -> IF w[n].token = -1 THEN ""
+       ELSE [op |-> "settle",job |-> w[n].job,token |-> w[n].token,
+             disposition |-> IF pending = "SettleYield" THEN 0 ELSE 1]
+ [] pending \in {"ReleaseRefused","ReleaseRetry","ReleaseNone","ReleaseInterrupted"} ->
+       IF w[n].lease = -1 THEN "" ELSE [op |-> "release_domain",lease |-> w[n].lease]
+ [] pending = "PollWork" -> IF w[n].token = -1 \/ w[n].lease = -1 THEN ""
+       ELSE [op |-> "complete",job |-> w[n].job,token |-> w[n].token,lease |-> w[n].lease]
+ [] pending = "RetireQueue" ->
+       LET t == IF w[n].retire \in {"first","resolve"} THEN w[n].original ELSE w[n].resolved IN
+       IF t = -1 THEN "" ELSE IF w[n].retire = "resolve"
+       THEN [op |-> "resolve",job |-> w[n].job,token |-> t]
+       ELSE [op |-> "settle",job |-> w[n].job,token |-> t,
+             disposition |-> IF w[n].retire = "second" /\ w[n].outcome = "cancel_requested" THEN 2 ELSE 3]
+ [] OTHER -> ""
+SqlPending == {"AcquireDomain","Bind","SettleYield","SettleRetry",
+ "ReleaseRefused","ReleaseRetry","ReleaseNone","ReleaseInterrupted"}
+RetirePending(n) == D(n).pending = "RetireQueue" /\ w[n].retire \in {"first","resolve","second"}
+CapacityGate(n) == w[n].stage = "driver" /\ w[n].call = "sent"
+ /\ (D(n).pending \in SqlPending \/ (RetirePending(n) /\ w[n].inner \in {"ready","sent"}))
+SampleOK(n) == D(n).pending # "RetireQueue" \/ w[n].sample = I.now
+WorkerDemands(n) ==
+ (IF w[n].stage = "claim" /\ w[n].call = "sent"
+  THEN {[input |-> [op |-> "claim",job |-> w[n].job,node |-> n],sample_ok |-> TRUE]} ELSE {})
+ \cup (IF w[n].stage = "driver" /\ w[n].call = "sent"
+  THEN (IF D(n).pending \in SqlPending \cup {"PollWork"} \/
+           (RetirePending(n) /\ w[n].inner = "sent")
+        THEN {[input |-> CallInput(n,D(n).pending),sample_ok |-> SampleOK(n)]} ELSE {})
+  ELSE {})
+ \cup (IF CapacityGate(n) THEN {[input |-> CallInput(n,D(n).pending),sample_ok |-> SampleOK(n)]} ELSE {})
+EnvInputs == IF StableSuccess THEN {} ELSE {a \in DInputs :
+ /\ a.op \in {"clock_advance","remove_owner","acquire_domain","release_domain","renew"}
+ /\ IF a.op = "acquire_domain" THEN a.node = 2 ELSE TRUE
+ /\ IF a.op = "release_domain" THEN I.captured_leases[a.lease+1].owner_node_id = "foreign-holder" ELSE TRUE
+ /\ IF a.op = "renew" THEN TokenLockAvailable(a) ELSE TRUE}
+CandidateDemands == UNION {WorkerDemands(n) : n \in Nodes}
+ \cup {[input |-> a,sample_ok |-> TRUE] : a \in EnvInputs}
+DemandCovered == \A d \in CandidateDemands :
+ (d.input \in DInputs /\ d.sample_ok) => Cardinality({e \in Edges : e.input = d.input}) = 1
+DWithinEpisodeCapacity == \A n \in Nodes : CapacityGate(n) =>
+ CallInput(n,D(n).pending) \in DInputs /\ SampleOK(n)
+CapacityAgrees == WithinEpisodeCapacity = DWithinEpisodeCapacity
+
+ContextId == CASE Mutation = "weak-admission" -> "weak_admission"
+ [] Mutation = "no-claim-win" -> "no_claim_win"
+ [] Mutation = "withheld-join" -> "withheld_join"
+ [] Mutation = "old-poll-policy" -> "old_poll_policy"
+ [] Mutation = "drop-before-join" -> "drop_before_join"
+ [] StableSuccess -> "stable" [] OTHER -> "base"
+CertW(p) == [n \in Nodes |-> p.workers[n+1]]
+CertAvailable(p) == [n \in Nodes |-> p.available[n+1]]
+CertMatch(p) == p.context = ContextId /\ sql = p.sql /\ w = CertW(p)
+ /\ available = CertAvailable(p) /\ completed = SeqSet(p.completed)
+CompletedSequence == (IF 0 \in completed THEN <<0>> ELSE <<>>) \o (IF 1 \in completed THEN <<1>> ELSE <<>>)
+CurrentKey == <<ContextId,sql,<<w[0],w[1]>>,<<available[0],available[1]>>,CompletedSequence>>
+CurrentCert == IF CurrentKey \in DOMAIN ProductIndex
+ THEN {ProductStates[ProductIndex[CurrentKey]+1]} ELSE {}
+CertifiedReachable == Cardinality(CurrentCert) = 1
+TargetEquals(q) == sql' = q.sql /\ w' = CertW(q)
+ /\ available' = CertAvailable(q) /\ completed' = SeqSet(q.completed)
+CertTargets(p) == {ProductStates[e.dst+1] : e \in SeqSet(ProductOutgoing[p.id+1])}
+PairLabels(p,q) == UNION {SeqSet(e.fair) : e \in {x \in SeqSet(ProductOutgoing[p.id+1]) : x.dst = q.id}}
+EnabledLabels(p) == SeqSet(ProductEnabled[p.id+1].actions)
+FairFamilies == {"ClaimSend","ClaimApply","ClaimReply","ClaimReturn","Dispatch","StoreApply",
+ "SimpleApply","Reply","DriverReturn","RetireLocal","RetireCallReturn","ExternalReturn",
+ "JoinReturn","RetireDrain","MakeAvailable","Admission","ClaimWin"}
+FamilyAction(f,n) == CASE f = "ClaimSend" -> ClaimSend(n)
+ [] f = "ClaimApply" -> ClaimApply(n) [] f = "ClaimReply" -> ClaimReply(n)
+ [] f = "ClaimReturn" -> ClaimReturn(n) [] f = "Dispatch" -> Dispatch(n)
+ [] f = "StoreApply" -> StoreApply(n) [] f = "SimpleApply" -> SimpleApply(n)
+ [] f = "Reply" -> Reply(n) [] f = "DriverReturn" -> DriverReturn(n)
+ [] f = "RetireLocal" -> RetireLocal(n) [] f = "RetireCallReturn" -> RetireCallReturn(n)
+ [] f = "ExternalReturn" -> ExternalReturn(n) [] f = "JoinReturn" -> JoinReturn(n)
+ [] f = "RetireDrain" -> RetireDrain(n) [] f = "MakeAvailable" -> MakeAvailable(n)
+ [] f = "Admission" -> Admission(n) [] f = "ClaimWin" -> ClaimWin(n)
+FairLabel(f,n) == f \o "/" \o ToString(n)
+(* ENABLED with ALL next variables fixed evaluates the actual action on that
+   state pair. These invariants do not constrain or replace executable Next. *)
+CertificateNextAgreement == \A p \in CurrentCert : \A q \in CertTargets(p) :
+ ENABLED (Next /\ TargetEquals(q))
+FairPairAgreement == \A p \in CurrentCert : \A q \in CertTargets(p), f \in FairFamilies, n \in Nodes :
+ (ENABLED (FamilyAction(f,n) /\ TargetEquals(q))) = (FairLabel(f,n) \in PairLabels(p,q))
+FairEnablednessAgreement == \A p \in CurrentCert, f \in FairFamilies, n \in Nodes :
+ (ENABLED <<FamilyAction(f,n)>>_vars) = (FairLabel(f,n) \in EnabledLabels(p))
 =============================================================================

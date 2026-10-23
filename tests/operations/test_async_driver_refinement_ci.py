@@ -44,7 +44,7 @@ class AsyncDriverRefinementCiTests(unittest.TestCase):
         self.assertIn("scripts/bootstrap-formal-toolchain fetch --cache-dir target/formal-toolchain", provision)
         self.assertIn("scripts/check-async-driver-refinement build-inputs --output-dir", build)
         self.assertIn("scripts/check-async-driver-refinement qualify", qualify)
-        for required in ("--driver-graph", "--store-graph", "--provenance", "--output-dir", "--cache-dir target/formal-toolchain"):
+        for required in ("--driver-graph", "--product-bundle", "--provenance", "--output-dir", "--cache-dir target/formal-toolchain"):
             with self.subTest(required=required):
                 self.assertIn(required, qualify)
         self.assertIn("always()", artifact)

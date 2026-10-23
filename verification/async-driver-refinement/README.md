@@ -1,104 +1,99 @@
-# Async driver refinement — one finite selected episode
+# Async driver refinement — a selected two-worker product
 
-**Status: implemented, unqualified.** No new test or model-checker result is
-claimed by these files. This package imports the production driver's finite
-control graph and a closed graph produced by real SQLite operations. Its
-conditional claims concern two fixed selected requests inside the declared
-input domain D. It does not prove an unbounded fair Rust execution theorem.
+**Status: implemented, unqualified.** The product design and wire contract are
+defined, but this candidate has no new Rust, control, or model-checker results.
+The earlier arbitrary Store-D closure hit its historical state cap; that
+failed harness is retained as history and is not an acceptance result. The
+replacement claim is a complete finite product for two selected workers
+over the declared input domain, using a source-bound Store oracle. Production
+ordinary Yield/Retry payload and deadline transfer remains explicitly
+`unclosed`; the bounded representative protocol is not full adapter
+refinement.
 
-NoTwoSourceReaders counts durable records with state running and queue expiry after the sampled time; it does not bound physical readers while expired work awaits cancellation or join.
+Companion to [CONTRACT.md](CONTRACT.md), which defines the claim, independent
+coverage checks, fairness, controls, and limits. The source schema is
+[product-schema.json](product-schema.json); [store-tests.json](store-tests.json)
+owns the exact Rust test registry. The checker binds the production driver
+graph, product schema, TLA modules, and eleven configurations before generating
+tables.
 
-`GuardBeforeRevoke` is a structural consistency check of the summarized
-operation order, not independent publication-lock evidence. Driver `Work`
-Debug strings pass an exact registry before mapping to stable model tags;
-unknown formatting rejects import instead of widening join outcomes.
+## Build the inputs and qualify them
 
-The stable-success model counts durable completion even if its acknowledgement
-is lost. A resulting `WorkFailed` may request Retry after COMPLETE; the
-actual Store relation retains a refused Retry self-edge for that input.
-
-Read [CONTRACT.md](CONTRACT.md) for the exact claims, fairness premises,
-source-transfer boundaries and controls. [store-schema.json](store-schema.json)
-records the Store producer's schema and reduced input domain;
-[selector-control.json](selector-control.json) defines the actual-source poll
-policy mutation. [checker.py](checker.py) validates graph inventories and
-creates the TLA tables. The repository CLI owns the exact command registry.
-
-## Run after independent review and fixes
+Run these after completed final review, fixes and compiler checks. The first
+command executes the registered Rust tests and input producers; it does not
+require a duplicate unit batch first. The normal CI lane qualifies affected
+work after Rust graph generation; earlier preflight has no graph inputs.
 
 ```bash
-# Selected Rust regressions, real driver inventory, real-SQL closure and mutants.
-scripts/check-async-driver-refinement build-inputs --output-dir target/async-driver-refinement
-# All positive configurations, nonvacuity witness, semantic and rejection controls.
-scripts/check-async-driver-refinement qualify \
+# Build the source-bound driver graph, selected product bundle, controls, and logs.
+python3 scripts/check-async-driver-refinement build-inputs \
+  --output-dir target/async-driver-refinement
+
+# Validate both inputs and run the complete configured TLC qualification.
+python3 scripts/check-async-driver-refinement qualify \
   --driver-graph target/async-driver-refinement/driver-graph.json \
-  --store-graph target/async-driver-refinement/store-graph.json \
+  --product-bundle target/async-driver-refinement/product-bundle.json \
   --provenance target/async-driver-refinement/provenance.json \
   --output-dir target/async-driver-refinement/tlc \
   --cache-dir target/formal-toolchain
 ```
 
-Run these as affected steps in the existing Rust CI lane, after graph
-production. Earlier preflight cannot consume graphs that do not exist yet.
-The runner resolves the unchanged durable-jobs pinned Java/TLC manifest
-through `scripts/check-formal`; it adds no floating tool or framework.
+The product test is
+`store::async_driver_product::actual_sql_two_worker_product_is_closed`; it
+reads `PLURX_ASYNC_DRIVER_GRAPH` and writes the bundle path named by
+`PLURX_ASYNC_PRODUCT_BUNDLE`. C4 and C9 run separate prefix-replay controls for
+`LastRequestAtomicRetirement` and `ReservationConservation` through
+`product_prefix_completion_mutation_fails_last_request_atomic_retirement`
+and `product_prefix_reservation_mutation_fails_reservation_conservation`.
+The checker also binds the raw driver-graph bytes, source registries, semantic
+model/config files, exact commands, toolchain, and logs.
 
-`affected --base REF` returns JSON for CI. Without a base it selects the
-package conservatively. `inventory --driver-graph … --store-graph …
---output-dir …` validates and generates tables only: its receipt explicitly
-has `acceptance:false`.
+The CI runner resolves the existing durable-jobs Java/TLC pins through
+[`check-formal`](../../scripts/check-formal); it adds no floating tool or
+solver framework. `affected --base REF` returns the selected-surface decision.
+Without a base, it conservatively selects the package. `inventory
+--driver-graph PATH --product-bundle PATH --output-dir DIR` validates the
+inputs and generates tables with `acceptance:false`; it is not proof.
 
-A failed Rust case can be rerun with `build-inputs … --case NAME`. A failed
-model configuration can be rerun with `qualify … --config NAME`. Reusing the
-same output directory preserves successful cases only when source, tools,
-commands and raw-log hashes still match. A partial run never becomes a full
-qualification. Project prose changes do not invalidate Rust source evidence.
+`build-inputs --case NAME` and `qualify --config NAME` can resume a matching
+working directory. Reuse requires the identical invocation and unchanged
+source, tool, command, log, and input identities. A changed source binding
+invalidates affected cases; there is no historical compatibility exception,
+and a partial journal never becomes a complete receipt.
 
-## Read the artifacts
+## Read the evidence and limits
 
-`provenance.json` records each exact Rust command, pinned compiler version,
-source and graph hashes, selected-test count and raw log hash. The 15 exact
-Store unit cases and one sampled backend history are defined in
-[store-tests.json](store-tests.json). Backend conformance requires completed
-markers for memory, file and the actual three-voter backend; enabling a
-feature alone is not evidence. The 124 source-defined partition rows require
-all four exact partition tests; the runtime 96-row marker covers only the
-queue identity/expiry partition. The selector
-mutant uses a standalone copy of the actual zero-dependency leaf crate;
-it never modifies checkout sources. Its original source/test, mutation and
-manifest hashes are retained.
+`provenance.json` records the exact Rust commands, source hashes, test counts,
+raw logs, and graph identities. Rust closure is limited to the selected
+two-worker product and its explicitly enumerated demands. It does not claim
+arbitrary Store-D closure. The 20,000 cap counts distinct exact Store states
+across all seven main contexts, including capacity-only successors. There is
+no new product-node cap. The bundle remains bounded by 256 MiB and the total
+artifact by 512 MiB; exceeding a bound leaves the result incomplete.
 
-`tlc/receipt.json` distinguishes complete positive configurations from named
-counterexamples. It binds source, models, generated table, config, commands,
-tools and input provenance; every configuration carries generated/distinct/
-remaining state counts and a raw log hash. Controls and the nonvacuity witness
-retain their traces. Timeouts, compiler errors, zero tests, unknown outcomes,
-missing graph targets and incomplete queues never count as acceptance.
+`tlc/receipt.json` separates complete positive configurations from named
+counterexamples. It binds generated tables, models, configurations, commands,
+tools, and input provenance. `inventory.json` and `tlc/receipt.json` carry
+`ordinary_settlement_payload_transfer: "unclosed"` alongside the shared named
+claim-boundary map. Missing demands or successors, incomplete
+frontiers, timeouts, resource failures, and unrelated invariant failures are
+not acceptance or control evidence. Seven main contexts feed nine main
+configurations; two sparse boundary controls bring the total to eleven.
 
-Retirement tracks the local token option separately from the held queue
-handle. It composes heartbeat drain, token take, three wall samples and the
-actual first-settle/resolve/optional-second-settle calls with separate
-application and reply steps. Local cleanup needs these bounded calls to
-return; errors may still leave durable authority. Each primitive uses current
-Store graph time: settlement requires its captured sample to remain current,
-and resolve requires its second sample to remain current. A reviewed source
-lemma makes the first dispatch sample irrelevant for resolution with
-`Some(original.fence)`; it is still recorded separately.
-Captured-time races and the two inner authoritative reads of `resolve_claim`
-remain conformance boundaries. Expired Running residue conservation and
-same-owner domain reacquisition after its one acquisition are outside the
-independent conservation/closed-input claim; foreign-holder is an independent
-third domain owner. See [CONTRACT.md](CONTRACT.md) for the exact restrictions.
+Production Yield uses captured-release deadlines of +5000 ms for refusal and
++1000 ms for pressure/domain-loss interruption. Retry uses release time plus
+jitter from raw job-ID bytes and the adapter's failed-attempt snapshot, with
+`library_execution_failed`; the selected
+representative uses application time and `transient`. Store validation can
+reject a captured deadline older than application time, and claim
+availability depends on the stored deadline. The retained T4 Kani policy proof
+does not prove this daemon-to-Store payload/time transfer. C9 is therefore a
+causal trigger-mutation witness only for the declared representative product.
 
-The qualification registry includes seven library-driver daemon cases and
-four `background_jobs::tests` retirement cases. The latter use actual
-finish/SQLite paths; they cover durable invariance after acknowledged settle,
-retirement after local revocation, unobserved renewal revision, and
-cancellation revision after child join. They do not prove no SQL was called,
-or cover COMPLETE/errors/successors or resolve's inner-read schedules.
-
-The imported relation is source-derived. Comparing it with itself would not
-be independent SQL evidence. The separate checks are assertions on raw row
-projections and operation preimages, Rust replay/rollback assertions, exact
-input enumeration, and actual trigger mutations. SQL engine internals,
-Tokio scheduling and catalogue publication remain explicit boundaries.
+The selected model remains a finite abstraction. `NoTwoSourceReaders` counts
+unexpired durable queue authority, not physical readers still joining.
+`GuardBeforeRevoke` is structural and does not independently prove lock
+publication. The three retirement wall samples, logical `resolve_claim`'s
+two authoritative reads, captured-time races, cancellation, child lifecycle,
+SQL-engine/Raft behavior, and Tokio scheduling remain reviewed or conformance
+boundaries. See [CONTRACT.md](CONTRACT.md) before interpreting a receipt.

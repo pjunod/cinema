@@ -2,6 +2,7 @@
 """Import and qualify the finite selected-episode driver/actual-SQL product."""
 from __future__ import annotations
 import argparse
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -16,6 +17,8 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT/'verification/async-driver-refinement'
+sys.path.insert(0,str(ROOT))
+from validation import async_refinement_resume as async_resume
 sys.path.insert(0,str(PACKAGE))
 import checker as c
 
@@ -27,6 +30,11 @@ CLAIM_BOUNDARIES = {
 }
 
 CLAIM_BOUNDARIES.update(c.STORE_BOUNDARIES)
+CLAIM_BOUNDARIES['OrdinarySettlementPayloadTransfer'] = (
+ 'Unclosed: the finite ordinary Yield/Retry representatives do not establish '
+ 'production payload, captured-deadline, retry-delay or application-time transfer.')
+ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER = 'unclosed'
+PRODUCT_SOURCE_BOUNDARIES = {'OrdinarySettlementPayloadTransfer':ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER}
 
 PREFIXES = ('crates/plurx-core/src/store/', 'crates/plurx-worker-control/',
  'crates/plurxd/src/library_work/', 'crates/plurxd/src/background_jobs/',
@@ -43,6 +51,7 @@ CARGO = ['cargo','+1.97.1']
 CORE = CARGO+['test','--locked','--offline','-p','plurx-core','--lib','--features','hiqlite-contract-tests']
 LEAF = CARGO+['test','--locked','--offline','-p','plurx-worker-control','--test','library_driver']
 DAEMON = CARGO+['test','--locked','--offline','-p','plurxd','--bin','plurxd']
+STORE_TESTS = c.read_json(PACKAGE/'store-tests.json')
 CASES = {
  'control-selector': CARGO+['test','--offline','--manifest-path','@SELECTOR_MANIFEST@','--test','library_driver','selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
  'graph-driver': CARGO+['run','--locked','--offline','--quiet','-p','plurx-worker-control','--example','library_driver_graph'],
@@ -50,9 +59,9 @@ CASES = {
  'driver-payload': LEAF+['numeric_payload_does_not_select_control_edges','--','--exact','--nocapture'],
  'driver-executor': LEAF+['production_executor_consumes_real_environment_replies_in_order','--','--exact','--nocapture'],
  'driver-selector': LEAF+['selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
- 'graph-store': CORE+['store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed','--','--exact','--nocapture'],
- 'control-C4': CORE+['store::async_driver_refinement::closure_completion_trigger_mutation_fails_last_request_atomic_retirement','--','--exact','--nocapture'],
- 'control-C9': CORE+['store::async_driver_refinement::closure_reservation_release_mutation_fails_reservation_conservation','--','--exact','--nocapture'],
+ 'graph-product': CORE+[STORE_TESTS['product_test'],'--','--exact','--nocapture'],
+ 'control-C4': CORE+[STORE_TESTS['product_controls']['C4'],'--','--exact','--nocapture'],
+ 'control-C9': CORE+[STORE_TESTS['product_controls']['C9'],'--','--exact','--nocapture'],
 }
 for short in ('ready_work_precedes_burst_pressure_ticks',
  'selector_preserves_loss_precedence_and_pending_work_pressure',
@@ -67,7 +76,6 @@ for short in ('acknowledged_settlement_leaves_retirement_durably_unchanged',
  'retirement_resolves_cancellation_revision_after_child_join'):
     CASES['daemon-'+short] = DAEMON+['background_jobs::tests::'+short,'--','--exact','--nocapture']
 
-STORE_TESTS = c.read_json(PACKAGE/'store-tests.json')
 for case in STORE_TESTS['core_tests']:
     if not any(case in argv for argv in CASES.values()):
         CASES['store-'+case.rsplit('::',1)[-1]] = CORE+[case,'--','--exact','--nocapture']
@@ -87,12 +95,13 @@ def case_evidence(name, output, code):
     c.require(re.findall(r'test result: ok\. (\d+) passed; 0 failed;',output) == ['1'],
               f'{name}: requires exactly one selected Rust test')
     facts = {'test_count':1,'result_class':'focused_rust_regression'}
+    if name == 'graph-product': facts['result_class'] = 'actual_sql_two_worker_product'
     if name in {'control-C4','control-C9'}:
         control = name.removeprefix('control-')
         named = 'LastRequestAtomicRetirement' if control == 'C4' else 'ReservationConservation'
         markers = [json.loads(x) for x in re.findall(r'async_store_control=(\{[^\n]+\})',output)]
         c.require(markers == [{'control':control,'named_failure':named}], 'missing exact actual-SQL control attribution')
-        facts.update({'named_failure':named,'result_class':'actual_sql_trigger_mutation'})
+        facts.update({'named_failure':named,'result_class':'actual_sql_product_prefix_mutation'})
     if name == 'sampled-backends':
         markers = [json.loads(x) for x in re.findall(r'async_store_backend_sample=(\{[^\n]+\})',output)]
         expected = [{'backend':backend,'completed':True,'reply_fault':'applied acknowledgement deliberately discarded'}
@@ -114,6 +123,132 @@ def case_evidence(name, output, code):
         c.require(markers == [contract['fields']], f'{name}: missing, duplicate, or drifted named marker')
         facts['named_marker'] = markers[0]
     return facts
+
+def causal_prefix_evidence(name, output, driver, driver_sha256):
+    c.require(name in {'control-C4','control-C9'}, 'causal-prefix evidence is only valid for product controls')
+    lines = re.findall(r'async_store_causal_prefix=(\{[^\n]+\})',output)
+    c.require(len(lines) == 1 and len(lines[0].encode()) <= 128*1024,
+              f'{name}: requires one bounded causal-prefix marker')
+    def unique(pairs):
+        value = {}
+        for key,item in pairs:
+            c.require(key not in value,f'{name}: duplicate causal-prefix JSON key')
+            value[key] = item
+        return value
+    marker = json.loads(lines[0],object_pairs_hook=unique)
+    c.exact_keys(marker,{'schema_version','control','named_failure','scope','ordinary_settlement_payload_transfer',
+      'driver_graph_sha256','source_bindings',
+      'schema_bindings','mutation','unmutated_prefix_replay','prefix','mutated_prefix','identities',
+      'first_causal_violation'},f'{name} causal prefix')
+    control = name.removeprefix('control-')
+    named = 'LastRequestAtomicRetirement' if control == 'C4' else 'ReservationConservation'
+    expected = {
+      'C4':('completion_retirement','background_library_request_completed','store/background_jobs_library.sql'),
+      'C9':('reservation_release','background_job_settlement_effects','store/background_jobs_schema.sql'),
+    }[control]
+    c.require(marker['schema_version'] == 1 and marker['control'] == control
+      and marker['named_failure'] == named and marker['scope'] == 'declared_representative_product'
+      and marker['ordinary_settlement_payload_transfer'] == ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER
+      and marker['driver_graph_sha256'] == driver_sha256,
+      f'{name}: causal prefix identity mismatch')
+    c.require(marker['source_bindings'] == c.product_source_bindings(),
+              f'{name}: causal prefix source bindings differ from product producer registry')
+    schema = marker['schema_bindings']
+    c.exact_keys(schema,{'unmutated','mutated'},f'{name} schema bindings')
+    c.require(all(isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) for value in schema.values())
+      and schema['unmutated'] != schema['mutated'],f'{name}: schema mutation identity missing')
+    mutation = marker['mutation']
+    c.exact_keys(mutation,{'kind','trigger','source_sha256','mutated_trigger_sha256'},f'{name} mutation')
+    kind,trigger,source_path = expected
+    source_digest = c.sha(ROOT/'crates/plurx-core/src'/source_path)
+    c.require(mutation['kind'] == kind and mutation['trigger'] == trigger
+      and mutation['source_sha256'] == source_digest
+      and marker['source_bindings'].get(source_path) == source_digest
+      and isinstance(mutation['mutated_trigger_sha256'],str)
+      and re.fullmatch('[0-9a-f]{64}',mutation['mutated_trigger_sha256'])
+      and mutation['mutated_trigger_sha256'] != source_digest,
+      f'{name}: causal mutation source identity mismatch')
+    c.require(marker['unmutated_prefix_replay'] is True,
+              f'{name}: normal prefix replay was not established')
+    c.require(isinstance(marker['prefix'],list) and 0 < len(marker['prefix']) <= 32,
+              f'{name}: normal prefix is empty or exceeds bound')
+    edges = driver['edges']
+    previous_to = None
+    seen_edge = False
+    for index,row in enumerate(marker['prefix']):
+        c.exact_keys(row,{'driver_from','request','reply','driver_to','primitive','normal_result'},
+                     f'{name} normal prefix row {index}')
+        source,target = row['driver_from'],row['driver_to']
+        c.require((source is None and target is None and index == 0) or
+          (type(source) is int and type(target) is int and source >= 0 and target >= 0),
+          f'{name}: malformed driver prefix endpoints')
+        c.require(row['request'] is None or isinstance(row['request'],str),
+                  f'{name}: malformed driver request')
+        c.require(row['reply'] is None or isinstance(row['reply'],str),
+                  f'{name}: malformed driver reply')
+        if source is not None:
+            c.require(not seen_edge or previous_to == source,f'{name}: broken driver prefix chain')
+            c.require(seen_edge or source == driver.get('initial'),
+                      f'{name}: driver prefix does not begin at the actual initial state')
+            matching = [edge for edge in edges if edge['from'] == source and edge['to'] == target
+              and edge['request'] == row['request'] and edge['reply'] == row['reply']]
+            c.require(len(matching) == 1,f'{name}: prefix edge is absent/ambiguous in source driver graph')
+            seen_edge = True; previous_to = target
+        else:
+            c.require(row['request'] is None or any(edge['request'] == row['request'] for edge in edges),
+                      f'{name}: initial request is absent from source driver graph')
+            c.require(row['reply'] is None or (row['reply'] in c.REPLIES and
+              (any(edge['reply'] == row['reply'] for edge in edges)
+               or any(rejected['reply'] == row['reply'] for rejected in driver.get('rejected',[])))),
+                      f'{name}: initial reply is absent from source driver graph')
+        c.require(row['primitive'] is None or isinstance(row['primitive'],dict),
+                  f'{name}: malformed normal primitive')
+        c.require(row['normal_result'] is None or isinstance(row['normal_result'],str),
+                  f'{name}: malformed normal result')
+    c.require(seen_edge,f'{name}: normal prefix contains no actual source driver edge')
+    mutated = marker['mutated_prefix']
+    c.require(isinstance(mutated,list) and 0 < len(mutated) <= 32,
+              f'{name}: mutated prefix is empty or exceeds bound')
+    identities = marker['identities']
+    c.exact_keys(identities,{'normal_predecessor','normal_successor','mutated_predecessor','mutated_successor'},
+                 f'{name} full identities')
+    identity_hashes = {}
+    for key,value in identities.items():
+        c.require(isinstance(value,str),f'{name}: full identity is not canonical JSON text')
+        parsed = json.loads(value,object_pairs_hook=unique)
+        c.require(c.canonical(parsed) == value,f'{name}: full identity is not canonical JSON')
+        identity_hashes[key] = hashlib.sha256(value.encode()).hexdigest()
+    c.require(identities['normal_predecessor'] == identities['mutated_predecessor']
+      and identities['normal_successor'] != identities['mutated_successor'],
+      f'{name}: mutation did not diverge from the normal transition')
+    previous = identity_hashes['mutated_predecessor']
+    for index,row in enumerate(mutated):
+        c.exact_keys(row,{'primitive','result','from_sha256','to_sha256','invariant'},
+                     f'{name} mutated prefix row {index}')
+        c.require(isinstance(row['primitive'],dict) and isinstance(row['result'],str)
+          and re.fullmatch('[0-9a-f]{64}',row['from_sha256'])
+          and re.fullmatch('[0-9a-f]{64}',row['to_sha256'])
+          and row['from_sha256'] == previous,
+          f'{name}: malformed or unlinked actual SQL prefix row')
+        required_invariant = named if index == len(mutated)-1 else None
+        c.require(row['invariant'] == required_invariant,
+                  f'{name}: causal invariant is not the first named failure')
+        previous = row['to_sha256']
+    c.require(mutated[0]['from_sha256'] == identity_hashes['mutated_predecessor']
+      and mutated[-1]['to_sha256'] == identity_hashes['mutated_successor'],
+      f'{name}: mutated prefix does not link full identities')
+    violation = marker['first_causal_violation']
+    c.exact_keys(violation,{'step','name'},f'{name} first causal violation')
+    c.require(type(violation['step']) is int and violation['step'] == len(mutated)-1
+      and violation['name'] == named,f'{name}: first causal violation is not the final named step')
+    return {'causal_prefix_sha256':hashlib.sha256(lines[0].encode()).hexdigest(),
+      'causal_prefix_steps':len(mutated),'first_causal_violation':violation}
+
+def control_causal_evidence(name, output, out):
+    driver_path = out/'driver-graph.json'
+    driver = c.read_json(driver_path)
+    c.validate_driver(driver)
+    return causal_prefix_evidence(name,output,driver,c.sha(driver_path))
 
 
 def write(path,value):
@@ -230,32 +365,47 @@ def source_identity(include_proof=True):
         patch_roots = tuple(path+'/' for path in patch_path_overrides()) + ('vendor/',)
         paths = {p for p in paths if p.startswith('crates/') or p.startswith(patch_roots)
                  or p in {'Cargo.lock','Cargo.toml','rust-toolchain.toml'}}
+        paths.update(async_resume.INVOCATION_PATHS)
+        for path in async_resume.INVOCATION_PATHS:
+            c.require((ROOT/path).is_file(),f'missing invocation identity input: {path}')
     crate_roots = tuple(crate+'/' for crates in SCOPE_CRATES.values() for crate in crates)
     sources = {p:c.sha(ROOT/p) for p in sorted(paths) if (ROOT/p).is_file()
       and (not p.endswith('.md') or p.startswith(crate_roots))}
     sources.update(patches)
     return sources
 
-def case_sources(name, sources, root=ROOT):
+def case_sources(name, sources, root=ROOT, out=None):
     crates = SCOPE_CRATES[case_scope(name)]
     path_roots = tuple(vendor+'/' for vendor in patch_path_overrides(root))
-    return {path:digest for path,digest in sources.items() if path in {'Cargo.toml','Cargo.lock','rust-toolchain.toml'}
+    selected = {path:digest for path,digest in sources.items() if path in {'Cargo.toml','Cargo.lock','rust-toolchain.toml'}
       or any(path.startswith(crate+'/') for crate in crates)
       or path.startswith('vendor/')
-      or path.startswith(path_roots)}
+      or path.startswith(path_roots)
+      or path in async_resume.INVOCATION_PATHS}
+    if name in {'graph-product','control-C4','control-C9'}:
+        c.require(out is not None and (out/'driver-graph.json').is_file(),
+                  f'{name} requires the exact raw driver graph input')
+        selected['generated-input:driver-graph.json'] = c.sha(out/'driver-graph.json')
+    if name == 'graph-product':
+        selected.update({'product-semantic:'+path:digest
+          for path,digest in c.product_semantic_bindings().items()})
+    return selected
 
 
 def reusable_case(name, row, out, sources):
     log = out/f'rust-{name}.log'
-    if (row.get('accepted') is not True or row.get('scope') != case_scope(name) or row.get('input_sha256') != case_sources(name,sources)
+    if (row.get('accepted') is not True or row.get('scope') != case_scope(name) or row.get('input_sha256') != case_sources(name,sources,out=out)
         or row.get('argv') != rendered_command(name,out) or not log.is_file()
         or c.sha(log) != row.get('log_sha256')):
         return False
     try:
-        evidence = case_evidence(name,log.read_text(),row.get('exit_code'))
+        output = log.read_text()
+        evidence = case_evidence(name,output,row.get('exit_code'))
+        if name in {'control-C4','control-C9'}:
+            evidence.update(control_causal_evidence(name,output,out))
         if any(row.get(key) != value for key,value in evidence.items()): return False
-        if name in {'graph-driver','graph-store'}:
-            graph = out/('driver-graph.json' if name == 'graph-driver' else 'store-graph.json')
+        if name in {'graph-driver','graph-product'}:
+            graph = out/('driver-graph.json' if name == 'graph-driver' else 'product-bundle.json')
             if not graph.is_file() or c.sha(graph) != row.get('graph_sha256'): return False
         if name == 'control-selector' and row.get('mutation',{}).get('contract_sha256') != c.sha(PACKAGE/'selector-control.json'):
             return False
@@ -334,7 +484,7 @@ def read_journal(path, kind):
     c.require(type(value.get('complete')) is bool, f'Malformed hydrated {kind} completion flag')
     if kind == 'rust':
         c.require(digest_map(value.get('source_sha256')) and isinstance(value.get('rust_toolchain'),dict)
-          and isinstance(value.get('graphs'),dict) and set(value['graphs']) <= {'driver','store'}, 'Malformed hydrated Rust global identity')
+          and isinstance(value.get('graphs'),dict) and set(value['graphs']) <= {'driver','product'}, 'Malformed hydrated Rust global identity')
     else: c.require(isinstance(value.get('identities'),dict) and set(value['identities']) ==
       {'graph_sha256','generated_table_sha256','toolchain','runner_sha256','checker_sha256','model_sha256','config_sha256'},
       'Malformed hydrated TLC global identity')
@@ -357,10 +507,11 @@ def read_journal(path, kind):
 
 def refresh_graphs(journal,out,sources):
     journal['graphs'] = {}
-    for kind in ('driver','store'):
+    for kind in ('driver','product'):
         name = 'graph-'+kind
         if reusable_case(name,journal['cases'].get(name,{}),out,sources):
-            journal['graphs'][kind] = {'sha256':c.sha(out/(kind+'-graph.json'))}
+            filename = 'driver-graph.json' if kind == 'driver' else 'product-bundle.json'
+            journal['graphs'][kind] = {'sha256':c.sha(out/filename)}
 
 def build_inputs(args):
     out = args.output_dir.resolve(); out.mkdir(parents=True,exist_ok=True)
@@ -374,33 +525,39 @@ def build_inputs(args):
     for name in selected:
         argv = rendered_command(name,out); log = out/f'rust-{name}.log'
         prior = journal['cases'].get(name,{})
-        graph = out/('driver-graph.json' if name == 'graph-driver' else 'store-graph.json')
+        graph = out/('driver-graph.json' if name == 'graph-driver' else 'product-bundle.json')
         if reusable_case(name,prior,out,sources):
             print(json.dumps({'case':name,'status':'reused-bound-pass'}),flush=True); continue
-        environment = os.environ.copy(); environment.pop('PLURX_ASYNC_STORE_GRAPH',None)
+        environment = os.environ.copy()
+        environment.pop('PLURX_ASYNC_PRODUCT_BUNDLE',None)
+        environment.pop('PLURX_ASYNC_DRIVER_GRAPH',None)
         mutation = stage_selector(out) if name == 'control-selector' else None
         if mutation is not None: environment['CARGO_TARGET_DIR'] = str(ROOT/'target/async-driver-selector-target')
-        if name == 'graph-store':
+        if name in {'graph-product','control-C4','control-C9'}:
+            environment['PLURX_ASYNC_DRIVER_GRAPH'] = str(out/'driver-graph.json')
+        if name == 'graph-product':
             graph.unlink(missing_ok=True)
-            environment['PLURX_ASYNC_STORE_GRAPH'] = str(graph)
+            environment['PLURX_ASYNC_PRODUCT_BUNDLE'] = str(graph)
         proc,seconds = run(argv,env=environment)
         output = proc.stdout+'\n'+proc.stderr; log.write_text(output)
         record = {'argv':argv,'exit_code':proc.returncode,'log_sha256':c.sha(log),'elapsed_seconds':seconds,
-                  'test_count':0,'accepted':False,'result_class':'failed_command','scope':case_scope(name),'input_sha256':case_sources(name,sources)}
+                  'test_count':0,'accepted':False,'result_class':'failed_command','scope':case_scope(name),'input_sha256':case_sources(name,sources,out=out)}
         journal['cases'][name] = record; journal['complete'] = False
         refresh_graphs(journal,out,sources); write(journal_path,journal)
         c.require(source_identity(False) == sources,'source changed during graph/regression execution')
         facts = case_evidence(name,output,proc.returncode)
+        if name in {'control-C4','control-C9'}:
+            facts.update(control_causal_evidence(name,output,out))
         if name == 'graph-driver':
             try: driver = json.loads(proc.stdout)
             except json.JSONDecodeError as exc: raise c.Invalid('driver exporter did not emit JSON') from exc
             c.validate_driver(driver); graph.write_text(proc.stdout)
         record.update(facts); record['accepted'] = True
         if mutation is not None: record['mutation'] = mutation
-        if name in {'graph-driver','graph-store'}:
+        if name in {'graph-driver','graph-product'}:
             c.require(graph.is_file(),f'{name} did not write graph')
             record['graph_sha256'] = c.sha(graph)
-            journal['graphs']['driver' if name == 'graph-driver' else 'store'] = {'sha256':c.sha(graph)}
+            journal['graphs']['driver' if name == 'graph-driver' else 'product'] = {'sha256':c.sha(graph)}
         refresh_graphs(journal,out,sources)
         write(journal_path,journal)
         print(json.dumps({'case':name,'status':'passed','log':str(log)}),flush=True)
@@ -409,7 +566,7 @@ def build_inputs(args):
     write(journal_path,journal)
     print(json.dumps({'provenance':str(journal_path),'complete':journal['complete']}))
 
-def validate_provenance(path,driver_path,store_path):
+def validate_provenance(path,driver_path,product_path):
     p = read_journal(path,'rust')
     c.require(p is not None and p.get('schema_version') == 2 and p.get('complete') is True,'incomplete graph/regression provenance')
     c.require(p.get('source_sha256') == source_identity(False),'source/provenance hash mismatch')
@@ -423,15 +580,18 @@ def validate_provenance(path,driver_path,store_path):
         c.require(log.is_file() and c.sha(log) == row.get('log_sha256'),f'command log missing/changed: {name}')
         evidence = case_evidence(name,log.read_text(),row.get('exit_code'))
         c.require(all(row.get(key) == value for key,value in evidence.items()),f'case evidence/receipt differs: {name}')
-    c.require(p.get('graphs') == {'driver':{'sha256':c.sha(driver_path)},'store':{'sha256':c.sha(store_path)}},
+    c.require(p.get('graphs') == {'driver':{'sha256':c.sha(driver_path)},'product':{'sha256':c.sha(product_path)}},
               'graph/provenance hash mismatch')
     return p
 
 def prepare(args):
-    driver,store = c.read_json(args.driver_graph),c.read_json(args.store_graph)
-    ranks = c.validate_driver(driver); facts = c.validate_store(store)
+    driver,product = c.read_json(args.driver_graph),c.read_json(args.product_bundle)
+    ranks = c.validate_driver(driver)
+    facts = c.validate_product(product,driver,driver_sha256=c.sha(args.driver_graph))
+    c.require(facts.get('source_boundaries') == PRODUCT_SOURCE_BOUNDARIES,
+              'product source-boundary status mismatch')
     out = args.output_dir.resolve(); out.mkdir(parents=True,exist_ok=True)
-    (out/'SourceTables.tla').write_text(c.tables(driver,store))
+    (out/'SourceTables.tla').write_text(c.tables(driver,product))
     for model in ('AsyncDriverRefinement.tla','BoundaryControls.tla'):
         shutil.copyfile(PACKAGE/model,out/model)
     for name in c.CONFIGS:
@@ -439,9 +599,11 @@ def prepare(args):
         c.require((PACKAGE/f'{name}.cfg').read_text() == text,f'reviewed configuration drift: {name}')
         (out/f'{name}.cfg').write_text(text)
     inventory = {'schema_version':1,'result_class':'inventory_only','acceptance':False,'claim_boundaries':CLAIM_BOUNDARIES,
+      'source_boundaries':PRODUCT_SOURCE_BOUNDARIES,
+      'ordinary_settlement_payload_transfer':ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER,
       'driver':{'states':len(driver['states']),'edges':len(driver['edges']),'rejected':len(driver['rejected']),
-                'reply_classes':len(c.REPLIES),'dag_rank_max':max(ranks)},'store':facts,
-      'graph_sha256':{'driver':c.sha(args.driver_graph),'store':c.sha(args.store_graph)},
+                'reply_classes':len(c.REPLIES),'dag_rank_max':max(ranks)},'product':facts,
+      'graph_sha256':{'driver':c.sha(args.driver_graph),'product':c.sha(args.product_bundle)},
       'source_sha256':source_identity(),'generated_table_sha256':c.sha(out/'SourceTables.tla')}
     write(out/'inventory.json',inventory)
     return out,inventory
@@ -468,9 +630,9 @@ def tlc_identities(out,inventory,tools):
       'config_sha256':{name:c.sha(out/f'{name}.cfg') for name in c.CONFIGS}}
 
 def qualify(args):
-    provenance = validate_provenance(args.provenance.resolve(),args.driver_graph,args.store_graph)
+    provenance = validate_provenance(args.provenance.resolve(),args.driver_graph,args.product_bundle)
     out,inventory = prepare(args)
-    strict_controls = c.rejection_controls(c.read_json(args.driver_graph),c.read_json(args.store_graph))
+    strict_controls = c.rejection_controls(c.read_json(args.driver_graph),c.read_json(args.product_bundle))
     write(out/'strict-controls.json',strict_controls)
     tools = formal_toolchain(args.cache_dir)
     identities = tlc_identities(out,inventory,tools)
@@ -480,9 +642,11 @@ def qualify(args):
     receipt = old if old.get('identities') == identities else {'schema_version':1,'identities':identities,'runs':{}}
     receipt['attestations'] = {'provenance_sha256':c.sha(args.provenance),'source_sha256':current_sources,
       'inventory_sha256':c.sha(out/'inventory.json')}
-    receipt.update({'claim_boundaries':CLAIM_BOUNDARIES,'strict_controls':strict_controls,'complete':False,'result_class':'unqualified','scope':'conditional finite selected episode D',
-       'sql_closure':'closed only over declared input domain; not arbitrary production histories',
-       'source_transfer':'reviewed driver tag-independence and adapter/environment contracts; no full fair Rust trace theorem'})
+    receipt.update({'claim_boundaries':CLAIM_BOUNDARIES,'strict_controls':strict_controls,'complete':False,'result_class':'unqualified','scope':'selected_two_worker_product',
+       'source_boundaries':PRODUCT_SOURCE_BOUNDARIES,
+       'ordinary_settlement_payload_transfer':ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER,
+       'product_coverage':'seven main contexts close exactly; boundary counterexamples are separate checks; no arbitrary raw Store-D closure',
+       'source_transfer':'ordinary settlement payload transfer remains unclosed; no full source-faithful ordinary settlement or fair Rust trace theorem'})
     for name in ([args.config] if args.config else list(c.CONFIGS)):
         config = c.CONFIGS[name]; log = out/f'{name}.log'; cfg = out/f'{name}.cfg'
         model = config.get('model','AsyncDriverRefinement')
@@ -518,7 +682,7 @@ def parser():
     b = sub.add_parser('build-inputs'); b.add_argument('--output-dir',type=Path,required=True); b.add_argument('--case',choices=tuple(CASES))
     for name in ('inventory','qualify'):
         a = sub.add_parser(name)
-        for flag in ('driver-graph','store-graph','output-dir'): a.add_argument('--'+flag,type=Path,required=True)
+        for flag in ('driver-graph','product-bundle','output-dir'): a.add_argument('--'+flag,type=Path,required=True)
         if name == 'qualify':
             a.add_argument('--provenance',type=Path,required=True)
             a.add_argument('--cache-dir',type=Path,default=ROOT/'target/formal-toolchain')

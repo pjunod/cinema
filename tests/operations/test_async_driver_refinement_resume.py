@@ -87,7 +87,7 @@ class InvocationTrust(OwnedScratch):
 class ArchiveSafety(OwnedScratch):
     def test_only_useful_data_is_hydrated(self):
         data = archive([(name,b'{}',stat.S_IFREG|0o600) for name in (
-          'provenance.json','driver-graph.json','store-graph.json','rust-driver-closure.log',
+          'provenance.json','driver-graph.json','product-bundle.json','rust-driver-closure.log',
           'rust-control-C4.log','rust-control-C9.log','tlc/receipt.json','tlc/cleanup.log','tlc/SourceTables.tla','tlc/cleanup.cfg',
           'tlc/inventory.json','selector-target/binary','selector-mutant/src/lib.rs',
           'scratch/private.json','validation/untrusted.py','resume-origin.json')])
@@ -99,7 +99,7 @@ class ArchiveSafety(OwnedScratch):
 
     def test_traversal_symlink_special_duplicate_and_oversized_log_refuse(self):
         bad = [
-          [('../store-graph.json',b'{}',stat.S_IFREG|0o600)],
+          [('../product-bundle.json',b'{}',stat.S_IFREG|0o600)],
           [('provenance.json',b'{}',stat.S_IFLNK|0o777)],
           [('provenance.json',b'{}',stat.S_IFIFO|0o600)],
           [('provenance.json',b'{}',stat.S_IFREG|0o600)]*2,
@@ -112,7 +112,7 @@ class ArchiveSafety(OwnedScratch):
 
     def test_graph_limit_is_distinct_from_small_log_limit(self):
         payload = b'x'*(adapter.MAX_SMALL_BYTES+1)
-        count,size = adapter.extract_evidence(archive([('store-graph.json',payload,stat.S_IFREG|0o600)]),self.directory)
+        count,size = adapter.extract_evidence(archive([('product-bundle.json',payload,stat.S_IFREG|0o600)]),self.directory)
         self.assertEqual((count,size),(1,len(payload)))
 
     def test_generic_extractor_keeps_aggregate_and_compression_bounds(self):
@@ -126,14 +126,115 @@ class ArchiveSafety(OwnedScratch):
 
 
 class ReuseIdentities(OwnedScratch):
-    def test_store_edit_preserves_leaf_but_invalidates_store_and_daemon_scopes(self):
+    def test_semantic_invocation_changes_invalidate_persistent_case_rows(self):
+        sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool',
+          'crates/plurx-core/src/store/async_driver_product.rs':'product'}
+        sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
+        product_input = self.directory/'product-input'; product_input.mkdir()
+        raw_driver = product_input/'driver-graph.json'; raw_driver.write_text('{"states":[] }\n')
+        baseline = runner.case_sources('graph-product',sources,out=product_input)
+        for path in ('verification/async-driver-refinement/checker.py',
+                     'verification/async-driver-refinement/product-schema.json',
+                     'validation/async_refinement_resume.py',
+                     'validation/worker_control_resume.py'):
+            changed = dict(sources); changed[path] = 'changed invocation bytes'
+            with self.subTest(path=path):
+                self.assertNotEqual(baseline,runner.case_sources('graph-product',changed,out=product_input))
+        self.assertEqual(baseline,runner.case_sources('graph-product',dict(sources),out=product_input))
+        raw_driver.write_text('{"states":[1]}\n')
+        self.assertNotEqual(baseline,runner.case_sources('graph-product',sources,out=product_input))
+
+    def test_product_semantic_table_changes_invalidate_embedded_bundle(self):
+        sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool',
+          'crates/plurx-core/src/store/async_driver_product.rs':'product'}
+        sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
+        output = self.directory/'semantic-input'; output.mkdir()
+        (output/'driver-graph.json').write_text('{}\n')
+        semantic = {'verification/async-driver-refinement/AsyncDriverRefinement.tla':'a'*64,
+          'verification/async-driver-refinement/cleanup.cfg':'b'*64}
+        with patch.object(runner.c,'product_semantic_bindings',return_value=semantic,create=True):
+            baseline = runner.case_sources('graph-product',sources,out=output)
+            changed = dict(semantic); changed['verification/async-driver-refinement/cleanup.cfg'] = 'c'*64
+            with patch.object(runner.c,'product_semantic_bindings',return_value=changed,create=True):
+                self.assertNotEqual(baseline,runner.case_sources('graph-product',sources,out=output))
+
+    def test_store_edit_preserves_leaf_but_invalidates_product_and_daemon_scopes(self):
         sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool',
           'crates/plurx-worker-control/src/lib.rs':'leaf','crates/plurx-core/src/store/mod.rs':'store',
           'crates/plurxd/src/library_work.rs':'daemon'}
+        sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
         changed = dict(sources); changed['crates/plurx-core/src/store/mod.rs'] = 'changed'
         self.assertEqual(runner.case_sources('graph-driver',sources),runner.case_sources('graph-driver',changed))
-        for case in ('graph-store','daemon-ready_work_precedes_burst_pressure_ticks'):
+        for case in ('graph-product','daemon-ready_work_precedes_burst_pressure_ticks'):
             self.assertNotEqual(runner.case_sources(case,sources),runner.case_sources(case,changed))
+
+    def test_product_causal_prefix_requires_linked_named_first_failure(self):
+        source_path = 'store/background_jobs_library.sql'
+        source_sha = runner.c.sha(ROOT/'crates/plurx-core/src/store/background_jobs_library.sql')
+        bindings = {source_path:source_sha}
+        before = runner.c.canonical({'durable':'before'})
+        normal_after = runner.c.canonical({'durable':'normal'})
+        mutant_after = runner.c.canonical({'durable':'mutated'})
+        before_sha = hashlib.sha256(before.encode()).hexdigest()
+        intermediate_sha = '1'*64
+        mutant_sha = hashlib.sha256(mutant_after.encode()).hexdigest()
+        driver = {'initial':0,'edges':[{'from':0,'to':1,'request':None,'reply':'QueueLoss'}]}
+        marker = {
+          'schema_version':1,'control':'C4','named_failure':'LastRequestAtomicRetirement',
+          'scope':'declared_representative_product','ordinary_settlement_payload_transfer':'unclosed',
+          'driver_graph_sha256':'d'*64,'source_bindings':bindings,
+          'schema_bindings':{'unmutated':'a'*64,'mutated':'b'*64},
+          'mutation':{'kind':'completion_retirement','trigger':'background_library_request_completed',
+            'source_sha256':source_sha,'mutated_trigger_sha256':'c'*64},
+          'unmutated_prefix_replay':True,
+          'prefix':[
+            {'driver_from':None,'request':None,'reply':None,'driver_to':None,
+              'primitive':{'op':'claim'},'normal_result':'claimed'},
+            {'driver_from':0,'request':None,'reply':'QueueLoss','driver_to':1,
+              'primitive':{'op':'complete'},'normal_result':'accepted'}],
+          'mutated_prefix':[
+            {'primitive':{'op':'complete'},'result':'accepted','from_sha256':before_sha,
+              'to_sha256':intermediate_sha,'invariant':None},
+            {'primitive':{'op':'complete'},'result':'accepted','from_sha256':intermediate_sha,
+              'to_sha256':mutant_sha,'invariant':'LastRequestAtomicRetirement'}],
+          'identities':{'normal_predecessor':before,'normal_successor':normal_after,
+            'mutated_predecessor':before,'mutated_successor':mutant_after},
+          'first_causal_violation':{'step':1,'name':'LastRequestAtomicRetirement'}}
+        output = 'async_store_causal_prefix='+json.dumps(marker,separators=(',',':'),sort_keys=True)
+        with patch.object(runner.c,'product_source_bindings',return_value=bindings,create=True):
+            facts = runner.causal_prefix_evidence('control-C4',output,driver,'d'*64)
+            self.assertEqual(facts['causal_prefix_steps'],2)
+            bad = json.loads(json.dumps(marker)); bad['schema_bindings']['mutated'] = bad['schema_bindings']['unmutated']
+            with self.assertRaises(runner.c.Invalid):
+                runner.causal_prefix_evidence('control-C4','async_store_causal_prefix='+json.dumps(bad),driver,'d'*64)
+            bad = json.loads(json.dumps(marker)); bad['first_causal_violation']['step'] = 0
+            with self.assertRaises(runner.c.Invalid):
+                runner.causal_prefix_evidence('control-C4','async_store_causal_prefix='+json.dumps(bad),driver,'d'*64)
+            bad_driver = json.loads(json.dumps(driver)); bad_driver['edges'] = []
+            broken_chain = json.loads(json.dumps(marker)); broken_chain['prefix'][1]['driver_from'] = 2
+            bad_identity = json.loads(json.dumps(marker)); bad_identity['identities']['mutated_predecessor'] = '{broken'
+            bad_hash_chain = json.loads(json.dumps(marker)); bad_hash_chain['mutated_prefix'][0]['from_sha256'] = 'f'*64
+            early_failure = json.loads(json.dumps(marker)); early_failure['mutated_prefix'][0]['invariant'] = 'LastRequestAtomicRetirement'
+            unrelated_failure = json.loads(json.dumps(marker)); unrelated_failure['first_causal_violation']['name'] = 'UnrelatedInvariant'
+            wrong_scope = json.loads(json.dumps(marker)); wrong_scope['scope'] = 'source_faithful_adapter'
+            falsely_closed = json.loads(json.dumps(marker)); falsely_closed['ordinary_settlement_payload_transfer'] = 'closed'
+            cases = [
+              ('unknown-key',json.dumps({**marker,'unreviewed':True}),driver),
+              ('duplicate-key',output[:-1]+',"schema_version":1}',driver),
+              ('forged-source-binding',json.dumps({**marker,'source_bindings':{source_path:'0'*64}}),driver),
+              ('forged-mutation-source',json.dumps({**marker,'mutation':{**marker['mutation'],'source_sha256':'0'*64}}),driver),
+              ('absent-driver-edge',json.dumps(marker),bad_driver),
+              ('broken-driver-chain',json.dumps(broken_chain),driver),
+              ('malformed-full-identity',json.dumps(bad_identity),driver),
+              ('broken-state-hash-chain',json.dumps(bad_hash_chain),driver),
+              ('early-causal-violation',json.dumps(early_failure),driver),
+              ('unrelated-causal-violation',json.dumps(unrelated_failure),driver),
+              ('wrong-product-scope',json.dumps(wrong_scope),driver),
+              ('false-settlement-closure',json.dumps(falsely_closed),driver),
+            ]
+            for label,payload,bad_graph in cases:
+                with self.subTest(case=label),self.assertRaises((runner.c.Invalid,ValueError)):
+                    runner.causal_prefix_evidence('control-C4','async_store_causal_prefix='+payload,bad_graph,'d'*64)
 
     def test_new_workspace_path_dependency_outside_scope_fails_closed(self):
         crates = ['crates/plurx-core','crates/plurx-worker-control','crates/plurxd','crates/new-input']
@@ -161,7 +262,7 @@ class ReuseIdentities(OwnedScratch):
         for name in ('SourceTables.tla','AsyncDriverRefinement.tla','BoundaryControls.tla'):
             (self.directory/name).write_text('synthetic identity fixture only')
         for name in runner.c.CONFIGS: (self.directory/f'{name}.cfg').write_text('fixture')
-        metadata = {'graph_sha256':{'driver':'a','store':'b'}}
+        metadata = {'graph_sha256':{'driver':'a','product':'b'}}
         first = runner.tlc_identities(self.directory,metadata,{'fixture':'tool'})
         (self.directory/'provenance.json').write_text('{"elapsed_seconds":17}')
         self.assertEqual(first,runner.tlc_identities(self.directory,metadata,{'fixture':'tool'}))

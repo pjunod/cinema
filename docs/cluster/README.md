@@ -14,7 +14,7 @@ failures.
 
 | File | Answers | |
 |---|---|---|
-| [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Built driver/SQL relation and conditional fairness contract; Store closure exceeded its state budget and further design awaits Fable availability. | built |
+| [ASYNC-STORE-REFINEMENT-STATUS.md](ASYNC-STORE-REFINEMENT-STATUS.md) | Driver/SQL conditional fairness project; Astra-approved control-guided product implementation active, with final review and qualification outstanding. | built |
 | [RUST-ADMISSION-REFINEMENT-STATUS.md](RUST-ADMISSION-REFINEMENT-STATUS.md) | Production admission/start refinement pilot: scope, ownership, verifier feasibility, proof obligations and current delivery state. | built |
 | [WORKER-REFINEMENT-STATUS.md](WORKER-REFINEMENT-STATUS.md) | Built source correspondence and two full workers; PR receipt tracks qualification, ownership and landing. | built |
 | [OPERATION-PROGRESS-IMPLEMENTATION.md](OPERATION-PROGRESS-IMPLEMENTATION.md) | Source wait-map, repeated-operation model, acceptance and delivery plan. | built |

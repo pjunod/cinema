@@ -28,6 +28,7 @@ MAX_FILES = 300
 INVOCATION_PATHS = (
     'scripts/check-async-driver-refinement',
     'verification/async-driver-refinement/checker.py',
+    'verification/async-driver-refinement/product-schema.json',
     'verification/async-driver-refinement/store-tests.json',
     'rust-toolchain.toml',
     '.github/workflows/main-fast-lane.yml',
@@ -62,7 +63,7 @@ def transport_spec():
 def selected(parts, is_dir=False):
     if is_dir: return False
     if len(parts) == 1:
-        return (parts[0] in {'provenance.json','driver-graph.json','store-graph.json'}
+        return (parts[0] in {'provenance.json','driver-graph.json','product-bundle.json'}
           or re.fullmatch(r'rust-(?:[a-z0-9_-]{1,96}|control-C[49])\.log',parts[0]) is not None)
     if len(parts) == 2 and parts[0] == 'tlc':
         name = parts[1]
@@ -71,7 +72,7 @@ def selected(parts, is_dir=False):
 
 
 def member_limit(parts):
-    return MAX_GRAPH_BYTES if parts in (('driver-graph.json',),('store-graph.json',),('tlc','SourceTables.tla')) else MAX_SMALL_BYTES
+    return MAX_GRAPH_BYTES if parts in (('driver-graph.json',),('product-bundle.json',),('tlc','SourceTables.tla')) else MAX_SMALL_BYTES
 
 
 def extract_evidence(data, destination):

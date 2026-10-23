@@ -6,9 +6,11 @@ import copy
 import importlib.util
 import importlib.machinery
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('async_refinement_checker',ROOT/'verification/async-driver-refinement/checker.py')
@@ -104,6 +106,188 @@ class DomainInputContracts(unittest.TestCase):
             self.assertIn(checker.canonical({'op':'settle','job':0,'token':token,'disposition':3}),actions)
         self.assertNotIn(checker.canonical({'op':'settle','job':0,'token':0,'disposition':0}),actions)
         self.assertIn(checker.canonical({'op':'settle','job':0,'token':1,'disposition':0}),actions)
+
+
+def product_domain_fixture():
+    """Small D input fixture, never an actual SQL result or qualification bundle."""
+    return {'now':0,'jobs':[{'state':'queued','owner':None,'expiry':None,'request_done':False} for _ in range(2)],
+      'captured_tokens':[[],[]],'captured_leases':[],'domain':None,
+      'budgets':{'claims':[0,0],'renewed_claims':[],'domain_acquired':[False]*3,'removed':[False]*2}}
+
+
+def product_predecessor(context='stable'):
+    return {'id':0,'context':context,'sql':0,'w':[dict(checker.IDLE),dict(checker.IDLE)],
+            'available':[True,True],'completed':[]}
+
+
+class ProductCoverageContracts(unittest.TestCase):
+    """Independent helper contracts; no generated bundle, SQL, frontier or TLC run."""
+    def test_eligible_claim_without_oracle_is_fatal_before_successor_lookup(self):
+        p = product_predecessor(); p['w'][0].update(stage='claim',call='sent',job=0)
+        store = {'states':[product_domain_fixture()],'edges':[]}
+        demands = checker.expected_product_demands(p,fixture(),store)
+        self.assertEqual([(d['branch']['family'],d['role'],d['exclusion']) for d in demands],
+                         [('ClaimApply','apply',None)])
+        with self.assertRaisesRegex(checker.Invalid,'MissingProductOracleEdge'):
+            checker.complete_product_demands(p,fixture(),store,{})
+        excluded = copy.deepcopy(demands); excluded[0]['exclusion'] = {'kind':'domain','reason':'attempt_budget'}
+        with self.assertRaisesRegex(checker.Invalid,'complete independent enumeration'):
+            checker.require_exact_inventory(excluded,demands,'demand coverage')
+
+    def test_retirement_capacity_is_required_at_ready_and_sent(self):
+        s = product_domain_fixture()
+        token = dict(job_id='J0',node_id='node-a',boot_id='B',claim_id='C',fence=1,
+                     revision=1,lease_expires_ms=10)
+        s['captured_tokens'][0].append(token)
+        p = product_predecessor(); p['w'][0].update(stage='driver',call='sent',job=0,token=0,
+            ctrl=0,retire='first',original=0,sample=0)
+        driver = {'states':[{'pending':'RetireQueue'}]}
+        for inner in ('ready','sent'):
+            p['w'][0]['inner'] = inner
+            demands = checker.expected_product_demands(p,driver,{'states':[s]})
+            self.assertEqual([d['role'] for d in demands],['capacity'] if inner == 'ready' else ['capacity','apply'])
+            self.assertTrue(all(d['input']['disposition'] == 3 and d['exclusion'] is None for d in demands))
+            with self.subTest(inner=inner),self.assertRaisesRegex(checker.Invalid,'MissingProductOracleEdge'):
+                checker.complete_product_demands(p,driver,{'states':[s]}, {})
+        p['w'][0]['sample'] = -1
+        demands,used = checker.complete_product_demands(p,driver,{'states':[s]}, {})
+        self.assertFalse(used)
+        self.assertTrue(all(d['exclusion'] == {'kind':'sample','reason':'retirement_sample'} and
+                            d['oracle_edge'] is None for d in demands))
+
+    def test_capture_and_revision_exclusions_are_typed_not_forged_capacity(self):
+        s = product_domain_fixture()
+        token = dict(job_id='J0',node_id='node-a',boot_id='B',claim_id='C',fence=1,
+                     revision=1,lease_expires_ms=10)
+        s['captured_tokens'][0] = [token,{**token,'revision':2}]
+        self.assertEqual(checker.classify_domain(s,{'op':'settle','job':0,'token':0,'disposition':0}),
+                         {'kind':'domain','reason':'ordinary_revision'})
+        self.assertIsNone(checker.classify_domain(s,{'op':'settle','job':0,'token':0,'disposition':3}))
+        p = product_predecessor(); p['w'][0].update(stage='driver',call='sent',ctrl=0,job=0)
+        ds = checker.expected_product_demands(p,{'states':[{'pending':'Bind'}]},{'states':[s]})
+        self.assertTrue(all(d['input'] is None and d['exclusion'] ==
+                            {'kind':'capture','reason':'missing_token'} for d in ds))
+
+    def test_complete_local_choices_and_targets_cannot_be_omitted(self):
+        p = product_predecessor(); store = {'states':[product_domain_fixture()],'edges':[]}
+        candidates = checker.expected_product_successors(p,fixture(),store,{})
+        branches = [row[0] for row in candidates]
+        self.assertEqual({(b['family'],b['worker']) for b in branches},
+                         {('Admission',0),('Admission',1),('RemoveAvailability',0),('RemoveAvailability',1)})
+        with self.assertRaisesRegex(checker.Invalid,'complete independent enumeration'):
+            checker.require_exact_inventory(branches[:-1],branches,'branch coverage')
+        with self.assertRaisesRegex(checker.Invalid,'MissingProductSuccessor'):
+            checker.product_pair_obligations(p,candidates,{})
+        targets = {checker.canonical(row[1]):i+1 for i,row in enumerate(candidates)}
+        edges,enabled,_ = checker.product_pair_obligations(p,candidates,targets)
+        self.assertEqual(len(edges),4)
+        self.assertEqual(enabled['actions'],['Admission/0','Admission/1'])
+
+    def test_pair_membership_unions_overlaps_but_stutter_is_not_enabled(self):
+        p = product_predecessor(); same = checker.product_payload(p)
+        q = copy.deepcopy(same); q['available'][0] = False
+        branch = {'family':'ClaimApply','worker':0,'choice':{}}
+        candidates = [(branch,q,0,{'ClaimApply/0','ClaimWin/0'}),
+          ({**branch,'family':'WorkSuccess'},q,1,{'ExternalReturn/0'}),
+          ({**branch,'family':'RetireSample'},same,None,{'RetireLocal/0'})]
+        by_payload = {checker.canonical(same):0,checker.canonical(q):1}
+        edges,enabled,_ = checker.product_pair_obligations(p,candidates,by_payload)
+        union = ['ClaimApply/0','ClaimWin/0','ExternalReturn/0']
+        self.assertEqual(edges[0]['fair_actions'],union)
+        self.assertEqual(edges[1]['fair_actions'],union)
+        self.assertEqual(edges[2]['fair_actions'],['RetireLocal/0'])
+        self.assertEqual(enabled['actions'],union)
+        forged = copy.deepcopy(edges); forged[0]['fair_actions'].remove('ClaimWin/0')
+        with self.assertRaisesRegex(checker.Invalid,'complete independent enumeration'):
+            checker.require_exact_inventory(forged,edges,'pair membership')
+        with self.assertRaisesRegex(checker.Invalid,'duplicates'):
+            checker.require_exact_inventory(edges+[edges[0]],edges,'pair membership')
+
+    def test_orphan_is_rejected_without_claiming_full_product_acceptance(self):
+        checker.validate_context_reachability(0,[0,1],[[1],[1]])
+        with self.assertRaisesRegex(checker.Invalid,'orphan/unreachable'):
+            checker.validate_context_reachability(0,[0,1,2],[[1],[1],[2]])
+
+    def test_environment_keeps_unmatched_renewal_foreign_clock_and_removal(self):
+        p = product_predecessor('base'); s = product_domain_fixture()
+        token = dict(job_id='J0',node_id='node-a',boot_id='B',claim_id='C',fence=1,
+                     revision=1,lease_expires_ms=10)
+        s['captured_tokens'][0].append(token)
+        s['captured_leases'].append(dict(resource='R',owner_node_id='foreign-holder',fence=1,
+                                        revision=1,expires_at_unix_ms=10))
+        unmatched = list(checker.environment_inputs(p,s))
+        self.assertTrue({'renew','release_domain','clock_advance','remove_owner','acquire_domain'} <=
+                        {a['op'] for a in unmatched})
+        p['w'][0].update(stage='driver',job=0,token=0,localToken=True,call='sent')
+        self.assertNotIn('renew',{a['op'] for a in checker.environment_inputs(p,s)})
+        p['w'][0]['call'] = 'ready'
+        self.assertIn('renew',{a['op'] for a in checker.environment_inputs(p,s)})
+
+    def test_coverage_obligations_precede_expected_negative_invariants(self):
+        for name,config in checker.CONFIGS.items():
+            if config.get('model') == 'BoundaryControls': continue
+            with self.subTest(config=name):
+                self.assertEqual(config['invariants'][:len(checker.COVERAGE_INVARIANTS)],
+                                 list(checker.COVERAGE_INVARIANTS))
+
+    def test_ordinary_settlement_payload_transfer_cannot_be_silently_closed(self):
+        expected = {'OrdinarySettlementPayloadTransfer':'unclosed'}
+        checker.validate_source_boundaries(expected)
+        self.assertIn('source_boundaries',checker.PRODUCT_KEYS)
+        for bad in ({}, {'OrdinarySettlementPayloadTransfer':'closed'},
+                    {'OrdinarySettlementPayloadTransfer':'assumed'},
+                    {**expected,'UnknownBoundary':'unclosed'}, None):
+            with self.subTest(boundaries=bad),self.assertRaisesRegex(checker.Invalid,
+                    'OrdinarySettlementPayloadTransfer boundary must be exactly unclosed'):
+                checker.validate_source_boundaries(bad)
+        schema = checker.read_json(checker.PACKAGE/'product-schema.json')
+        self.assertEqual(schema['source_boundaries'],expected)
+        bad = copy.deepcopy(schema); bad['source_boundaries']['OrdinarySettlementPayloadTransfer'] = 'proved'
+        with self.assertRaisesRegex(checker.Invalid,'boundary must be exactly unclosed'):
+            checker.validate_product_schema(bad)
+        # Boundary rejection precedes even driver/schema/oracle validation.
+        for bad in ({}, {'OrdinarySettlementPayloadTransfer':'closed'}):
+            bundle = {key:None for key in checker.PRODUCT_KEYS}
+            bundle.update(schema_version=2,scope='selected_two_worker_product',source_boundaries=bad)
+            with self.assertRaisesRegex(checker.Invalid,'boundary must be exactly unclosed'):
+                checker.validate_product(bundle,{},False)
+        text = checker.STORE_BOUNDARIES['OrdinarySettlementPayloadTransfer']
+        for fragment in ('capture-time deadlines','retry delay','failed-attempt snapshot','error text',
+                         'local dispatch/loss/deadline guards','future claim eligibility','no payload noninterference lemma'):
+            self.assertIn(fragment,text)
+
+    def test_wire_schema_and_semantic_source_drift_fail_closed(self):
+        schema = checker.read_json(checker.PACKAGE/'product-schema.json')
+        checker.validate_product_schema(schema)
+        for key,value in (('main_contexts',{}),('fair_families',[]),('resource_policy',{}),('store_state_additions',['raw'])):
+            bad = copy.deepcopy(schema); bad[key] = value
+            with self.subTest(field=key),self.assertRaisesRegex(checker.Invalid,'schema .* drift'):
+                checker.validate_product_schema(bad)
+        bindings = {path:'a'*64 for path in checker.SEMANTIC_PATHS}
+        with mock.patch.object(checker,'sha',return_value='a'*64):
+            checker.validate_semantic_bindings(bindings)
+            path = next(iter(bindings)); bindings[path] = 'b'*64
+            with self.assertRaisesRegex(checker.Invalid,'semantic source hash mismatch'):
+                checker.validate_semantic_bindings(bindings)
+        bindings['unexpected.py'] = 'a'*64
+        with self.assertRaisesRegex(checker.Invalid,'semantic source registry differs'):
+            checker.validate_semantic_bindings(bindings,False)
+
+    def test_raw_preimage_and_episode_are_checked_without_a_table_oracle(self):
+        s = product_domain_fixture()
+        ep = {'now':0,'claims':[0,0],'tokens':[[],[]],'renewed_claims':[],'leases':[],
+              'domain_acquired':[False]*3,'removed':[False]*2}
+        s['raw'] = {'rows':{name:[] for name in checker.SNAPSHOT_TABLES},'episode':ep}
+        s['canonical_json'] = checker.canonical(s['raw'])
+        s['canonical_sha256'] = hashlib.sha256(s['canonical_json'].encode()).hexdigest()
+        checker.validate_raw_store(s)
+        bad = copy.deepcopy(s); bad['raw']['episode']['now'] = 1
+        with self.assertRaisesRegex(checker.Invalid,'canonical preimage'):
+            checker.validate_raw_store(bad)
+        bad = copy.deepcopy(s); bad['now'] = 1
+        with self.assertRaisesRegex(checker.Invalid,'episode/projection disagreement'):
+            checker.validate_raw_store(bad)
+
 
 
 class RawStoreProjectionContracts(unittest.TestCase):

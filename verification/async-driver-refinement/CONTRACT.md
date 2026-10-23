@@ -1,9 +1,15 @@
-# Contract — what qualification would establish
+# Contract — what the selected product can establish
 
 Companion to [README.md](README.md), which gives commands and receipt paths.
-**Status: implemented, unqualified; independent review and execution pending.**
-The finite-domain narrowing below is part of the claim, not a performance
-optimization that may be omitted from a report.
+**Status: implemented, unqualified.** The candidate has no new Rust test,
+control, or model-checker result. The earlier unrestricted Store-D closure
+hit its historical state cap; it remains a failed historical run, not an
+acceptance result. This claim replaces that traversal with a complete finite
+product for the selected two-worker protocol. The narrowing is part of the
+claim, not a performance optimization. `OrdinarySettlementPayloadTransfer`
+is explicitly `unclosed`; the finite protocol does not establish that
+production Yield/Retry requests carry the represented deadlines, errors, or
+application-time behavior.
 
 ## D is a concrete bounded input protocol
 
@@ -13,8 +19,12 @@ holder. Each job has at most two successful claims; each claim has at most
 one renewal. Each domain owner acquires at most once. Four successful attempt
 identities and two reserved mismatch identities are distinct; allocator
 exhaustion is outside D because the attempt limit is reached first. There
-are no new arrivals or cyclic demand. The state cap is 20,000; reaching it
-aborts generation rather than emitting a closed relation.
+are no new arrivals or cyclic demand. The 20,000 cap counts distinct exact
+Store identities across the union of all seven main contexts, including
+capacity-only oracle successors. Reaching it aborts generation. There is no
+product-node cap; the product bundle is bounded by 256 MiB and the total
+artifact by 512 MiB. A byte/state resource failure cannot emit a complete
+relation.
 
 All signed and unsigned integer values remain concrete. Only opaque generated
 job UUID strings are replaced by J0/J1. Clock steps use the next concrete
@@ -33,12 +43,118 @@ durable running ownership, including expired retained ownership; the foreign
 holder remains independent. Stale revisions, wrong-owner binding/completion,
 Fail and Stop are separate conformance partitions, not closed graph inputs.
 
-The importer independently enumerates this input domain for every state and
-requires exactly one edge per input. It does not compute SQL result guards.
-All operations must occur in the coverage inventory; known but unreachable
-result classes are listed as unobserved. Explicit attempt, renewal, domain
-and no-future-boundary cutoffs remain visible. A cutoff excludes an input,
-not every transition from that state.
+## The proof closes a selected product, not arbitrary Store D
+
+The Rust test `store::async_driver_product::actual_sql_two_worker_product_is_closed`
+builds `scope="selected_two_worker_product"` from the source-bound driver
+graph and actual SQL Store oracle. Rust certifies the finite product frontier;
+it does not claim closure of every Store-D input independently of that
+product. The previous raw Store-closure test and its closure-driven C4/C9
+wrappers are retired, not skipped or used as gates. Existing primitive,
+retirement, refusal, and backend conformance tests remain in the exact
+registry in [store-tests.json](store-tests.json).
+
+The imported oracle receives only the safety checks warranted by its selected
+product coverage. Rust, Python, and TLA independently derive structural
+candidate choices, D/sample eligibility, apply and capacity demands before
+looking up oracle edges. Every demanded eligible input must have exactly one
+actual outcome; a missing edge is fatal and cannot make capacity false.
+Python independently checks full successor equality and reachability. TLA
+preserves the original `Next` and fairness formulas while checking
+`DemandCovered`, `CapacityAgrees`, `CertifiedReachable`,
+`CertificateNextAgreement`, `FairPairAgreement`, and
+`FairEnablednessAgreement`. Fair memberships are the unions for each complete
+state pair; stuttering edges do not establish enabledness. A coverage failure
+is never a valid negative control.
+
+The completeness argument rules out a first omitted step. The exact initial
+valuation is certified. At each certified predecessor, complete structural
+choices and eligible primitive outcomes supply every original next step;
+exact successor equality certifies its target. Conversely, each certificate
+transition must satisfy the original action and actual primitive result.
+Equality of every fair action's state-pair relation preserves its
+nonstuttering enabledness and occurrences, so the original WF/SF formulas
+retain their meaning. This argument remains conditional on the three
+implementations and their source correspondence being correct; source hashes
+alone do not prove those obligations.
+
+The seven main contexts are `base`, `stable`, `weak_admission`,
+`no_claim_win`, `withheld_join`, `old_poll_policy`, and `drop_before_join`.
+They configure nine main TLC runs: safety, cleanup, selected-success,
+nonvacuity, and one control run for each of the five changed assumptions.
+`boundary_local_revocation` and `boundary_unknown_rollback` are two additional
+sparse boundary controls, for eleven configurations total. Their counterexamples
+are existential witnesses, not closure of unrestricted Store use.
+
+| Context | Configurations |
+|---|---|
+| `base` | `safety`, `cleanup` |
+| `stable` | `selected-success`, `nonvacuity` |
+| `weak_admission` | `control-weak-admission` |
+| `no_claim_win` | `control-no-claim-win` |
+| `withheld_join` | `control-withheld-join` |
+| `old_poll_policy` | `control-old-poll-policy` |
+| `drop_before_join` | `control-drop-before-join` |
+| `boundary_local_revocation` | `control-local-revocation` |
+| `boundary_unknown_rollback` | `control-unknown-as-rollback` |
+
+The product bundle binds the exact driver-graph bytes, the Rust source
+registry, compiled and installed schema identities, checker and product
+schema, both TLA modules, and all eleven configurations. Its raw Store rows
+and canonical full state identities preserve the Rust replay boundary. The
+256 MiB bundle and 512 MiB artifact bounds are the existing limits; there is
+no inferred product-state ceiling from the 20,000 Store-state cap.
+
+## Ordinary settlement payload transfer remains unclosed
+
+The model closes the ordinary Yield/Retry representatives declared in D. It
+does not claim they are the requests the production adapter sends. Its ordinary
+Yield uses `not_before_ms=application episode.now`, no error code and no
+checkpoint; Retry uses that same application time with error code `transient`.
+These values define the bounded product input, not a source-backed transfer
+theorem.
+
+The production lifecycle creates Yield deadlines from captured release time:
+domain and bind refusals use saturating `+5000 ms`, while pressure/domain-loss
+interruption uses `+1000 ms`. Retry stores the release sample plus a jittered
+delay computed from raw job-ID bytes and the adapter's failed-attempt snapshot,
+and sends `library_execution_failed`. The settlement method later
+takes a fresh `unix_ms()` for Store application. These capture, payload, and
+application times are distinct.
+
+This difference affects durable rows and later behavior. SQL stores
+`not_before_ms`, `last_error_code`, and error history; claim eligibility
+requires `not_before_ms <= now_ms`. Store validation rejects an ordinary
+Yield/Retry whose captured deadline is earlier than its application `now_ms`.
+The nine-table state identity preserves these fields, so the difference cannot
+be erased as a harmless tag or string normalization. `OrdinarySettlementPayloadTransfer`
+therefore remains a source-bound `unclosed` boundary covering deadline/delay
+construction, error text, capture timing, local dispatch, and Store
+application timing. No noninterference premise is asserted.
+
+The retained production T4 Kani target proves lifecycle `+5000`, `+1000`, and
+retry-delay policy for its inputs. It does not prove daemon capture/mutex
+scheduling, retry-delay construction for this adapter fixture, the selected
+Store time transfer, or cross-layer simulation. The bounded product can close
+its declared representative protocol while this source-transfer obligation
+remains unclosed.
+
+C9 replays the legal `Pressure → RevokeDomain/CancelWork → JoinFailed →
+DropPublisher → ReleaseInterrupted → SettleYield` control order and its
+trigger mutation under the declared representative product. Its deadline is
+not payload-faithful to production's captured `+1000 ms` Yield. The C9 marker
+must carry `scope="declared_representative_product"` and
+`ordinary_settlement_payload_transfer="unclosed"`; this witness is not
+actual-adapter payload evidence.
+
+The product frontier retains exact finite choices and actual Store outcomes.
+Rust records demands and branches; Python independently derives structural
+candidates and D/sample/apply/capacity eligibility before edge lookup. TLA
+checks demand completeness and capacity agreement against the original
+operators. Missing eligible inputs, unchecked exclusions, missing successors,
+or an incomplete frontier reject the bundle. Explicit attempt, renewal,
+domain and no-future-boundary cutoffs remain visible and exclude only the
+named input, not every transition from that state.
 
 ## Three claims have different premises
 
@@ -247,10 +363,11 @@ checks the exported installed inventory digest but does not prove SQLite.
 | `control-weak-admission` | Sole temporal property `BothSelectedCompletion`; SF weakened to WF |
 | `control-no-claim-win` | Sole temporal property `BothSelectedCompletion`; claim application/opportunity service removed |
 | `control-drop-before-join` | Actual local permit dropped at CancelWork return; `AdmissionUntilJoined` fails |
-| C4 / C9 | Actual SQL trigger mutants fail `LastRequestAtomicRetirement` / `ReservationConservation`, not table equality |
+| C4 | `store::async_driver_product::product_prefix_completion_mutation_fails_last_request_atomic_retirement` replays the protocol-valid actual-SQL prefix with the existing trigger mutation and preserves the unmutated replay through the first `LastRequestAtomicRetirement` failure |
+| C9 | `store::async_driver_product::product_prefix_reservation_mutation_fails_reservation_conservation` replays the protocol-valid actual-SQL prefix with the existing trigger mutation and preserves the unmutated replay through the first `ReservationConservation` failure |
 | `control-local-revocation` | Separate Store-boundary model rejects the stronger false `NoCommitAfterLocalRevocation` while durable freshness holds |
 | `control-unknown-as-rollback` | Separate actual-application boundary model fails `ResultAtomicity` when lost acknowledgement restores the preimage |
-| Strict rejection controls | Source hash drift, missing driver target and missing Store input are rejected by name |
+| Strict rejection controls | Source/schema drift, missing driver target, missing demanded oracle edge, forged exclusions, and incomplete certificate coverage reject by name |
 
 Temporal counterexamples require a lasso trace and exact temporal exit code;
 safety controls require their named invariant and exact safety exit code.
@@ -269,7 +386,7 @@ future routing/dependency change requires renewed review. Sequential same-
 writer savepoints do not prove commit visibility, concurrent writers, engine
 internals or replicated transactions. Any future selected primitive that uses
 QueueTransaction must fail closed rather than silently inherit this harness.
-The original BFS already compared full canonical preimages after refused
-operations, and Python required refused self-edges; there was no prior
-refusal-closure gap. The added direct-call mutation observer serves non-graph
-primitive tests, while resolve independently checks unchanged durable rows.
+The selected primitive tests retain full-row preimage checks for refused
+operations, and `resolve_claim` checks unchanged durable rows. These source-
+bound assertions support the imported oracle; they do not restore the retired
+arbitrary Store-D closure claim.

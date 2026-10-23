@@ -1,0 +1,159 @@
+{
+  "schema_version": 2,
+  "scope": "selected_two_worker_product",
+  "kind": "closed_wire_vocabulary_not_acceptance",
+  "root_fields": [
+    "contexts",
+    "coverage",
+    "demands",
+    "domain",
+    "driver_graph_sha256",
+    "enabledness",
+    "product_edges",
+    "product_states",
+    "schema_bindings",
+    "schema_version",
+    "scope",
+    "semantic_bindings",
+    "source_bindings",
+    "source_boundaries",
+    "store"
+  ],
+  "main_contexts": {
+    "base": {
+      "stable_success": false,
+      "mutation": "none"
+    },
+    "stable": {
+      "stable_success": true,
+      "mutation": "none"
+    },
+    "weak_admission": {
+      "stable_success": true,
+      "mutation": "weak-admission"
+    },
+    "no_claim_win": {
+      "stable_success": true,
+      "mutation": "no-claim-win"
+    },
+    "withheld_join": {
+      "stable_success": false,
+      "mutation": "withheld-join"
+    },
+    "old_poll_policy": {
+      "stable_success": false,
+      "mutation": "old-poll-policy"
+    },
+    "drop_before_join": {
+      "stable_success": false,
+      "mutation": "drop-before-join"
+    }
+  },
+  "boundary_contexts": {
+    "boundary_local_revocation": "local-revocation",
+    "boundary_unknown_rollback": "unknown-as-rollback"
+  },
+  "configuration_contexts": {
+    "safety": "base",
+    "cleanup": "base",
+    "selected-success": "stable",
+    "nonvacuity": "stable",
+    "control-weak-admission": "weak_admission",
+    "control-no-claim-win": "no_claim_win",
+    "control-withheld-join": "withheld_join",
+    "control-old-poll-policy": "old_poll_policy",
+    "control-drop-before-join": "drop_before_join",
+    "control-local-revocation": "boundary_local_revocation",
+    "control-unknown-as-rollback": "boundary_unknown_rollback"
+  },
+  "fair_families": [
+    "ClaimSend",
+    "ClaimApply",
+    "ClaimReply",
+    "ClaimReturn",
+    "Dispatch",
+    "StoreApply",
+    "SimpleApply",
+    "Reply",
+    "DriverReturn",
+    "RetireLocal",
+    "RetireCallReturn",
+    "ExternalReturn",
+    "JoinReturn",
+    "RetireDrain",
+    "MakeAvailable",
+    "Admission",
+    "ClaimWin"
+  ],
+  "worker_fields": [
+    "stage",
+    "job",
+    "attempt",
+    "token",
+    "lease",
+    "ctrl",
+    "call",
+    "reply",
+    "accepted",
+    "localToken",
+    "retire",
+    "inner",
+    "original",
+    "resolved",
+    "outcome",
+    "sample",
+    "firstSample",
+    "resolveSample",
+    "afterSample",
+    "started",
+    "dropped",
+    "joined",
+    "workStarted",
+    "faultUsed",
+    "admission",
+    "readLock"
+  ],
+  "product_state_fields": [
+    "id",
+    "context",
+    "sql",
+    "w",
+    "available",
+    "completed",
+    "canonical_sha256"
+  ],
+  "product_edge_fields": [
+    "from",
+    "to",
+    "branch",
+    "oracle_edge",
+    "fair_actions"
+  ],
+  "demand_fields": [
+    "context",
+    "from",
+    "branch",
+    "role",
+    "input",
+    "oracle_edge",
+    "exclusion"
+  ],
+  "demand_roles": [
+    "apply",
+    "capacity"
+  ],
+  "store_state_additions": [
+    "raw",
+    "canonical_json"
+  ],
+  "source_policy": "exact core and semantic registries; raw driver input digest; full Store canonical identity; independent semantics",
+  "resource_policy": {
+    "store_identity_cap": 20000,
+    "product_node_cap": null,
+    "bundle_max_bytes": 268435456,
+    "artifact_max_bytes": 536870912
+  },
+  "source_boundaries": {
+    "OrdinarySettlementPayloadTransfer": "unclosed"
+  }
+}

@@ -259,7 +259,7 @@ jobs:
         run: >-
           python3 scripts/check-async-driver-refinement qualify
           --driver-graph "$ASYNC_DRIVER_WORKING/driver-graph.json"
-          --store-graph "$ASYNC_DRIVER_WORKING/store-graph.json"
+          --product-bundle "$ASYNC_DRIVER_WORKING/product-bundle.json"
           --provenance "$ASYNC_DRIVER_WORKING/provenance.json"
           --output-dir "$ASYNC_DRIVER_WORKING/tlc"
           --cache-dir target/formal-toolchain

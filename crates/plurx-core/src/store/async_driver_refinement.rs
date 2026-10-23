@@ -6,10 +6,10 @@
 //! QueueSql below delegates to the real backend; it never copies production
 //! transition SQL, validation, schema, or trigger definitions.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
@@ -604,14 +604,14 @@ const ATTEMPTS_PER_JOB: u8 = 2;
 const DOMAIN_OWNERS: [&str; 3] = ["node-a", "node-b", "foreign-holder"];
 
 #[derive(Clone, Debug, Serialize)]
-struct Episode {
-    now: i64,
-    claims: [u8; 2],
-    tokens: [Vec<JobToken>; 2],
-    renewed_claims: Vec<String>,
-    leases: Vec<Lease>,
-    domain_acquired: [bool; 3],
-    removed: [bool; 2],
+pub(super) struct Episode {
+    pub(super) now: i64,
+    pub(super) claims: [u8; 2],
+    pub(super) tokens: [Vec<JobToken>; 2],
+    pub(super) renewed_claims: Vec<String>,
+    pub(super) leases: Vec<Lease>,
+    pub(super) domain_acquired: [bool; 3],
+    pub(super) removed: [bool; 2],
 }
 
 impl Episode {
@@ -628,9 +628,9 @@ impl Episode {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum Action {
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum Action {
     Claim {
         job: usize,
         node: usize,
@@ -820,9 +820,9 @@ async fn apply(
     observe_refusals: bool,
 ) -> Result<(String, Option<usize>), String> {
     let now = episode.now;
-    // The BFS already compares every refused edge's full canonical state.
-    // Direct conformance callers can enable the same observation here;
-    // logical resolution always checks durable rows independently of captures.
+    // The extracted oracle enables durable observation here and additionally
+    // compares full canonical state on refusals before memoization. Direct
+    // conformance can enable this observer; resolve always observes its reads.
     let before_rows = if matches!(action, Action::Resolve { .. })
         || (observe_refusals
             && !matches!(
@@ -916,6 +916,10 @@ async fn apply(
                 .await
                 .expect("settle preimage")
                 .expect("job");
+            // Dispositions 0/1 are representative protocol inputs: immediate Yield
+            // (no error/checkpoint) and immediate Retry (transient). They do not
+            // assert correspondence to adapter-captured deadlines or error text;
+            // OrdinarySettlementPayloadTransfer remains unclosed.
             let settlement = match disposition {
                 0 => JobSettlement::Yield {
                     error_code: None,
@@ -1277,13 +1281,13 @@ async fn projection(fixture: &Fixture, episode: &Episode, id: usize, key: &str) 
         "cutoffs": cutoffs, "canonical_sha256": format!("{:x}", Sha256::digest(key.as_bytes()))})
 }
 
-#[derive(Clone, Copy)]
-enum TriggerMutation {
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(super) enum TriggerMutation {
     CompletionRetirement,
     ReservationRelease,
 }
 
-async fn install_mutation(fixture: &Fixture, mutation: TriggerMutation) {
+async fn install_mutation(fixture: &Fixture, mutation: TriggerMutation) -> Value {
     let (schema, name) = match mutation {
         TriggerMutation::CompletionRetirement => (
             super::background_jobs_library::SCHEMA,
@@ -1315,6 +1319,9 @@ async fn install_mutation(fixture: &Fixture, mutation: TriggerMutation) {
         .async_refinement_control(format!("DROP TRIGGER {name};\n{mutated}"))
         .await
         .expect("source-derived trigger mutation");
+    json!({"kind": match mutation { TriggerMutation::CompletionRetirement => "completion_retirement", TriggerMutation::ReservationRelease => "reservation_release" },
+        "trigger": name, "source_sha256": format!("{:x}", Sha256::digest(schema.as_bytes())),
+        "mutated_trigger_sha256": format!("{:x}", Sha256::digest(mutated.as_bytes()))})
 }
 
 fn source_bindings() -> BTreeMap<&'static str, String> {
@@ -1400,7 +1407,7 @@ struct CapDiagnostic<'a> {
     rejected: (&'a Episode, &'a str, &'a Action),
 }
 
-fn diagnostic_action(encoded: String) -> Value {
+pub(super) fn diagnostic_action(encoded: String) -> Value {
     let bytes = encoded.len();
     json!({
         "sha256": format!("{:x}", Sha256::digest(encoded.as_bytes())),
@@ -1452,172 +1459,7 @@ fn state_cap_diagnostic(input: &CapDiagnostic<'_>) -> String {
     encoded
 }
 
-async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String> {
-    let fixture = Fixture::new().await;
-    if let Some(mutation) = mutation {
-        install_mutation(&fixture, mutation).await;
-    }
-    let initial = Episode::initial();
-    let first = canonical(&fixture, &initial).await;
-    let mut index = HashMap::from([(first.clone(), 0usize)]);
-    let mut states = vec![projection(&fixture, &initial, 0, &first).await];
-    let mut frontier = VecDeque::from([(0usize, Vec::<Action>::new())]);
-    let mut edges = Vec::new();
-    let mut by_op = BTreeMap::<String, usize>::new();
-    let mut by_result = BTreeMap::<String, usize>::new();
-    let mut expanded_states = 0usize;
-    while let Some((from, trace)) = frontier.pop_front() {
-        fixture
-            .store
-            .async_refinement_control("SAVEPOINT async_refinement_materialize;".into())
-            .await
-            .expect("materialization savepoint");
-        let mut episode = initial.clone();
-        for action in &trace {
-            apply_graph(&fixture, &mut episode, action).await?;
-        }
-        let key = canonical(&fixture, &episode).await;
-        if index.get(&key) != Some(&from) {
-            return Err(
-                "MaterializationRoundTrip: replay changed canonical concrete rows/tokens".into(),
-            );
-        }
-        invariants(&fixture, &episode).await?;
-        for action in actions(&fixture, &episode).await {
-            fixture
-                .store
-                .async_refinement_control("SAVEPOINT async_refinement_edge;".into())
-                .await
-                .expect("edge savepoint");
-            let mut successor = episode.clone();
-            let (result, resolved_token) = apply_graph(&fixture, &mut successor, &action).await?;
-            let next = canonical(&fixture, &successor).await;
-            // Source-specific no-apply results only: claim's cancelled/
-            // pruned cases return from its read-only precheck; other refused
-            // cases are zero-row CAS or an ephemeral renewal command. Held
-            // is the backend acquire CAS refusal plus a read-only reread.
-            if matches!(
-                result.as_str(),
-                "refused" | "cancelled" | "expired_or_pruned" | "held"
-            ) && next != key
-            {
-                return Err(
-                    "FailedCasAtomicity: refused operation changed durable rows or captured state"
-                        .into(),
-                );
-            }
-            let to = if let Some(to) = index.get(&next) {
-                *to
-            } else {
-                if states.len() >= STATE_CAP {
-                    eprintln!(
-                        "async_store_cap_diagnostic={}",
-                        state_cap_diagnostic(&CapDiagnostic {
-                            counts: [states.len(), edges.len(), frontier.len(), expanded_states],
-                            from,
-                            trace: &trace,
-                            predecessor: (&episode, &key),
-                            rejected: (&successor, &next, &action),
-                        })
-                    );
-                    return Err(format!("DomainStateCap: closure exceeded {STATE_CAP} concrete states; no closed relation emitted"));
-                }
-                invariants(&fixture, &successor).await?;
-                let to = states.len();
-                index.insert(next.clone(), to);
-                states.push(projection(&fixture, &successor, to, &next).await);
-                let mut path = trace.clone();
-                path.push(action.clone());
-                frontier.push_back((to, path));
-                to
-            };
-            for (previous, successor) in states[from]["jobs"]
-                .as_array()
-                .expect("previous jobs")
-                .iter()
-                .zip(states[to]["jobs"].as_array().expect("successor jobs"))
-            {
-                if successor["fence"].as_i64().expect("successor fence")
-                    < previous["fence"].as_i64().expect("previous fence")
-                {
-                    return Err("MonotoneFence: graph edge decreased a durable job fence".into());
-                }
-            }
-            if states[from]["domain"].is_object()
-                && states[to]["domain"].is_object()
-                && states[to]["domain"]["fence"]
-                    .as_u64()
-                    .expect("successor domain fence")
-                    < states[from]["domain"]["fence"]
-                        .as_u64()
-                        .expect("previous domain fence")
-            {
-                return Err("MonotoneFence: graph edge decreased a durable domain fence".into());
-            }
-            let action_json = serde_json::to_value(&action).expect("action JSON");
-            let op = action_json["op"]
-                .as_str()
-                .expect("string in typed JSON projection")
-                .to_owned();
-            *by_op.entry(op).or_default() += 1;
-            *by_result.entry(result.clone()).or_default() += 1;
-            edges.push(json!({"from": from, "to": to, "action": action_json, "result": result, "resolved_token": resolved_token}));
-            fixture
-                .store
-                .async_refinement_control(
-                    "ROLLBACK TO async_refinement_edge; RELEASE async_refinement_edge;".into(),
-                )
-                .await
-                .expect("edge rollback must not be skipped");
-            if canonical(&fixture, &episode).await != key {
-                return Err("RollbackRoundTrip: edge rollback changed concrete state".into());
-            }
-        }
-        fixture
-            .store
-            .async_refinement_control(
-                "ROLLBACK TO async_refinement_materialize; RELEASE async_refinement_materialize;"
-                    .into(),
-            )
-            .await
-            .expect("materialization rollback must not be skipped");
-        if canonical(&fixture, &initial).await != first {
-            return Err("RollbackRoundTrip: materialization rollback changed Init".into());
-        }
-        expanded_states += 1;
-    }
-    for op in [
-        "claim",
-        "renew",
-        "settle",
-        "resolve",
-        "bind",
-        "complete",
-        "acquire_domain",
-        "release_domain",
-        "remove_owner",
-        "clock_advance",
-    ] {
-        if !by_op.contains_key(op) {
-            return Err(format!("DomainCoverage: missing operation {op}"));
-        }
-    }
-    let mut cutoff_counts = BTreeMap::<String, usize>::new();
-    for state in &states {
-        for cutoff in state["cutoffs"]
-            .as_array()
-            .expect("array in typed JSON projection")
-        {
-            *cutoff_counts
-                .entry(
-                    cutoff
-                        .as_str()
-                        .expect("string in typed JSON projection")
-                        .into(),
-                )
-                .or_default() += 1;
-        }
-    }
+pub(super) fn domain_metadata() -> Value {
     let mut domain = json!({"jobs": 2, "nodes": NODES, "physical_capacity_per_node": 1,
             "attempts_per_job": ATTEMPTS_PER_JOB, "renewals_per_attempt": 1, "rearrival": false,
             "ordinary_token_inputs": "latest captured revision per claim; queue-token Mutex adapter contract; historical revisions remain captured and conformance-tested",
@@ -1635,6 +1477,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
             "premises": ["completion opportunity before attempt/domain/fault budget exhaustion", "two fixed selected requests; no infinite fresh-progress conclusion"],
             "savepoints": "same production writer connection, sequential harness; transaction/commit visibility and SQLite internals remain assumptions; any SQL/ABORT/ROLLBACK error aborts closure"});
     let boundary_metadata = json!({
+        "OrdinarySettlementPayloadTransfer": "unclosed: ordinary Yield/Retry use declared representative payloads (Yield error_code=None and checkpoint=None; Retry error_code=transient; not_before_ms=application now); production capture-time deadlines, retry delay and failed-attempt snapshot, error text, local dispatch/loss/deadline guards and future claim eligibility correspondence are not closed; no payload noninterference lemma or true transfer assumption is claimed",
         "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; ordinary dispositions 0/1/2 retain latest-revision inputs",
         "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
         "primitive_clock_boundary": "each generated primitive request uses current episode.now; the daemon's three retirement wall samples and dispatch/application races are reviewed adapter/conformance boundaries, not source-derived clock-race coverage",
@@ -1648,7 +1491,7 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
         "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
         "schema_snapshot_boundary": "canonical durable rows cover exactly the nine snapshot_tables; all installed schema objects are hash-bound for identity, not complete row snapshots or proofs of unrelated tables",
         "savepoint_boundary": "no closure transition invokes queue_transaction or nested explicit transactions; test savepoints bracket sequential primitives on the production writer and any savepoint/SQL failure aborts closure",
-        "refusal_observation": "the existing BFS full-canonical equality guard already rejects every refused edge mutation; direct non-graph conformance can additionally enable apply's durable snapshot observer; no pre-existing closure gap is claimed",
+        "refusal_observation": "the extracted oracle retains the original full-canonical refused-edge equality guard before memoization; logical resolve retains durable read-only observation; no pre-existing closure gap is claimed",
     });
     domain
         .as_object_mut()
@@ -1659,62 +1502,271 @@ async fn build_graph(mutation: Option<TriggerMutation>) -> Result<Value, String>
                 .expect("boundary metadata object")
                 .clone(),
         );
-    let graph = json!({"schema_version": 1, "scope": "closed bounded selected-protocol actual-SQL relation, not arbitrary production histories",
-        "initial": 0, "source_bindings": source_bindings(), "schema_bindings": schema_bindings(&fixture).await,
-        "domain": domain,
-        "coverage": {"closed": true, "no_skipped_edges": true, "state_count": states.len(), "edge_count": edges.len(),
-            "by_op": by_op, "by_result": by_result, "cutoff_counts": cutoff_counts},
-        "states": states, "edges": edges});
-    let mut graph = serde_json::to_string(&graph).expect("graph JSON");
-    for (index, job) in fixture.jobs.iter().enumerate() {
-        graph = graph.replace(job, &format!("J{index}"));
+    domain
+}
+
+pub(super) type StoreHandle = usize;
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct OracleEdge {
+    pub(super) from: StoreHandle,
+    pub(super) to: StoreHandle,
+    pub(super) action: Action,
+    pub(super) result: String,
+    pub(super) resolved_token: Option<usize>,
+}
+
+pub(super) struct OracleState {
+    pub(super) canonical: String,
+    pub(super) episode: Episode,
+    pub(super) view: Value,
+    parent: Option<(StoreHandle, Action)>,
+    inputs: Vec<Action>,
+}
+
+// A cache is bound to one migrated fixture/source/mutation identity for its
+// entire lifetime. Keys compare full canonical bytes and exact input values.
+pub(super) struct Oracle {
+    fixture: Fixture,
+    pub(super) states: Vec<OracleState>,
+    pub(super) edges: Vec<OracleEdge>,
+    index: HashMap<String, StoreHandle>,
+    cache: HashMap<(StoreHandle, Action), usize>,
+    pub(super) schema: Value,
+    pub(super) failure: Option<Value>,
+    pub(super) mutation: Value,
+}
+
+impl Oracle {
+    pub(super) async fn new(mutation: Option<TriggerMutation>) -> Result<Self, String> {
+        let fixture = Fixture::new().await;
+        let mutation = if let Some(mutation) = mutation {
+            install_mutation(&fixture, mutation).await
+        } else {
+            Value::Null
+        };
+        let episode = Episode::initial();
+        invariants(&fixture, &episode).await?;
+        let key = canonical(&fixture, &episode).await;
+        let view = projection(&fixture, &episode, 0, &key).await;
+        let inputs = actions(&fixture, &episode).await;
+        let schema = schema_bindings(&fixture).await;
+        Ok(Self {
+            fixture,
+            states: vec![OracleState {
+                canonical: key.clone(),
+                episode,
+                view,
+                parent: None,
+                inputs,
+            }],
+            edges: vec![],
+            index: HashMap::from([(key, 0)]),
+            cache: HashMap::new(),
+            schema,
+            failure: None,
+            mutation,
+        })
     }
-    Ok(serde_json::from_str(&graph).expect("renamed graph JSON"))
-}
 
-#[tokio::test]
-async fn actual_sql_bounded_episode_graph_is_closed() {
-    let graph = build_graph(None)
-        .await
-        .expect("actual SQL closure and named invariants");
-    if let Ok(path) = std::env::var("PLURX_ASYNC_STORE_GRAPH") {
-        std::fs::write(
-            path,
-            serde_json::to_vec_pretty(&graph).expect("graph output"),
-        )
-        .expect("write graph");
+    pub(super) fn initial(&self) -> StoreHandle {
+        0
     }
-    eprintln!("async_store_graph_coverage={}", graph["coverage"]);
-}
 
-#[tokio::test]
-async fn closure_completion_trigger_mutation_fails_last_request_atomic_retirement() {
-    let failure = build_graph(Some(TriggerMutation::CompletionRetirement))
-        .await
-        .expect_err("C4 mutated closure must be rejected");
-    assert!(
-        failure.starts_with("LastRequestAtomicRetirement"),
-        "C4 observed {failure}"
-    );
-    eprintln!(
-        "async_store_control={}",
-        json!({"control": "C4", "named_failure": failure})
-    );
-}
+    pub(super) fn domain_inputs(&self, handle: StoreHandle) -> &[Action] {
+        &self.states[handle].inputs
+    }
 
-#[tokio::test]
-async fn closure_reservation_release_mutation_fails_reservation_conservation() {
-    let failure = build_graph(Some(TriggerMutation::ReservationRelease))
-        .await
-        .expect_err("C9 mutated closure must be rejected");
-    assert!(
-        failure.starts_with("ReservationConservation"),
-        "C9 observed {failure}"
-    );
-    eprintln!(
-        "async_store_control={}",
-        json!({"control": "C9", "named_failure": failure})
-    );
+    pub(super) fn normalize(&self, value: &Value) -> Value {
+        let mut encoded = serde_json::to_string(value).expect("oracle JSON");
+        for (index, job) in self.fixture.jobs.iter().enumerate() {
+            encoded = encoded.replace(job, &format!("J{index}"));
+        }
+        serde_json::from_str(&encoded).expect("normalized oracle JSON")
+    }
+
+    pub(super) fn export_state(&self, handle: StoreHandle) -> Value {
+        let state = &self.states[handle];
+        let mut view = state.view.clone();
+        view["raw"] = serde_json::from_str(&state.canonical).expect("full canonical raw view");
+        view["canonical_json"] = json!(state.canonical);
+        self.normalize(&view)
+    }
+
+    pub(super) fn export_states(&self) -> Vec<Value> {
+        (0..self.states.len())
+            .map(|id| self.export_state(id))
+            .collect()
+    }
+
+    pub(super) fn trace(&self, mut handle: StoreHandle) -> Vec<Action> {
+        let mut trace = Vec::new();
+        while let Some((parent, action)) = &self.states[handle].parent {
+            trace.push(action.clone());
+            handle = *parent;
+        }
+        trace.reverse();
+        trace
+    }
+
+    pub(super) fn source_bindings(&self) -> BTreeMap<&'static str, String> {
+        let mut sources = source_bindings();
+        sources.insert(
+            "store/async_driver_product.rs",
+            format!(
+                "{:x}",
+                Sha256::digest(include_str!("async_driver_product.rs").as_bytes())
+            ),
+        );
+        sources.insert(
+            "store/mod.rs",
+            format!("{:x}", Sha256::digest(include_str!("mod.rs").as_bytes())),
+        );
+        sources
+    }
+
+    pub(super) async fn apply(
+        &mut self,
+        handle: StoreHandle,
+        input: &Action,
+    ) -> Result<usize, String> {
+        if !self.domain_inputs(handle).contains(input) {
+            return Err("OracleInputDomain: demanded input is outside exact D".into());
+        }
+        if let Some(edge) = self.cache.get(&(handle, input.clone())) {
+            return Ok(*edge);
+        }
+        let trace = self.trace(handle);
+        let fixture = &self.fixture;
+        let parent = &self.states[handle];
+        fixture
+            .store
+            .async_refinement_control("SAVEPOINT async_product_materialize;".into())
+            .await
+            .map_err(|error| format!("MaterializationSavepoint: {error}"))?;
+        let mut episode = Episode::initial();
+        let evaluated: Result<_, String> = async {
+            for action in &trace {
+                let before = canonical(fixture, &episode).await;
+                let (result, _) = apply(fixture, &mut episode, action, true).await?;
+                let after = canonical(fixture, &episode).await;
+                if matches!(
+                    result.as_str(),
+                    "refused" | "cancelled" | "expired_or_pruned" | "held"
+                ) && before != after
+                {
+                    return Err(
+                        "FailedCasAtomicity: replay refusal changed full canonical state".into(),
+                    );
+                }
+                invariants(fixture, &episode).await?;
+            }
+            if canonical(fixture, &episode).await != parent.canonical {
+                return Err(
+                    "MaterializationRoundTrip: replay changed canonical concrete rows/tokens"
+                        .into(),
+                );
+            }
+            if actions(fixture, &episode).await != parent.inputs {
+                return Err("OracleInputDomain: materialized D differs from stored D".into());
+            }
+            let before = parent.canonical.clone();
+            let (result, resolved_token) = apply(fixture, &mut episode, input, true).await?;
+            let next = canonical(fixture, &episode).await;
+            if matches!(
+                result.as_str(),
+                "refused" | "cancelled" | "expired_or_pruned" | "held"
+            ) && before != next
+            {
+                return Err(
+                    "FailedCasAtomicity: refused operation changed durable rows or captured state"
+                        .into(),
+                );
+            }
+            let view = projection(fixture, &episode, self.states.len(), &next).await;
+            let inputs = actions(fixture, &episode).await;
+            let invariant = invariants(fixture, &episode).await;
+            Ok((
+                next,
+                episode.clone(),
+                view,
+                inputs,
+                result,
+                resolved_token,
+                invariant,
+            ))
+        }
+        .await;
+        // Every Result failure restores the real writer and checks Init; an
+        // actual SQL panic also aborts the test and can never publish closure.
+        fixture
+            .store
+            .async_refinement_control(
+                "ROLLBACK TO async_product_materialize; RELEASE async_product_materialize;".into(),
+            )
+            .await
+            .map_err(|error| format!("RollbackRoundTrip: {error}"))?;
+        if canonical(fixture, &Episode::initial()).await != self.states[0].canonical {
+            return Err("RollbackRoundTrip: materialization rollback changed Init".into());
+        }
+        let (next, successor, mut view, inputs, result, resolved_token, invariant) = evaluated?;
+        if invariant.is_err() || (!self.index.contains_key(&next) && self.states.len() >= STATE_CAP)
+        {
+            self.failure = Some(self.normalize(&json!({
+                "complete": false, "from": handle, "action": input, "result": result,
+                "predecessor_sha256": format!("{:x}", Sha256::digest(parent.canonical.as_bytes())),
+                "successor_sha256": format!("{:x}", Sha256::digest(next.as_bytes())),
+                "trace": trace, "predecessor": parent.view, "successor": view,
+                "predecessor_canonical_json": parent.canonical, "successor_canonical_json": next,
+            })));
+        }
+        invariant?;
+        for (old, new) in parent.view["jobs"]
+            .as_array()
+            .expect("jobs")
+            .iter()
+            .zip(view["jobs"].as_array().expect("jobs"))
+        {
+            if new["fence"].as_i64() < old["fence"].as_i64() {
+                return Err("MonotoneFence: oracle edge decreased job fence".into());
+            }
+        }
+        if parent.view["domain"].is_object()
+            && view["domain"].is_object()
+            && view["domain"]["fence"].as_u64() < parent.view["domain"]["fence"].as_u64()
+        {
+            return Err("MonotoneFence: oracle edge decreased domain fence".into());
+        }
+        let to = if let Some(to) = self.index.get(&next) {
+            *to
+        } else {
+            if self.states.len() >= STATE_CAP {
+                return Err(format!("DomainStateCap: closure exceeded {STATE_CAP} concrete states; no closed relation emitted"));
+            }
+            let to = self.states.len();
+            view["id"] = json!(to);
+            self.index.insert(next.clone(), to);
+            self.states.push(OracleState {
+                canonical: next,
+                episode: successor,
+                view,
+                parent: Some((handle, input.clone())),
+                inputs,
+            });
+            to
+        };
+        let id = self.edges.len();
+        self.edges.push(OracleEdge {
+            from: handle,
+            to,
+            action: input.clone(),
+            result,
+            resolved_token,
+        });
+        self.cache.insert((handle, input.clone()), id);
+        self.failure = None;
+        Ok(id)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

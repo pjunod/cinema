@@ -446,6 +446,7 @@ contract = "The core model classifies media and persists its durable state witho
 paths = [
   "tests/support/rust_source_inventory.rs",
   "crates/plurx-core/src/store/async_driver_refinement.rs",
+  "crates/plurx-core/src/store/async_driver_product.rs",
   "crates/plurx-core/src/store/background_jobs/principal_tests.rs",
   "crates/plurx-core/src/store/background_jobs/subtitle_admission_tests.rs",
   "crates/plurx-core/src/store/hiqlite_fragment_index_cluster/tests.rs",
