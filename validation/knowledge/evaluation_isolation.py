@@ -103,11 +103,15 @@ class IsolationConfig:
     candidate_readonly: bool = False
     working_directory: str = "/work"
     trusted_source_members: tuple[TrustedSourceMember, ...] = ()
+    native_binding: object | None = None
 
     def __post_init__(self):
         for name in ("engine", "owned_root", "candidate_root", "grader_root", "runtime_root"):
             object.__setattr__(self, name, Path(getattr(self, name)))
         object.__setattr__(self, "engine", self.engine.resolve())
+        if self.native_binding is not None:
+            from .study_driver.guest_stage_store import NativeGuestBinding
+            _require(type(self.native_binding) is NativeGuestBinding, "typed native stage binding required")
         object.__setattr__(self, "trusted_source_members", tuple(self.trusted_source_members))
         object.__setattr__(self, "trusted_source_files", tuple(self.trusted_source_files))
         object.__setattr__(self, "trusted_wrappers", tuple(self.trusted_wrappers))
@@ -344,7 +348,8 @@ if rust_required == "yes":
         outcome=subprocess.run([path,"--version"],cwd="/",stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
         versions[name]={"returncode":outcome.returncode,"output":outcome.stdout.decode("utf-8","replace").strip()}
 build_environment={key:os.environ.get(key) for key in ("CARGO_BUILD_JOBS","CARGO_PROFILE_DEV_DEBUG","CARGO_PROFILE_TEST_DEBUG")} if rust_required=="yes" else {}
-print(json.dumps({"outside":outside,"network":{"interfaces":interfaces,"links":links,"ipv4_routes":ipv4_routes,"ipv6_routes":ipv6_routes,**error_observation(network_errno)},"guest_errno":guest_errno,"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
+native_mounts={path:[os.stat(path).st_dev,os.stat(path).st_ino] for path in ("/work","/work/.runtime","/grader")}
+print(json.dumps({"native_mounts":native_mounts,"outside":outside,"network":{"interfaces":interfaces,"links":links,"ipv4_routes":ipv4_routes,"ipv6_routes":ipv6_routes,**error_observation(network_errno)},"guest_errno":guest_errno,"versions":versions,"filesystem":filesystem,"build_environment":build_environment},sort_keys=True))
 '''
 
 
@@ -508,8 +513,10 @@ def _workdir(value, config=None):
     return value
 
 
-def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 1024, git_blob=None):
+def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 1024, git_blob=None, native=None):
     """Open through no-follow directory descriptors, including race windows."""
+    if native is not None:
+        return native.member_digest(root, path, expected, max_bytes=max_bytes, git_blob=git_blob)
     parts = path.relative_to(root).parts
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -542,7 +549,51 @@ def _read_member(root: Path, path: Path, expected, *, max_bytes=512 * 1024 * 102
     return digest.hexdigest()
 
 
-def _manifest(root: Path, *, candidate=False, max_bytes=512 * 1024 * 1024, exceptions=None, source_members=None):
+def _mount_info(config, path):
+    if config.native_binding is not None:
+        return config.native_binding.info(path)
+    _no_symlinks(path)
+    return path.lstat()
+
+
+def _native_manifest(root, native, *, candidate, max_bytes, exceptions, source_members):
+    view = native.inventory(root, max_bytes=max_bytes)
+    rows, paths, seen_exceptions, seen_members = [], set(), set(), set()
+    ancestors = {str(parent) for name in source_members for parent in Path(name).parents if str(parent) != "."}
+    for row in view["entries"]:
+        relative = row["path"];parts = Path(relative).parts
+        _require(isinstance(relative, str) and relative and not relative.startswith("/") and "\\" not in relative
+                 and str(Path(relative)) == relative and all(part not in {"", ".", ".."} for part in parts)
+                 and relative not in paths and len(paths) < 100000, "native manifest member scope refused")
+        paths.add(relative)
+        permitted = candidate and (relative in exceptions and relative in _SOURCE_EXCEPTIONS
+            or relative in source_members or relative in ancestors and row["kind"] == "dir")
+        _require((not _private_name(parts[-1]) or permitted)
+                 and (not any(_private_name(part) for part in parts[:-1]) or permitted), "private native mount member refused")
+        _require(row["kind"] in {"dir", "file"} and type(row["mode"]) is int and 0 <= row["mode"] <= 0o777,
+                 "special native mount member refused")
+        if candidate and relative.startswith(".runtime/"):
+            _require(False, "candidate runtime mountpoint must be empty")
+        if row["kind"] == "file":
+            _require(type(row["size"]) is int and row["size"] >= 0 and re.fullmatch(r"[a-f0-9]{64}", row["sha256"]),
+                     "native file digest unproved")
+            member = source_members.get(relative)
+            if member is not None:
+                _require(row["sha256"] == member.sha256 and row["git_blob"] == member.git_blob, "tracked source member changed")
+                seen_members.add(relative)
+            if relative in exceptions:
+                _require(row["sha256"] == exceptions[relative], "trusted source exception content changed")
+                seen_exceptions.add(relative)
+            rows.append((relative, row["mode"], row["sha256"]))
+    _require(view["bytes"] <= max_bytes and seen_exceptions == set(exceptions) and seen_members == set(source_members),
+             "native manifest bounds or required source missing")
+    return _digest(sorted(rows))
+
+
+def _manifest(root: Path, *, candidate=False, max_bytes=512 * 1024 * 1024, exceptions=None, source_members=None, native=None):
+    if native is not None:
+        return _native_manifest(root, native, candidate=candidate, max_bytes=max_bytes,
+                                exceptions=exceptions or {}, source_members=source_members or {})
     rows = []
     total = 0
     members = 0
@@ -642,9 +693,8 @@ def _prepare(config: IsolationConfig):
     wrapper_commands = {"/work/" + relative for relative in wrappers}
     for relative, expected in wrappers.items():
         path = config.candidate_root / relative
-        _no_symlinks(path)
-        info = path.lstat()
-        _require(info.st_mode & 0o111 and _read_member(config.candidate_root, path, info) == expected, "trusted wrapper content/mode changed")
+        info = _mount_info(config, path)
+        _require(info.st_mode & 0o111 and _read_member(config.candidate_root, path, info, native=config.native_binding) == expected, "trusted wrapper content/mode changed")
     _require(0 < len(config.acceptance_argv) <= 32, "fixed acceptance argv required")
     for argv in config.acceptance_argv:
         _require(0 < len(argv) <= 256 and argv[0] in {config.python_executable, config.cargo_executable, config.rustc_executable} | wrapper_commands, "trusted runtime callback required")
@@ -680,6 +730,9 @@ def _prepare(config: IsolationConfig):
             logs.mkdir(mode=0o777)
         _no_symlinks(logs, directory=True)
         logs.chmod(0o777)
+    if config.native_binding is not None:
+        _require(not config.readonly_caches, "native stages do not expose external caches")
+        config.native_binding.prepare(config.candidate_root, config.runtime_root, quiet=_quiet_log_mount(config))
     # Runtime artifacts, including protected wrapper logs, share one measured
     # durable state tree. Empty source mountpoints add no hidden source bytes.
     mountpoint = config.candidate_root / ".runtime"
@@ -711,14 +764,14 @@ def _prepare(config: IsolationConfig):
         engine_digest = _bytes_digest(config.engine.read_bytes())
     for mount in mounts:
         _no_symlinks(mount, directory=True)
-    sources = {"candidate": _manifest(config.candidate_root, candidate=True, exceptions=exceptions, source_members=source_members), "grader": _manifest(config.grader_root),
-               "runtime": _manifest(config.runtime_root, max_bytes=config.runtime_max_bytes),
+    sources = {"candidate": _manifest(config.candidate_root, candidate=True, exceptions=exceptions, source_members=source_members, native=config.native_binding), "grader": _manifest(config.grader_root, native=config.native_binding),
+               "runtime": _manifest(config.runtime_root, max_bytes=config.runtime_max_bytes, native=config.native_binding),
                "caches": [_manifest(Path(cache.source), max_bytes=config.cache_max_bytes) for cache in config.readonly_caches]}
     payload = {"engine": str(config.engine), "engine_digest": engine_digest, "endpoint": config.endpoint,
                "image": config.image, "root": str(root), "mounts": [(str(p), target, ro) for p, target, ro in _mounts(config)],
-               "mount_identity": [(path.stat().st_dev, path.stat().st_ino) for path, _, _ in _mounts(config)],
+               "mount_identity": [(_mount_info(config, path).st_dev, _mount_info(config, path).st_ino) for path, _, _ in _mounts(config)],
                "quiet_log_mount": _quiet_log_mount(config),
-               "mountpoint_identity": [(str(path.relative_to(config.candidate_root)), path.stat().st_dev, path.stat().st_ino)
+               "mountpoint_identity": [(str(path.relative_to(config.candidate_root)), _mount_info(config, path).st_dev, _mount_info(config, path).st_ino)
                                        for path in _candidate_mountpoints(config)],
                "sources": sources, "argv": config.acceptance_argv, "candidate_readonly": config.candidate_readonly, "working_directory": config.working_directory, "environment": sorted(_environment(config).items()),
                "limits": [config.timeout_seconds, config.max_output_bytes, config.memory_bytes, config.cpus, config.pids_limit,
@@ -731,6 +784,7 @@ def _prepare(config: IsolationConfig):
                "outcome_controller": _bytes_digest(_OUTCOME_CONTROLLER.encode()),
                "role_import_bootstrap": _bytes_digest(_ROLE_IMPORT_BOOTSTRAP.encode()),
                "executor": _bytes_digest(Path(__file__).read_bytes())}
+    if config.native_binding is not None:payload["native_store"] = config.native_binding.public()
     return private, payload
 
 
@@ -981,7 +1035,10 @@ def _configuration_probe(config, private):
     _OWNED_CONTAINERS.add(name)
     observations = None
     cleanup = False
+    native_sentinel = None
     try:
+        if config.native_binding is not None:
+            native_sentinel = config.native_binding.outside_begin(sentinel, sentinel.read_bytes())
         image = _command(config, ["image", "inspect", config.image])
         _require(image.returncode == 0 and not image.output_limited and not image.timed_out, "pinned image unavailable")
         image_data = json.loads(image.stdout)
@@ -1000,6 +1057,9 @@ def _configuration_probe(config, private):
                             str(sentinel), config.rustc_executable, config.cargo_executable, "yes" if config.require_rust else "no"])
         _require(checked.returncode == 0 and not checked.timed_out and not checked.output_limited, "isolation probes unavailable")
         observed = json.loads(checked.stdout)
+        if config.native_binding is not None:
+            _require(native_sentinel is not None and observed.get("native_mounts") == config.native_binding.mounted_identities(config),
+                     "native mounted guest identity unproved")
         guest_errno = observed["guest_errno"]
         _require(_guest_errno_valid(guest_errno), "guest errno protocol unproved")
         _require(observed["outside"]["readable"] is False and
@@ -1027,6 +1087,7 @@ def _configuration_probe(config, private):
             _require(cargo["returncode"] == 0 and cargo["output"].startswith("cargo "), "Cargo runtime unavailable")
         _require(_bytes_digest(sentinel.read_bytes()) == sentinel_digest, "outside sentinel changed")
         observations = {"security": security, "observed_probes": observed, "sentinel_digest": sentinel_digest}
+        if native_sentinel is not None:observations["native_outside_sentinel"] = native_sentinel
         return name, observations
     finally:
         # Successful callers retain this live container for their one callback;
@@ -1036,9 +1097,19 @@ def _configuration_probe(config, private):
             if not cleanup:
                 raise IsolationError("container cleanup unproved")
         try:
-            sentinel.unlink(missing_ok=True)
-        except OSError:
-            pass
+            if native_sentinel is not None:
+                try:config.native_binding.outside_end(native_sentinel)
+                except BaseException:
+                    # A late guest-cleanup refusal must not strand the otherwise
+                    # successful probe container before its handle is returned.
+                    if observations is not None and not _cleanup(config, name):
+                        raise IsolationError("container cleanup unproved after native sentinel refusal")
+                    raise
+        finally:
+            try:
+                sentinel.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def probe(config: IsolationConfig) -> ProbeReceipt:
@@ -1129,8 +1200,7 @@ def _driver_packet(config, name, argv, plan, mode, context):
     driver = plan.driver
     _require(driver is not None, "family has no reviewed structured outcome driver")
     path = config.grader_root / driver.path
-    _no_symlinks(path)
-    _require(_read_member(config.grader_root, path, path.lstat()) == driver.sha256, "family driver changed")
+    _require(_read_member(config.grader_root, path, _mount_info(config, path), native=config.native_binding) == driver.sha256, "family driver changed")
     secret = os.urandom(32)
     nonce = uuid.uuid4().hex
     arguments = ["exec", "--interactive", "--workdir=/", name, config.python_executable, "-I", "-S", "-c", _OUTCOME_CONTROLLER,
@@ -1296,11 +1366,13 @@ def _worker_configuration(config, plan, step=None):
             _require(shared_cache or not left.is_relative_to(right) and not right.is_relative_to(left), "protected/worker mounts overlap")
     private, payload = _prepare(current)
     expected = {worker.driver.path, "rpc-contract.json"}
-    actual = {path.relative_to(current.grader_root).as_posix() for path in current.grader_root.rglob("*") if stat.S_ISREG(path.lstat().st_mode)}
+    actual = ({row["path"] for row in current.native_binding.inventory(current.grader_root)["entries"] if row["kind"] == "file"}
+              if current.native_binding is not None else
+              {path.relative_to(current.grader_root).as_posix() for path in current.grader_root.rglob("*") if stat.S_ISREG(path.lstat().st_mode)})
     _require(actual == expected, "worker export must contain only its driver and closed contract")
     for relative, expected_digest in ((worker.driver.path, worker.driver.sha256), ("rpc-contract.json", worker.schema_sha256)):
         path = current.grader_root / relative
-        _require(_read_member(current.grader_root, path, path.lstat()) == expected_digest, "worker trusted export changed")
+        _require(_read_member(current.grader_root, path, _mount_info(current, path), native=current.native_binding) == expected_digest, "worker trusted export changed")
     return current, payload
 
 
@@ -1501,8 +1573,7 @@ def _duplex_broker(config, name, argv, plan, mode, context, worker_config, worke
 
 def _protected_packet(config, name, argv, plan, mode, context):
     driver = config.grader_root / plan.driver.path
-    _no_symlinks(driver)
-    _require(_read_member(config.grader_root, driver, driver.lstat()) == plan.driver.sha256, "protected driver changed")
+    _require(_read_member(config.grader_root, driver, _mount_info(config, driver), native=config.native_binding) == plan.driver.sha256, "protected driver changed")
     current_step = (plan.prerequisite_steps if mode == "prerequisite" else plan.acceptance_steps)[context["step_index"]]
     worker_config, before = _worker_configuration(config, plan, current_step)
     private = worker_config.owned_root / ".isolation"
@@ -1716,6 +1787,7 @@ def _run_step_inner(config, plan, index, receipt, *, mode, prerequisite=None, pr
     parent = _issued_step(previous) if previous is not None else None
     work_identity = {key: before[key] for key in ("root", "mount_identity", "mountpoint_identity")}
     work_identity["mounts"] = [(path, target) for path, target, readonly in before["mounts"]]
+    if "native_store" in before:work_identity["native_store"] = before["native_store"]
     if plan.worker is not None:
         _, worker_identity = _worker_configuration(config, plan, step)
         work_identity["worker"] = {key: worker_identity[key] for key in ("root", "mounts", "mount_identity", "mountpoint_identity")}

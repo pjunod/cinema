@@ -41,6 +41,13 @@ def _sha(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def _tree_digest(rows):
+    # Preserve the pre-existing paired_runtime/evaluation_isolation manifest
+    # format, including JSON ASCII escaping for non-ASCII relative paths.
+    raw = json.dumps(sorted(rows), sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return _sha(raw)
+
+
 def _identity(info):
     return info.st_dev, info.st_ino
 
@@ -116,7 +123,7 @@ class GuestStageFilesystem:
                  and os.fstat(self.work).st_dev == os.fstat(self.control).st_dev
                  and not self.work_path.is_relative_to(self.control_path)
                  and not self.control_path.is_relative_to(self.work_path), "DistinctNativeControlRequired")
-        self.session, self.stages = session, {}
+        self.session, self.stages, self.sentinels = session, {}, {}
         self.failed = False
         os.mkdir(session, mode=0o700, dir_fd=self.control)
         self.records = os.open(session, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.control)
@@ -233,9 +240,9 @@ class GuestStageFilesystem:
         _require(type(max_bytes) is int and 0 < max_bytes <= 128 * 1024**3, "ObservationBound")
         root = self._root(stage_id, role)
         entries, total = [], 0
-        def walk(directory, prefix):
+        def walk(directory, prefix, selected=None):
             nonlocal total
-            before = sorted(os.listdir(directory))
+            before = sorted(os.listdir(directory)) if selected is None else [selected]
             for name in before:
                 _relative(name)
                 path = prefix + name
@@ -246,12 +253,13 @@ class GuestStageFilesystem:
                        "stat": list(_fingerprint(info)), "size": info.st_size}
                 if row["kind"] == "dir":
                     entries.append(row)
-                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-                    try:
-                        _require(_fingerprint(os.fstat(child)) == _fingerprint(info), "GuestEntryChanged")
-                        walk(child, path + "/")
-                    finally:
-                        os.close(child)
+                    if selected is None:
+                        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                        try:
+                            _require(_fingerprint(os.fstat(child)) == _fingerprint(info), "GuestEntryChanged")
+                            walk(child, path + "/")
+                        finally:
+                            os.close(child)
                 else:
                     total += info.st_size
                     _require(total <= max_bytes, "GuestManifestByteBound")
@@ -266,7 +274,7 @@ class GuestStageFilesystem:
                         _require(count == info.st_size and _fingerprint(os.fstat(stream.fileno())) == _fingerprint(info), "GuestEntryChanged")
                     row.update(sha256=digest.hexdigest(), git_blob=blob.hexdigest());entries.append(row)
                 _require(_fingerprint(os.stat(name, dir_fd=directory, follow_symlinks=False)) == _fingerprint(info), "GuestEntryChanged")
-            _require(sorted(os.listdir(directory)) == before, "GuestMembershipChanged")
+            if selected is None:_require(sorted(os.listdir(directory)) == before, "GuestMembershipChanged")
         try:
             root_info = os.fstat(root)
             if metadata_only:
@@ -278,19 +286,25 @@ class GuestStageFilesystem:
                             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
                             os.close(parent);parent = child
                         info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
-                        _require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode), "GuestLinksOrSpecialFilesRefused")
+                        _require(info.st_dev == root_info.st_dev and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)), "GuestLinksOrSpecialFilesRefused")
                         entries = [{"path": relative, "kind": "dir" if stat.S_ISDIR(info.st_mode) else "file",
                                     "mode": stat.S_IMODE(info.st_mode), "stat": list(_fingerprint(info)), "size": info.st_size}]
                     finally:os.close(parent)
                 self._record(stage_id)
                 return {"stage": stage_id, "role": role, "root_stat": list(_fingerprint(root_info)), "entries": entries,
                         "bytes": 0, "root": dict(self.stages[stage_id]["roots"][role])}
-            walk(root, "")
-            self._record(stage_id)
-            if relative is not None:
-                _relative(relative)
-                entries = [row for row in entries if row["path"] == relative]
+            if relative is None:
+                walk(root, "")
+            else:
+                parts = _relative(relative);parent = os.dup(root)
+                try:
+                    for part in parts[:-1]:
+                        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        os.close(parent);parent = child
+                    walk(parent, "/".join(parts[:-1]) + ("/" if len(parts) > 1 else ""), selected=parts[-1])
+                finally:os.close(parent)
                 _require(len(entries) == 1, "GuestMemberMissing")
+            self._record(stage_id)
             return {"stage": stage_id, "role": role, "root_stat": list(_fingerprint(root_info)), "entries": entries,
                     "bytes": total, "root": dict(self.stages[stage_id]["roots"][role])}
         finally:
@@ -365,15 +379,56 @@ class GuestStageFilesystem:
             current["phase"] = "poisoned"
             raise
 
+    def outside_sentinel(self, stage_id, name, *, content=None, expected=None):
+        record = self._record(stage_id)
+        _require(re.fullmatch(r"outside-[a-f0-9]{32}", name) is not None, "FixedOutsideSentinelRequired")
+        parent = os.open(stage_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.work)
+        try:
+            _require(_identity(os.fstat(parent)) == record["identity"], "GuestStageIdentityChanged")
+            try:os.mkdir(".isolation", mode=0o700, dir_fd=parent)
+            except FileExistsError:pass
+            private = os.open(".isolation", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                info = os.fstat(private)
+                _require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700, "PrivateSentinelParentRequired")
+                key = (stage_id, name)
+                if content is not None:
+                    _require(type(content) is bytes and len(content) == 32 and expected is None and key not in self.sentinels,
+                             "ExactOutsideChallengeRequired")
+                    file = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=private)
+                    with os.fdopen(file, "wb") as stream:
+                        stream.write(content);stream.flush();os.fsync(stream.fileno());info = os.fstat(stream.fileno())
+                    result = {"scope": "outside-all-role-mounts", "stage": stage_id, "name": name,
+                              "device": info.st_dev, "inode": info.st_ino, "sha256": _sha(content), "bytes": 32,
+                              "mode": stat.S_IMODE(info.st_mode), "present": True}
+                    self.sentinels[key] = result
+                else:
+                    _require(expected == self.sentinels.get(key) and expected is not None, "OriginalOutsideSentinelRequired")
+                    file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=private)
+                    with os.fdopen(file, "rb") as stream:
+                        info = os.fstat(stream.fileno());raw = stream.read(33)
+                        _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == 32
+                                 and _identity(info) == (expected["device"], expected["inode"])
+                                 and _sha(raw) == expected["sha256"]
+                                 and _fingerprint(info) == _fingerprint(os.stat(name, dir_fd=private, follow_symlinks=False)),
+                                 "OutsideSentinelChanged")
+                    os.unlink(name, dir_fd=private);del self.sentinels[key]
+                    result = dict(expected, present=False, removed=True)
+                os.fsync(private)
+                return result
+            finally:os.close(private)
+        finally:os.close(parent)
+
     def close(self, stage_id):
         record = self._record(stage_id)
+        _require(not any(key[0] == stage_id for key in self.sentinels), "OutsideSentinelCleanupRequired")
         if record["phase"] == "closed":return self._public(stage_id)
         closure = {}
         for role in ("candidate", "grader", "worker-source", "worker-export"):
             if role in record["roots"]:
                 view = self.observe(stage_id, role)
                 rows = [(r["path"], r["mode"], r["sha256"]) for r in view["entries"] if r["kind"] == "file"]
-                closure[role] = _sha(_json(sorted(rows)))
+                closure[role] = _tree_digest(rows)
         record["phase"] = "closed"
         result = dict(self._public(stage_id), source_identity=closure)
         _durable(self.records, stage_id + "-closed.json", result)
@@ -526,6 +581,8 @@ def _verified_pack(manifest_path, expected_sha):
                  and type(manifest["modules"]) is dict and 1 <= len(manifest["modules"]) <= 64, "ClosedHelperPackRequired")
         expected_files = set()
         for name, row in manifest["modules"].items():
+            _require(type(name) is str and (name == "validation" or name.startswith("validation."))
+                     and all(part.isidentifier() for part in name.split(".")), "ClosedHelperModuleNamespace")
             _require(set(row) == {"path", "sha256", "package"} and type(row["package"]) is bool
                      and re.fullmatch(r"[a-f0-9]{64}", row["sha256"]), "HelperModuleIdentityRequired")
             expected = name.replace(".", "/") + ("/__init__.py" if row["package"] else ".py")
@@ -559,7 +616,7 @@ def serve(filesystem, binding, source_hashes, input_stream, output_stream):
                      and request["sequence"] == sequence and request["session"] == filesystem.session,
                      "OrderedHostOperationRequired")
             op, body = request["op"], request["body"]
-            _require(op in {"bind", "seed", "publish", "observe", "fixed_layout", "copy_qualified_pair", "close", "retire", "status", "finish"}
+            _require(op in {"bind", "seed", "publish", "observe", "fixed_layout", "copy_qualified_pair", "outside_sentinel", "close", "retire", "status", "finish"}
                      and type(body) is dict, "ClosedHostOperationRequired")
             try:
                 observed = _native_binding(binding["alias"], binding["physical_work"], binding["control"],
@@ -588,6 +645,10 @@ def serve(filesystem, binding, source_hashes, input_stream, output_stream):
                 elif op == "observe":result = filesystem.observe(**body)
                 elif op == "fixed_layout":result = filesystem.layout(**body)
                 elif op == "copy_qualified_pair":result = filesystem.copy_qualified_pair(**body)
+                elif op == "outside_sentinel":
+                    if "content_base64" in body:
+                        body = dict(body);body["content"] = base64.b64decode(body.pop("content_base64"), validate=True)
+                    result = filesystem.outside_sentinel(**body)
                 elif op == "close":result = filesystem.close(**body)
                 elif op == "retire":result = filesystem.retire(**body)
                 elif op == "status":

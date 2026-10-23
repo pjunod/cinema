@@ -341,6 +341,11 @@ class PairedRoleStager:
     def adopt(self, stage, baseline, body, *, expected_target_identity=None, expected_parent_identity=None):
         require(stage.paired_role == baseline.paired_role and body["initial_protected_source"] ==
                 self.owner.source_manifest(stage.candidate), "PristineProtectedViewRequired")
+        native=getattr(self.owner,"native_store",None)
+        if native is not None:
+            result=native.copy_qualified(stage,baseline,body)
+            stage.family_v2=self.bind_plan(stage,stage.family_v2)
+            return result
         verified_identity=copy_qualified_runtime(baseline.worker_runtime, stage.worker_runtime, body["after"]["worker_runtime"],
             expected_target_identity=expected_target_identity, expected_parent_identity=expected_parent_identity)
         # Rebind to this stage, never the baseline candidate/worker configuration.

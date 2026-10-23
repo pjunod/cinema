@@ -335,6 +335,38 @@ class StageRetirementTests(unittest.TestCase):
         complete=json.loads((self.output/"stage-evidence"/handle.root.name/"retirement-completed.json").read_bytes())
         self.assertEqual(complete["authorization"]["receipt_sha256"],fields["receipt_sha256"])
 
+    def test_native_retirement_requires_actual_host_receipt_and_journal_before_guest_call(self):
+        # Stub only the remote filesystem boundary; host issuance, serialization,
+        # checkpoint verification, archival and retirement ordering remain real.
+        handle,proof=self.stage();receipt=self.pending(handle,proof)
+        original=self.output/"native-original.json"
+        raw=b'{"closed":true,"synthetic_native_filesystem":true}'
+        original.write_bytes(raw);info=original.stat()
+        native=Mock()
+        native.measure.side_effect=paired.measure_tree
+        native.proofs.return_value={"native-closure.json":{"path":original,"sha256":hashlib.sha256(raw).hexdigest(),
+            "identity":(info.st_dev,info.st_ino),"bytes":len(raw)}}
+        native.retire.return_value={"retired":True,"synthetic_remote_boundary":True}
+        self.stager.native_store=native;handle.native_binding=NS()
+        missing={"run_id":"native-authorization","receipt_sha256":"a"*64,"checkpoint_sha256":"b"*64}
+        with self.assertRaises((adapter.AcceptanceAdapterError,FileNotFoundError)):
+            self.runner.retire_acceptance(receipt,**missing)
+        native.retire.assert_not_called();self.assertTrue(handle.runtime.exists())
+        fields=self.checkpoint(receipt,"native-authorization")
+        forged=dict(fields,checkpoint_sha256="f"*64)
+        with self.assertRaises(adapter.AcceptanceAdapterError):self.runner.retire_acceptance(receipt,**forged)
+        native.retire.assert_not_called();self.assertTrue(handle.runtime.exists())
+        self.runner.retire_acceptance(receipt,**fields)
+        native.retire.assert_called_once()
+        args,kwargs=native.retire.call_args
+        self.assertIs(args[0],handle)
+        self.assertEqual(args[1],{"event":"acceptance_finished","receipt_sha256":fields["receipt_sha256"],
+                                  "checkpoint_sha256":fields["checkpoint_sha256"]})
+        archive=self.output/"stage-evidence"/handle.root.name
+        self.assertEqual((archive/"native-closure.json").read_bytes(),raw)
+        self.assertEqual(kwargs["archive_sha256"],hashlib.sha256((archive/"archive.json").read_bytes()).hexdigest())
+        self.assertTrue(handle.retired);native.mirror_retired.assert_called_once_with(handle)
+
     def test_internal_build_hardlinks_can_retire_without_outside_aliases(self):
         handle,proof=self.stage();receipt=self.pending(handle,proof)
         original=handle.runtime/"target"/"synthetic-build"

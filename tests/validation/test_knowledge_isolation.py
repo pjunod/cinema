@@ -975,17 +975,47 @@ class ReviewedControllerOciTests(unittest.TestCase):
     No account, model, private plan, Gold, or actual study acceptance is loaded.
     """
     def setUp(self):
-        base = Path.cwd() / "target/agent-fixtures/.hermes/hdr-collaboration/workspaces/controller-oci"
-        base.mkdir(parents=True, exist_ok=True)
-        self.root = Path(tempfile.mkdtemp(prefix="roles-", dir=base)).resolve()
+        self.native_store = None
+        native_path = os.environ.get("PLURX_KNOWLEDGE_OCI_NATIVE_SPEC")
+        if native_path:
+            import uuid
+            from validation.knowledge.study_driver import guest_stage_store as native
+            raw, _ = native._regular_bytes(Path(native_path))
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), os.environ.get("PLURX_KNOWLEDGE_OCI_NATIVE_SPEC_SHA256"),
+                             "explicit public native fixture configuration must be pinned")
+            spec = json.loads(raw)
+            self.assertEqual(set(spec), {"owned_root", "receipt_root", "mirror_max_bytes", "transport", "expected_binding", "source_hashes"})
+            repository = Path(__file__).resolve().parents[2]
+            for name, expected in spec["source_hashes"].items():
+                self.assertTrue(name == "validation" or name.startswith("validation."))
+                self.assertTrue(all(part.isidentifier() for part in name.split(".")))
+                path = repository / (name.replace(".", "/") + ".py")
+                if not path.exists():path = repository / name.replace(".", "/") / "__init__.py"
+                self.assertEqual(hashlib.sha256(native._regular_bytes(path)[0]).hexdigest(), expected)
+            transport = native.GuestTransportSpec(**spec["transport"], expected_binding=spec["expected_binding"], source_hashes=spec["source_hashes"])
+            from types import SimpleNamespace
+            self.native_store = native.NativeGuestStageStore(transport, owned_root=spec["owned_root"], baseline=None,
+                mirror_max_bytes=spec["mirror_max_bytes"], receipt_root=spec["receipt_root"],
+                admission=SimpleNamespace(assert_current=lambda: None))
+            self.addCleanup(self.native_store.close_transport)
+            self.root = Path(spec["owned_root"]) / uuid.uuid4().hex
+            self.root.mkdir(mode=0o700)
+            self.role_names = {"protected-source": "candidate", "protected-export": "grader", "protected-runtime": "runtime",
+                               "worker-source": "worker-source", "worker-export": "worker-export", "worker-runtime": "worker-runtime"}
+        else:
+            base = Path.cwd() / "target/agent-fixtures/.hermes/hdr-collaboration/workspaces/controller-oci"
+            base.mkdir(parents=True, exist_ok=True)
+            self.root = Path(tempfile.mkdtemp(prefix="roles-", dir=base)).resolve()
+            self.role_names = {name: name for name in ("protected-source", "protected-export", "protected-runtime",
+                                                      "worker-source", "worker-export", "worker-runtime")}
         self.fixture_succeeded = False
         self.observation_sequence = 0
         self.addCleanup(self.finish_fixture)
         for name in ("protected-source", "protected-export", "protected-runtime",
                      "worker-source", "worker-export", "worker-runtime"):
-            (self.root / name).mkdir(mode=0o755)
+            (self.root / self.role_names[name]).mkdir(mode=0o755)
         for role in ("protected", "worker"):
-            source = self.root / (role + "-source")
+            source = self.root / self.role_names[role + "-source"]
             (source / "validation").mkdir()
             (source / "validation/__init__.py").write_text("")
             (source / "validation/synthetic_role.py").write_text("VALUE = " + repr(role) + "\n")
@@ -1032,15 +1062,15 @@ def run(mode,argv,context):
         'sha256':hashlib.sha256(Path(fixture.__file__).read_bytes()).hexdigest(),
         'completed_checks':3,'failed_checks':0,'skipped_checks':0}}
 """
-        (self.root / "worker-export/worker.py").write_text(worker_source)
-        (self.root / "worker-export/rpc-contract.json").write_text('{"protocol":2,"operations":["health"]}\n')
-        (self.root / "protected-export/protected.py").write_text(protected_source)
+        (self.root / self.role_names["worker-export"] / "worker.py").write_text(worker_source)
+        (self.root / self.role_names["worker-export"] / "rpc-contract.json").write_text('{"protocol":2,"operations":["health"]}\n')
+        (self.root / self.role_names["protected-export"] / "protected.py").write_text(protected_source)
         self.python = os.environ.get("PLURX_KNOWLEDGE_OCI_PYTHON", "/usr/bin/python3")
         self.config = isolation.IsolationConfig(engine=Path(os.environ["PLURX_KNOWLEDGE_OCI_ENGINE"]),
             endpoint=os.environ.get("PLURX_KNOWLEDGE_OCI_ENDPOINT", "unix:///var/run/docker.sock"),
             image=os.environ["PLURX_KNOWLEDGE_OCI_IMAGE"], owned_root=self.root,
-            candidate_root=self.root / "protected-source", grader_root=self.root / "protected-export",
-            runtime_root=self.root / "protected-runtime", candidate_readonly=True,
+            candidate_root=self.root / self.role_names["protected-source"], grader_root=self.root / self.role_names["protected-export"],
+            runtime_root=self.root / self.role_names["protected-runtime"], candidate_readonly=True,
             python_executable=self.python,
             rustc_executable=os.environ.get("PLURX_KNOWLEDGE_OCI_RUSTC", "/usr/bin/rustc"),
             cargo_executable=os.environ.get("PLURX_KNOWLEDGE_OCI_CARGO", "/usr/bin/cargo"),
@@ -1058,9 +1088,19 @@ def run(mode,argv,context):
         self.observation_sequence += 1
 
     def finish_fixture(self):
-        self.record_observation({"kind": "fixture-finished", "passed": self.fixture_succeeded,
-            "owned_containers": sorted(isolation._OWNED_CONTAINERS), "retained_stage": str(self.root)})
-        print("retained synthetic OCI evidence: " + str(self.root), file=sys.stderr)
+        try:
+            if self.native_store is not None and getattr(self, "native_handle", None) is not None and not self.native_store.failed:
+                self.native_store.close(self.native_handle)
+                self.record_observation({"kind": "native-fixture-retained", "binding": self.native_handle.native_binding.public(),
+                    "original_host_proofs": {name: row["sha256"] for name, row in self.native_store.proofs(self.native_handle).items()},
+                    "native_retirement_claimed": False})
+        except BaseException:
+            self.fixture_succeeded = False
+            raise
+        finally:
+            self.record_observation({"kind": "fixture-finished", "passed": self.fixture_succeeded,
+                "owned_containers": sorted(isolation._OWNED_CONTAINERS), "retained_stage": str(self.root)})
+            print("retained synthetic OCI evidence: " + str(self.root), file=sys.stderr)
 
     def assert_receipt(self, receipt, expected):
         self.record_observation({"kind": "receipt", "status": receipt.status, "expected": expected,
@@ -1081,8 +1121,8 @@ def run(mode,argv,context):
                 source_commit="a" * 40, source_archive_sha256="c" * 64)
         argv = config.acceptance_argv[0]
         worker_argv = (self.python, "/grader/worker.py")
-        worker_config = replace(config, candidate_root=self.root / "worker-source",
-            grader_root=self.root / "worker-export", runtime_root=self.root / "worker-runtime",
+        worker_config = replace(config, candidate_root=self.root / self.role_names["worker-source"],
+            grader_root=self.root / self.role_names["worker-export"], runtime_root=self.root / self.role_names["worker-runtime"],
             acceptance_argv=(worker_argv,), trusted_wrappers=(), uid=1000, gid=1000)
         worker = isolation.ProtectedWorkerPlan(worker_config,
             isolation.TrustedSourceFile("worker.py", hashlib.sha256((worker_config.grader_root / "worker.py").read_bytes()).hexdigest()),
@@ -1092,6 +1132,17 @@ def run(mode,argv,context):
         assertion_step = isolation.ExecutionStep("checks", argv, writes={"runtime"})
         plan = isolation.FamilyPlanV2("synthetic-real-role-provenance", (prerequisite_step,), (assertion_step,),
             isolation.TrustedSourceFile("protected.py", worker.proxy_sha256), worker=worker)
+        if self.native_store is not None:
+            from validation.knowledge.study_driver.runtime_bindings import Stage
+            self.native_handle = Stage(self.root, config.candidate_root, config.grader_root, config.runtime_root,
+                worker_candidate=worker_config.candidate_root, worker_grader=worker_config.grader_root, worker_runtime=worker_config.runtime_root)
+            self.native_store.reserve(self.root)
+            binding = self.native_store.publish(self.native_handle)
+            self.native_handle.native_binding = binding
+            config = replace(config, native_binding=binding)
+            worker_config = replace(worker_config, native_binding=binding)
+            worker = replace(worker, config=worker_config)
+            plan = replace(plan, worker=worker)
         calls = []
         actual_popen = isolation.subprocess.Popen
         actual_command = isolation._command
@@ -1130,12 +1181,22 @@ def run(mode,argv,context):
             for args in launches:
                 index = args.index(code)
                 self.assertEqual(args[index - 3:index], ["-I", "-S", "-c"])
-        if quiet:
-            logs = config.runtime_root / "quiet-logs"
-            self.assertTrue(list(logs.glob("*.log")))
-            self.assertEqual(list((config.candidate_root / "target/quiet").iterdir()), [])
-            self.assertFalse((worker_config.runtime_root / "quiet-logs").exists())
-        self.assertFalse((config.candidate_root / "forbidden-source-write").exists())
+        if self.native_store is not None:
+            candidate_rows = self.native_handle.native_binding.inventory(config.candidate_root)["entries"]
+            self.assertNotIn("forbidden-source-write", {row["path"] for row in candidate_rows})
+            if quiet:
+                runtime_rows = self.native_handle.native_binding.inventory(config.runtime_root)["entries"]
+                worker_rows = self.native_handle.native_binding.inventory(worker_config.runtime_root)["entries"]
+                self.assertTrue(any(row["path"].startswith("quiet-logs/") and row["path"].endswith(".log") for row in runtime_rows))
+                self.assertFalse(any(row["path"].startswith("target/quiet/") for row in candidate_rows))
+                self.assertFalse(any(row["path"] == "quiet-logs" or row["path"].startswith("quiet-logs/") for row in worker_rows))
+        else:
+            if quiet:
+                logs = config.runtime_root / "quiet-logs"
+                self.assertTrue(list(logs.glob("*.log")))
+                self.assertEqual(list((config.candidate_root / "target/quiet").iterdir()), [])
+                self.assertFalse((worker_config.runtime_root / "quiet-logs").exists())
+            self.assertFalse((config.candidate_root / "forbidden-source-write").exists())
         self.assertEqual(isolation._OWNED_CONTAINERS, set())
         self.fixture_succeeded = True
 

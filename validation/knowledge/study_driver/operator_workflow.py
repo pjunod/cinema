@@ -25,6 +25,7 @@ from . import trusted_launcher as launcher
 from . import runtime_bindings as runtime
 from . import isolation_adapter as adapter
 from . import paired_runtime as paired
+from . import guest_stage_store as guest_store
 from . import python_byte_outcome_driver as byte_driver
 from .. import evaluation as ev
 from .. import evaluation_provider as provider
@@ -239,7 +240,17 @@ class PreparedStudy:
                 roles[name]=paired.PairedRoleBinding(**values)
             r=spec["runtime"]
             seed=paired.DependencyImageSeed(r["dependency_receipt"]["path"],r["dependency_receipt"]["sha256"],image=r["image"],baseline=self.baseline,admission=self.admission,review_gate=self.admission.assert_current)
-            self.stager=runtime.SourceStager(baseline=self.baseline,isolation_api=isolation,owned_root=r["owned_root"],engine=r["engine"],endpoint=r["endpoint"],image=r["image"],python_executable=spec["executables"]["python"],rustc_executable=spec["executables"]["rustc"],cargo_executable=spec["executables"]["cargo"],admission=self.admission,registry_seeder=seed,byte_driver_api=byte_driver,outcome_driver_path=family["byte_driver"]["path"],outcome_driver_sha256=family["byte_driver"]["sha256"],family_recipes=self.recipes,paired_roles=roles,execution_options=r["execution_options"])
+            self.native_store=None
+            if "native_store" in r:
+                native=r["native_store"]
+                require(set(native)=={"transport","expected_binding","receipt_root","mirror_max_bytes"}
+                        and set(native["transport"])=={"executable","executable_sha256","arguments","environment","timeout_seconds"},
+                        "closed native operator configuration required")
+                transport=guest_store.GuestTransportSpec(**native["transport"],expected_binding=native["expected_binding"],
+                    source_hashes={name:row["sha256"] for name,row in closure.modules.items()})
+                self.native_store=guest_store.NativeGuestStageStore(transport,owned_root=r["owned_root"],baseline=self.baseline,
+                    mirror_max_bytes=native["mirror_max_bytes"],admission=self.admission,receipt_root=native["receipt_root"])
+            self.stager=runtime.SourceStager(baseline=self.baseline,isolation_api=isolation,owned_root=r["owned_root"],engine=r["engine"],endpoint=r["endpoint"],image=r["image"],python_executable=spec["executables"]["python"],rustc_executable=spec["executables"]["rustc"],cargo_executable=spec["executables"]["cargo"],admission=self.admission,registry_seeder=seed,byte_driver_api=byte_driver,outcome_driver_path=family["byte_driver"]["path"],outcome_driver_sha256=family["byte_driver"]["sha256"],family_recipes=self.recipes,paired_roles=roles,execution_options=r["execution_options"],native_store=self.native_store)
             self.config["manifest"]=SimpleNamespace(knowledge_sha256=graph_config["sha256"])
             self.runner=runtime.prepare_acceptance(config=self.config,graph=self.graph,review_gate=self.gate,admission=self.admission,stager=self.stager,adapter_api=adapter,cache_directory=r["cache_directory"])
             launcher.bind_checkpoint(checkpoints)
@@ -418,6 +429,7 @@ class PreparedStudy:
 
     def close(self):
         if getattr(self,"client",None) is not None:self.client.close()
+        if getattr(self,"native_store",None) is not None:self.native_store.close_transport()
         if hasattr(self,"baseline"):self.baseline.close()
         self.admission.close()
 

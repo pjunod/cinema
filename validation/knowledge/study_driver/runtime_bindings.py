@@ -291,13 +291,19 @@ class Stage:
     worker_runtime:Path|None=None
     closed:bool=False
     retired:bool=False
+    native_binding:object=None
 
 class SourceStager:
     """Full frozen source goes only to the unprivileged private executor mount."""
-    def __init__(self,*,baseline,isolation_api,owned_root,engine,endpoint,image,python_executable,rustc_executable,cargo_executable,admission,registry_seeder=None,byte_driver_api=None,outcome_driver_path=None,outcome_driver_sha256=None,family_recipes=None,paired_roles=None,execution_options=None):
+    def __init__(self,*,baseline,isolation_api,owned_root,engine,endpoint,image,python_executable,rustc_executable,cargo_executable,admission,registry_seeder=None,byte_driver_api=None,outcome_driver_path=None,outcome_driver_sha256=None,family_recipes=None,paired_roles=None,execution_options=None,native_store=None):
         self.baseline=baseline;self.api=isolation_api;self.root=no_links(owned_root);self.engine=engine;self.endpoint=endpoint;self.image=image
         require(self.root.is_dir() and self.root.stat().st_mode&0o777==0o700 and "evaluation-private" not in self.root.parts and "/tmp" not in str(self.root),"DedicatedPrivateExecutionRootRequired")
         self.python=python_executable;self.rustc=rustc_executable;self.cargo=cargo_executable;self.admission=admission;self.seeder=registry_seeder
+        self.native_store=native_store
+        if native_store is not None:
+            from .guest_stage_store import NativeGuestStageStore
+            require(type(native_store) is NativeGuestStageStore and native_store.owned_root==self.root
+                    and native_store.baseline is baseline,"ExplicitNativeStoreRequired")
         self.byte_driver_api=byte_driver_api;self.driver_path=outcome_driver_path;self.driver_sha256=outcome_driver_sha256;self.family_recipes=family_recipes
         self.execution_options=dict(execution_options or {})
         require(set(self.execution_options)<= {"timeout_seconds","max_output_bytes","memory_bytes","cpus","pids_limit","runtime_max_bytes","cache_max_bytes"},"ClosedExecutionResourceOptions")
@@ -308,9 +314,11 @@ class SourceStager:
         if paired_roles is not None:
             from .paired_runtime import PairedRoleStager
             self.paired=PairedRoleStager(self,paired_roles)
-    def prepare(self,spec,replacements,artifacts,commands=()):
+    def prepare(self,spec,replacements,artifacts,commands=(),*,_pinned=False):
         self.admission.assert_current();require(spec["source_commit"]==self.baseline.commit and spec["source_tree"]==self.baseline.tree,"StageBaselineMismatch")
-        root=self.root/uuid.uuid4().hex;root.mkdir(mode=0o700)
+        root=self.root/uuid.uuid4().hex
+        if self.native_store is not None:self.native_store.reserve(root)
+        root.mkdir(mode=0o700)
         handle=Stage(root,root/"candidate",root/"grader",root/"runtime",spec=dict(spec),artifacts=tuple(artifacts),commands=tuple(commands))
         for p in (handle.candidate,handle.grader,handle.runtime):p.mkdir(mode=0o700)
         try:
@@ -361,9 +369,18 @@ class SourceStager:
                 from .paired_runtime import readable_tree,runtime_layout
                 readable_tree(handle.candidate);readable_tree(handle.grader);runtime_layout(handle.runtime)
             self._register_stage(handle)
+            if self.native_store is not None:
+                handle.native_binding=self.native_store.publish(handle,pinned=_pinned)
+                self._stages[id(handle)]["pinned"]=_pinned
+                if handle.family_v2 is not None:handle.family_v2=self.paired.bind_plan(handle,handle.family_v2)
             return handle
         except Exception:
-            shutil.rmtree(root);raise
+            if self.native_store is None:shutil.rmtree(root)
+            else:
+                # A transfer may have partially published a distinct guest object.
+                # Preserve the host mirror and stop; never silently erase lineage.
+                self.native_store.failed=True
+            raise
     @staticmethod
     def step_command(step):
         return {"argv":step.argv,"cwd":step.cwd,"environment":dict(step.environment,**{
@@ -373,10 +390,10 @@ class SourceStager:
     def family_identity(plan):
         from .paired_runtime import family_identity
         return family_identity(plan)
-    @staticmethod
-    def source_manifest(root):
+    def source_manifest(self,root):
         from .paired_runtime import measure_tree
-        return measure_tree(root,candidate=True)
+        native=getattr(self,"native_store",None)
+        return native.measure(root,candidate=True) if native is not None else measure_tree(root,candidate=True)
     def configuration(self,handle,command,_worker=False,_step=None):
         cwd=command["cwd"];require(isinstance(cwd,str) and (cwd=="/work" or cwd.startswith("/work/")) and ".." not in PurePosixPath(cwd).parts and str(PurePosixPath(cwd))==cwd,"ExactWorkingDirectoryRequired");self.admission.assert_current()
         env=dict(command_environment(command))
@@ -402,7 +419,7 @@ class SourceStager:
                       if step.argv==argv and step.cwd==cwd and step.environment==tuple(sorted(env.items()))]
             require(selected and len({step.protected_readonly for step in selected})==1,"AmbiguousFrozenStepConfiguration")
             readonly=selected[0].protected_readonly
-        return self.api.IsolationConfig(candidate_readonly=readonly,engine=self.engine,endpoint=self.endpoint,image=self.image,owned_root=handle.root,candidate_root=handle.candidate,grader_root=handle.grader,runtime_root=handle.runtime,acceptance_argv=registration,python_executable=self.python,rustc_executable=self.rustc,cargo_executable=self.cargo,require_rust=rust,environment=tuple(sorted(env.items())),uid=os.getuid(),gid=os.getgid(),source_commit=self.baseline.commit,source_archive_sha256=self.baseline.expected,trusted_source_files=exceptions,trusted_wrappers=wrappers,working_directory=cwd,trusted_source_members=tuple(self.api.TrustedSourceMember(path,row["sha256"],row["git_blob"]) for path,row in sorted(self.baseline.permits.items())),**self.execution_options)
+        return self.api.IsolationConfig(candidate_readonly=readonly,engine=self.engine,endpoint=self.endpoint,image=self.image,owned_root=handle.root,candidate_root=handle.candidate,grader_root=handle.grader,runtime_root=handle.runtime,acceptance_argv=registration,python_executable=self.python,rustc_executable=self.rustc,cargo_executable=self.cargo,require_rust=rust,environment=tuple(sorted(env.items())),uid=os.getuid(),gid=os.getgid(),source_commit=self.baseline.commit,source_archive_sha256=self.baseline.expected,trusted_source_files=exceptions,trusted_wrappers=wrappers,working_directory=cwd,trusted_source_members=tuple(self.api.TrustedSourceMember(path,row["sha256"],row["git_blob"]) for path,row in sorted(self.baseline.permits.items())),native_binding=handle.native_binding,**self.execution_options)
     def supports_family(self,artifacts,commands):
         if self.family_recipes is not None:
             resolved=self.family_recipes.resolve(artifacts,commands)
@@ -428,7 +445,7 @@ class SourceStager:
         plan=self.family_plan(handle,commands)
         if plan is None:return None
         spec=dict(handle.spec,source_transform=None,source_transform_target=None)
-        baseline=self.prepare(spec,{},handle.artifacts,commands);handle.baseline_stage=baseline
+        baseline=self.prepare(spec,{},handle.artifacts,commands,_pinned=True);handle.baseline_stage=baseline
         self._stage_record(baseline)["pinned"]=True
         plan=self.family_plan(baseline,commands)
         if getattr(plan,"schema_version",1)==2:
@@ -464,15 +481,22 @@ class SourceStager:
         try:
             # copy_qualified_runtime checks the issued source/copy manifest before
             # replacing a target. No arbitrary current inode is adopted as truth.
-            replacements["runtime"]=copy_qualified_runtime(baseline_stage.runtime,handle.runtime,body["after"]["runtime"],
-                expected_target_identity=record["children"]["runtime"],expected_parent_identity=record["root"])
-            require(self._directory_identity(handle.runtime)==replacements["runtime"],"StageChildIdentityChanged")
-            if handle.paired_role is not None:
-                require(self.paired is not None,"PairedRuntimeBindingRequired")
-                require(self._directory_identity(handle.worker_runtime)==record["children"]["worker-runtime"],"StageChildIdentityChanged")
-                replacements["worker-runtime"]=self.paired.adopt(handle,baseline_stage,body,
-                    expected_target_identity=record["children"]["worker-runtime"],expected_parent_identity=record["root"])
-                require(self._directory_identity(handle.worker_runtime)==replacements["worker-runtime"],"StageChildIdentityChanged")
+            native=getattr(self,"native_store",None);native_transition=None
+            if native is not None:
+                bound_body=dict(body,receipt_sha256=prerequisite.digest)
+                native_transition=(self.paired.adopt(handle,baseline_stage,bound_body) if handle.paired_role is not None
+                                   else native.copy_qualified(handle,baseline_stage,bound_body))
+                native.validate(handle)
+            else:
+                replacements["runtime"]=copy_qualified_runtime(baseline_stage.runtime,handle.runtime,body["after"]["runtime"],
+                    expected_target_identity=record["children"]["runtime"],expected_parent_identity=record["root"])
+                require(self._directory_identity(handle.runtime)==replacements["runtime"],"StageChildIdentityChanged")
+                if handle.paired_role is not None:
+                    require(self.paired is not None,"PairedRuntimeBindingRequired")
+                    require(self._directory_identity(handle.worker_runtime)==record["children"]["worker-runtime"],"StageChildIdentityChanged")
+                    replacements["worker-runtime"]=self.paired.adopt(handle,baseline_stage,body,
+                        expected_target_identity=record["children"]["worker-runtime"],expected_parent_identity=record["root"])
+                    require(self._directory_identity(handle.worker_runtime)==replacements["worker-runtime"],"StageChildIdentityChanged")
             # A copied baseline target must rebuild against this stage's source.
             now=time.time_ns()
             roots=(handle.candidate,handle.worker_candidate) if handle.worker_candidate is not None else (handle.candidate,)
@@ -490,7 +514,7 @@ class SourceStager:
                         "roots":{name:{"before":record["children"][name],"after":identity,
                                   "runtime_sha256":body["after"]["runtime" if name=="runtime" else "worker_runtime"]}
                                  for name,identity in replacements.items()}}
-            record["children"].update(replacements);record["runtime_adoption"]=transition
+            record["children"].update(replacements);record["runtime_adoption"]=native_transition or transition
         except BaseException:
             # A partially replaced pair has no committed capability transition.
             # Keep all files for diagnostics and refuse capture/close/retirement.
@@ -525,7 +549,12 @@ class SourceStager:
         runtime_identity={key:{field:value[field] for field in ("runtime","caches")} for key,value in all_sources.items()}
         return {"source_bytes_modes_sha256":sha(canonical(source_identity)),"grader_bytes_modes_sha256":sha(canonical(grader_identity)),
             "image_sha256":sha(canonical(images)),"toolchain_runtime_dependencies_sha256":sha(canonical({"sources":runtime_identity,"observed":observed,"qualified_family_binding":prerequisite.binding_digest})),
-            "environment_policy_sha256":sha(canonical({"roles":policies,"commands":commands,"family":self.family_identity(self.family_plan(handle,commands)),"runtime_bindings":file_sha(Path(__file__)),"paired_runtime":file_sha(Path(__file__).with_name("paired_runtime.py"))}))}
+            "environment_policy_sha256":sha(canonical({"roles":policies,"commands":commands,"family":self.family_identity(self.family_plan(handle,commands)),"runtime_bindings":file_sha(Path(__file__)),"paired_runtime":file_sha(Path(__file__).with_name("paired_runtime.py")),
+                # Stage capabilities bind probe provenance, while cache policy
+                # binds the stable source/environment authority across stages.
+                **({"native_store":{key:value for key,value in handle.native_binding.public().items()
+                                       if key in {"kind","binding_sha256","source_hashes"}}}
+                   if handle.native_binding is not None else {})}))}
     _SCRATCH_NAMES=("candidate","grader","runtime","worker-source","worker-export","worker-runtime")
 
     @staticmethod
@@ -552,11 +581,15 @@ class SourceStager:
                 and self._directory_identity(handle.root)==record["root"],"StageIdentityChanged")
         for name,identity in record["children"].items():
             require(self._directory_identity(handle.root/name)==identity,"StageChildIdentityChanged")
+        native=getattr(self,"native_store",None)
+        if native is not None and handle.native_binding is not None:native.validate(handle)
         return record
 
     def _source_closure(self,handle):
         from .paired_runtime import measure_tree
-        return {name:measure_tree(handle.root/name,candidate=name in {"candidate","worker-source"})
+        native=getattr(self,"native_store",None)
+        measure=native.measure if native is not None else measure_tree
+        return {name:measure(handle.root/name,candidate=name in {"candidate","worker-source"})
                 for name in ("candidate","grader","worker-source","worker-export") if (handle.root/name).exists()}
 
     def close(self,handle):
@@ -564,6 +597,8 @@ class SourceStager:
         record=self._stage_record(handle)
         if handle.closed:return
         if handle.baseline_stage is not None:self.close(handle.baseline_stage)
+        native=getattr(self,"native_store",None)
+        if native is not None:native.close(handle)
         closure={"schema_version":1,"closed":True,"candidate_retained_private":True,
                  "stage":handle.root.name,"source_identity":self._source_closure(handle),
                  "runtime_adoption":record.get("runtime_adoption")}
@@ -675,7 +710,10 @@ class SourceStager:
             else:
                 references=body.get("steps") if body.get("schema_version")==2 else [row["digest"] for row in body.get("executions",())]
                 require(isinstance(references,list) and references and all(ref in bodies and bodies[ref].get("cleanup_proved") is True for ref in references),"StageAggregateCleanupUnproved")
-        return {"stage":handle.root.name,"closure_sha256":record["closure"],"isolation_receipts":receipts}
+        evidence={"stage":handle.root.name,"closure_sha256":record["closure"],"isolation_receipts":receipts}
+        native=getattr(self,"native_store",None)
+        if native is not None:evidence["native_receipts"]={name:row["sha256"] for name,row in native.proofs(handle).items()}
+        return evidence
 
     def _archive_retirement_evidence(self,handle,evidence):
         root=getattr(self,"_retirement_evidence_root",None)
@@ -683,11 +721,21 @@ class SourceStager:
         record=self._stage_record(handle)
         sources={"stage-closed.json":(handle.root/"stage-closed.json",record["closure"])}
         sources.update({name:(handle.root/".isolation"/name,value) for name,value in evidence["isolation_receipts"].items()})
+        identities={name:row["identity"] for name,row in record["receipts"].items()}
+        identities["stage-closed.json"]=record["closure_identity"]
+        native=getattr(self,"native_store",None)
+        if native is not None:
+            originals=native.proofs(handle)
+            require({name:row["sha256"] for name,row in originals.items()}==evidence["native_receipts"],"NativeEvidenceChanged")
+            sources.update({name:(row["path"],row["sha256"]) for name,row in originals.items()})
+            identities.update({name:row["identity"] for name,row in originals.items()})
         sizes={name:no_links(path).lstat().st_size for name,(path,value) in sources.items()}
         manifest={"schema_version":1,"stage":record["name"],"files":{name:{"sha256":value,"bytes":sizes[name]} for name,(path,value) in sources.items()}}
         total=sum(sizes.values())+len(canonical(manifest))+4096
+        from .guest_stage_store import HOST_AUDIT_MAX
+        original_native_allowance=HOST_AUDIT_MAX if native is not None else 0
         require(all(size<=self.RECEIPT_FILE_MAX for size in sizes.values()) and total<=self.RECEIPT_STAGE_MAX
-                and self._retirement_evidence_bytes+total<=self.RECEIPT_TOTAL_MAX,"RetirementEvidenceBoundExceeded")
+                and self._retirement_evidence_bytes+total+original_native_allowance<=self.RECEIPT_TOTAL_MAX,"RetirementEvidenceBoundExceeded")
         # Reserve before writing: a partial archive cannot reset the aggregate cap.
         self._retirement_evidence_bytes+=total
         target=root/record["name"];target.mkdir(mode=0o700)
@@ -699,7 +747,7 @@ class SourceStager:
                 try:
                     before=os.fstat(incoming)
                     require(stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_size==sizes[name]
-                            and (before.st_dev,before.st_ino)==(record["closure_identity"] if name=="stage-closed.json" else record["receipts"][name]["identity"]),"RetirementEvidenceIdentityChanged")
+                            and (before.st_dev,before.st_ino)==identities[name],"RetirementEvidenceIdentityChanged")
                     outgoing=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
                     measured=hashlib.sha256();copied=0
                     while chunk:=os.read(incoming,1024**2):
@@ -781,16 +829,21 @@ class SourceStager:
                 finally:os.close(child)
             durable(handle.root/"stage-retirement-intent.json",{"schema_version":1,"authorization":authorization,"evidence":evidence,"external_archive":archive,"scratch_roots":sorted(record["children"])})
             record["retiring"]=True
+            native=getattr(self,"native_store",None);native_retirement=None
+            if native is not None:
+                native_retirement=native.retire(handle,authorization,terminal=terminal,archive_sha256=archive["manifest_sha256"])
             for name in record["children"]:shutil.rmtree(name,dir_fd=directory)
             os.fsync(directory)
             require(all(not os.path.lexists(handle.root/name) for name in record["children"]),"StageScratchRemovalUnproved")
             completed={"schema_version":1,"retired":True,"authorization":authorization,"external_archive":archive}
+            if native_retirement is not None:completed["native_retirement"]=native_retirement
             durable(self._retirement_evidence_root/handle.root.name/"retirement-completed.json",completed)
             external=os.open(self._retirement_evidence_root/handle.root.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
             try:os.fsync(external)
             finally:os.close(external)
             durable(handle.root/"stage-retired.json",completed)
             os.fsync(directory);handle.retired=True
+            if native is not None:native.mirror_retired(handle)
         except BaseException as error:
             # Preserve intent and all original receipts, even after partial deletion.
             try:self._retirement_failure(handle,authorization,error,deletion_started=record["retiring"])
