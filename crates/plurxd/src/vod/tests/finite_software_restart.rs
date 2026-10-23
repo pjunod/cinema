@@ -227,6 +227,7 @@ async fn finite_restart_child(root: &std::path::Path) {
         .expect("first counted response");
     assert!(matches!(&body, ReadyBytes::Finite(_)));
     drop(body);
+    drop(ready); // Release the response's cloned FiniteOutput before runtime drain.
     wait_until(
         "first process R-to-S retirement",
         Duration::from_secs(90),

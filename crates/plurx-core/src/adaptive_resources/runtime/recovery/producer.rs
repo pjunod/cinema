@@ -27,7 +27,7 @@ pub(crate) struct NativeActiveRImportProof {
 /// One original adoption operation survives waiter cancellation and unknown
 /// commit results. The imported native owner is separately retained by the
 /// runtime map before this operation can enter the journal queue.
-pub(super) struct RecoveryRAdoption {
+pub(in crate::adaptive_resources::runtime) struct RecoveryRAdoption {
     operation_id: Uuid,
     obligation_id: Uuid,
     previous_owner_id: Uuid,
