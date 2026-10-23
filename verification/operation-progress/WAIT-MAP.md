@@ -4,6 +4,15 @@
 
 This map supports [Operation progress](../../docs/cluster/OPERATION-PROGRESS-IMPLEMENTATION.md). It follows one `library_scan` or `metadata_refresh` job through the worker and names what must progress before a durable library request has a useful result. [Source anchors](source-anchors.json) record exact strings and whole-file hashes for load-bearing paths.
 
+## Read-only readiness binding — scoped refresh on 2026-10-23
+
+The A2923b2c to be610d647 delta adds the advisory `dv_title_readiness`
+trait method and delegation to the core background-job store. Table30's
+`LibraryScan` / `MetadataRefresh` authority arm is byte-identical. Only that
+whole-file mapping hash is refreshed; exact anchors, executable source-anchor
+records, model/configurations and worker correspondence are unchanged. The
+readiness API's completion and latency acquire no liveness or qualification claim.
+
 ## Selected binding refresh — 2026-10-22
 
 The five drifted source files were compared with the revisions whose contents

@@ -2,7 +2,7 @@
 
 **Status:** reviewed source contract; bounded qualification complete ·
 **Initial checked source:** `663b3aa548` · **Latest scoped source review:**
-`4b359f7923c47a1e8715e826a9b6581a08f60e05` · **Scope:** bound `library_scan` and
+`be610d6472b8717bc034e45404141ef0854c4bf2` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -11,6 +11,17 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Advisory title readiness — scoped refresh on 2026-10-23
+
+The source delta from A2923b2c to be610d647 adds only the
+`dv_title_readiness` trait/delegation and `TitleReadiness` helper in the two
+drifted files. The helper SELECTs title summary JSON and derives advisory
+counts; it does not enqueue, claim, renew, publish or cancel jobs. Existing
+queue and title-publication transitions and all eleven exact-string anchors
+are unchanged. Their whole-file mapping hashes are rebound to the inspected
+source. This read-only API remains outside the selected library-worker proof;
+no model/configuration change, model replay or new qualification is claimed.
 
 ## DV-title additions preserve the selected authority boundary
 
