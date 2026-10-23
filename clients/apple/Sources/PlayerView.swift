@@ -2593,10 +2593,9 @@ struct PlayerView: View {
     #if os(tvOS)
     /// SwiftUI's Slider is unavailable on tvOS. This focusable bar previews
     /// Left/Right without seeking, commits with Select, and cancels with Menu.
-    /// Up reaches the marker row and Down restores the transport row. This is
-    /// not a Button:
-    /// tvOS adds a large white pressed/focus surround to Buttons even when the
-    /// ordinary focus effect is disabled.
+    /// Up reaches the marker row and Down restores the transport row. This uses
+    /// a native Button supplied by the remote adapter with a label-only style,
+    /// so Select activates reliably without a large pressed/focus surround.
     private var tvTimeline: some View {
         GeometryReader { geometry in
             let playedFraction = controller.knownDurationMs > 0
@@ -2637,17 +2636,15 @@ struct PlayerView: View {
         }
         .frame(height: 8)
         .contentShape(Rectangle())
-        .focusable()
-        .focusEffectDisabled()
-        .focused($focusedControl, equals: .progress)
-        .remoteControl("player:timeline", label: "Playback position") {
-            _ = applyPlayerInputOutcome(PlayerInputRouting.route(surface: .tenFoot, state: inputState(), input: .select), input: .select)
-        }
         .playerRemoteAdapter(
             .timeline,
             state: inputState,
             apply: applyPlayerInputOutcome
         )
+        .focused($focusedControl, equals: .progress)
+        .remoteControl("player:timeline", label: "Playback position") {
+            _ = applyPlayerInputOutcome(PlayerInputRouting.route(surface: .tenFoot, state: inputState(), input: .select), input: .select)
+        }
         .accessibilityLabel("Playback position")
         .accessibilityValue(pendingMs == nil ? "Timeline" : "Previewing \(formatTime(pendingMs!))")
         .accessibilityHint("Left or right previews. Select commits. Menu cancels.")
