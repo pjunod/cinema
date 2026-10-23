@@ -22,7 +22,7 @@ class StageRetirementTests(unittest.TestCase):
     def setUp(self):
         fixture=Path(__file__).resolve().parents[2]/"target/agent-fixtures/.hermes/hdr-collaboration/workspaces/stage-retirement"
         fixture.mkdir(parents=True,exist_ok=True)
-        temporary=tempfile.TemporaryDirectory(dir=fixture)
+        temporary=tempfile.TemporaryDirectory(prefix="owned-",dir=fixture)
         self.addCleanup(temporary.cleanup)
         self.base=Path(temporary.name)
         self.execution=self.base/"execution";self.execution.mkdir(mode=0o700)
