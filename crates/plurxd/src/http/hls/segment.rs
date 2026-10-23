@@ -793,15 +793,13 @@ async fn vod_segment_response_before(
     // Small objects — the init above all — are answered from memory so the
     // Apple rewrite can run; segments stream.
     if buffered_init {
-        let mut init = Vec::with_capacity(ready.len.min(64 * 1024) as usize);
-        let read = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(publication_deadline),
-            ready.file.read_to_end(&mut init),
-        )
-        .await;
-        match read {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
+        let mut init = match ready
+            .file
+            .read_all_bounded(INIT_INSPECTION_LIMIT_BYTES, publication_deadline)
+            .await
+        {
+            Ok(init) => init,
+            Err(error) => {
                 authorize_attempt_status(
                     state,
                     session,
@@ -811,21 +809,12 @@ async fn vod_segment_response_before(
                     publication_deadline,
                 )
                 .await?;
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    return Err(response_publication_timeout());
+                }
                 return Err(ApiError::Internal(error.to_string()));
             }
-            Err(_) => {
-                authorize_attempt_status(
-                    state,
-                    session,
-                    &owner,
-                    segment_publication_kind(seg, None),
-                    Some(seg),
-                    publication_deadline,
-                )
-                .await?;
-                return Err(response_publication_timeout());
-            }
-        }
+        };
         if init.len() as u64 != ready.len {
             authorize_attempt_status(
                 state,
@@ -954,47 +943,56 @@ async fn vod_segment_response_before(
     }
     let etag = artifact_etag;
     let (status, len, content_range) = match requested_range {
-        Some((start, end)) => {
-            use tokio::io::AsyncSeekExt;
-            let seek = tokio::time::timeout_at(
-                tokio::time::Instant::from_std(publication_deadline),
-                ready.file.seek(std::io::SeekFrom::Start(start)),
-            )
-            .await;
-            match seek {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    authorize_attempt_status(
-                        state,
-                        session,
-                        &owner,
-                        segment_publication_kind(seg, requested_range),
-                        Some(seg),
-                        publication_deadline,
-                    )
-                    .await?;
-                    return Err(ApiError::Internal(error.to_string()));
-                }
-                Err(_) => {
-                    authorize_attempt_status(
-                        state,
-                        session,
-                        &owner,
-                        segment_publication_kind(seg, requested_range),
-                        Some(seg),
-                        publication_deadline,
-                    )
-                    .await?;
-                    return Err(response_publication_timeout());
-                }
-            }
-            (
-                StatusCode::PARTIAL_CONTENT,
-                end - start + 1,
-                Some(format!("bytes {start}-{end}/{}", ready.len)),
-            )
-        }
+        Some((start, end)) => (
+            StatusCode::PARTIAL_CONTENT,
+            end - start + 1,
+            Some(format!("bytes {start}-{end}/{}", ready.len)),
+        ),
         None => (StatusCode::OK, ready.len, None),
+    };
+    let (range_start, range_end_exclusive) = requested_range
+        .map(|(start, end)| (start, end.saturating_add(1)))
+        .unwrap_or((0, ready.len));
+    let body_deadline_std = Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+    let reader = match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(publication_deadline),
+        ready.file.into_range_stream(
+            range_start,
+            range_end_exclusive,
+            MEDIA_BODY_READ_BUFFER,
+            body_deadline_std,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(error)) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                return Err(response_publication_timeout());
+            }
+            return Err(ApiError::Internal(error.to_string()));
+        }
+        Err(_) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(response_publication_timeout());
+        }
     };
     let complete_object = range_covers_object(requested_range, ready.len);
     let completion_permit = match reserve_response_completion(publication_deadline).await {
@@ -1023,17 +1021,12 @@ async fn vod_segment_response_before(
         publication_deadline,
     )
     .await?;
-    // Taken before `ready.file` is moved into the reader: the pump outlives
-    // this function, and the session registry lock is long released by the
-    // time it runs.
+    // The selected reader is already prepared before response authorization;
+    // only its opaque stream crosses into the body pump.
     let delivery = std::sync::Arc::clone(&ready.delivery);
     let retained_lease = ready.retained_lease;
     let observed_media_duration_ms = ready.observed_media_duration_ms;
-    let reader = tokio_util::io::ReaderStream::with_capacity(
-        tokio::io::AsyncReadExt::take(ready.file, len),
-        MEDIA_BODY_READ_BUFFER,
-    );
-    let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+    let body_deadline = tokio::time::Instant::from_std(body_deadline_std);
     let (sender, receiver) = tokio::sync::mpsc::channel(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
     let terminal = StreamedBodyTerminal::new();
     let pump_terminal = terminal.clone();

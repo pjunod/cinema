@@ -253,6 +253,7 @@ impl BootstrapFold {
                             BootstrapIoV1::CloseBootstrapHandles { .. }
                                 | BootstrapIoV1::ResolvePossibleChild { .. }
                                 | BootstrapIoV1::RemoveRenditionChild { .. }
+                                | BootstrapIoV1::SyncRetainedParent { .. }
                                 | BootstrapIoV1::CloseRetainedHandles { .. }
                         ))
                 {

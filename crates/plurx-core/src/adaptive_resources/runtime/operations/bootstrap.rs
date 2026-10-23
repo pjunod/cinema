@@ -9,6 +9,8 @@ use v2::scratch::{AssetEventV1, ScratchLifecycleV1};
 pub(super) mod native;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod readers;
+#[cfg(unix)]
+pub(in crate::adaptive_resources::runtime) mod retirement;
 
 pub(super) struct BootstrapMember {
     plan: ScratchPlanV3,
@@ -25,6 +27,8 @@ pub(super) struct BootstrapMember {
     sync: Option<native::sync::Sync>,
     #[cfg(unix)]
     readers: BTreeMap<Uuid, readers::ReaderEntry>,
+    #[cfg(unix)]
+    retirement: Option<retirement::CleanupRun>,
 }
 
 /// Fully validated target fold while the actual native cells remain owned by
@@ -54,6 +58,7 @@ impl PreparedBootstrapTransfer {
             publication: source.publication.take(),
             sync: source.sync.take(),
             readers: std::mem::take(&mut source.readers),
+            retirement: source.retirement.take(),
         }
     }
 }
@@ -83,6 +88,7 @@ impl BootstrapMember {
             || self.root_arm.is_none()
             || self.change.is_some()
             || self.next_arm.is_some()
+            || self.retirement.is_some()
             || state.asset.lifecycle != ScratchLifecycleV1::Frozen
             || state.asset.totals.pending_jobs != 0
             || state.bootstrap.phase != BootstrapPhase::SinkReady
@@ -149,6 +155,15 @@ impl BootstrapMember {
             if let Some(sync) = self.sync.as_mut() {
                 if let Err(error) = sync.join_registered().await {
                     first_error.get_or_insert(error);
+                }
+            }
+            if let Some(retirement) = self.retirement.as_mut() {
+                if let Some(cell) = retirement.pending_cell_mut() {
+                    if cell.launched() {
+                        if let Err(error) = cell.join_registered().await {
+                            first_error.get_or_insert(error);
+                        }
+                    }
                 }
             }
             if let Some(error) = first_error {
@@ -267,6 +282,8 @@ impl NodeResourceRuntime {
                     sync: None,
                     #[cfg(unix)]
                     readers: BTreeMap::new(),
+                    #[cfg(unix)]
+                    retirement: None,
                 },
             );
         }

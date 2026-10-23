@@ -393,12 +393,9 @@ async fn playback_info_stream_format_copy_does_not_relabel_source_hdr_as_output(
 
 async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<u8> {
     let mut ready = fetch(serve, session, name).await;
-    let mut bytes = Vec::new();
-    ready
-        .file
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read served file");
+    let bytes = ready.file
+        .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
+        .await.expect("read served file");
     assert_eq!(bytes.len() as u64, ready.len);
     bytes
 }
@@ -698,12 +695,9 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .expect("parent");
     let mut ready = publication.result.expect("init ready").expect("exact init");
     assert_eq!(ready.etag, init_sha);
-    let mut child_init = Vec::new();
-    ready
-        .file
-        .read_to_end(&mut child_init)
-        .await
-        .expect("verified open descriptor");
+    let child_init = ready.file
+        .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
+        .await.expect("verified open descriptor");
     assert_eq!(child_init, cached_init);
     assert!(
         serve

@@ -503,7 +503,7 @@ pub(super) async fn direct_bytes(
     let body = match body {
         Some(start) => {
             source_file_body(
-                tokio::fs::File::from_std(file),
+                tokio::fs::File::from_std(file).into(),
                 std::sync::Arc::clone(&guard),
                 body_length,
                 Some(start),

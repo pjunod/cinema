@@ -52,6 +52,14 @@ pub(in crate::adaptive_resources::runtime::operations) struct ReaderReadFact {
     pub join_id: v2::Id,
     pub bytes_read: u64,
     pub outcome: NativeOutcomeV1,
+    pub failure: Option<ReaderReadFailure>,
+}
+
+/// Fixed-size diagnostic copied from the original positional read error.
+#[derive(Clone, Copy)]
+pub(in crate::adaptive_resources::runtime::operations) struct ReaderReadFailure {
+    pub kind: io::ErrorKind,
+    pub errno: Option<i32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,6 +109,7 @@ pub(in crate::adaptive_resources::runtime::operations) struct ReaderCell {
     open_attempted: bool,
     open_acknowledged: bool,
     read_fact: Option<ReaderReadFact>,
+    read_error: Option<io::Error>,
     read_acknowledged: bool,
     close_fact: Option<(v2::Id, v2::Id, bool)>,
     close_acknowledged: bool,
@@ -127,9 +136,9 @@ fn basename(output: OutputKey) -> Result<CString, OperationError> {
 }
 
 impl ReaderCell {
-    /// Allocate the sole physical read buffer before native entry. The caller
-    /// must already have durably armed this exact OpenReader lease and budgeted
-    /// its capacity plus an in-flight body chunk under the retained owner.
+    /// Allocate and register the sole physical read buffer/cell before the
+    /// durable OpenReader Arm. The enclosing runtime budgets it first and
+    /// releases native entry only after that exact Arm commits.
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn new(
         lease: ReaderLeaseV1,
         frozen: &FileObservedV1,
@@ -179,6 +188,7 @@ impl ReaderCell {
             open_attempted: false,
             open_acknowledged: false,
             read_fact: None,
+            read_error: None,
             read_acknowledged: false,
             close_fact: None,
             close_acknowledged: false,
@@ -414,6 +424,7 @@ impl ReaderCell {
             || self.pending.is_some()
             || self.failed_join
             || self.read_fact.is_some()
+            || self.read_error.is_some()
             || self.close_fact.is_some()
             || range.start != self.cursor
             || range.end_exclusive < range.start
@@ -456,6 +467,7 @@ impl ReaderCell {
             join_id,
             bytes_read: 0,
             outcome: NativeOutcomeV1::NeverEntered,
+            failure: None,
         });
         Ok(enter)
     }
@@ -485,10 +497,15 @@ impl ReaderCell {
                             fact.bytes_read = u64::try_from(count).map_err(|_| invalid())?;
                             fact.outcome = NativeOutcomeV1::Completed;
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            fact.failure = Some(ReaderReadFailure {
+                                kind: error.kind(),
+                                errno: error.raw_os_error(),
+                            });
                             fact.outcome = NativeOutcomeV1::Failed {
                                 error_class: "retained reader positional read failed".into(),
                             };
+                            self.read_error = Some(error);
                         }
                     }
                 }
@@ -523,6 +540,22 @@ impl ReaderCell {
             .ok_or_else(invalid)?;
         self.read_acknowledged = true;
         Ok(())
+    }
+    /// Move the original OS read error only after its exact ReaderRead Observe
+    /// has been durably acknowledged. It cannot be turned into an early refund.
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn take_acknowledged_read_error(
+        &mut self,
+    ) -> Option<io::Error> {
+        if self.read_acknowledged
+            && self
+                .read_fact
+                .as_ref()
+                .is_some_and(|fact| fact.failure.is_some())
+        {
+            self.read_error.take()
+        } else {
+            None
+        }
     }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn take_acknowledged_chunk(
         &mut self,

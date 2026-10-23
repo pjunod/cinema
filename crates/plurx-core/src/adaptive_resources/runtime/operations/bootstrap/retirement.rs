@@ -1,0 +1,680 @@
+//! Durable V3 retirement over the original retained S native owners. Every
+//! destructive step has one retained Arm/Observe identity and one native cell.
+use super::*;
+use native::cleanup::{CleanupCell, CleanupFact};
+use v2::scratch::{
+    AssetEventRefV1, AssetIoV1, AssetObservationV1, NativeOutcomeV1, OwnedDirectoryRefV1,
+};
+
+/// Consumed once, under the retained bundle lock, by the outer typed
+/// settlement. Neither the folded DTO nor a pathname can construct this.
+pub(in crate::adaptive_resources) struct RetainedFiniteClosure {
+    binding: ReservationBinding,
+    member: Uuid,
+    head: AssetEventRefV1,
+}
+impl RetainedFiniteClosure {
+    pub(in crate::adaptive_resources) fn binding(&self) -> ReservationBinding {
+        self.binding
+    }
+    pub(in crate::adaptive_resources) fn head(&self) -> AssetEventRefV1 {
+        self.head.clone()
+    }
+    pub(in crate::adaptive_resources) fn member(&self) -> Uuid {
+        self.member
+    }
+    pub(in crate::adaptive_resources) fn into_binding(self) -> ReservationBinding {
+        self.binding
+    }
+}
+
+#[derive(Clone)]
+enum CleanupOperation {
+    Output(AssetIoV1),
+    Bootstrap(BootstrapIoV1),
+}
+struct CleanupIo {
+    io: v2::Id,
+    observe: v2::Id,
+    join: v2::Id,
+    operation: CleanupOperation,
+    cell: CleanupCell,
+    armed: bool,
+    launched: bool,
+    joined: bool,
+}
+enum CleanupPending {
+    Begin { operation: v2::Id },
+    Io(CleanupIo),
+}
+pub(super) struct CleanupRun {
+    pending: Option<CleanupPending>,
+    closed: Option<RetainedFiniteClosure>,
+    issued: bool,
+}
+impl CleanupRun {
+    fn new() -> Self {
+        Self {
+            pending: None,
+            closed: None,
+            issued: false,
+        }
+    }
+    pub(super) fn pending_cell_mut(&mut self) -> Option<&mut CleanupCell> {
+        match self.pending.as_mut() {
+            Some(CleanupPending::Io(io)) => Some(&mut io.cell),
+            _ => None,
+        }
+    }
+}
+fn id() -> Result<v2::Id, OperationError> {
+    Ok(v2::Id::new(Uuid::new_v4())?)
+}
+fn io(operation: CleanupOperation, cell: CleanupCell) -> Result<CleanupPending, OperationError> {
+    Ok(CleanupPending::Io(CleanupIo {
+        io: id()?,
+        observe: id()?,
+        join: id()?,
+        operation,
+        cell,
+        armed: false,
+        launched: false,
+        joined: false,
+    }))
+}
+fn directory_ref(
+    fold: &BootstrapFold,
+    directory: &v2::scratch::DirectoryObservedV1,
+) -> OwnedDirectoryRefV1 {
+    OwnedDirectoryRefV1 {
+        owning_obligation: fold.obligation_id(),
+        member_id: fold.member_id(),
+        directory_id: directory.directory_id,
+    }
+}
+fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationError> {
+    let fold = bootstrap.fold.as_ref().ok_or(OperationError::State)?;
+    let state = fold.state();
+    if state.asset.lifecycle == ScratchLifecycleV1::RetainedReadOnly {
+        return Ok(CleanupPending::Begin { operation: id()? });
+    }
+    if state.asset.lifecycle != ScratchLifecycleV1::Retiring {
+        return Err(OperationError::State);
+    }
+    let child = state
+        .asset
+        .directory
+        .as_ref()
+        .ok_or(OperationError::State)?;
+    if let Some(file) = fold.files().first() {
+        return io(
+            CleanupOperation::Output(AssetIoV1::RemoveOwned {
+                file_id: file.file_id,
+                expected_native_object: Some(file.native_object.clone()),
+            }),
+            CleanupCell::remove_owned_file(file, child)?,
+        );
+    }
+    if !state.asset.directory_synced {
+        return io(
+            CleanupOperation::Output(AssetIoV1::SyncFiles { file_ids: vec![] }),
+            CleanupCell::sync_child(child)?,
+        );
+    }
+    let parent = &state
+        .bootstrap
+        .parent
+        .as_ref()
+        .ok_or(OperationError::State)?
+        .observed;
+    let parent_ref = directory_ref(fold, parent);
+    match state.bootstrap.phase {
+        BootstrapPhase::SinkReady => io(
+            CleanupOperation::Bootstrap(BootstrapIoV1::RemoveRenditionChild {
+                parent: parent_ref,
+                child_directory_id: child.directory_id,
+                child_component: bootstrap.plan.bootstrap().child_component.clone(),
+            }),
+            CleanupCell::remove_child(&bootstrap.plan, parent, child)?,
+        ),
+        BootstrapPhase::RetainedChildRemoved if !state.bootstrap.retained_parent_synced => io(
+            CleanupOperation::Bootstrap(BootstrapIoV1::SyncRetainedParent { parent: parent_ref }),
+            CleanupCell::sync_parent(parent)?,
+        ),
+        BootstrapPhase::RetainedChildRemoved => {
+            let observed = [parent.clone(), child.clone()];
+            let mut copy_ids = observed
+                .iter()
+                .flat_map(|directory| directory.held_copy_ids.iter().copied())
+                .collect::<Vec<_>>();
+            copy_ids.sort_unstable();
+            io(
+                CleanupOperation::Bootstrap(BootstrapIoV1::CloseRetainedHandles {
+                    copy_ids: copy_ids.clone(),
+                }),
+                CleanupCell::close_retained(&observed, &copy_ids)?,
+            )
+        }
+        _ => Err(OperationError::State),
+    }
+}
+fn queue_bootstrap_change(
+    journal: &CustodyJournal,
+    role: &mut OwnedRole,
+    member: Uuid,
+    operation_id: v2::Id,
+    event: AssetEventV3,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    let bootstrap = role
+        .bootstrap
+        .get_mut(&member)
+        .ok_or(OperationError::State)?;
+    if bootstrap.change.is_some() || role.transition.is_some() {
+        return Err(OperationError::State);
+    }
+    let change = AssetChangeV3 {
+        scratch_member_id: v2::Id::new(member)?,
+        asset_id: bootstrap.plan.asset_id,
+        generation_epoch: bootstrap.plan.generation_epoch,
+        previous: bootstrap
+            .fold
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .state()
+            .asset
+            .head,
+        event,
+    };
+    bootstrap.change = Some((operation_id, change));
+    resume_change(journal, role, member, deadline)
+}
+fn retry_transition(
+    role: &mut OwnedRole,
+    journal: &CustodyJournal,
+    member: Uuid,
+    deadline: Instant,
+) -> Result<(), OperationError> {
+    if let Some(transition) = role.transition.as_mut() {
+        if transition.effect != Effect::Bootstrap(member) {
+            return Err(OperationError::State);
+        }
+        if transition.operation.pending.is_none()
+            && matches!(transition.operation.result, Some(Err(_)))
+        {
+            transition.operation.retry(journal, deadline)?;
+        }
+    }
+    Ok(())
+}
+
+impl BootstrapMember {
+    /// Read-only prebuild fact. The one-shot native capability remains in this
+    /// member until the outer settlement is completely validated.
+    pub(in crate::adaptive_resources::runtime) fn retained_close_fact(
+        &self,
+        expected_binding: ReservationBinding,
+        expected_member: Uuid,
+    ) -> Result<(ScratchPlanV3, AssetEventRefV1), OperationError> {
+        let run = self.retirement.as_ref().ok_or(OperationError::State)?;
+        let closed = run.closed.as_ref().ok_or(OperationError::State)?;
+        if closed.binding() != expected_binding
+            || closed.member() != expected_member
+            || run.issued
+            || run.pending.is_some()
+            || self.change.is_some()
+            || self.next_arm.is_some()
+            || !self.readers.is_empty()
+        {
+            return Err(OperationError::State);
+        }
+        let state = self.fold.as_ref().ok_or(OperationError::State)?.state();
+        if state.asset.lifecycle != ScratchLifecycleV1::RetiredClosed
+            || state.asset.head != Some(closed.head())
+        {
+            return Err(OperationError::State);
+        }
+        Ok((self.plan.clone(), closed.head()))
+    }
+    /// Synchronous one-shot move under the SAME role bundle lock. No journal
+    /// or ledger fallible work may occur between this take and receipt custody.
+    pub(in crate::adaptive_resources::runtime) fn take_retained_close(
+        &mut self,
+        expected_binding: ReservationBinding,
+        expected_member: Uuid,
+    ) -> Result<RetainedFiniteClosure, OperationError> {
+        self.retained_close_fact(expected_binding, expected_member)?;
+        let run = self.retirement.as_mut().ok_or(OperationError::State)?;
+        run.issued = true;
+        run.closed.take().ok_or(OperationError::State)
+    }
+}
+
+impl NodeResourceRuntime {
+    /// Run the exact V3 S cleanup lineage. The same member-owned run and native
+    /// cell survive cancellation and uncertain journal waits.
+    pub(in crate::adaptive_resources::runtime) async fn close_retained_finite_native(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        self.close_dropped_finite_readers(owner, index, deadline)
+            .await?;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(OperationError::Deadline);
+            }
+            let mut bundle = owner.state.lock().await;
+            let bundle_id = bundle.id;
+            let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            let bootstrap = role
+                .bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?;
+            if bootstrap
+                .fold
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .state()
+                .asset
+                .totals
+                .readers
+                != 0
+            {
+                return Err(OperationError::State);
+            }
+            readers::clear_terminal_readers(bootstrap)?;
+            if bootstrap.retirement.is_none() {
+                if bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state()
+                    .asset
+                    .totals
+                    .pending_jobs
+                    != 0
+                {
+                    return Err(OperationError::State);
+                }
+                // Install the owner before the first await, journal arm or
+                // destructive native entry.
+                bootstrap.retirement = Some(CleanupRun::new());
+            }
+            if bootstrap
+                .retirement
+                .as_ref()
+                .is_some_and(|run| run.closed.is_some())
+            {
+                return Ok(());
+            }
+            self.drive_cleanup(role, bundle_id, member, deadline)
+                .await?;
+        }
+    }
+
+    async fn drive_cleanup(
+        &self,
+        role: &mut OwnedRole,
+        bundle_id: Uuid,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+        if bootstrap
+            .retirement
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .pending
+            .is_none()
+        {
+            let step = next_step(bootstrap)?;
+            role.bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?
+                .retirement
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .pending = Some(step);
+        }
+        let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+        let pending = bootstrap
+            .retirement
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .pending
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        let (arm, observe, begin) = match pending {
+            CleanupPending::Begin { operation } => (*operation, None, true),
+            CleanupPending::Io(io) => (io.io, Some(io.observe), false),
+        };
+        if let Some(transition) = &role.transition {
+            if transition.effect != Effect::Bootstrap(member)
+                || (transition.operation.id != arm.uuid()
+                    && Some(transition.operation.id) != observe.map(v2::Id::uuid))
+            {
+                return Err(OperationError::State);
+            }
+        }
+        let head = bootstrap
+            .fold
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .state()
+            .asset
+            .head;
+        if begin {
+            if head.as_ref().is_none_or(|head| head.operation_id != arm) {
+                if role.transition.is_none()
+                    && role
+                        .bootstrap
+                        .get(&member)
+                        .ok_or(OperationError::State)?
+                        .change
+                        .is_none()
+                {
+                    native::publication::queue_output_change(
+                        &self.journal,
+                        role,
+                        member,
+                        arm.uuid(),
+                        AssetEventV1::BeginRetirement {
+                            exact_head_before_retirement: head.ok_or(OperationError::State)?,
+                        },
+                        deadline,
+                    )?;
+                }
+                resume_change(&self.journal, role, member, deadline)?;
+                retry_transition(role, &self.journal, member, deadline)?;
+                self.finish_transition(bundle_id, role).await?;
+            }
+            role.bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?
+                .retirement
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .pending = None;
+            return Ok(());
+        }
+        let (io_id, observe_id, join_id, operation, armed, launched, joined) = {
+            let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+            let Some(CleanupPending::Io(io)) = bootstrap
+                .retirement
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .pending
+                .as_ref()
+            else {
+                return Err(OperationError::State);
+            };
+            (
+                io.io,
+                io.observe,
+                io.join,
+                io.operation.clone(),
+                io.armed,
+                io.launched,
+                io.joined,
+            )
+        };
+        if !armed {
+            if head.as_ref().is_none_or(|head| head.operation_id != io_id) {
+                if role.transition.is_none()
+                    && role
+                        .bootstrap
+                        .get(&member)
+                        .ok_or(OperationError::State)?
+                        .change
+                        .is_none()
+                {
+                    match operation.clone() {
+                        CleanupOperation::Output(operation) => {
+                            native::publication::queue_output_change(
+                                &self.journal,
+                                role,
+                                member,
+                                io_id.uuid(),
+                                AssetEventV1::ArmIo { io_id, operation },
+                                deadline,
+                            )?
+                        }
+                        CleanupOperation::Bootstrap(operation) => queue_bootstrap_change(
+                            &self.journal,
+                            role,
+                            member,
+                            io_id,
+                            AssetEventV3::ArmBootstrapV1 { io_id, operation },
+                            deadline,
+                        )?,
+                    }
+                }
+                resume_change(&self.journal, role, member, deadline)?;
+                retry_transition(role, &self.journal, member, deadline)?;
+                self.finish_transition(bundle_id, role).await?;
+            }
+            let bootstrap = role
+                .bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?;
+            let Some(CleanupPending::Io(io)) = bootstrap
+                .retirement
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .pending
+                .as_mut()
+            else {
+                return Err(OperationError::State);
+            };
+            io.armed = true;
+            return Ok(());
+        }
+        if !launched {
+            let bootstrap = role
+                .bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?;
+            let Some(CleanupPending::Io(io)) = bootstrap
+                .retirement
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .pending
+                .as_mut()
+            else {
+                return Err(OperationError::State);
+            };
+            let enter = io.cell.launch(
+                bootstrap
+                    .native_root
+                    .as_mut()
+                    .ok_or(OperationError::State)?,
+            )?;
+            io.launched = true;
+            let _ = enter.send(());
+            return Ok(());
+        }
+        if !joined {
+            let bootstrap = role
+                .bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?;
+            let Some(CleanupPending::Io(io)) = bootstrap
+                .retirement
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .pending
+                .as_mut()
+            else {
+                return Err(OperationError::State);
+            };
+            io.cell.join_registered().await?;
+            io.joined = true;
+            return Ok(());
+        }
+        let fact = {
+            let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+            let Some(CleanupPending::Io(io)) = bootstrap
+                .retirement
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .pending
+                .as_ref()
+            else {
+                return Err(OperationError::State);
+            };
+            io.cell.fact().ok_or(OperationError::State)?
+        };
+        let event = match (&operation, &fact) {
+            (
+                CleanupOperation::Output(_),
+                CleanupFact::Asset {
+                    outcome,
+                    observation,
+                },
+            ) => AssetEventV3::OutputV2 {
+                event: AssetEventV1::ObserveIo {
+                    io_id,
+                    native_join_operation_id: join_id,
+                    outcome: outcome.clone(),
+                    observation: observation.clone(),
+                },
+            },
+            (CleanupOperation::Bootstrap(_), CleanupFact::Bootstrap(result)) => {
+                AssetEventV3::ObserveBootstrapV1 {
+                    io_id,
+                    native_join_operation_id: join_id,
+                    result: result.clone(),
+                }
+            }
+            _ => return Err(OperationError::State),
+        };
+        let positive = match &fact {
+            CleanupFact::Asset {
+                outcome,
+                observation,
+            } => {
+                *outcome == NativeOutcomeV1::Completed
+                    && matches!(
+                        observation,
+                        AssetObservationV1::Removed { .. } | AssetObservationV1::Synced
+                    )
+            }
+            CleanupFact::Bootstrap(result) => result.outcome == NativeOutcomeV1::Completed,
+        };
+        let is_close = matches!(
+            operation,
+            CleanupOperation::Bootstrap(BootstrapIoV1::CloseRetainedHandles { .. })
+        );
+        if head
+            .as_ref()
+            .is_none_or(|head| head.operation_id != observe_id)
+        {
+            if role.transition.is_none()
+                && role
+                    .bootstrap
+                    .get(&member)
+                    .ok_or(OperationError::State)?
+                    .change
+                    .is_none()
+            {
+                match event {
+                    AssetEventV3::OutputV2 { event } => native::publication::queue_output_change(
+                        &self.journal,
+                        role,
+                        member,
+                        observe_id.uuid(),
+                        event,
+                        deadline,
+                    )?,
+                    event => queue_bootstrap_change(
+                        &self.journal,
+                        role,
+                        member,
+                        observe_id,
+                        event,
+                        deadline,
+                    )?,
+                }
+            }
+            resume_change(&self.journal, role, member, deadline)?;
+            retry_transition(role, &self.journal, member, deadline)?;
+            self.finish_transition(bundle_id, role).await?;
+        }
+        let bootstrap = role
+            .bootstrap
+            .get_mut(&member)
+            .ok_or(OperationError::State)?;
+        let Some(CleanupPending::Io(io)) = bootstrap
+            .retirement
+            .as_mut()
+            .ok_or(OperationError::State)?
+            .pending
+            .as_mut()
+        else {
+            return Err(OperationError::State);
+        };
+        io.cell.acknowledge_after_observe(
+            bootstrap
+                .native_root
+                .as_mut()
+                .ok_or(OperationError::State)?,
+        )?;
+        if !positive {
+            return Err(OperationError::State);
+        }
+        if is_close {
+            let state = bootstrap
+                .fold
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .state();
+            if !io.cell.positive_close_acknowledged()
+                || !bootstrap
+                    .native_root
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .no_original_handles()
+                || !bootstrap.readers.is_empty()
+                || !bootstrap
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.ready_for_transfer())
+                || !bootstrap
+                    .sync
+                    .as_ref()
+                    .is_some_and(|sync| sync.ready_for_transfer())
+                || state.asset.lifecycle != ScratchLifecycleV1::RetiredClosed
+                || state.asset.directory.is_some()
+                || !bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .files()
+                    .is_empty()
+                || state.bootstrap.phase != BootstrapPhase::Closed
+                || state.asset.totals.pending_jobs != 0
+            {
+                return Err(OperationError::State);
+            }
+            bootstrap
+                .retirement
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .closed = Some(RetainedFiniteClosure {
+                binding: role.binding,
+                member,
+                head: state.asset.head.ok_or(OperationError::State)?,
+            });
+        }
+        bootstrap
+            .retirement
+            .as_mut()
+            .ok_or(OperationError::State)?
+            .pending = None;
+        Ok(())
+    }
+}

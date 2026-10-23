@@ -21,6 +21,8 @@ pub(super) mod bootstrap;
 #[cfg(unix)]
 pub(super) mod finite_retirement;
 #[cfg(unix)]
+mod finite_settlement;
+#[cfg(unix)]
 mod finite_vod;
 mod live_settlement;
 mod pipe_drains;

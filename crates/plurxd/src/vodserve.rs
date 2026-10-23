@@ -51,7 +51,7 @@ use plurx_core::transcode::{
     COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::copyseg::sanitize_stale_dolby_brand;
@@ -1105,7 +1105,7 @@ pub enum VodSupersedeError {
 pub struct SegmentReady {
     /// Immutable plan duration, rounded outward to milliseconds; init is None.
     pub observed_media_duration_ms: Option<u32>,
-    pub file: tokio::fs::File,
+    pub(crate) file: ready_file::ReadyFile,
     pub len: u64,
     /// Strong: rendition key + plan index + materialization instant + length.
     pub etag: String,
@@ -1122,7 +1122,10 @@ pub struct SegmentReady {
 // split: begin vod-reader
 #[path = "vod/reader.rs"]
 mod reader;
+#[path = "vod/ready_file.rs"]
+mod ready_file;
 use reader::*;
+pub(crate) use ready_file::ReadyFile;
 // split: end vod-reader
 
 // split: begin vod-marker-prewarm

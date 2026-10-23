@@ -124,6 +124,15 @@ impl RenditionDir {
     pub(crate) fn is_finite(&self) -> bool {
         self.writes.finite.is_some()
     }
+
+    /// Return the finite output selector without exposing or duplicating its
+    /// held native directory handle.
+    pub(crate) fn finite_output(&self) -> Option<FiniteOutput> {
+        self.writes
+            .finite
+            .as_ref()
+            .map(|finite| finite.output.clone())
+    }
     pub(crate) async fn write_finite_metadata(&self, name: &str, bytes: Vec<u8>) -> io::Result<()> {
         self.writes
             .finite

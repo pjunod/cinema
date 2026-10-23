@@ -163,7 +163,6 @@ pub(crate) async fn test_assert_sealed_cached_delivery(
     id: &str,
     expected: &crate::transcode::RetainedOutputFacts,
 ) {
-    use tokio::io::AsyncReadExt;
     let publication = serve
         .segment_before(
             id,
@@ -176,10 +175,9 @@ pub(crate) async fn test_assert_sealed_cached_delivery(
         .result
         .expect("cached delivery")
         .expect("member");
-    let mut bytes = Vec::new();
-    member
+    let bytes = member
         .file
-        .read_to_end(&mut bytes)
+        .read_all_bounded(member.len, Instant::now() + Duration::from_secs(1))
         .await
         .expect("real body");
     assert_eq!(bytes, vec![0; 1000]);

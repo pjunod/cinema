@@ -89,7 +89,37 @@ fn single_copy(directory: &DirectoryObservedV1) -> Result<v2::Id, OperationError
     }
     Ok(directory.held_copy_ids[0])
 }
+impl RootCell {
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn no_original_handles(
+        &self,
+    ) -> bool {
+        self.pending.is_none()
+            && !self.failed_join
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|result| result.files.is_empty())
+    }
+}
 impl CleanupCell {
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn launched(&self) -> bool {
+        self.launched
+    }
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn positive_close_acknowledged(
+        &self,
+    ) -> bool {
+        self.acknowledged
+            && self.pending.is_none()
+            && !self.failed_join
+            && matches!(&self.action, CleanupAction::CloseHandles { exact_ids }
+                if self.result.as_ref().is_some_and(|result|
+                    result.directories.is_empty()
+                    && result.unknown_close.is_none()
+                    && &result.known_closed == exact_ids
+                    && matches!(&result.fact, Some(CleanupFact::Bootstrap(fact))
+                        if fact.outcome == NativeOutcomeV1::Completed
+                            && fact.closed_copy_ids.as_slice() == exact_ids.as_slice())))
+    }
     fn new(action: CleanupAction, observed: Vec<DirectoryObservedV1>) -> Self {
         Self {
             action,

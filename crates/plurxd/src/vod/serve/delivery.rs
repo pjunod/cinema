@@ -1017,7 +1017,7 @@ impl VodServe {
                     let Some(expected) = expected else {
                         return Ok(None);
                     };
-                    let Some(bytes) = read_child_init(&mut ready, &expected).await? else {
+                    let Some(bytes) = read_child_init(&mut ready, &expected, deadline).await? else {
                         return Ok(None);
                     };
                     let mut reader = FragmentReader::new();
@@ -1210,7 +1210,7 @@ impl VodServe {
             let mut ready = self
                 .serve_init(&found.rendition, budget, found.delivery)
                 .await?;
-            let Some(bytes) = read_child_init(&mut ready, &expected).await? else {
+            let Some(bytes) = read_child_init(&mut ready, &expected, deadline).await? else {
                 return Ok(None);
             };
             let mut reader = FragmentReader::new();
@@ -1360,12 +1360,15 @@ impl VodServe {
                 if ready.len == 0 || ready.len > 16 * 1024 * 1024 {
                     return Err("preparation fragment exceeds its bounded inspection".into());
                 }
-                let mut media = Vec::new();
-                (&mut ready.file)
-                    .take(ready.len + 1)
-                    .read_to_end(&mut media)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let read_limit = ready.len + 1;
+                let media = ready.file.read_all_bounded(read_limit, deadline).await
+                    .map_err(|error| {
+                        if error.kind() == io::ErrorKind::InvalidData {
+                            "preparation fragment length changed".to_owned()
+                        } else {
+                            error.to_string()
+                        }
+                    })?;
                 if media.len() as u64 != ready.len {
                     return Err("preparation fragment length changed".into());
                 }
@@ -1439,12 +1442,15 @@ impl VodServe {
                         if ready.len == 0 || ready.len > 16 * 1024 * 1024 {
                             return Err("soundtrack inspection is oversized".into());
                         }
-                        let mut bytes = Vec::new();
-                        (&mut ready.file)
-                            .take(ready.len + 1)
-                            .read_to_end(&mut bytes)
-                            .await
-                            .map_err(|error| error.to_string())?;
+                        let read_limit = ready.len + 1;
+                        let bytes = ready.file.read_all_bounded(read_limit, deadline).await
+                            .map_err(|error| {
+                                if error.kind() == io::ErrorKind::InvalidData {
+                                    "soundtrack length changed".to_owned()
+                                } else {
+                                    error.to_string()
+                                }
+                            })?;
                         if bytes.len() as u64 != ready.len {
                             return Err("soundtrack length changed".into());
                         }
@@ -1609,7 +1615,7 @@ impl VodServe {
                         .as_ref()
                         .is_some_and(|identity| identity.served_init == expected)
                     {
-                        match read_child_init(&mut ready, expected).await {
+                        match read_child_init(&mut ready, expected, deadline).await {
                             Ok(Some(_)) => {}
                             Ok(None) => {
                                 return Some(VodPublication {
@@ -1808,24 +1814,19 @@ async fn quality_inspection<T: Send + 'static>(
 async fn read_child_init(
     ready: &mut SegmentReady,
     expected: &str,
+    deadline: Instant,
 ) -> Result<Option<Vec<u8>>, VodError> {
     if ready.len > 256 * 1024 {
         return Ok(None);
     }
-    let mut bytes = Vec::new();
-    (&mut ready.file)
-        .take(256 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(VodError::Io)?;
+    let bytes = match ready.file.read_all_bounded(256 * 1024 + 1, deadline).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(None),
+        Err(error) => return Err(VodError::Io(error)),
+    };
     if bytes.len() as u64 != ready.len || format!("{:x}", Sha256::digest(&bytes)) != expected {
         return Ok(None);
     }
-    ready
-        .file
-        .seek(std::io::SeekFrom::Start(0))
-        .await
-        .map_err(VodError::Io)?;
     Ok(Some(bytes))
 }
 

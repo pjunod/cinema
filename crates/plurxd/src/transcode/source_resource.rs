@@ -86,7 +86,7 @@ impl SourceResourceReadCustody {
             // Source's actual response/producer custody owns this file. Local
             // retained-cache admission cannot confer authority in this namespace.
             retained_lease: None,
-            file: tokio::fs::File::from_std(file),
+            file: tokio::fs::File::from_std(file).into(),
             len,
             etag: format!("{etag_stem}-{len}"),
             delivery: Arc::clone(delivery),

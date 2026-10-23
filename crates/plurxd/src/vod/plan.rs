@@ -364,7 +364,7 @@ pub(super) async fn open_ready(
     let len = file.metadata().await?.len();
     Ok(SegmentReady {
         observed_media_duration_ms: None,
-        file,
+        file: file.into(),
         len,
         etag: format!("{etag_stem}-{len}"),
         delivery: Arc::clone(delivery),

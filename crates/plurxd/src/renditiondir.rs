@@ -217,6 +217,15 @@ impl RenditionDir {
     /// them is present. Nothing is unlinked in that case, so a refusal cannot
     /// take the bytes with it.
     pub async fn evict(&self, manifest: &mut Manifest, index: u32) -> io::Result<bool> {
+        #[cfg(unix)]
+        if self.is_finite() {
+            // This owner retires its exact closed inventory as one S asset.
+            // A path unlink would bypass that inventory and its durable charge.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "finite output requires whole retained-asset eviction",
+            ));
+        }
         let Some(state) = manifest.state(index) else {
             return Ok(false);
         };
@@ -371,6 +380,25 @@ impl RenditionDir {
     /// For a rendition being given up whole. Record-then-unlink is not needed
     /// here because nothing survives to be wrong.
     pub async fn purge(&self, manifest: &mut Manifest) -> Freed {
+        #[cfg(unix)]
+        if let Some(output) = self.finite_output() {
+            let bytes = manifest.materialized_bytes();
+            return match output
+                .evict(std::time::Instant::now() + std::time::Duration::from_secs(30))
+                .await
+            {
+                Ok(()) => {
+                    for index in 0..manifest.len() as u32 {
+                        manifest.forget(index);
+                    }
+                    Freed { bytes, error: None }
+                }
+                Err(error) => Freed {
+                    bytes: 0,
+                    error: Some(error.into_io_error()),
+                },
+            };
+        }
         let mut freed = Freed::default();
         for index in 0..manifest.len() as u32 {
             let bytes = manifest

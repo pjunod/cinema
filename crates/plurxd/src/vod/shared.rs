@@ -1099,6 +1099,10 @@ impl Shared {
         if manifest.is_admitted() {
             return;
         }
+        #[cfg(unix)]
+        let counted_finite = rendition.dir.is_finite();
+        #[cfg(not(unix))]
+        let counted_finite = false;
         let removed = {
             let mut renditions = self.renditions.lock().await;
             let exact = renditions
@@ -1109,7 +1113,7 @@ impl Shared {
                 rendition.gen_epoch.fetch_add(1, Relaxed);
                 // A private processed instance remains discoverable and
                 // charged until its directory has physically disappeared.
-                if !rendition.ephemeral_processing {
+                if !rendition.ephemeral_processing && !counted_finite {
                     renditions.remove(key);
                 }
             }
@@ -1137,6 +1141,28 @@ impl Shared {
             )
             .await;
             shared.pool.close(&rendition.key);
+            if counted_finite {
+                let mut manifest = rendition.manifest.lock().await;
+                let freed = rendition.dir.purge(&mut manifest).await;
+                if let Some(error) = freed.error {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                        %error, "retained finite cleanup remains charged for retry");
+                    return;
+                }
+                sub_saturating(&shared.working_set, freed.bytes);
+                drop(manifest);
+                let mut registry = shared.renditions.lock().await;
+                if registry
+                    .get(&rendition.key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                {
+                    registry.remove(&rendition.key);
+                }
+                drop(registry);
+                rendition.kick();
+                shared.kick_all();
+                return;
+            }
             if rendition.ephemeral_processing {
                 let deletion = if shared
                     .hooks

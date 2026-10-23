@@ -96,6 +96,23 @@ pub(super) struct ReaderEntry {
     opened: bool,
     terminal: bool,
 }
+/// Retained retirement may discard only fully acknowledged terminal rows.
+/// A live response chunk keeps its original ReaderCell/buffer and refuses this.
+pub(super) fn clear_terminal_readers(
+    bootstrap: &mut BootstrapMember,
+) -> Result<(), OperationError> {
+    if bootstrap.readers.values().any(|entry| {
+        !entry.terminal
+            || entry.cell.is_some()
+            || entry.current.is_some()
+            || !entry.control.terminal.load(Ordering::Acquire)
+    }) {
+        return Err(OperationError::State);
+    }
+    bootstrap.readers.clear();
+    Ok(())
+}
+
 fn id() -> Result<v2::Id, OperationError> {
     Ok(v2::Id::new(Uuid::new_v4())?)
 }
@@ -596,6 +613,7 @@ impl NodeResourceRuntime {
         };
         let failed_read = matches!(&io.operation, AssetIoV1::ReadRange { range, .. } if
             !matches!(outcome, NativeOutcomeV1::Completed) || matches!(&observation, AssetObservationV1::ReaderRead { bytes_read: 0, .. } if range.start < range.end_exclusive));
+        let rejected_open_errno = rejected.then(|| cell.open_rejection_errno()).flatten();
         if role.transition.is_none() {
             native::publication::queue_output_change(
                 &self.journal,
@@ -621,6 +639,7 @@ impl NodeResourceRuntime {
             .get_mut(&lease)
             .expect("retained reader");
         let cell = entry.cell.as_mut().expect("original reader cell");
+        let mut failed_read_error = None;
         let result = match io.operation {
             AssetIoV1::OpenReader { .. } if rejected => {
                 entry.cell = None;
@@ -634,10 +653,33 @@ impl NodeResourceRuntime {
             }
             AssetIoV1::ReadRange { .. } => {
                 cell.acknowledge_read(io.io)?;
+                let failure = cell.read_fact().and_then(|fact| fact.failure);
+                let original_error = cell.take_acknowledged_read_error();
                 let chunk = cell.take_acknowledged_chunk()?;
                 if failed_read {
                     drop(chunk);
                     entry.control.closing.store(true, Ordering::Release);
+                    failed_read_error = Some(original_error.unwrap_or_else(|| {
+                        failure.map_or_else(
+                            || {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "retained file reached early EOF",
+                                )
+                            },
+                            |native| {
+                                native.errno.map_or_else(
+                                    || {
+                                        std::io::Error::new(
+                                            native.kind,
+                                            "retained file read failed",
+                                        )
+                                    },
+                                    std::io::Error::from_raw_os_error,
+                                )
+                            },
+                        )
+                    }));
                     ReaderProgress::Continue
                 } else {
                     ReaderProgress::Chunk(FiniteReadChunk(chunk))
@@ -657,10 +699,13 @@ impl NodeResourceRuntime {
             .terminal
             .store(entry.terminal, Ordering::Release);
         entry.control.ready.notify_one();
-        if failed_read {
-            return Err(OperationError::Physical(std::io::Error::other(
-                "retained file read failed or reached early EOF",
+        if let Some(errno) = rejected_open_errno {
+            return Err(OperationError::Physical(std::io::Error::from_raw_os_error(
+                errno,
             )));
+        }
+        if let Some(error) = failed_read_error {
+            return Err(OperationError::Physical(error));
         }
         Ok(result)
     }

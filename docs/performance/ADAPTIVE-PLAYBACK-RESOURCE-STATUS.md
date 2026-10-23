@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; retained-reader/cleanup host compilation passes, behavioral tests not run.
-**Updated:** 2026-10-22 at published checkpoint `ad6d6c68178bc5bbddca3af03af0744239e98c5b`; retained-reader/cleanup source described below.
+**Status:** open · implementation incomplete; published native Linux all-targets compile passed on Rust 1.97.1; current HTTP and S-cleanup integration passes host compilation; native check pending; behavioral tests not run.
+**Updated:** 2026-10-22 at published checkpoint `1a4e015bf`; current uncommitted work described below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -27,6 +27,18 @@ acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
 
+Published checkpoint `1a4e015bf` passed the native Linux all-targets Rust
+1.97.1 compile in 195.199 seconds. No behavioral tests ran. Current integration adds HTTP `ReadyFile` counted-range selection and native
+error causality, S cleanup through original native cells, typed settlement and
+retryable dormant eviction. Host daemon all-target compilation passes on Rust
+1.97.1 (140.517 seconds, stable source hashes; receipt
+`direct-check-20261022-215906.json`). Core all-target compilation completed in
+the preceding adapter-failure iterations. Native compilation of this new
+snapshot remains pending. All V1–V5 and R1/M0–M7 remain open.
+Ordinary VOD still uses legacy admission. Initialization inspection/copy remains
+outside the ledger, peak-memory bounds and per-dimension capacity are not
+implemented, and partial-start ownership remains unresolved.
+
 The selected executable now uses a fixed eight-entry verification cache keyed by
 all seven S1 identity fields and digest. Only a prior successful held-file native
 ELF/hash scan can populate it; a cache hit rechecks the same held descriptor before
@@ -40,8 +52,9 @@ original latched jobs retain the File and one fixed buffer. Only known durable
 read observation exposes an opaque chunk. Chunk drop returns that SAME buffer,
 and waits for it release the bundle lock. Drop requests closure rather than
 claiming it: normal completion, later serving and eviction use the same close
-operation; only positive original close permits removal of the lease. HTTP has
-not yet adopted this interface. Active native reader owners and their exact
+operation; only positive original close permits removal of the lease. HTTP
+`ReadyFile` counted-range selection and native-error causality now use this
+interface and pass host compilation. Active native reader owners and their exact
 cursor/lease inventory now move with the same bootstrap owner through provisional
 S and known R→S; the old output selection resolves to S after rebind. The runtime
 also explicitly preserves its actual ledger durable tag: the initial prepare-
@@ -50,8 +63,11 @@ bundle ID is distinct from the journal obligation ID.
 Retained cleanup vocabulary fences new readers, removes exact owned files, syncs
 the child, unlinks the child relative to the held parent, syncs that parent, then
 closes the exact folded descriptor-copy set. Failed/uncertain removals and closes
-retain charge and cannot retry a numeric descriptor. Native cleanup cells for
-those actions are authored; the S cleanup orchestrator is not connected yet.
+retain charge and cannot retry a numeric descriptor. The S cleanup state machine,
+typed settlement and dormant eviction now use the original native jobs and
+nonclone closure capability. Actual closed inventories are disposed before
+refund; unresolved cleanup preserves the rendition registry and charge. Host
+compilation passes; native compilation and behavior qualification remain open.
 Typed S settlement reconstructs the latest closed fold in the journal transaction,
 checks exact retained lineage and empty files/readers/handles/storage, and retains
 the original physical receipt through known COMMIT. It has no production native
@@ -108,22 +124,15 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `ad6d6c68178bc5bbddca3af03af0744239e98c5b`.
-The retained-reader/native-cleanup/typed-settlement source passed pinned Rust 1.97.1
-host core+daemon all-target compilation in 249.207s (EXIT 0, stable hashes),
-`direct-check-20261022-211958.json`, log SHA-256
-`368f75510ad220a7b52cfa4b3acf06854aaf020a75b9e22ac80ae150b02a8933`.
-The candidate has 391 unique regression anchors; the durable new list has 84.
-Authored regressions are NOT RUN. The source-only Linux compiler loop is established
-in a pinned 1.97.1 container with credential-free archives, a private dependency
-cache and offline network-isolated compilation. Its first all-target check of
-`ad6d6c6817` found a Linux-only fixture Vec move; the current source fixes it.
-The current checkpoint still needs native compilation. No strict Clippy, final
-independent review, qualification/fast lane, merge or deployment is claimed.
-Ordinary admission/terminal integration, actual HTTP serving and exact S cleanup/
-reuse remain unwired. Native/index/runtime/journal memory is not an end-to-end
-bound. The child descriptor helper transient peak is `3N + 1` for N source
-mappings; the combined parent/child standard spawn peak remains unestablished.
+The latest published base is `1a4e015bf`. The native Linux all-target Rust 1.97.1
+source compile passed in 195.199 seconds. No behavioral tests ran. The current
+uncommitted HTTP `ReadyFile` counted-range selection/native-error causality and
+S-cleanup state-machine/typed-settlement/eviction changes are not covered by that
+receipt and await compilation. No strict Clippy, final independent review,
+qualification/fast lane, merge or deployment is claimed. Ordinary admission and
+terminal integration remain open. Initialization inspection/copy is outside the
+ledger; peak-memory bounds, per-dimension capacity and partial-start ownership
+remain unresolved.
 
 ## Current source and compiler receipt
 

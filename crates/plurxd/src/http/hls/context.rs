@@ -205,19 +205,24 @@ pub(super) async fn exact_hls_context_at(
         .await
     {
         Some(crate::transcode::VodResponsePublication {
-            result: Ok(Some(ready)),
+            result: Ok(Some(mut ready)),
             ..
         }) => {
             if ready.len > INIT_INSPECTION_LIMIT_BYTES {
                 return Err(HlsInitInspectionError::invalid());
             }
-            init.reserve(ready.len as usize);
-            let mut reader = ready.file.take(ready.len);
-            let read = reader
-                .read_to_end(&mut init)
+            init = ready
+                .file
+                .read_all_bounded(INIT_INSPECTION_LIMIT_BYTES, deadline)
                 .await
-                .map_err(|_| HlsInitInspectionError::unavailable())?;
-            if read as u64 != ready.len {
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                        HlsInitInspectionError::invalid()
+                    } else {
+                        HlsInitInspectionError::unavailable()
+                    }
+                })?;
+            if init.len() as u64 != ready.len {
                 return Err(HlsInitInspectionError::invalid());
             }
         }

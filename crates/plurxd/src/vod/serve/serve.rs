@@ -920,6 +920,8 @@ impl VodServe {
         // before its preparation frontier has been admitted.
         let mut demand = None;
         let deadline = Instant::now() + budget;
+        #[cfg(unix)]
+        let finite_output = rendition.dir.finite_output();
         loop {
             // Arm the notification — created AND enabled — before checking
             // the disk. `Notified` registers with its `Notify` only on first
@@ -930,17 +932,48 @@ impl VodServe {
             let notified = rendition.init_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if rendition.dir.has_init().await {
+            #[cfg(unix)]
+            let finite_init_len = match finite_output.as_ref() {
+                Some(output) => output
+                    .file_len(plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Init)
+                    .await
+                    .map_err(|error| VodError::Io(io::Error::other(error.to_string())))?,
+                None => None,
+            };
+            #[cfg(unix)]
+            let legacy_init_ready = finite_output.is_none() && rendition.dir.has_init().await;
+            #[cfg(not(unix))]
+            let legacy_init_ready = rendition.dir.has_init().await;
+            #[cfg(unix)]
+            let finite_init_ready = finite_init_len.is_some();
+            #[cfg(not(unix))]
+            let finite_init_ready = false;
+            if finite_init_ready || legacy_init_ready {
                 rendition.clear_demand(INIT_DEMAND_INDEX);
-                let path = rendition.dir.path().join(INIT_NAME);
-                let ready = open_with_read_custody(
-                    &path,
-                    &format!("{}-init", rendition.key),
-                    &delivery,
-                    custody,
-                )
-                .await
-                .map_err(VodError::Io)?;
+                let etag_stem = format!("{}-init", rendition.key);
+                #[cfg(unix)]
+                let ready =
+                    if let (Some(output), Some(len)) = (finite_output.as_ref(), finite_init_len) {
+                        Self::finite_ready(
+                            output.clone(),
+                            plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Init,
+                            len,
+                            &etag_stem,
+                            &delivery,
+                        )
+                    } else {
+                        let path = rendition.dir.path().join(INIT_NAME);
+                        open_with_read_custody(&path, &etag_stem, &delivery, custody)
+                            .await
+                            .map_err(VodError::Io)?
+                    };
+                #[cfg(not(unix))]
+                let ready = {
+                    let path = rendition.dir.path().join(INIT_NAME);
+                    open_with_read_custody(&path, &etag_stem, &delivery, custody)
+                        .await
+                        .map_err(VodError::Io)?
+                };
                 if self.source_changed(rendition) {
                     let cause =
                         "source changed while the rendition init was being opened".to_owned();
@@ -1236,14 +1269,25 @@ impl VodServe {
         // The materialization instant is part of the etag: key-index-length
         // alone collides across an evict-and-regenerate whose bytes differ
         // while its length happens to match.
-        match open_with_read_custody(
-            &path,
-            &format!("{}-{index}-{at_ms}", rendition.key),
-            delivery,
-            custody,
-        )
-        .await
-        {
+        let etag_stem = format!("{}-{index}-{at_ms}", rendition.key);
+        #[cfg(unix)]
+        let finite_output = rendition.dir.finite_output();
+        #[cfg(unix)]
+        let finite_file =
+            plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile::Segment(index);
+        #[cfg(unix)]
+        let opened = match finite_output {
+            Some(output) => output
+                .file_len(finite_file)
+                .await
+                .map_err(|error| VodError::Io(io::Error::other(error.to_string())))?
+                .map(|len| Self::finite_ready(output, finite_file, len, &etag_stem, delivery))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "finite segment absent")),
+            None => open_with_read_custody(&path, &etag_stem, delivery, custody).await,
+        };
+        #[cfg(not(unix))]
+        let opened = open_with_read_custody(&path, &etag_stem, delivery, custody).await;
+        match opened {
             Ok(mut ready) => {
                 ready.observed_media_duration_ms = plan_media_duration_ms(rendition, index);
                 Ok(Some(ready))
@@ -1251,6 +1295,24 @@ impl VodServe {
             // The manifest lied — treat as planned; reconcile repairs it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(VodError::Io(error)),
+        }
+    }
+
+    #[cfg(unix)]
+    fn finite_ready(
+        output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+        file: plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile,
+        len: u64,
+        etag_stem: &str,
+        delivery: &Arc<crate::meter::Meter>,
+    ) -> SegmentReady {
+        SegmentReady {
+            observed_media_duration_ms: None,
+            file: ready_file::ReadyFile::Finite { output, file, len },
+            len,
+            etag: format!("{etag_stem}-{len}"),
+            delivery: Arc::clone(delivery),
+            retained_lease: None,
         }
     }
 

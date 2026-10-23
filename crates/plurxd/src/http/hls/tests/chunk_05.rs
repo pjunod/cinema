@@ -648,7 +648,7 @@ async fn vod_ready_metered(
         retained_lease: None,
         file: tokio::fs::File::open(path)
             .await
-            .expect("open VOD response object"),
+            .expect("open VOD response object").into(),
         len: advertised_len,
         etag: format!("http-test-{advertised_len}"),
     }

@@ -1348,12 +1348,20 @@ struct SourceFileReader {
 static SOURCE_READ_JOBS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
 async fn source_file_body(
-    file: tokio::fs::File,
+    file: crate::vodserve::ReadyFile,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
     len: u64,
     start: Option<u64>,
     #[cfg(test)] gate: Option<std::sync::Arc<SourceReadJobGate>>,
 ) -> Result<axum::body::Body, ApiError> {
+    // Source custody currently selects the concrete legacy file owner. A
+    // counted finite output has its own original native reader, which cannot
+    // be converted into an uncounted Tokio file for this actor.
+    let file = match file {
+        crate::vodserve::ReadyFile::Local(file) => file,
+        #[cfg(unix)]
+        crate::vodserve::ReadyFile::Finite { .. } => return Err(unavailable()),
+    };
     let conversion_guard = std::sync::Arc::clone(&guard);
     // Tokio may already own an outstanding blocking operation. The conversion
     // task is detached from waiter cancellation and holds the real barrier until

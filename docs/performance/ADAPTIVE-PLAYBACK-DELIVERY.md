@@ -1,6 +1,6 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `ad6d6c68178bc5bbddca3af03af0744239e98c5b`.
+**Status:** open · implementation incomplete · published native Linux all-targets compile passed on Rust 1.97.1; current HTTP and S-cleanup integration passes host compilation; native check pending; behavioral tests not run.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -12,16 +12,26 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at `ad6d6c6817`. The immediate target is one ordinary
+All five items are **OPEN** at published checkpoint `1a4e015bf`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
+
+Current integration adds HTTP `ReadyFile` counted-range selection and
+native-error causality, plus S cleanup through original native cells, typed
+settlement and retryable dormant eviction. Host daemon all-target compilation
+passes on Rust 1.97.1 (140.517 seconds, stable source hashes); core all-target
+compilation completed in the preceding adapter-failure iterations. Native
+compilation of this new snapshot remains pending. Initialization
+inspection/copy remains outside the ledger; peak-memory bounds, per-dimension
+capacity and partial-start ownership remain unresolved. No V1–V5 or M0–M7 item
+is closed.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
 | V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
 | V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The concrete finite request carries an immutable `SoftwareAvcCommand` and pump plan in the same reserved bundle before I/O, checks source identity/path/scanner values, prearms source cells without a lease, and uses the predeclared root acquisition ID. The same retained `File` crosses spawn; after known launch, source-copy observation is enriched, then the retained pump task is observed and acknowledged. The bounded Segmenter prefix/merge/finish split/published batch now flows through `GenerationMemoryLimits`/`Generation`; init parsing has a four-copy bound, parser/read/inventory allocations and plan-boundary vectors are fallible, and canonical grid/producer-clock alignment is compiled. These components do not establish an end-to-end quota: parser metadata, native process, launcher and runtime-journal memory remain unresolved. Known durable Observe ends pending-I/O payload accounting; actual payload is cleared and the same directory returned under the original bundle lock before another queue operation can enter. The whole role reservation remains held until retirement. Ordinary `build_rendition_with_storage` still uses legacy admission. |
 | V3 — producer/stop — OPEN | Core now joins the same retained writer/root outside the publication bundle lock and quiesces already-registered native jobs. Stop aborts the original task through its retained handle, including late registration; result summaries do not move the graph-owned diagnostics. Observed parent source descriptors close once, but inherited-copy/fixed-process/partial-start closure and all charges remain held. Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
-| V4 — retained output — OPEN | Compact V3 frozen references, a proof-bearing atomic SQLite R→S mutation/recovery and a post-COMMIT same-ledger swap primitive are authored; private native retirement/S ownership is connected for the fully acquired no-reader profile; ordinary integration and native qualification are open. Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
+| V4 — retained output — OPEN | Compact V3 frozen references, a proof-bearing atomic SQLite R→S mutation/recovery and a post-COMMIT same-ledger swap primitive are authored; private native retirement/S ownership is connected for fully acquired output with exact active-reader transfer; ordinary integration and native qualification are open. Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
 Current sequence: wire this finite runtime composition into ordinary
@@ -55,10 +65,12 @@ opaque chunk; Drop requests closure for the same retained owner. Active reader
 cells/leases now transfer with the same native bootstrap owner across R→S. The
 actual prepare-bundle ledger tag is explicitly retained separately from journal
 obligation identity. A bounded S cleanup event/native-cell sequence and typed
-terminal settlement transaction are authored, but native S cleanup execution and
-HTTP adoption remain unwired. Image verification now reuses only prior successful
-full-S1/digest/ELF attestations on the same rechecked held file. Host compilation
-passes; behavioral tests are NOT RUN and no V item closes from this checkpoint.
+terminal settlement transaction are authored; S cleanup execution, typed settlement and dormant
+eviction are connected and pass host compilation, along with HTTP counted
+range selection and native-error causality. Native compilation is pending. Image verification now reuses only prior
+successful full-S1/digest/ELF attestations on the same rechecked held file.
+Published-checkpoint host compilation passed; behavioral tests are NOT RUN and
+no V item closes from this checkpoint.
 
 The current source binds a hashed native ELF held in the same source custodian
 to fd-based fixed launch. A process-only graph witness now requires original
@@ -67,9 +79,10 @@ Source-copy audits and staged same-owner frozen-bootstrap transfer are authored;
 the private retirement adapter now installs the same native output in provisional
 S before its receipt/command, preserves full R over unknown results, then performs
 one post-COMMIT ledger swap and role rebinding. S retains the whole R nonproducer
-allowance. Host core+daemon compilation passes; actual serving, complete quotas,
-S cleanup and ordinary wiring remain open. No behavioral tests have run. This
-does not close any V item.
+allowance. Published native Linux all-targets compilation passed on Rust 1.97.1
+in 195.199 seconds; current uncommitted edits await compilation. Actual serving,
+complete quotas, S cleanup and ordinary wiring remain open. No behavioral tests
+have run. This does not close any V item.
 
 Core exposes a concrete
 [`finite_vod` runtime interface](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
@@ -107,11 +120,10 @@ connection, full memory profile, serving leases, retained-output transfer,
 conserving retirement and exact settlement/capacity reuse still lack their
 production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
-records the limits. The latest committed base is
-`ad6d6c68178bc5bbddca3af03af0744239e98c5b`. The frozen sixth-checkpoint source
-passed pinned Rust 1.97.1 host core+daemon all-target compilation in 132.333s
-with stable hashes; the source ledger records the exact receipt and the existing
-root-constructor field fixed before this pass. This is warning-level compilation.
+records the limits. The latest published checkpoint is `1a4e015bf`. Its native
+Linux all-target Rust 1.97.1 compile passed in 195.199 seconds. Current
+uncommitted HTTP and S-cleanup changes are outside that receipt and await
+compilation. This is warning-level compilation.
 Host-eligible authored cases compiled; Linux-only bodies and Windows remain
 outside that evidence. No behavioral tests or review ran for this slice.
 Review and qualification wait for the complete integrated candidate.

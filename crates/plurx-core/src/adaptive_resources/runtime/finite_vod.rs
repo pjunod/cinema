@@ -38,6 +38,18 @@ use v2::scratch::{
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct FiniteVodError(OperationError);
+impl FiniteVodError {
+    /// Preserve a native failure when adapting counted reads to an I/O stream.
+    pub fn into_io_error(self) -> std::io::Error {
+        match self.0 {
+            OperationError::Physical(error) => error,
+            OperationError::Deadline => {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "finite VOD deadline elapsed")
+            }
+            error => std::io::Error::other(error),
+        }
+    }
+}
 impl From<OperationError> for FiniteVodError {
     fn from(error: OperationError) -> Self {
         Self(error)
@@ -259,6 +271,19 @@ impl FiniteOutput {
                 end_exclusive,
                 memory_cap,
             )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Evict the exact retained output through original native cleanup and a
+    /// known durable settlement. Active bodies must finish before this closes.
+    /// Cancellation retains the same native jobs and settlement operation.
+    pub async fn evict(&self, deadline: Instant) -> Result<(), FiniteVodError> {
+        self.runtime
+            .settle_retained_finite_output(&self.preparation, 0, self.member, deadline)
+            .await?;
+        self.runtime
+            .forget_preparation(self.preparation.clone())
             .await
             .map_err(Into::into)
     }

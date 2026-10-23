@@ -4273,8 +4273,8 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         let artifact = serve.shared.retained_artifacts.acquire(&identity).expect("retained artifact");
         let meter = Arc::new(crate::meter::Meter::default());
         let mut init_ready = artifact.open(None, &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained init");
-        let mut init_bytes = Vec::new();
-        init_ready.file.read_to_end(&mut init_bytes).await.expect("read init");
+        let init_bytes = init_ready.file.read_all_bounded(init_ready.len, std::time::Instant::now() + Duration::from_secs(30))
+            .await.expect("read init");
         assert_eq!(init_bytes, init);
         assert!(init_ready.observed_media_duration_ms.is_none());
         let mut ready = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained segment");
@@ -4283,8 +4283,8 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
         // Rematerialization traverses the published URI instead of replacing
         // it, and already-issued open body leases name the original bytes.
         sink.materialize(0, vec![9; 1000]).await.expect("ordinary rematerialization");
-        let mut original = Vec::new();
-        ready.file.read_to_end(&mut original).await.expect("open body remains readable");
+        let original = ready.file.read_all_bounded(ready.len, std::time::Instant::now() + Duration::from_secs(30))
+            .await.expect("open body remains readable");
         assert_eq!(original, vec![7; 1000]);
         let live = rendition.dir.path().join(segment_name(0));
         assert_eq!(tokio::fs::read(&live).await.expect("live segment"), vec![7; 1000]);

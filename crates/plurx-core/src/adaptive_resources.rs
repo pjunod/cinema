@@ -236,6 +236,15 @@ pub struct PhysicalCloseReceipt {
 }
 
 impl PhysicalCloseReceipt {
+    /// Consumes the original native retained-output closure. Audit heads and
+    /// serialized terminal states cannot construct this physical capability.
+    #[cfg(unix)]
+    fn from_retained_finite(closure: runtime::RetainedFiniteClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+        }
+    }
+
     /// Read-only core seam for committing a matching durable settlement.
     /// The binding is not a close proof, mint, wire token or refund authority.
     pub(crate) fn custody_binding(&self) -> ReservationBinding {

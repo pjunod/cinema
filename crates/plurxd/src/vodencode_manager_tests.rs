@@ -293,7 +293,6 @@ fn processed_window_luma(
 #[tokio::test]
 async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     use plurx_core::store::SqliteStore;
-    use tokio::io::AsyncReadExt;
     let base = crate::test_tempdir().expect("manager fixture");
     let source = plurx_core::testfixtures::source("h264");
     let probe = plurx_core::scan::probe::probe(&source)
@@ -404,11 +403,10 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
             .result
             .expect("materialized")
             .expect("planned resource");
-        ready
-            .file
-            .read_to_end(&mut bytes)
-            .await
-            .expect("actual GET file");
+        let object_bytes = ready.file
+            .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
+            .await.expect("actual GET file");
+        bytes.extend_from_slice(&object_bytes);
         if init_len.is_none() {
             init_len = Some(bytes.len());
         }
