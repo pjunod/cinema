@@ -229,6 +229,41 @@ class KnowledgeIsolationTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(receipt.public()))
         self.assertIn("stdout_base64", json.loads(result.private_path.read_text())["output"])
 
+    def test_fresh_native_challenges_reach_v1_v2_and_worker_comparison_consumers(self):
+        # SyntheticEngine is not containment proof. Reuse real probe issuance
+        # and comparison flows, injecting only coherent native challenge facts.
+        actual_probe=isolation._configuration_probe
+        actual_projection=isolation._stable_probe_observations
+        seen={};sequence=0
+        def observed(config,private):
+            nonlocal sequence
+            name,body=actual_probe(config,private);sequence+=1
+            mounts={target:[path.stat().st_dev,path.stat().st_ino] for path,target in
+                    ((config.candidate_root,"/work"),(config.runtime_root,"/work/.runtime"),(config.grader_root,"/grader"))}
+            body["observed_probes"]["native_mounts"]=mounts
+            body["native_outside_sentinel"]={"scope":"outside-all-role-mounts","stage":"f"*32,
+                "name":"outside-"+format(sequence,"032x"),"device":mounts["/work"][0],"inode":sequence,
+                "sha256":body["sentinel_digest"],"bytes":32,"mode":0o600,"present":True}
+            return name,body
+        def projected(body,*,native_stage=None):
+            caller=sys._getframe(1).f_code.co_name
+            seen.setdefault(caller,[]).append(body["native_outside_sentinel"]["name"])
+            return actual_projection(body,native_stage="f"*32)
+        with patch.object(isolation,"_configuration_probe",new=observed), \
+             patch.object(isolation,"_stable_probe_observations",new=projected):
+            proof=isolation.probe(self.config)
+            self.assertEqual(self.execute(self.config,self.argv,proof).status,"passed")
+            config,plan=self.protected_plan()
+            with patch.object(isolation,"_duplex_broker",side_effect=self.protected_broker):
+                prerequisite=self.v2_qualified(config,plan)
+                first=self.v2_config(config,plan.acceptance_steps[0])
+                result=isolation.execute_plan(first,isolation.probe(first),family=plan,prerequisite=prerequisite)
+                self.assertEqual(result.status,"passed")
+        for consumer in ("_execute_family","_run_step_inner","_protected_packet"):
+            self.assertIn(consumer,seen)
+            self.assertGreaterEqual(len(set(seen[consumer])),2)
+        self.assertEqual(self.engine.alive,set())
+
     def test_immutable_full_image_id_works_without_repository_digest(self):
         config = replace(self.config, image=self.engine.image_id)
         receipt = isolation.probe(config)
@@ -1137,7 +1172,8 @@ def run(mode,argv,context):
             self.native_handle = Stage(self.root, config.candidate_root, config.grader_root, config.runtime_root,
                 worker_candidate=worker_config.candidate_root, worker_grader=worker_config.grader_root, worker_runtime=worker_config.runtime_root)
             self.native_store.reserve(self.root)
-            binding = self.native_store.publish(self.native_handle)
+            binding = self.native_store.publish(self.native_handle,role_users={"protected":[config.uid,config.gid],
+                "worker":[worker_config.uid,worker_config.gid]})
             self.native_handle.native_binding = binding
             config = replace(config, native_binding=binding)
             worker_config = replace(worker_config, native_binding=binding)
@@ -1166,6 +1202,16 @@ def run(mode,argv,context):
         with patch.object(isolation.subprocess, "Popen", side_effect=observed_popen), \
                 patch.object(isolation, "_command", side_effect=observed_command), \
                 patch.object(isolation, "_configuration_probe", side_effect=observed_probe):
+            if self.native_store is not None and not quiet:
+                # Same writable-source policy as SourceStager.prepare_preflight;
+                # real root helper publication must support the configured UID.
+                writable=replace(config,candidate_readonly=False,require_rust=True,
+                    acceptance_argv=((config.cargo_executable,"--version"),))
+                preflight=isolation.probe(writable)
+                self.assert_receipt(preflight,"verified")
+                observed=json.loads(preflight.private_path.read_bytes())
+                self.assertTrue(observed["observations"]["observed_probes"]["filesystem"]["candidate"]["writable"])
+                self.assertEqual(observed["configuration"]["user"],[config.uid,config.gid])
             proof = isolation.probe(config)
             self.assert_receipt(proof, "verified")
             qualification = isolation.qualify_family(config, plan, proof)

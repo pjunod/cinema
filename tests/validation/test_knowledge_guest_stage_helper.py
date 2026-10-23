@@ -59,7 +59,7 @@ class GuestStageFilesystemTests(unittest.TestCase):
 
     @staticmethod
     def role_users(*, paired=False):
-        identity = [os.getuid(), os.getgid()]
+        identity = [65534, 65534] if os.geteuid() == 0 else [os.getuid(), os.getgid()]
         users = {"protected": identity}
         if paired:
             users["worker"] = list(identity)
