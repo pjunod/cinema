@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A remains draft and unmerged; A–F implementation and evidence are tracked on `effort/display-targeted-dv`, with the single main promotion still open · **Updated:** 2026-10-22 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
+**Status:** A/#1216 is merged; B–F implementation and evidence remain on `effort/display-targeted-dv`, with the single main promotion still open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 ## PR B implementation checkpoint
@@ -52,8 +52,8 @@ and narrow independent closure are required; no previous pass is relabelled.
 ## PR A implementation checkpoint
 
 User-confirmed delivery is one effort branch followed by one promotion PR to
-`main`. PR #1216 is retargeted to `effort/display-targeted-dv`, remains a draft
-and is unmerged. The current published source checkpoint is
+`main`. PR #1216 merged into `effort/display-targeted-dv` as `3fbb3f669`;
+its compile-only gate #5863 and fresh paperwork #5862 passed. The current published source checkpoint is
 `503619eb6744264b99d4ce7858f92a244911faf3`; it remains the source identity for
 its compile and P7 evidence. This documentation-only update does not relabel
 those results. A–F stage PRs target the effort branch. Before each stage merge,
@@ -385,7 +385,7 @@ segments). This works with every encoder. The other options are ruled out:
 
 ## Tests
 
-### PR A executable qualification inventory (authored, not yet run)
+### PR A qualification inventory (definitions; outcomes above)
 
 The coordinator runs these only after complete independent review and fixes.
 Use native Linux, pinned Rust 1.97.1 and the verified API 374 dependency image.
@@ -458,8 +458,8 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 | Stage | Contents | Recorded state |
 |---|---|---|
-| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 remains draft on `effort/display-targeted-dv`; source review is approved, general-FEL checks and exact regressions pass, both mapped P7 targets pass; final integrated adoption and accuracy qualification remain open. |
-| B | Processed-output MDCV/CLL writer | Built; seven Rust cases passed at #312; not merged or promotion-qualified. |
+| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 merged into the effort as `3fbb3f669`; source review is approved, general-FEL checks and exact regressions pass, both mapped P7 targets pass; final integrated adoption and accuracy qualification remain open. |
+| B | Processed-output MDCV/CLL writer | PR #1266 is draft; compiled #361 and seven Rust cases #312 retain source-specific passes. Not merged or promotion-qualified. |
 | C | Peak capability, buckets, elision, Developer setting, indicator and Activity text | Built; source-attributed Rust, badge and settings cases pass; not merged or promotion-qualified. |
 | D | Android / Android TV peak reporting and web setting | Built; source-attributed web, Android, Apple and build checks pass; not merged or promotion-qualified. |
 | E | Phase 2 trim comparison | Neutral-L3 reference and 14-case numerical observations are retained; creative accuracy and complete L8 contract remain unaccepted. |
