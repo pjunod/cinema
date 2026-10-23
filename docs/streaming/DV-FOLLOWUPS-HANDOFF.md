@@ -1,6 +1,6 @@
 # Dolby Vision follow-ups: handoff for any agent (2026-10-19)
 
-**Status:** open · **Updated:** 2026-10-19 · **Owner:** unassigned (from Claude session 018Q4JhsMWmMe7WWFAUpqNJz)
+**Status:** open · **Updated:** 2026-10-23 · **Owner:** per section; Task C is direct GPT/root
 
 Repo: Forgejo `noirr/plurx`. Process:
 - Paul's PR lifecycle: draft with a `WIP:` title → one adversarial review → fast lane once → merge via the API as a merge commit, with `Regression-Test: <path>::<name>` lines in the merge message.
@@ -131,34 +131,42 @@ incident and general remote processed requalification remain out of B scope.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
-**Current qualification (2026-10-22):** original `a49`/`c036` source review is
-retained; scanner controls have 20 passes. Standalone P7 retained the actual
-`c036` listing, 17,983 valid frames, observed maximum 3,441 nits, and passing
-policy results. Owner-interrupted attempt 258 stopped at 137/1,000 for 1,000
-nits; it is neither a product defect nor a pass, and 1,600 nits was not run.
-Additive continuation 259 is running 1,000 nits and proceeds to 1,600 only if
-that cell passes. There are zero new mapped-P7 passes at this snapshot.
+**Current (2026-10-23), owner direct GPT/root:** A/#1216 merged into
+`effort/display-targeted-dv` at3fbb3f669 after compile-only gate5863. Remaining
+B–F commits are batched in integration PR#1269; #1266/#1267/#1268/#1270 are
+closed folded records, not separate merges. Main promotion remains open.
+The [canonical qualification ledger](DISPLAY-TARGETED-DV-BUILD.md) supersedes
+historical checkpoints below.
 
-Current-main integration is `a316`, plus test-only scanner fixture repair
-`fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8`. Pinned Rust formatting passed on
-`a316`. The original compile's E0063 was in the scanner `/bin/false` fixture;
-failed-only compile 261 passed on pinned Rust 1.97.1 with true outer exit 0,
-checking `plurxd` and `plurx-core` all targets with `hiqlite-contract-tests`
-and running no units. PR B integration `2038269` is queued for pinned compile
-262. Retain the prior 99 Rust passes, receipt regression, 141 shader cases / 866,304 samples,
-70 helper results, and P8 passes under their original attribution; do not replay
-or relabel them.
+Actual P7 mapped1000/1600 driver348 passed both cells on source503619eb,
+including audio, cadence, native BL/EL shapes and seek windows. Its title scan
+contains17983 valid frames and maximum L1 PQ code3441; that code is not a
+measurement in nits. Retain earlier P8, unit, shader and helper passes under
+their original source attribution. The integrated renderer still needs fresh
+P8 adoption; changed C inputs do not inherit helper341/P7’s source identity.
 
-The separate FEL comparison/interpreter lane is excluded from PR A because no
-reviewed production fix is available to integrate, consistent with the original
-contract §§113–115. Full-app C1 still has a final source-EOF failure; no
-full-clip or general FEL accuracy claim is made. PR #1216 is owned by direct
-GPT/root, with existing full and delta reviews retained. Narrow integration
-review, completed P7 evidence, current fast lane, and API merge with 22 regression
-anchors remain open. B metadata `2038269` is complete but unqualified. C server
-and D clients are being implemented by separate Sol agents in isolated clones;
-E/F remain planned. No setting is exposed before B. Apple peak reporting,
-device acceptance, and deployment are not claimed.
+Sourceba8df0e7 passed pinned Rust1.97.1 fmt/check/all-target Clippy382 and
+production C helper link384 with zero product tests, controls, media or GPU
+execution. This includes the root-cause repair sharing fresh FEL polynomial/MMR
+admission and receipts with SDR while retaining BT.709 conversion,100-nit
+mapping and narrow P8.1 authoring. Candidate2ab5fd294 has identical protected
+runtime/Cargo inputs. Required local paperwork15/15 and fresh PR paperwork5882
+passed; gate5884 then stopped in corrective-history preflight before compiler
+allocation. Source-backed anchor repair1b904ce9 passed direct checks; the authenticated CI
+audit is still required. The broad local attempt ended130 without a result.
+No red merge occurs.
+
+Phase E reference acquisition and comparison machinery work, but substantial
+creative-trim errors remain. Full CM4/L8 support and creative acceptance are
+absent; the user declined Dolby contact. A scope decision is pending on whether
+to promote qualified HDR/SDR with trims explicitly unfinished or hold main for E.
+Final main promotion requires frozen current-main reconciliation, completed-code
+adversarial review, applicable once-only fast-lane evidence and qualification.
+
+The separate full-app FEL comparison/interpreter lane remains excluded: C1 has
+a final source-EOF failure without a reviewed production repair (original
+contract §§113–115). No full-clip/general FEL accuracy, physical-display result,
+Apple peak reporting, deployment or restart is claimed by this work.
 
 ### Historical qualification record (not current status)
 
