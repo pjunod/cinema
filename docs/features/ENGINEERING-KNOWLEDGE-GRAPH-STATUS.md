@@ -1,6 +1,6 @@
 # Engineering knowledge pilot status — owners, evidence and next work
 
-**Status:** open · **Updated:** 2026-10-22 · **Owner:** Codex integrator
+**Status:** open · **Updated:** 2026-10-23 · **Owner:** Codex integrator
 
 Companion to the [approved pilot plan](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md)
 and [review closure](ENGINEERING-KNOWLEDGE-GRAPH-REVIEW.md). This is the live
@@ -13,8 +13,9 @@ execution instructions. No benchmark savings are established.
 Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`. The
 source-only implementation checkpoint is
 `de7ce78ef671338eb8744cf4e20035a2ce963542`, tree
-`bf962c9dfba269637badd5d0c8338b547031bdd8`. The new source is not
-independently reviewed, environment-admitted or CI-qualified.
+`bf962c9dfba269637badd5d0c8338b547031bdd8`. Actual Astra R13 reviewed candidate
+543dda0b5a99c9512631431b6d486535ff3d216f and requested three source repairs.
+It is not source-approved, environment-admitted or CI-qualified.
 
 Published PR #1262 remains at B8, b8df5282d435b687a708230c7e58d7e62e319cde.
 Required CI 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
@@ -28,8 +29,11 @@ The new route contains six production and five test files with 14 new cases:
 13 in new test files and one host-checkpoint regression in the existing
 retirement module. Two existing actual OCI controls and one compatibility
 selector are affected. No changed check has run on this head. The integrator
-verified 37 modules, 11 assets and 48 host buffers; independent review and
-exact environment admission remain pending. The guest pack is limited to its
+verified 37 modules, 11 assets and 48 host buffers; R13 independently matched
+all 48. Sol is repairing immutable grader mode support, trusted role ownership
+through publication/adoption and fresh-sentinel compatibility comparisons. Luna
+is drafting focused regressions; exact-source closure and environment admission
+remain pending. The guest pack is limited to its
 seven-module helper closure and excludes provider/launcher modules and
 credentials. Outer entry/provider bytes are unchanged; runtime.native_store
 adds metadata only.
@@ -43,10 +47,19 @@ residuals were 16,384 and 4,096 bytes respectively. This does not establish
 an exclusive retainer or full-study capacity fit.
 The original fixed 36 GiB APFS volume is physically reserved and the prior thin
 backing remains offline. The distinct native-guest disk/configuration
-operation is prepared but normal review rejected it before execution; exact
-human consent is pending. Astra R12's private review payload and destination
-consent is separately pending; no R12 card was dispatched. No alternate route
-was used.
+operation received contextual human approval and normal tool approval.
+Full write/readback verified a separate physically reserved 36 GiB native raw
+backing. Pre-attachment trim checks passed, but the first native attach made a
+partition without a valid ext4 superblock; the expected mount was absent.
+The owned VM was gracefully stopped and all partial disk/configuration/logs
+retained. The third diagnostic boot detached that disk but an overbroad vdb-absence
+guard stopped log extraction; the read-only configuration ISO can use that
+name. The VM stopped gracefully. All three authorized starts are used; one
+corrected log-only diagnostic requires additional human authorization.
+No format retry or study code ran.
+Actual Astra R13 task t_e7332bfa requested changes; source and runtime authority
+are both false. No R12 or alternate review route was used. The report digest
+and numbered findings are recorded in the [study ledger](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md#current-admission--r13-source-repairs-and-native-disk-diagnosis).
 
 The earlier Rust qualification's exact cause remains unknown because its
 streams were discarded. A separate 4 GiB diagnostic confirmed OOM with debug

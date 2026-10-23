@@ -1,6 +1,6 @@
 # Engineering knowledge efficiency study — measured cost and documentation reliability
 
-**Status:** open · **Updated:** 2026-10-22 · **Owner:** Codex integrator
+**Status:** open · **Updated:** 2026-10-23 · **Owner:** Codex integrator
 
 Companion to the [pilot contract](ENGINEERING-KNOWLEDGE-GRAPH-PILOT.md)
 and [execution ledger](ENGINEERING-KNOWLEDGE-GRAPH-STATUS.md). This document
@@ -373,12 +373,13 @@ was the R6 candidate; later retirement repairs below have separate source
 review and affected-check evidence. Legacy cache maintenance remains a
 follow-up, rather than a claimed repair.
 
-## Current admission — native source built; independent review pending
+## Current admission — R13 source repairs and native disk diagnosis
 
 The source-only implementation checkpoint is commit
 `de7ce78ef671338eb8744cf4e20035a2ce963542`, tree
 `bf962c9dfba269637badd5d0c8338b547031bdd8`. It is committed but
-has not received independent source/environment review or new-head CI. The
+received independent R13 source review, which requested three repairs; exact
+environment admission and new-head CI remain open. The
 published PR #1262 remains at b8df5282d435b687a708230c7e58d7e62e319cde; its
 required CI run 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
 (2,147 retained plus 26 new retirement checks), two expected opt-in OCI skips
@@ -399,12 +400,17 @@ The integrator verified the static closure of 37 modules, 11 assets and
 48 host buffers: 42 R10 keys are unchanged, four changed and two are new.
 The closure-file digest is
 `f060d3b5e2eea57d25087f7ecdbee2510c1094fff49dbe1774e2b5a263518254`;
-independent source review and exact environment admission remain pending. The guest pack
+actual Astra R13 verified all 48 execution buffers but requested changes. The guest pack
 is limited to seven modules, including knowledge.model, and excludes provider
 and launcher modules and credentials. The outer entry/provider bytes remain
 unchanged; the added runtime.native_store value is metadata-only. These
-implementation boundaries are ready for independent review and environment
-admission, not runtime acceptance or production qualification.
+implementation boundaries do not establish runtime acceptance or qualification.
+R13-B1 requires preserving real immutable 0444 grader files. R13-B2 requires
+explicit trusted non-root role ownership through publication and qualified
+adoption. R13-B3 requires stable compatibility comparisons while retaining each
+fresh sentinel challenge as exact evidence. Sol owns the production repairs;
+Luna owns focused mode/probe regression drafts. No revised checks have run.
+The exact revised source will receive narrow independent closure before CI.
 
 Two separate public contrasts observed the live Apple Virtualization process
 holding the exact deleted 4 MiB inode. Guest-origin unlink reached link count
@@ -418,11 +424,26 @@ unmount. This observes a retainer and recovery contrast, not an exclusive
 cause or full-study fit proof.
 The original fixed 36 GiB APFS execution volume is physically reserved; the
 prior thin backing is preserved offline. The distinct native-guest disk and
-configuration operation is fully prepared but normal tool review rejected
-this topology before execution. Its exact human-consent question remains
-pending; no native disk/configuration operation ran. Astra R12's separate
-private design/review payload and destination also await specific human
-consent; no R12 card was dispatched.
+configuration operation received contextual human approval and normal tool
+approval. Full write/fsync/readback verified 36 GiB of logical and allocated
+native backing. A separate boot verified the persistent trim policy before
+attachment. The first attach created a partition but no valid ext4 primary
+superblock; the missing-mount check stopped execution. The owned VM was
+gracefully stopped, with all partial disk/configuration/log state preserved.
+The third permitted diagnostic boot used the reviewed trim-only configuration
+with the new disk detached. An overbroad vdb-absence guard stopped it before
+log extraction: the read-only configuration ISO can legitimately use that
+name. The VM stopped gracefully; all three authorized starts are used. A
+corrected fourth log-only diagnostic is being prepared and requires specific
+additional human authorization. No format retry or study helper has run. Physical reservation
+is not filesystem reuse or full-study fit evidence. Astra R13 reviewed the
+source separately under the same contextual approval; no R12 was dispatched.
+
+Actual R13 task: t_e7332bfa, hdr-astra / gpt-6-astra. Verdict: request changes,
+source_authorized=false and runtime_authorized=false. Reviewed candidate:
+543dda0b5a99c9512631431b6d486535ff3d216f. Report SHA-256:
+1b726e835dcbc8cecac36050c21d39519098bbbd169fb166395ccfc33350d022.
+This review grants no approval to the repairs now in progress.
 
 The exact Rust failure cause in the earlier qualification remains unknown
 because its original streams were discarded. A separate 4 GiB diagnostic
