@@ -10,8 +10,58 @@ use crate::http::{
     },
     stream::{file_range_head, plan_file_range, FileRangePlan},
 };
-use crate::transcode::source_actor::{direct::SourceDirectFile, SourceViewerActor};
+use crate::transcode::source_actor::{
+    direct::{SourceDirectFile, SourceDirectPayload},
+    SourceViewerActor,
+};
 use plurx_core::playback_principal::PlaybackPrincipal;
+
+#[cfg(target_os = "linux")]
+fn admitted_source_body(
+    owner: std::sync::Arc<
+        plurx_core::adaptive_resources::runtime::direct_source::DirectSourceOwner,
+    >,
+    body: plurx_core::adaptive_resources::runtime::direct_source::DirectSourceBody,
+    guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
+    start: u64,
+    length: u64,
+) -> axum::body::Body {
+    let stream = futures_util::stream::try_unfold(
+        (owner, body, guard, start, length),
+        |(owner, body, guard, offset, remaining)| async move {
+            if remaining == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            let chunk = remaining.min(64 * 1024) as usize;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+            let permit = tokio::select! { biased;
+                () = guard.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Source body retired")),
+                permit = std::sync::Arc::clone(&SOURCE_READ_JOBS).acquire_owned() => permit.map_err(std::io::Error::other)?,
+            };
+            let buffer = tokio::select! { biased;
+                () = guard.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Source body retired")),
+                result = owner.read_at(&body, offset, chunk, permit, deadline) => result.map_err(std::io::Error::other)?,
+            };
+            if buffer.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Source resource truncated",
+                ));
+            }
+            owner.unchanged().map_err(std::io::Error::other)?;
+            let actual = buffer.len() as u64;
+            let next = offset
+                .checked_add(actual)
+                .ok_or_else(|| std::io::Error::other("Source offset overflow"))?;
+            let bytes = bytes::Bytes::from_owner(buffer);
+            Ok(Some((
+                bytes,
+                (owner, body, guard, next, remaining - actual),
+            )))
+        },
+    );
+    axum::body::Body::from_stream(stream)
+}
 
 /// Prepared by current Source authority and the actual decision engine with
 /// the player's real capabilities. No wire constructor; carries no admission.
@@ -23,12 +73,22 @@ pub(crate) struct PreparedSourceDirect {
     fingerprint: String,
     invocation_fingerprint: Option<String>,
     file: plurx_core::domain::MediaFile,
-    object_version: String,
+    object_version: Option<String>,
     length: u64,
     mime: &'static str,
     recipe_json: String,
 }
 impl PreparedSourceDirect {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn persistent_direct_heap_bytes(&self) -> Option<usize> {
+        self.file
+            .requested_heap_bytes()?
+            .checked_add(self.recipe_json.capacity())
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn source_file(&self) -> &plurx_core::domain::MediaFile {
+        &self.file
+    }
     pub(crate) fn matches_assignment(
         &self,
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
@@ -188,14 +248,19 @@ pub(super) async fn prepare_source_direct(
     if !DIRECT_MIMES.contains(&mime) {
         return Err(SourceStartFailure::Unsupported);
     }
-    // The planned object: a regular file opened without following links whose
-    // size and mtime are the scanner's. Every later open must be this object.
-    let fence = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
-        .await
-        .map_err(|_| refused)?;
-    let length = fence.handle.metadata().map_err(|_| refused)?.len();
-    let object_version = fence.object_version().to_owned();
-    drop(fence);
+    // The selected Linux direct owner reserves its typed source claim before
+    // entering the native file. Scanner size/mtime are a preadmission plan;
+    // the original admitted open records the actual S1 object identity.
+    #[cfg(target_os = "linux")]
+    let (length, object_version) = (u64::try_from(file.size).map_err(|_| refused)?, None);
+    #[cfg(not(target_os = "linux"))]
+    let (length, object_version) = {
+        let fence = crate::fragment_index_cluster::open_source_playback_fence(&file, None)
+            .await
+            .map_err(|_| refused)?;
+        let length = fence.handle.metadata().map_err(|_| refused)?.len();
+        (length, Some(fence.object_version().to_owned()))
+    };
     let SourceDetailsRead::Authorized(current) = read_witness().await.map_err(|_| refused)? else {
         return Err(refused);
     };
@@ -346,9 +411,13 @@ pub(super) async fn start_prepared_worker(
                 .start_source_worker(state, assignment, activation, ingress, *prepared, deadline)
                 .await
         }
-        PreparedSourceStart::Direct(prepared) => manager.start_source_direct_worker(
-            state, assignment, activation, ingress, *prepared, deadline,
-        ),
+        PreparedSourceStart::Direct(prepared) => {
+            manager
+                .start_source_direct_worker(
+                    state, assignment, activation, ingress, *prepared, deadline,
+                )
+                .await
+        }
     }
 }
 
@@ -488,7 +557,13 @@ pub(super) async fn direct_bytes(
     if current_grant != grant {
         return Err(unavailable());
     }
-    let (file, length, mime, guard) = opened.into_parts();
+    let (payload, length, mime, guard) = opened.into_parts();
+    #[cfg(all(test, target_os = "linux"))]
+    if let (Some(gate), SourceDirectPayload::Admitted { owner, .. }) = (&read_gate, &payload) {
+        owner
+            .install_read_gate(std::sync::Arc::clone(&gate.0.core))
+            .map_err(|_| unavailable())?;
+    }
     let guard = std::sync::Arc::new(guard);
     let method = demand.method();
     super::ingress::publication_allowed(&state, &owned.assignment).await?;
@@ -501,19 +576,30 @@ pub(super) async fn direct_bytes(
         _ => None,
     };
     let body = match body {
-        Some(start) => {
-            source_file_body(
-                tokio::fs::File::from_std(file).into(),
+        Some(start) => match payload {
+            #[cfg(target_os = "linux")]
+            SourceDirectPayload::Admitted { owner, body } => admitted_source_body(
+                owner,
+                body,
                 std::sync::Arc::clone(&guard),
+                start,
                 body_length,
-                Some(start),
-                #[cfg(test)]
-                read_gate.map(|gate| gate.0),
-            )
-            .await?
-        }
+            ),
+            #[cfg(not(target_os = "linux"))]
+            SourceDirectPayload::Legacy(file) => {
+                source_file_body(
+                    tokio::fs::File::from_std(file).into(),
+                    std::sync::Arc::clone(&guard),
+                    body_length,
+                    Some(start),
+                    #[cfg(test)]
+                    read_gate.map(|gate| gate.0),
+                )
+                .await?
+            }
+        },
         None => {
-            drop(file);
+            drop(payload);
             axum::body::Body::empty()
         }
     };

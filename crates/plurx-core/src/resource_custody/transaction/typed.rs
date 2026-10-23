@@ -75,6 +75,7 @@ pub(super) fn prepare(
     }
     for (new, handle) in batch.obligations.iter().zip(handles) {
         v2::validate_manifest(&new.manifest)?;
+        validate_direct_read_domain_link(tx, batch, handles, new, owner)?;
         if matches!(
             new.memory_claim,
             crate::adaptive_resources::MemoryClaim::KnownBounded {
@@ -178,6 +179,111 @@ pub(super) fn prepare(
         obligations: handles.iter().map(|h| h.obligation_id).collect(),
         trial,
     })
+}
+
+/// The selected source may share only a real prepared direct-read role in
+/// this same atomic batch or an exact still-held earlier obligation. A UUID
+/// supplied in JSON is never accepted as evidence of a read CPU reservation.
+fn validate_direct_read_domain_link(
+    tx: &Transaction<'_>,
+    batch: &TypedPrepareBatch,
+    handles: &[ObligationHandle],
+    new: &TypedNewObligation,
+    owner: Uuid,
+) -> Result<(), CustodyError> {
+    let domains: Vec<_> = new
+        .manifest
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            v2::MemberPlan::DirectSourceV1 { source, .. } => {
+                Some(source.read_domain_obligation_id.uuid())
+            }
+            _ => None,
+        })
+        .collect();
+    if domains.is_empty() {
+        return Ok(());
+    }
+    if domains.len() != 1 || new.manifest.members.len() != 1 || new.resources.cpu_ns_per_second != 0
+    {
+        return Err(codec::invalid());
+    }
+    let target = domains[0];
+    if let Some((domain, handle)) = batch
+        .obligations
+        .iter()
+        .zip(handles)
+        .find(|(_, handle)| handle.obligation_id == target)
+    {
+        return validate_direct_domain_record(
+            &domain.manifest,
+            domain.resources,
+            domain.allocation_epoch,
+            new.allocation_epoch,
+            owner,
+            handle.graph_id,
+        );
+    }
+    let old: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>)> = tx
+        .query_row(
+            "SELECT owner_id,graph_id,allocation_epoch,resources,manifest_json,obligation_id FROM obligations WHERE obligation_id=?1 AND phase!='settled'",
+            [target.as_bytes()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .optional()?;
+    let Some((old_owner, old_graph, old_epoch, old_resources, old_manifest, old_id)) = old else {
+        return Err(codec::invalid());
+    };
+    if old_owner != owner.as_bytes() || old_id != target.as_bytes() {
+        return Err(codec::invalid());
+    }
+    let graph = Uuid::from_slice(&old_graph).map_err(|_| codec::invalid())?;
+    let epoch = u64::from_le_bytes(
+        old_epoch
+            .as_slice()
+            .try_into()
+            .map_err(|_| codec::invalid())?,
+    );
+    let resources = codec::vector_from_bytes(&old_resources)?;
+    let v2::ManifestDocument::V2(manifest) = v2::decode_manifest(&old_manifest)? else {
+        return Err(codec::invalid());
+    };
+    validate_direct_domain_record(
+        &manifest,
+        resources,
+        epoch,
+        new.allocation_epoch,
+        owner,
+        graph,
+    )
+}
+
+fn validate_direct_domain_record(
+    manifest: &v2::Manifest,
+    resources: ResourceVector,
+    epoch: u64,
+    source_epoch: u64,
+    owner: Uuid,
+    graph: Uuid,
+) -> Result<(), CustodyError> {
+    if epoch != source_epoch
+        || manifest.owner_id.uuid() != owner
+        || manifest.graph_id.uuid() != graph
+        || resources.cpu_ns_per_second == 0
+        || resources.handles != 0
+        || resources.processes != 0
+        || resources.hardware_slots != 0
+        || resources.tuner_slots != 0
+        || resources.scratch_bytes != 0
+        || !matches!(manifest.members.as_slice(),
+            [v2::MemberPlan::DirectReadDomainV1 { domain, .. }]
+                if domain.owner_id.uuid() == owner && domain.graph_id.uuid() == graph
+                    && domain.maximum_parallel_reads == 1)
+    {
+        return Err(codec::invalid());
+    }
+    Ok(())
 }
 
 pub(super) fn change(

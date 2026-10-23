@@ -30,6 +30,10 @@ impl SourceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        Some(self.0.capacity())
+    }
 }
 impl<'de> Deserialize<'de> for SourceId {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

@@ -26,7 +26,7 @@ pub struct PhotoQuery {
 /// GET /api/v1/items/:id/photo — original bytes, with range support.
 /// GET /api/v1/items/:id/photo?size=thumb — the artwork-cache thumbnail.
 pub async fn serve(
-    _user: AuthUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<PhotoQuery>,
@@ -57,6 +57,5 @@ pub async fn serve(
         .into_iter()
         .next()
         .ok_or(ApiError::NotFound("photo file"))?;
-    super::stream::serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64))
-        .await
+    super::stream::serve_authorized_file_range(&state, user.id, &file, &headers, &method).await
 }

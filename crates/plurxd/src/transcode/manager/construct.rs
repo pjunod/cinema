@@ -46,6 +46,8 @@ impl TranscodeManager {
         ));
         TranscodeManager {
             source_workers: source_actor::SourceWorkerRegistry::default(),
+            #[cfg(target_os = "linux")]
+            local_direct_owners: local_direct::LocalDirectOwners::default(),
             source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,

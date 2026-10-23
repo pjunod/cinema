@@ -46,6 +46,10 @@ impl NodeResourceRuntime {
                                 slot,
                                 ..
                             }
+                            | crate::resource_custody::codec_v2::MemberPlan::DirectSourceV1 {
+                                slot,
+                                ..
+                            }
                             | crate::resource_custody::codec_v2::MemberPlan::VodOutputTaskV1 {
                                 slot,
                                 ..
@@ -62,6 +66,9 @@ impl NodeResourceRuntime {
                                 slot,
                                 ..
                             } => &slot.protected_paths,
+                            crate::resource_custody::codec_v2::MemberPlan::DirectReadDomainV1 {
+                                ..
+                            } => continue,
                         };
                         if paths.iter().any(|protected| overlaps(path, protected)) {
                             return true;

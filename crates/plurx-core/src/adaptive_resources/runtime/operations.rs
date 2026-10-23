@@ -18,6 +18,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 pub(super) mod bootstrap;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) mod direct_source;
 #[cfg(unix)]
 pub(in crate::adaptive_resources::runtime) mod finite_cancel;
 #[cfg(unix)]
@@ -76,6 +78,7 @@ pub(crate) struct OwnedPreparation {
 
 struct Bundle {
     id: Uuid,
+    typed_obligation_ids: Vec<Uuid>,
     family_ids: Vec<FamilyIdentity>,
     retained: BTreeSet<ReservationBinding>,
     prepare: JournalOperation,
@@ -237,6 +240,19 @@ impl JournalOperation {
 }
 
 impl NodeResourceRuntime {
+    pub(in crate::adaptive_resources::runtime) fn prepared_typed_obligation_id(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<Uuid, OperationError> {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        bundle
+            .typed_obligation_ids
+            .get(index)
+            .copied()
+            .ok_or(OperationError::State)
+    }
     /// Only authoritative observations/settings composition may update this;
     /// the value remains Known/Unknown and does not rewrite explicit settings.
     pub(crate) fn update_capacity(
@@ -444,6 +460,11 @@ impl NodeResourceRuntime {
         }
         let owned = self.ledger.reserve_families_claiming(families, claims)?;
         let id = Uuid::new_v4();
+        let typed_obligation_ids: Vec<Uuid> = if typed {
+            (0..missing).map(|_| Uuid::new_v4()).collect()
+        } else {
+            Vec::new()
+        };
         let mut obligations = Vec::new();
         let mut typed_obligations = Vec::new();
         let mut roles = Vec::new();
@@ -467,8 +488,8 @@ impl NodeResourceRuntime {
                     Ok::<_, CustodyError>(
                         members
                             .into_iter()
-                            .map(|member| member.bind(owner_id, graph_id))
-                            .collect::<Vec<_>>(),
+                            .map(|member| member.bind(owner_id, graph_id, &typed_obligation_ids))
+                            .collect::<Result<Vec<_>, _>>()?,
                     )
                 })
                 .transpose()?;
@@ -581,6 +602,7 @@ impl NodeResourceRuntime {
                     families: requests,
                     trial: trial.unwrap_or(false),
                 },
+                typed_obligation_ids.clone(),
                 deadline,
             )
         } else {
@@ -607,6 +629,7 @@ impl NodeResourceRuntime {
         };
         let state = Arc::new(AsyncMutex::new(Bundle {
             id,
+            typed_obligation_ids,
             family_ids: families.iter().map(|f| f.identity).collect(),
             retained: retained_bindings.clone(),
             prepare: JournalOperation::queued(pending),

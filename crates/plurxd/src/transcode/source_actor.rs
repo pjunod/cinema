@@ -220,6 +220,8 @@ enum SourceSettlementFault {
 #[derive(Default)]
 pub(super) struct SourceWorkerRegistry {
     entries: std::sync::Mutex<Vec<Arc<SourceViewerInner>>>,
+    #[cfg(target_os = "linux")]
+    direct_tasks: std::sync::Mutex<[Option<direct::SourceDirectRecord>; 8]>,
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
     native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
@@ -335,6 +337,15 @@ impl SourceResponseGuard {
             .get_or_init(|| Instant::now() + Duration::from_secs(305))
     }
     pub(crate) fn retirement_mode(&self) -> crate::sharing_connection_custody::DriverCloseMode {
+        #[cfg(target_os = "linux")]
+        if self
+            .owner
+            .direct
+            .as_ref()
+            .is_some_and(|direct| !direct.admitted_unchanged())
+        {
+            return crate::sharing_connection_custody::DriverCloseMode::Revoke;
+        }
         if self
             .source
             .as_ref()
@@ -358,6 +369,15 @@ impl SourceResponseGuard {
     }
     pub(crate) async fn cancelled(&self) {
         loop {
+            #[cfg(target_os = "linux")]
+            if self
+                .owner
+                .direct
+                .as_ref()
+                .is_some_and(|direct| !direct.admitted_unchanged())
+            {
+                return;
+            }
             if self
                 .source
                 .as_ref()

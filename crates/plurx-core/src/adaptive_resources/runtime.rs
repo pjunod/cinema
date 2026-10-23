@@ -21,6 +21,8 @@ use crate::resource_custody::{
     ProcessIdentity, RecoverySnapshot, Role,
 };
 
+#[cfg(target_os = "linux")]
+pub mod direct_source;
 #[cfg(unix)]
 pub mod finite_vod;
 mod operations;
@@ -30,6 +32,10 @@ pub(crate) mod recovery;
 mod response_memory;
 #[cfg(unix)]
 pub(super) use operations::bootstrap::retirement::RetainedFiniteClosure;
+#[cfg(target_os = "linux")]
+pub(super) use operations::direct_source::DirectReadDomainClosure;
+#[cfg(target_os = "linux")]
+pub(super) use operations::direct_source::DirectSourceClosure;
 #[cfg(unix)]
 pub(super) use operations::finite_cancel::FiniteCancellationClosure;
 #[cfg(unix)]
@@ -90,6 +96,8 @@ pub struct NodeResourceRuntime {
         Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryRAdoption>>>>,
     #[cfg(target_os = "linux")]
     recovered_adoptions: Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryAdoption>>>>,
+    #[cfg(target_os = "linux")]
+    direct_read_domain: Mutex<Option<Arc<direct_source::DirectReadDomain>>>,
     operations: Mutex<operations::Operations>,
     // Immutable actual daemon configuration, not a path authorized by audit JSON.
     rendition_root: Option<PathBuf>,
@@ -143,6 +151,8 @@ impl NodeResourceRuntime {
             recovered_r_adoptions: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             recovered_adoptions: Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
+            direct_read_domain: Mutex::new(None),
             operations: Mutex::new(operations::Operations::default()),
             rendition_root: None,
         })

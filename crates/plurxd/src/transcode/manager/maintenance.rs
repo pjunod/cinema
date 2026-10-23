@@ -669,6 +669,10 @@ impl TranscodeManager {
                     continue;
                 }
             }
+            #[cfg(target_os = "linux")]
+            self.reconcile_local_direct_owners();
+            #[cfg(target_os = "linux")]
+            self.reconcile_source_direct_tasks();
             let now_unix_ms = crate::media_sessions::unix_ms();
             self.terminal_controls
                 .lock()

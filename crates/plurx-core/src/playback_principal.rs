@@ -78,6 +78,13 @@ impl PlaybackPrincipal {
             Self::Sharing { .. } => true,
         }
     }
+
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        match self {
+            Self::LocalUser { .. } => Some(0),
+            Self::Sharing { viewer_key, .. } => Some(viewer_key.0.capacity()),
+        }
+    }
     pub fn local_user_id(&self) -> Option<i64> {
         match self {
             Self::LocalUser { user_id } => Some(*user_id),

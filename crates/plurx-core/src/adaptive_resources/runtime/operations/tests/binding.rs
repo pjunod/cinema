@@ -264,7 +264,8 @@ fn local_copy_binding_preserves_external_retained_owner_and_copy_lineage() {
             ],
         },
     }
-    .bind(owner_id, graph_id);
+    .bind(owner_id, graph_id, &[])
+    .expect("source copy binding");
     let v2::MemberPlan::SourceV1 { source, .. } = bound else {
         panic!()
     };

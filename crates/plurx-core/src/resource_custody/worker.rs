@@ -404,16 +404,28 @@ impl CustodyJournal {
         &self,
         operation_id: Uuid,
         batch: TypedPrepareBatch,
+        obligation_ids: Vec<Uuid>,
         deadline: Instant,
     ) -> Result<PendingOperation, CustodyError> {
         codec::nonnil(operation_id)?;
+        if obligation_ids.len() != batch.obligations.len()
+            || obligation_ids.iter().any(Uuid::is_nil)
+            || obligation_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != obligation_ids.len()
+        {
+            return Err(codec::invalid());
+        }
         let handles = batch
             .obligations
             .iter()
-            .map(|n| ObligationHandle {
+            .zip(obligation_ids)
+            .map(|(n, obligation_id)| ObligationHandle {
                 journal_id: self.journal_id,
                 owner_id: self.owner_id,
-                obligation_id: Uuid::new_v4(),
+                obligation_id,
                 graph_id: n.manifest.graph_id.uuid(),
                 runtime_binding: n.runtime_binding,
                 #[cfg(target_os = "linux")]

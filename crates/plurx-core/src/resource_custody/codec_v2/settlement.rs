@@ -86,6 +86,14 @@ pub(crate) enum ClosedFact {
         holder_id: Id,
         copies: Vec<CopyClosed>,
     },
+    DirectSourceV1 {
+        holder_id: Id,
+        copies: Vec<CopyClosed>,
+    },
+    DirectReadDomainV1 {
+        domain_id: Id,
+        close_operation_id: Id,
+    },
     VodOutputTaskV1 {
         task: VodOutputTask,
         join_operation_id: Id,
@@ -292,6 +300,32 @@ pub(crate) fn validate_settlement(
                     }
                     validate_copy_closures(source, &envelope.observed, copies)?;
                 }
+                (
+                    MemberPlan::DirectSourceV1 { source, .. },
+                    ClosedFact::DirectSourceV1 { holder_id, copies },
+                ) => {
+                    if *holder_id != source.holder_id
+                        || copies.len() != 1
+                        || copies[0].copy() != &source.planned_copies[0]
+                    {
+                        return Err(codec::invalid());
+                    }
+                    match &copies[0] {
+                        CopyClosed::ProvenNeverAcquired { copy, .. }
+                            if matches!(&envelope.observed,
+                                Some(Observed::DirectSourceV1 { source: observed })
+                                    if observed.copies.contains(copy)) =>
+                        {
+                            return Err(codec::invalid());
+                        }
+                        CopyClosed::DomainExtinct { .. } => return Err(codec::invalid()),
+                        _ => {}
+                    }
+                }
+                (
+                    MemberPlan::DirectReadDomainV1 { domain, .. },
+                    ClosedFact::DirectReadDomainV1 { domain_id, close_operation_id },
+                ) if *domain_id == domain.domain_id && !close_operation_id.uuid().is_nil() => {}
                 (
                     MemberPlan::VodOutputTaskV1 { task, .. },
                     ClosedFact::VodOutputTaskV1 {

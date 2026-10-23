@@ -130,7 +130,19 @@ pub async fn content(
             "The file grant has expired or was revoked.",
         ));
     }
-    super::stream::serve_book_content(&state, grant.file_id, &method, &headers).await
+    let verified_grant_id = grant
+        .id
+        .parse::<uuid::Uuid>()
+        .map_err(|_| ApiError::NotFound("grant"))?;
+    super::stream::serve_verified_grant_book_content(
+        &state,
+        verified_grant_id,
+        grant.user_id,
+        grant.file_id,
+        &method,
+        &headers,
+    )
+    .await
 }
 
 pub async fn revoke(

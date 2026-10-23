@@ -499,6 +499,9 @@ mod hls_codecs;
 use hls_codecs::*;
 // split: end hls-codecs
 
+#[cfg(target_os = "linux")]
+#[path = "transcode/local_direct.rs"]
+pub(crate) mod local_direct;
 #[allow(dead_code)] // Finite owned actor API; ordinary Shared ingress remains closed.
 #[path = "transcode/source_actor.rs"]
 pub(crate) mod source_actor;
@@ -550,6 +553,8 @@ pub use rate_control::*;
 pub struct TranscodeManager {
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
+    #[cfg(target_os = "linux")]
+    local_direct_owners: local_direct::LocalDirectOwners,
     pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,

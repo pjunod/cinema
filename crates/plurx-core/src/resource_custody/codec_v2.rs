@@ -170,6 +170,109 @@ pub(crate) struct SourcePlan {
     pub planned_copies: Vec<SourceCopy>,
     pub recovery: SourceRecovery,
 }
+
+/// A direct reader freezes scanner and dispatch facts before native entry.
+/// The exact S1 identity exists only in the original open's observed result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectSourcePlanV1 {
+    pub version: u32,
+    pub holder_id: Id,
+    pub member_id: Id,
+    pub media_file_id: String,
+    pub recipe_source_binding: String,
+    pub provenance: DirectSourceProvenanceV1,
+    pub read_domain_obligation_id: Id,
+    pub absolute_path: String,
+    pub scanner_size: i64,
+    pub scanner_mtime: i64,
+    pub expectation: DirectSourceExpectationV1,
+    pub access: SourceAccess,
+    pub filesystem_domain: FilesystemDomain,
+    pub planned_copies: Vec<SourceCopy>,
+    pub recovery: SourceRecovery,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub(crate) enum DirectSourceExpectationV1 {
+    ScannerExact,
+    AuthorizedLocalPath,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectReadDomainPlanV1 {
+    pub version: u32,
+    pub domain_id: Id,
+    pub owner_id: Id,
+    pub graph_id: Id,
+    pub maximum_parallel_reads: u32,
+}
+/// Audit provenance for the pre-open selected path. Neither arm grants user
+/// authorization or stands in for the observed native S1 identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
+pub(crate) enum DirectSourceProvenanceV1 {
+    Sharing {
+        assignment_custody_identity: String,
+    },
+    Local {
+        authenticated_user_id: i64,
+        file_id: i64,
+    },
+    FileGrant {
+        verified_grant_id: Id,
+        user_id: i64,
+        file_id: i64,
+    },
+}
+impl DirectSourceProvenanceV1 {
+    pub(crate) fn binding(&self) -> Result<String, CustodyError> {
+        match self {
+            Self::Sharing {
+                assignment_custody_identity,
+            } => {
+                if assignment_custody_identity.len() != 64
+                    || !assignment_custody_identity
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(codec::invalid());
+                }
+                Ok(assignment_custody_identity.clone())
+            }
+            Self::Local {
+                authenticated_user_id,
+                file_id,
+            } => {
+                if *authenticated_user_id <= 0 || *file_id <= 0 {
+                    return Err(codec::invalid());
+                }
+                use sha2::{Digest, Sha256};
+                let mut digest = Sha256::new();
+                digest.update(b"plurx.direct-local-source.v1\0");
+                digest.update(authenticated_user_id.to_be_bytes());
+                digest.update(file_id.to_be_bytes());
+                Ok(format!("{:x}", digest.finalize()))
+            }
+            Self::FileGrant {
+                verified_grant_id,
+                user_id,
+                file_id,
+            } => {
+                if *user_id <= 0 || *file_id <= 0 {
+                    return Err(codec::invalid());
+                }
+                use sha2::{Digest, Sha256};
+                let mut digest = Sha256::new();
+                digest.update(b"plurx.direct-file-grant.v1\0");
+                digest.update(verified_grant_id.uuid().as_bytes());
+                digest.update(user_id.to_be_bytes());
+                digest.update(file_id.to_be_bytes());
+                Ok(format!("{:x}", digest.finalize()))
+            }
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FileType {
@@ -305,6 +408,14 @@ pub(crate) enum MemberPlan {
         slot: MemberSlot,
         source: SourcePlan,
     },
+    DirectSourceV1 {
+        slot: MemberSlot,
+        source: DirectSourcePlanV1,
+    },
+    DirectReadDomainV1 {
+        slot: MemberSlot,
+        domain: DirectReadDomainPlanV1,
+    },
     VodOutputTaskV1 {
         slot: MemberSlot,
         task: VodOutputTask,
@@ -327,6 +438,8 @@ impl MemberPlan {
         match self {
             Self::LegacyV1 { planned } => planned.member_id,
             Self::SourceV1 { slot, .. }
+            | Self::DirectSourceV1 { slot, .. }
+            | Self::DirectReadDomainV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
             | Self::ScratchAssetsV1 { slot, .. }
             | Self::ScratchAssetsV2 { slot, .. }
@@ -344,6 +457,8 @@ impl MemberPlan {
         match self {
             Self::LegacyV1 { planned } => planned.adapter.as_str(),
             Self::SourceV1 { .. } => "source_file",
+            Self::DirectSourceV1 { .. } => "direct_source_file",
+            Self::DirectReadDomainV1 { .. } => "direct_read_domain",
             Self::VodOutputTaskV1 { .. } => "vod_output_task",
             Self::ScratchAssetsV1 { .. }
             | Self::ScratchAssetsV2 { .. }
@@ -359,6 +474,8 @@ impl MemberPlan {
                 .chain(planned.owned_by)
                 .collect(),
             Self::SourceV1 { slot, .. }
+            | Self::DirectSourceV1 { slot, .. }
+            | Self::DirectReadDomainV1 { slot, .. }
             | Self::VodOutputTaskV1 { slot, .. }
             | Self::ScratchAssetsV1 { slot, .. }
             | Self::ScratchAssetsV2 { slot, .. }
@@ -388,6 +505,9 @@ pub(crate) enum Observed {
         identity: super::ObservedIdentity,
     },
     SourceV1 {
+        source: SourceObserved,
+    },
+    DirectSourceV1 {
         source: SourceObserved,
     },
     VodOutputTaskV1 {
@@ -483,6 +603,68 @@ fn validate_copies(copies: &[SourceCopy]) -> Result<(), CustodyError> {
         }
     }
 }
+fn validate_direct_source(
+    source: &DirectSourcePlanV1,
+    manifest: &Manifest,
+) -> Result<(), CustodyError> {
+    if source.version != 1
+        || source.scanner_size < 0
+        || !std::path::Path::new(&source.absolute_path).is_absolute()
+        || source.planned_copies.len() != 1
+        || source.recipe_source_binding != source.provenance.binding()?
+    {
+        return Err(codec::invalid());
+    }
+    match (&source.provenance, &source.expectation) {
+        (DirectSourceProvenanceV1::Sharing { .. }, DirectSourceExpectationV1::ScannerExact)
+        | (
+            DirectSourceProvenanceV1::Local { .. },
+            DirectSourceExpectationV1::AuthorizedLocalPath,
+        )
+        | (
+            DirectSourceProvenanceV1::FileGrant { .. },
+            DirectSourceExpectationV1::AuthorizedLocalPath,
+        ) => {}
+        _ => return Err(codec::invalid()),
+    }
+    for value in [
+        &source.media_file_id,
+        &source.recipe_source_binding,
+        &source.absolute_path,
+    ] {
+        codec::long_text(value)?;
+    }
+    match &source.provenance {
+        DirectSourceProvenanceV1::Local { file_id, .. }
+        | DirectSourceProvenanceV1::FileGrant { file_id, .. }
+            if source.media_file_id != file_id.to_string() =>
+        {
+            return Err(codec::invalid())
+        }
+        _ => {}
+    }
+    source.filesystem_domain.validate()?;
+    validate_copies(&source.planned_copies)?;
+    let SourceRecovery::LocalSourceHandlesV1 {
+        owner_id,
+        graph_id,
+        filesystem_domain,
+    } = &source.recovery;
+    let copy = &source.planned_copies[0];
+    if *owner_id != manifest.owner_id
+        || *graph_id != manifest.graph_id
+        || filesystem_domain != &source.filesystem_domain
+        || source.filesystem_domain.daemon_owner_id != manifest.owner_id
+        || !matches!(copy.owner,
+            CopyOwner::DaemonSourceCell { owner_id: copy_owner, graph_id: copy_graph, member_id }
+                if copy_owner == *owner_id && copy_graph == *graph_id && member_id == source.member_id)
+        || copy.parent_copy_id.is_some()
+    {
+        return Err(codec::invalid());
+    }
+    Ok(())
+}
+
 fn validate_source(source: &SourcePlan, manifest: &Manifest) -> Result<(), CustodyError> {
     if source.version != 1 {
         return Err(codec::invalid());
@@ -620,6 +802,30 @@ pub(crate) fn validate_manifest(value: &Manifest) -> Result<(), CustodyError> {
                 }
                 validate_source(source, value)?;
             }
+            MemberPlan::DirectSourceV1 { slot, source } => {
+                validate_slot(slot)?;
+                if slot.member_id != source.member_id
+                    || slot.owned_by.is_some()
+                    || !slot.depends_on.is_empty()
+                    || slot.protected_paths.as_slice() != [source.absolute_path.as_str()]
+                {
+                    return Err(codec::invalid());
+                }
+                validate_direct_source(source, value)?;
+            }
+            MemberPlan::DirectReadDomainV1 { slot, domain } => {
+                validate_slot(slot)?;
+                if domain.version != 1
+                    || domain.maximum_parallel_reads != 1
+                    || domain.owner_id != value.owner_id
+                    || domain.graph_id != value.graph_id
+                    || slot.owned_by.is_some()
+                    || !slot.depends_on.is_empty()
+                    || !slot.protected_paths.is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+            }
             MemberPlan::VodOutputTaskV1 { slot, task } => {
                 validate_slot(slot)?;
                 if slot.member_id != task.member_id {
@@ -753,6 +959,32 @@ pub(crate) fn validate_envelope(
             observed.native_object.validate()?;
         }
         (
+            MemberPlan::DirectSourceV1 { source, .. },
+            Some(Observed::DirectSourceV1 { source: observed }),
+        ) => {
+            if observed.version != 1
+                || observed.holder_id != source.holder_id
+                || observed.member_id != source.member_id
+                || observed.access != source.access
+                || observed.source_association.media_file_id != source.media_file_id
+                || observed.source_association.recipe_source_binding != source.recipe_source_binding
+                || observed.native_object.file_type != FileType::Regular
+                || observed.native_object.filesystem_domain != source.filesystem_domain
+                || observed.copies != source.planned_copies
+                || !direct_s1_matches(
+                    &observed.source_association.object_version,
+                    &observed.native_object,
+                    match source.expectation {
+                        DirectSourceExpectationV1::ScannerExact => Some(source.scanner_size),
+                        DirectSourceExpectationV1::AuthorizedLocalPath => None,
+                    },
+                )
+            {
+                return Err(codec::invalid());
+            }
+            observed.native_object.validate()?;
+        }
+        (
             MemberPlan::VodOutputTaskV1 { task, .. },
             Some(Observed::VodOutputTaskV1 { task: observed }),
         ) if task == observed => {}
@@ -770,6 +1002,30 @@ pub(crate) fn validate_envelope(
     }
     codec::encode(envelope)?;
     Ok(())
+}
+
+fn direct_s1_matches(identity: &str, native: &NativeObject, scanner_size: Option<i64>) -> bool {
+    let mut fields = identity.split(':');
+    if fields.next() != Some("s1") {
+        return false;
+    }
+    let parsed = (|| {
+        Some(crate::source_identity::SourceIdentity::from_fields(
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+        ))
+    })();
+    let Some(parsed) = parsed else { return false };
+    fields.next().is_none()
+        && parsed.render_s1() == identity
+        && native.device == (NativeValue::Known { value: parsed.dev })
+        && native.inode == (NativeValue::Known { value: parsed.ino })
+        && scanner_size.is_none_or(|size| i64::try_from(parsed.size).ok() == Some(size))
 }
 
 // Preserve the exact legacy envelope type as well as the strict version selector.

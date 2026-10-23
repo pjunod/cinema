@@ -440,6 +440,39 @@ pub struct FiniteResponseBuffer {
     capacity: usize,
 }
 impl FiniteResponseBuffer {
+    /// Fill this already charged allocation directly from the original source
+    /// descriptor. Positional IO never changes its shared file offset and does
+    /// not create a second heap payload or another native handle.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) fn read_at(
+        &mut self,
+        file: &std::fs::File,
+        offset: u64,
+        requested: usize,
+    ) -> io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+
+        if requested == 0 || requested > self.capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid charged read",
+            ));
+        }
+        let bytes = self.bytes.as_mut().expect("live response buffer");
+        bytes.resize(requested, 0);
+        let result = file.read_at(bytes, offset);
+        match result {
+            Ok(read) => {
+                bytes.truncate(read);
+                Ok(read)
+            }
+            Err(error) => {
+                bytes.clear();
+                Err(error)
+            }
+        }
+    }
+
     pub fn reserve_metadata_workspace(&self, bytes: usize) -> io::Result<FiniteResponseWorkspace> {
         let owner = self
             .slot

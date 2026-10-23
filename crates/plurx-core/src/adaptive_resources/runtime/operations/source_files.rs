@@ -158,6 +158,12 @@ impl RetainedSourceLease {
     pub fn file(&self) -> &File {
         &self.file
     }
+
+    /// Shares the SAME original native descriptor with an already registered
+    /// core read job. Arc cloning creates no file description or FD copy.
+    pub(in crate::adaptive_resources::runtime) fn shared_file(&self) -> Arc<File> {
+        Arc::clone(&self.file)
+    }
 }
 
 pub(crate) struct SourceOpenSpec {
@@ -218,11 +224,82 @@ pub(super) struct InheritedSource {
 struct SourceResult {
     file: Option<Arc<File>>,
     observed: Option<v2::SourceObserved>,
+    direct_open_error: Option<std::io::ErrorKind>,
     verified_sha256: Option<[u8; 32]>,
     verified_elf: bool,
     verified_sha256_cached: bool,
 }
+enum SourceOpenPlan {
+    Original(v2::SourcePlan),
+    Direct(v2::DirectSourcePlanV1),
+}
+/// Inline original-job frames used by the direct Source component bound.
+/// Dynamic strings and serialized envelopes are charged separately there.
+pub(in crate::adaptive_resources::runtime) const fn direct_source_frame_bytes() -> usize {
+    std::mem::size_of::<SourceCell>()
+        + std::mem::size_of::<SourceResult>()
+        + std::mem::size_of::<SourceOpenPlan>()
+        + std::mem::size_of::<JoinHandle<SourceResult>>()
+        + std::mem::size_of::<JoinHandle<ParentCloseOutcome>>()
+}
 impl SourceCell {
+    fn direct_known_open_error_kind(&self) -> Option<std::io::ErrorKind> {
+        if !matches!(self.plan, v2::MemberPlan::DirectSourceV1 { .. })
+            || self.pending.is_some()
+            || self.failed_join
+        {
+            return None;
+        }
+        let result = self.result.as_ref()?;
+        if result.file.is_some() || result.observed.is_some() {
+            return None;
+        }
+        result.direct_open_error
+    }
+    pub(in crate::adaptive_resources::runtime) fn direct_observed_identity(
+        &self,
+    ) -> Result<(u64, String), OperationError> {
+        let v2::MemberPlan::DirectSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if !self.observed_committed || self.pending.is_some() {
+            return Err(OperationError::State);
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        let file = result.file.as_ref().ok_or(OperationError::State)?;
+        let observed = result.observed.as_ref().ok_or(OperationError::State)?;
+        let metadata = file.metadata()?;
+        let actual = SourceIdentity::from_metadata(&metadata).render_s1();
+        if !metadata.is_file()
+            || (matches!(
+                source.expectation,
+                v2::DirectSourceExpectationV1::ScannerExact
+            ) && !SourceIdentity::scanner_matches(
+                &metadata,
+                source.scanner_size,
+                source.scanner_mtime,
+            ))
+            || observed.holder_id != source.holder_id
+            || observed.member_id != source.member_id
+            || observed.source_association.media_file_id != source.media_file_id
+            || observed.source_association.recipe_source_binding != source.recipe_source_binding
+            || observed.source_association.object_version != actual
+            || observed.native_object.device
+                != (v2::NativeValue::Known {
+                    value: metadata.dev(),
+                })
+            || observed.native_object.inode
+                != (v2::NativeValue::Known {
+                    value: metadata.ino(),
+                })
+            || observed.native_object.mount_id != bootstrap::native::steps::mount_id(file)
+            || observed.native_object.filesystem_domain != source.filesystem_domain
+        {
+            return Err(OperationError::State);
+        }
+        Ok((metadata.len(), actual))
+    }
+
     /// Await only the original source-open worker if it was registered. The
     /// actual file/observation remain cached; this does not launch or observe it.
     pub(super) async fn join_registered(&mut self) -> Result<(), OperationError> {
@@ -256,11 +333,12 @@ impl SourceCell {
         if self.pending.is_some() || self.result.is_some() || self.failed_join {
             return Err(OperationError::State);
         }
-        let v2::MemberPlan::SourceV1 { source, .. } = &self.plan else {
-            return Err(OperationError::State);
+        let plan = match &self.plan {
+            v2::MemberPlan::SourceV1 { source, .. } => SourceOpenPlan::Original(source.clone()),
+            v2::MemberPlan::DirectSourceV1 { source, .. } => SourceOpenPlan::Direct(source.clone()),
+            _ => return Err(OperationError::State),
         };
         let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
-        let plan = source.clone();
         let spec = self.spec.take().ok_or(OperationError::State)?;
         let (enter, registered) = tokio::sync::oneshot::channel();
         self.pending = Some(runtime.spawn_blocking(move || {
@@ -268,6 +346,7 @@ impl SourceCell {
                 return SourceResult {
                     file: None,
                     observed: None,
+                    direct_open_error: None,
                     verified_sha256: None,
                     verified_elf: false,
                     verified_sha256_cached: false,
@@ -279,8 +358,78 @@ impl SourceCell {
     }
 }
 
-fn open_source(spec: SourceOpenSpec, plan: v2::SourcePlan) -> SourceResult {
-    open_source_with_cache(spec, plan, &VERIFIED_EXECUTABLES)
+fn open_source(spec: SourceOpenSpec, plan: SourceOpenPlan) -> SourceResult {
+    match plan {
+        SourceOpenPlan::Original(plan) => open_source_with_cache(spec, plan, &VERIFIED_EXECUTABLES),
+        SourceOpenPlan::Direct(plan) => open_direct_source(spec, plan),
+    }
+}
+
+fn open_direct_source(spec: SourceOpenSpec, plan: v2::DirectSourcePlanV1) -> SourceResult {
+    let mut result = SourceResult {
+        file: None,
+        observed: None,
+        direct_open_error: None,
+        verified_sha256: None,
+        verified_elf: false,
+        verified_sha256_cached: false,
+    };
+    if spec.expected_sha256.is_some()
+        || spec.path.to_str() != Some(plan.absolute_path.as_str())
+        || spec.scanner_size != plan.scanner_size
+        || spec.scanner_mtime != plan.scanner_mtime
+        || !std::fs::metadata("/proc/self/ns/mnt").is_ok_and(|metadata| {
+            matches!(plan.filesystem_domain.mount_namespace,
+                v2::NativeValue::Known { value } if value == metadata.ino())
+        })
+    {
+        return result;
+    }
+    let file = match crate::fs_secure::open_read_nofollow_blocking(&spec.path) {
+        Ok(file) => file,
+        Err(error) => {
+            result.direct_open_error = Some(error.kind());
+            return result;
+        }
+    };
+    result.file = Some(Arc::new(file));
+    let file = result.file.as_ref().expect("original direct native file");
+    let Ok(metadata) = file.metadata() else {
+        return result;
+    };
+    if !metadata.is_file()
+        || (matches!(
+            plan.expectation,
+            v2::DirectSourceExpectationV1::ScannerExact
+        ) && !SourceIdentity::scanner_matches(&metadata, spec.scanner_size, spec.scanner_mtime))
+    {
+        return result;
+    }
+    let actual_s1 = SourceIdentity::from_metadata(&metadata).render_s1();
+    result.observed = Some(v2::SourceObserved {
+        version: 1,
+        holder_id: plan.holder_id,
+        member_id: plan.member_id,
+        copies: plan.planned_copies.clone(),
+        native_object: v2::NativeObject {
+            file_type: v2::FileType::Regular,
+            device: v2::NativeValue::Known {
+                value: metadata.dev(),
+            },
+            inode: v2::NativeValue::Known {
+                value: metadata.ino(),
+            },
+            mount_id: bootstrap::native::steps::mount_id(file),
+            filesystem_domain: plan.filesystem_domain,
+        },
+        access: v2::SourceAccess::ReadOnlyRegular,
+        source_association: v2::SourceAssociation {
+            media_file_id: plan.media_file_id,
+            object_version: actual_s1,
+            recipe_source_binding: plan.recipe_source_binding,
+        },
+    });
+    result
 }
 
 fn open_source_with_cache(
@@ -291,6 +440,7 @@ fn open_source_with_cache(
     let mut result = SourceResult {
         file: None,
         observed: None,
+        direct_open_error: None,
         verified_sha256: None,
         verified_elf: false,
         verified_sha256_cached: false,
@@ -396,6 +546,19 @@ fn open_source_with_cache(
 }
 
 impl NodeResourceRuntime {
+    /// Diagnostic only: a joined original nofollow-open error before any FD
+    /// existed. This does not authorize physical closure or a refund.
+    pub(in crate::adaptive_resources::runtime) fn direct_source_known_open_error_kind(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+    ) -> Option<std::io::ErrorKind> {
+        self.validate_preparation(owner).ok()?;
+        let bundle = owner.state.try_lock().ok()?;
+        let source = bundle.roles.get(index)?.sources.get(&member)?;
+        source.direct_known_open_error_kind()
+    }
     /// Synchronous registration in admitted ownership; takes no already-open
     /// File and can never bless an acquisition that happened before prepare.
     pub(crate) fn queue_source_open(
@@ -436,24 +599,38 @@ impl NodeResourceRuntime {
             .and_then(|members| members.iter().find(|m| m.member_id() == member))
             .cloned()
             .ok_or(OperationError::State)?;
-        let v2::MemberPlan::SourceV1 { slot, source } = &plan else {
-            return Err(OperationError::State);
-        };
         let path = spec.path.to_str().ok_or(OperationError::State)?;
+        let (slot, domain, copies, binding_ok) = match &plan {
+            v2::MemberPlan::SourceV1 { slot, source } => (
+                slot,
+                &source.filesystem_domain,
+                &source.planned_copies,
+                digest_binding_matches(
+                    &source.source_association.recipe_source_binding,
+                    spec.expected_sha256,
+                ),
+            ),
+            v2::MemberPlan::DirectSourceV1 { slot, source } => (
+                slot,
+                &source.filesystem_domain,
+                &source.planned_copies,
+                source.absolute_path == path
+                    && source.scanner_size == spec.scanner_size
+                    && source.scanner_mtime == spec.scanner_mtime
+                    && spec.expected_sha256.is_none(),
+            ),
+            _ => return Err(OperationError::State),
+        };
         if !slot.protected_paths.iter().any(|p| p == path)
-            || source.filesystem_domain.platform != v2::FilesystemPlatform::Linux
-            || source.filesystem_domain.daemon_owner_id.uuid() != self.owner.owner_id
-            || source.filesystem_domain.os_boot != self.owner.os_boot
+            || domain.platform != v2::FilesystemPlatform::Linux
+            || domain.daemon_owner_id.uuid() != self.owner.owner_id
+            || domain.os_boot != self.owner.os_boot
             || !matches!(self.owner.os_boot, BootIdentity::Known { .. })
-            || !digest_binding_matches(
-                &source.source_association.recipe_source_binding,
-                spec.expected_sha256,
-            )
+            || !binding_ok
         {
             return Err(OperationError::State);
         }
-        let mut copies = source
-            .planned_copies
+        let mut copies = copies
             .iter()
             .filter(|copy| matches!(copy.owner, v2::CopyOwner::DaemonSourceCell { .. }));
         let copy = copies.next().ok_or(OperationError::State)?;
@@ -529,6 +706,43 @@ impl NodeResourceRuntime {
         })
     }
 
+    /// The one direct lease and its committed actual identity leave the same
+    /// locked SourceCell together. No cancellation point follows lease issue.
+    pub(in crate::adaptive_resources::runtime) async fn open_prepared_direct_source(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(RetainedSourceLease, u64, String), OperationError> {
+        self.acquire_prepared_source(owner, index, member, deadline)
+            .await?;
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle.installed {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
+        if role.refunded
+            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
+            || source.lease_issued
+        {
+            return Err(OperationError::State);
+        }
+        let (length, object_version) = source.direct_observed_identity()?;
+        let file = source
+            .result
+            .as_ref()
+            .and_then(|result| result.file.as_ref())
+            .ok_or(OperationError::State)?;
+        let lease = RetainedSourceLease {
+            file: Arc::clone(file),
+        };
+        source.lease_issued = true;
+        Ok((lease, length, object_version))
+    }
+
     /// Runs source prepare/arm/open/observe and durable observation, without
     /// exporting the retained File through a lease.
     pub(in crate::adaptive_resources::runtime) async fn acquire_prepared_source(
@@ -601,7 +815,13 @@ impl NodeResourceRuntime {
             let envelope = v2::Envelope {
                 version: 2,
                 planned: source.plan.clone(),
-                observed: Some(v2::Observed::SourceV1 { source: observed }),
+                observed: Some(match &source.plan {
+                    v2::MemberPlan::SourceV1 { .. } => v2::Observed::SourceV1 { source: observed },
+                    v2::MemberPlan::DirectSourceV1 { .. } => {
+                        v2::Observed::DirectSourceV1 { source: observed }
+                    }
+                    _ => return Err(OperationError::State),
+                }),
             };
             start_named_transition(
                 &self.journal,
@@ -848,7 +1068,92 @@ impl SourceCell {
     /// Closes only this retained parent descriptor. A failed/ambiguous close is
     /// terminal because retrying its numeric fd could close a recycled handle.
     pub(super) async fn close_parent(&mut self) -> Result<(), OperationError> {
-        self.close_parent_inner(true).await
+        self.close_parent_inner(true, false).await
+    }
+
+    /// The direct profile has no inherited/root copy. Join its original open,
+    /// then close the exact original File after its one issued lease drains.
+    /// A surviving lease makes Arc::try_unwrap refuse without consuming it.
+    pub(in crate::adaptive_resources::runtime) async fn close_direct_parent(
+        &mut self,
+    ) -> Result<(), OperationError> {
+        let v2::MemberPlan::DirectSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if source.planned_copies.len() != 1
+            || !matches!(
+                source.planned_copies[0].owner,
+                v2::CopyOwner::DaemonSourceCell { .. }
+            )
+            || self.root_observed_committed
+            || self.selected_root_member.is_some()
+            || self.pending_root.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        self.join_registered().await?;
+        if self
+            .result
+            .as_ref()
+            .is_some_and(|result| result.file.is_some())
+        {
+            self.close_parent_inner(false, true).await?;
+        }
+        Ok(())
+    }
+
+    /// Audit the one original source copy from retained native state, never
+    /// from a caller's claim that a pathname or descriptor has disappeared.
+    pub(in crate::adaptive_resources::runtime) fn direct_closed_fact(
+        &self,
+        absence_operation_id: Uuid,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        let v2::MemberPlan::DirectSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        let [copy] = source.planned_copies.as_slice() else {
+            return Err(OperationError::State);
+        };
+        if !matches!(copy.owner, v2::CopyOwner::DaemonSourceCell { .. })
+            || self.pending.is_some()
+            || self.failed_join
+            || self.root_observed_committed
+            || self.selected_root_member.is_some()
+            || self.pending_root.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        let fact = if self.parent_closed() {
+            if self
+                .result
+                .as_ref()
+                .is_none_or(|result| result.file.is_some())
+            {
+                return Err(OperationError::State);
+            }
+            v2::CopyClosed::ActualOwnedClose {
+                copy: copy.clone(),
+                operation_id: v2::Id::new(self.parent_close_operation_id)?,
+            }
+        } else if matches!(self.parent_close, ParentCloseState::NotStarted)
+            && (self.spec.is_some() && self.result.is_none()
+                || self.spec.is_none()
+                    && self
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.file.is_none() && result.observed.is_none()))
+        {
+            v2::CopyClosed::ProvenNeverAcquired {
+                copy: copy.clone(),
+                operation_id: v2::Id::new(absence_operation_id)?,
+            }
+        } else {
+            return Err(OperationError::State);
+        };
+        Ok(v2::ClosedFact::DirectSourceV1 {
+            holder_id: source.holder_id,
+            copies: vec![fact],
+        })
     }
 
     /// A sealed no-root graph proves that no child inherited this source.
@@ -874,10 +1179,14 @@ impl SourceCell {
                 Err(OperationError::State)
             };
         }
-        self.close_parent_inner(false).await
+        self.close_parent_inner(false, false).await
     }
 
-    async fn close_parent_inner(&mut self, require_observed: bool) -> Result<(), OperationError> {
+    async fn close_parent_inner(
+        &mut self,
+        require_observed: bool,
+        allow_issued_lease: bool,
+    ) -> Result<(), OperationError> {
         match &self.parent_close {
             ParentCloseState::Closed => return Ok(()),
             ParentCloseState::Failed(errno) => {
@@ -891,7 +1200,7 @@ impl SourceCell {
             // Refuse before taking the File on unsupported platforms or when
             // the source still has another exported owner.
             if !cfg!(target_os = "linux")
-                || self.lease_issued
+                || (self.lease_issued && !allow_issued_lease)
                 || (require_observed && !self.observed_committed)
                 || self.pending.is_some()
                 || self.spec.is_some()

@@ -61,6 +61,12 @@ pub struct CustodyError {
     pub message: &'static str,
 }
 impl CustodyError {
+    pub(crate) fn invalid_reference() -> Self {
+        Self::new(
+            ErrorKind::UnreadableAuthority,
+            "invalid typed custody reference",
+        )
+    }
     fn new(kind: ErrorKind, message: &'static str) -> Self {
         Self {
             kind,

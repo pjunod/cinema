@@ -12,6 +12,10 @@ pub type SourceAdmissionError = crate::error::StoreError;
 pub enum SourceAdmissionMembers {}
 #[cfg(not(feature = "hiqlite-store"))]
 impl SourceAdmissionMembers {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        match *self {}
+    }
+
     pub fn write_guard(
         &self,
         _now_ms: i64,
@@ -138,6 +142,22 @@ pub struct SourceBindingHandle {
     pub(crate) released: bool,
 }
 impl SourceBindingHandle {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self.principal.requested_heap_bytes()?;
+        for capacity in [
+            self.request_id.capacity(),
+            self.request_fingerprint.capacity(),
+            self.playback_id.capacity(),
+            self.library_id.requested_heap_bytes()?,
+            self.item_id.requested_heap_bytes()?,
+            self.file_id.requested_heap_bytes()?,
+            self.file_revision.requested_heap_bytes()?,
+        ] {
+            bytes = bytes.checked_add(capacity)?;
+        }
+        Some(bytes)
+    }
+
     pub fn incarnation_id(&self) -> Uuid {
         self.incarnation_id
     }
@@ -233,6 +253,15 @@ pub struct SourceDispatchAssignment {
     pub(crate) members: SourceAdmissionMembers,
 }
 impl SourceDispatchAssignment {
+    /// Dynamic heap capacities owned by this assignment and its nested
+    /// membership snapshot. The caller counts inline layout and shared Arcs.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.binding
+            .requested_heap_bytes()?
+            .checked_add(self.owner_node_id.capacity())?
+            .checked_add(self.members.requested_heap_bytes()?)
+    }
+
     pub fn binding(&self) -> &SourceBindingHandle {
         &self.binding
     }
@@ -314,6 +343,15 @@ pub struct SourceIngressAdmissionPermission {
     pub(crate) members: SourceAdmissionMembers,
 }
 impl SourceIngressAdmissionPermission {
+    /// Dynamic heap capacities retained by this ingress capability, including
+    /// its independently cloned membership snapshot. The caller counts inline
+    /// layout and shared owners separately.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        self.assignment
+            .requested_heap_bytes()?
+            .checked_add(self.members.requested_heap_bytes()?)
+    }
+
     pub fn assignment(&self) -> &SourceDispatchAssignment {
         &self.assignment
     }

@@ -237,12 +237,14 @@ pub(super) fn protected_paths(inventory: &ObligationInventory) -> Vec<PathBuf> {
             .members
             .iter()
             .flat_map(|m| match m {
-                v2::MemberPlan::LegacyV1 { planned } => &planned.protected_paths,
+                v2::MemberPlan::LegacyV1 { planned } => planned.protected_paths.as_slice(),
                 v2::MemberPlan::SourceV1 { slot, .. }
+                | v2::MemberPlan::DirectSourceV1 { slot, .. }
                 | v2::MemberPlan::VodOutputTaskV1 { slot, .. }
                 | v2::MemberPlan::ScratchAssetsV1 { slot, .. }
                 | v2::MemberPlan::ScratchAssetsV2 { slot, .. }
-                | v2::MemberPlan::ScratchAssetsV3 { slot, .. } => &slot.protected_paths,
+                | v2::MemberPlan::ScratchAssetsV3 { slot, .. } => slot.protected_paths.as_slice(),
+                v2::MemberPlan::DirectReadDomainV1 { .. } => &[],
             })
             .map(PathBuf::from)
             .collect(),

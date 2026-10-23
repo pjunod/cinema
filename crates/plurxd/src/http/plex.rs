@@ -268,7 +268,7 @@ pub async fn children(
 
 /// GET /library/parts/:file_id/:mtime/:name — direct play with range support.
 pub async fn part(
-    _user: PlexUser,
+    PlexUser(user): PlexUser,
     State(state): State<AppState>,
     Path((file_id, _mtime, _name)): Path<(i64, String, String)>,
     method: axum::http::Method,
@@ -279,8 +279,7 @@ pub async fn part(
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("part"))?;
-    super::stream::serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64))
-        .await
+    super::stream::serve_authorized_file_range(&state, user.id, &file, &headers, &method).await
 }
 
 /// GET /library/metadata/:key/thumb  and  /art — serve cached artwork.

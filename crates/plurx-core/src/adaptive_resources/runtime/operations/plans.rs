@@ -14,6 +14,14 @@ pub(crate) enum TypedMemberPlan {
         slot: v2::MemberSlot,
         source: SourcePlan,
     },
+    DirectSource {
+        slot: v2::MemberSlot,
+        source: DirectSourcePlan,
+    },
+    DirectReadDomain {
+        slot: v2::MemberSlot,
+        domain_id: v2::Id,
+    },
     VodOutputTask {
         slot: v2::MemberSlot,
         task: VodTaskPlan,
@@ -39,6 +47,28 @@ pub(crate) struct SourcePlan {
     // Observed domain data is preserved, never rewritten to bless another owner.
     pub filesystem_domain: v2::FilesystemDomain,
     pub copies: Vec<SourceCopyPlan>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DirectSourcePlan {
+    pub holder_id: v2::Id,
+    pub media_file_id: String,
+    pub recipe_source_binding: String,
+    pub provenance: v2::DirectSourceProvenanceV1,
+    pub absolute_path: String,
+    pub scanner_size: i64,
+    pub scanner_mtime: i64,
+    pub expectation: v2::DirectSourceExpectationV1,
+    pub filesystem_domain: v2::FilesystemDomain,
+    pub copy_id: v2::Id,
+    pub acquisition_operation_id: v2::Id,
+    pub read_domain: DirectReadDomainRef,
+}
+
+#[derive(Clone)]
+pub(crate) enum DirectReadDomainRef {
+    BatchRole(usize),
+    Existing(Uuid),
 }
 
 #[derive(Clone)]
@@ -86,12 +116,65 @@ impl TypedMemberPlan {
         }
     }
 
-    pub(super) fn bind(self, owner_id: v2::Id, graph_id: v2::Id) -> v2::MemberPlan {
-        match self {
+    pub(super) fn bind(
+        self,
+        owner_id: v2::Id,
+        graph_id: v2::Id,
+        obligation_ids: &[Uuid],
+    ) -> Result<v2::MemberPlan, CustodyError> {
+        Ok(match self {
             Self::Legacy(planned) => v2::MemberPlan::LegacyV1 { planned },
             Self::ScratchV1 { slot, scratch } => v2::MemberPlan::ScratchAssetsV1 { slot, scratch },
             Self::ScratchV2 { slot, plan } => v2::MemberPlan::ScratchAssetsV2 { slot, plan },
             Self::ScratchV3 { slot, plan } => v2::MemberPlan::ScratchAssetsV3 { slot, plan },
+            Self::DirectReadDomain { slot, domain_id } => v2::MemberPlan::DirectReadDomainV1 {
+                slot,
+                domain: v2::DirectReadDomainPlanV1 {
+                    version: 1,
+                    domain_id,
+                    owner_id,
+                    graph_id,
+                    maximum_parallel_reads: 1,
+                },
+            },
+            Self::DirectSource { slot, source } => v2::MemberPlan::DirectSourceV1 {
+                source: v2::DirectSourcePlanV1 {
+                    version: 1,
+                    holder_id: source.holder_id,
+                    member_id: slot.member_id,
+                    media_file_id: source.media_file_id,
+                    recipe_source_binding: source.recipe_source_binding,
+                    provenance: source.provenance,
+                    absolute_path: source.absolute_path,
+                    scanner_size: source.scanner_size,
+                    scanner_mtime: source.scanner_mtime,
+                    expectation: source.expectation,
+                    access: v2::SourceAccess::ReadOnlyRegular,
+                    filesystem_domain: source.filesystem_domain.clone(),
+                    planned_copies: vec![v2::SourceCopy {
+                        copy_id: source.copy_id,
+                        owner: v2::CopyOwner::DaemonSourceCell {
+                            owner_id,
+                            graph_id,
+                            member_id: slot.member_id,
+                        },
+                        acquisition_operation_id: source.acquisition_operation_id,
+                        parent_copy_id: None,
+                    }],
+                    recovery: v2::SourceRecovery::LocalSourceHandlesV1 {
+                        owner_id,
+                        graph_id,
+                        filesystem_domain: source.filesystem_domain,
+                    },
+                    read_domain_obligation_id: v2::Id::new(match source.read_domain {
+                        DirectReadDomainRef::BatchRole(index) => *obligation_ids
+                            .get(index)
+                            .ok_or_else(CustodyError::invalid_reference)?,
+                        DirectReadDomainRef::Existing(id) => id,
+                    })?,
+                },
+                slot,
+            },
             Self::Source { slot, source } => {
                 let member_id = slot.member_id;
                 let copies = source
@@ -168,6 +251,6 @@ impl TypedMemberPlan {
                 },
                 slot,
             },
-        }
+        })
     }
 }

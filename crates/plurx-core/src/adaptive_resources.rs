@@ -248,6 +248,22 @@ pub struct PhysicalCloseReceipt {
 }
 
 impl PhysicalCloseReceipt {
+    /// Consumes an original registered direct SourceCell close, after every
+    /// escaped body/chunk owner has drained. No DTO can construct this proof.
+    #[cfg(target_os = "linux")]
+    fn from_direct_source(closure: runtime::DirectSourceClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+            _recovered_r: None,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn from_direct_read_domain(closure: runtime::DirectReadDomainClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+            _recovered_r: None,
+        }
+    }
     /// Only the same live runtime's original no-writer root, source and
     /// producer-output native closures can construct a cancellation receipt.
     #[cfg(unix)]

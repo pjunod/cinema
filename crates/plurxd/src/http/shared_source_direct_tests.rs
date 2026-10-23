@@ -4,10 +4,7 @@ use super::*;
 use crate::http::sharing_direct_wire::{DecodedSourceDirectStart, DirectMethod};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use serde_json::json;
-use std::{
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use super::super::{
     real_source_start_fixture_with, tests::actual_resource_request, RealSourceStartFixture,
@@ -379,7 +376,7 @@ async fn parked_body(
         .expect("direct headers");
     assert_eq!(response.status(), StatusCode::OK);
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !gate.entered.load(Ordering::SeqCst) {
+        while !gate.entered() {
             tokio::task::yield_now().await;
         }
     })
@@ -453,7 +450,7 @@ async fn sharing_source_direct_read_join_before_end_receipt() {
         !ending.is_finished(),
         "dropping the response cannot release a live read job"
     );
-    assert!(!gate.complete.load(Ordering::SeqCst));
+    assert!(!gate.complete());
     gate.release();
     let receipt = tokio::time::timeout(Duration::from_secs(15), ending)
         .await
@@ -463,8 +460,8 @@ async fn sharing_source_direct_read_join_before_end_receipt() {
     assert_eq!(receipt["state"], "settled");
     assert_eq!(receipt["settled"], true);
     assert_eq!(receipt["session_id"], session.known["session_id"]);
-    assert!(gate.complete.load(Ordering::SeqCst));
-    assert!(gate.file_closed.load(Ordering::SeqCst));
+    assert!(gate.complete());
+    assert!(gate.file_closed());
     peer.stop().await;
     fixture.shutdown().await;
 }

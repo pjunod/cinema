@@ -25,6 +25,10 @@ impl FileRevision {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        Some(self.0.capacity())
+    }
 }
 impl<'de> Deserialize<'de> for FileRevision {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

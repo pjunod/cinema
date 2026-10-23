@@ -1287,16 +1287,70 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
         ))
 }
 #[cfg(test)]
-#[derive(Default)]
 pub(crate) struct SourceReadJobGate {
     pub(crate) entered: std::sync::atomic::AtomicBool,
     pub(crate) complete: std::sync::atomic::AtomicBool,
     pub(crate) file_closed: std::sync::atomic::AtomicBool,
     released: std::sync::Mutex<bool>,
     release: std::sync::Condvar,
+    #[cfg(target_os = "linux")]
+    core: std::sync::Arc<
+        plurx_core::adaptive_resources::runtime::direct_source::DirectSourceReadGate,
+    >,
+}
+#[cfg(test)]
+impl Default for SourceReadJobGate {
+    fn default() -> Self {
+        Self {
+            entered: std::sync::atomic::AtomicBool::new(false),
+            complete: std::sync::atomic::AtomicBool::new(false),
+            file_closed: std::sync::atomic::AtomicBool::new(false),
+            released: std::sync::Mutex::new(false),
+            release: std::sync::Condvar::new(),
+            #[cfg(target_os = "linux")]
+            core: plurx_core::adaptive_resources::runtime::direct_source::DirectSourceReadGate::new(
+            ),
+        }
+    }
 }
 #[cfg(test)]
 impl SourceReadJobGate {
+    pub(crate) fn entered(&self) -> bool {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst) || {
+            #[cfg(target_os = "linux")]
+            {
+                self.core.entered()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        }
+    }
+    pub(crate) fn complete(&self) -> bool {
+        self.complete.load(std::sync::atomic::Ordering::SeqCst) || {
+            #[cfg(target_os = "linux")]
+            {
+                self.core.complete()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        }
+    }
+    pub(crate) fn file_closed(&self) -> bool {
+        self.file_closed.load(std::sync::atomic::Ordering::SeqCst) || {
+            #[cfg(target_os = "linux")]
+            {
+                self.core.file_closed()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        }
+    }
     fn park(&self) -> std::io::Result<()> {
         let mut released = self.released.lock().expect("read job gate");
         self.entered
@@ -1319,6 +1373,8 @@ impl SourceReadJobGate {
     pub(crate) fn release(&self) {
         *self.released.lock().expect("read gate") = true;
         self.release.notify_all();
+        #[cfg(target_os = "linux")]
+        self.core.release();
     }
 }
 struct SourceReadFile {
@@ -1345,7 +1401,7 @@ struct SourceFileReader {
     file: std::sync::Mutex<SourceReadFile>,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
 }
-static SOURCE_READ_JOBS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+pub(super) static SOURCE_READ_JOBS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)));
 async fn source_file_body(
     file: crate::vodserve::ReadyFile,
@@ -2423,9 +2479,24 @@ async fn build_real_source_start_fixture(
     assert!(Box::pin(selected.prepare_source_schema_before_serving())
         .await
         .expect("actual startup factory"));
+    #[cfg(target_os = "linux")]
+    let direct_runtime = if matches!(mode, SourceFixtureMode::Direct) {
+        Some(
+            crate::resource_runtime::open_before_cleanup(&mut selected, &config)
+                .await
+                .expect("production direct custody startup")
+                .expect("Linux direct custody runtime"),
+        )
+    } else {
+        None
+    };
     let client = selected.local_client().expect("local voter client");
     let mut state = Arc::new(crate::http::source_actor_test_state());
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
+    #[cfg(target_os = "linux")]
+    if let Some(runtime) = direct_runtime {
+        state_mut.resource_runtime = Some(runtime);
+    }
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = selected.membership_manager();
     state_mut.clock_observer = if let Some(clock) = &startup_clock {

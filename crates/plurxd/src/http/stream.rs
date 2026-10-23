@@ -15,7 +15,9 @@ use plurx_core::tracks::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncReadExt;
+#[cfg(any(test, not(target_os = "linux")))]
+use tokio::io::AsyncSeekExt;
 
 use super::error::ApiError;
 use super::extract::AuthUser;
@@ -3008,7 +3010,7 @@ pub struct DirectQuery {
 /// GET /api/v1/files/:id/download — download the original file without treating the transfer as playback.
 /// Authentication and range handling are identical to the direct media route.
 pub async fn download(
-    _user: AuthUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     method: Method,
@@ -3016,7 +3018,7 @@ pub async fn download(
 ) -> Result<Response, ApiError> {
     let file = load_file(&state, id).await?;
     let mut response =
-        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await?;
+        serve_authorized_file_range(&state, user.id, &file, &headers, &method).await?;
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment"),
@@ -3053,8 +3055,7 @@ pub async fn direct(
             return Err(error);
         }
     };
-    let served =
-        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await;
+    let served = serve_authorized_file_range(&state, user.id, &file, &headers, &method).await;
     match &served {
         // Bytes are going out: this is the moment playback is real. Every
         // request in the storm reports, and the registry collapses them — the
@@ -3110,17 +3111,61 @@ fn count_direct_play_bytes(response: Response) -> Response {
 /// Separate from `direct` because opening an EPUB/PDF is not timed playback:
 /// it must not announce a viewer, scrobble, or manufacture audio progress.
 pub async fn book_content(
-    _user: AuthUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     AxPath(id): AxPath<i64>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    serve_book_content(&state, id, &method, &headers).await
+    serve_book_content(&state, user.id, id, &method, &headers).await
 }
 
 pub(super) async fn serve_book_content(
     state: &AppState,
+    authenticated_user_id: i64,
+    id: i64,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    serve_bound_book_content(
+        state,
+        DirectRangeAuthority {
+            user_id: authenticated_user_id,
+            file_id: id,
+            grant_id: None,
+        },
+        id,
+        method,
+        headers,
+    )
+    .await
+}
+
+pub(super) async fn serve_verified_grant_book_content(
+    state: &AppState,
+    verified_grant_id: uuid::Uuid,
+    user_id: i64,
+    id: i64,
+    method: &Method,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    serve_bound_book_content(
+        state,
+        DirectRangeAuthority {
+            user_id,
+            file_id: id,
+            grant_id: Some(verified_grant_id),
+        },
+        id,
+        method,
+        headers,
+    )
+    .await
+}
+
+async fn serve_bound_book_content(
+    state: &AppState,
+    authority: DirectRangeAuthority,
     id: i64,
     method: &Method,
     headers: &HeaderMap,
@@ -3134,8 +3179,7 @@ pub(super) async fn serve_book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    let mut response =
-        serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await?;
+    let mut response = serve_bound_file_range(state, authority, &file, headers, method).await?;
     if response.status().is_success() {
         let name = file
             .path
@@ -3648,8 +3692,166 @@ pub(crate) fn file_content_type(path: &Path) -> &'static str {
     content_type(path)
 }
 
-/// HTTP range serving of a file (direct play). Shared by the native part
-/// endpoint and the Plex-compat `/library/parts/...` endpoint.
+/// Serve an authenticated local file through its original admitted native
+/// owner. The ordinary scanner row supplies the bounded plan; the first
+/// admitted open records the actual file identity. The response owns one
+/// body guard, and a registered manager task retires that same core owner
+/// after this Body and its last charged Bytes aliases are gone.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct DirectRangeAuthority {
+    user_id: i64,
+    file_id: i64,
+    grant_id: Option<uuid::Uuid>,
+}
+
+pub(crate) async fn serve_authorized_file_range(
+    state: &AppState,
+    authenticated_user_id: i64,
+    file: &MediaFile,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Result<Response, ApiError> {
+    serve_bound_file_range(
+        state,
+        DirectRangeAuthority {
+            user_id: authenticated_user_id,
+            file_id: file.id,
+            grant_id: None,
+        },
+        file,
+        headers,
+        method,
+    )
+    .await
+}
+
+async fn serve_bound_file_range(
+    state: &AppState,
+    authority: DirectRangeAuthority,
+    file: &MediaFile,
+    headers: &HeaderMap,
+    method: &Method,
+) -> Result<Response, ApiError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state, authority);
+        return serve_file_range(&file.path, headers, method, Some(file.size.max(0) as u64)).await;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use plurx_core::adaptive_resources::runtime::direct_source::DirectSourceBinding;
+        let binding = match authority.grant_id {
+            Some(verified_grant_id) => DirectSourceBinding::FileGrant {
+                verified_grant_id,
+                user_id: authority.user_id,
+                file_id: authority.file_id,
+            },
+            None => DirectSourceBinding::Local {
+                authenticated_user_id: authority.user_id,
+                file_id: authority.file_id,
+            },
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+        let opened = state
+            .transcode
+            .open_local_direct(state, binding, file, deadline)
+            .await
+            .map_err(|error| match error {
+                crate::transcode::local_direct::LocalDirectFailure::LengthMismatch => {
+                    ApiError::NotFound("file on disk")
+                }
+                crate::transcode::local_direct::LocalDirectFailure::NotFound => {
+                    ApiError::NotFound("file on disk")
+                }
+                crate::transcode::local_direct::LocalDirectFailure::Unavailable => {
+                    ApiError::ServiceUnavailable("direct source unavailable".into())
+                }
+            })?;
+        let crate::transcode::local_direct::LocalDirectOpen {
+            owner,
+            guard,
+            length,
+        } = opened;
+        let plan = plan_file_range(headers, method, length);
+        let body = match plan {
+            FileRangePlan::Partial { start, end } => {
+                let read = owner.begin_body().map_err(|_| {
+                    ApiError::ServiceUnavailable("direct source unavailable".into())
+                })?;
+                local_admitted_body(owner, read, guard, start, end - start + 1)
+            }
+            FileRangePlan::Full if *method == Method::GET && length > 0 => {
+                let read = owner.begin_body().map_err(|_| {
+                    ApiError::ServiceUnavailable("direct source unavailable".into())
+                })?;
+                local_admitted_body(owner, read, guard, 0, length)
+            }
+            _ => {
+                drop((owner, guard));
+                Body::empty()
+            }
+        };
+        let (status, fields) = file_range_head(plan, length, content_type(&file.path));
+        let mut response = (status, body).into_response();
+        for (name, value) in fields {
+            response.headers_mut().insert(
+                name,
+                HeaderValue::from_str(&value).map_err(|e| ApiError::Internal(e.to_string()))?,
+            );
+        }
+        Ok(response)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_admitted_body(
+    owner: std::sync::Arc<
+        plurx_core::adaptive_resources::runtime::direct_source::DirectSourceOwner,
+    >,
+    read: plurx_core::adaptive_resources::runtime::direct_source::DirectSourceBody,
+    guard: crate::transcode::local_direct::LocalDirectGuard,
+    start: u64,
+    length: u64,
+) -> Body {
+    let stream = futures_util::stream::try_unfold(
+        (owner, read, guard, start, length),
+        |(owner, read, guard, offset, remaining)| async move {
+            if remaining == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            let chunk = remaining.min(64 * 1024) as usize;
+            let permit = std::sync::Arc::clone(&super::shared_source_playback::SOURCE_READ_JOBS)
+                .acquire_owned()
+                .await
+                .map_err(std::io::Error::other)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+            let buffer = owner
+                .read_at(&read, offset, chunk, permit, deadline)
+                .await
+                .map_err(std::io::Error::other)?;
+            if buffer.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "direct source truncated",
+                ));
+            }
+            let actual = buffer.len() as u64;
+            let next = offset
+                .checked_add(actual)
+                .ok_or_else(|| std::io::Error::other("direct offset overflow"))?;
+            Ok(Some((
+                bytes::Bytes::from_owner(buffer),
+                (owner, read, guard, next, remaining - actual),
+            )))
+        },
+    );
+    Body::from_stream(stream)
+}
+
+/// Legacy raw-file range serving on unsupported platforms, and the range
+/// parser's fixture reference on Linux. Production Linux handlers use the
+/// registered admitted owner above.
+#[cfg(any(test, not(target_os = "linux")))]
 pub(crate) async fn serve_file_range(
     path: &Path,
     headers: &HeaderMap,

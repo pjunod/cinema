@@ -3244,6 +3244,19 @@ pub struct SourceAdmissionMembers {
 }
 
 impl SourceAdmissionMembers {
+    /// Dynamic heap capacities retained by this concrete membership snapshot.
+    /// Callers count inline layout and any shared owner separately.
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .members_json
+            .capacity()
+            .checked_add(self.membership_log_json.capacity())?;
+        if let Some(fingerprint) = &self.purpose_master_fingerprint {
+            bytes = bytes.checked_add(fingerprint.capacity())?;
+        }
+        Some(bytes)
+    }
+
     /// Actual identity captured by the production membership observation.
     /// Source assignment still correlates this identity in its committing SQL.
     pub(crate) fn actual_local_raft_id(&self) -> u64 {
