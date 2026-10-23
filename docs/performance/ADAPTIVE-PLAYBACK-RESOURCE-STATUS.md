@@ -1,23 +1,25 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete. Source checkpoint
-`483f8b616be60b9bdec70cb9fe5c83fdb4a9ad95` passed exact native Linux
-core+daemon all-target compilation, including the existing cluster integration
-fixture feature (Rust 1.97.1, EXIT 0/201.830 seconds; log SHA-256
-`5f70f1d9e0316e6768d42c0b80b9cd69a08607074599010667b0ef3fb8aaf2a0`).
-The ordinary lifecycle and two-process restart fixture bodies compiled; neither
-ran. Stable host compilation passed at parent source
-`18648c5fdc03f80d74d78619bd93a4a030128415` in 158.391 seconds (log SHA-256
-`efc58e4f37f8aebbb20d38ab4365c68dff2b2e6ba3a3b92bbb74f251a5064436`);
-the descendant source change is a Linux-only fixture import. Static catalog
-and paperwork passed at that parent source (36 points/43 checks/4,206 files;
-15/15 bookkeeping checks). There are 459 authored regression anchors, NOT RUN.
-Source connects repeated unchanged-head recovered-R adoption, original engine
-check jobs through cancellation, explicit immutable metadata sizing/lifetime,
-and compact event-driven daemon cleanup. The original memory component remains
-at S until mutable reader/client-state accounting is bounded. All V1–V5 and
-R1/M0–M7 remain OPEN. Final independent actual Fable review, qualification,
-fast lane and merge have not run. Draft PR #1248 carries the live owner/state.
+**Status:** open · implementation incomplete. Published checkpoints
+`269923bb7` and `ee8cc4674` pass pinned host all-target core+daemon+cluster-
+fixture compilation in 112.938 seconds (log SHA-256
+`652e173afdea2098959099136202d057432d664592079b11efa659730a68bbeb`), with a
+latest core-only host PASS in 12.445 seconds (log SHA-256
+`0f6a098d724add9edfa8f15936f95471b5905cab2a207f03c0b115d85372f7b4`). The
+corrected checkpoint `26633a1a9d75e2631d52cbb1799e40ee10c99115` passed pinned
+Rust 1.97.1 native Linux daemon all-target compilation, including cluster
+fixtures, in 231.509 seconds (archive SHA-256
+`64edbf1ce91945e20f35cc31c5c606961f2e639a8705bf646c4e1d0f6b088227`, log
+SHA-256 `7ecb186feef175f59dd8d7d97cf3b974e0d22414c8ae827f87b44a0a440d8a46`,
+task receipt `direct-linux-26633a1a9d75-RESULT.json`). This retry
+compiled the daemon and its core dependency; it was not a core test-target
+PASS. Host checks exclude Linux-only test bodies. Authored behavioral tests
+remain NOT RUN. Bounded client partitions,
+terminal-body alias custody and indexed streaming recovery are integrated.
+Candidate S now retains the selected path's enforced immutable, client,
+response and native partitions after known retirement; strict S<R memory-return
+behavior remains unrun. All V1–V5 and R1/M0–M7 remain OPEN. No final Fable
+review, qualification, fast lane or merge has run.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -26,14 +28,24 @@ exited and its heartbeat remains paused. One integration branch
 closure, tests, review or qualification are claimed. Complete implementation,
 actual independent Fable 5.1 review and fixes precede qualification and landing.
 
+Current work keeps accepted HTTP payload slots until the final shared `Bytes`
+alias drops, including terminal and error responses, and does not refund on
+request cancellation. Custody v6 streams full history and verifies indexed
+family/asset-operation membership without adding a family/history count cap;
+old SQL row comparisons remain. Direct-source adapter and root diagnostic-event
+edits remain uncommitted and are not covered by the native receipt above. Other
+pipelines, remaining mutable client-state bounds, partial startup and cold
+cache/restart remain open. No authored behavioral tests have run.
+
 Normative [plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md),
 [acceptance](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) and
 [design review](ADAPTIVE-PLAYBACK-RESOURCE-REVIEW.md) retain their historical
 approval pins below. An explicit manager-accepted, source-grounded zero/service-
 budget clarification now changes their bytes; review §6 records that delta
-without inventing new independent approval. Current plan/acceptance/review
-SHA-256 respectively:
-`0a3a26eaab79e9b1852d16dc005394cfca59e676fae7319cbc34b0e64ca1386c`,
+without inventing new independent approval. The coverage map and implementation header now describe current owners; this
+administrative refresh does not change the approved requirements. Current
+plan/acceptance/review SHA-256 respectively:
+`1a8b49498043582343668df38150abf2a048fd48e5b628f73a0fc2430eb1a4fe`,
 `73067de47ac10b0855637540e0e3d84724e0361aa72340de9c867bd4cf1159fd`,
 `3c5a4b08f83617e73273e520aa4a9a78a60e69ab550618c97f2966756898e8ed`.
 
@@ -172,66 +184,29 @@ lane, merge or deployment are claimed.
 
 ## Current source and compiler receipt
 
-`7b783effa` extends the SAME prearmed native root cell through no-follow component
-opens and exclusive child mkdir/open: actual descriptors, original job/latch,
-known Arm/Observe retries, retained parent+child and Linux descriptor mount ID.
-Entered errors/partial creation/EEXIST retain facts; no implicit adoption. The
-internal runtime can reach ParentReady/SinkReady, NOT ordinary application entry.
-`7184dcd01` rejects foreign owner/boot labels before arm. `735387e96` adapts the
-existing native publisher to consume a moved held directory and selected I/O ID,
-with no path fallback/local UUID; the selected Linux ordinary software-transcode
-caller now uses this path, while other recipes retain legacy input.
-These mechanisms are NOT permission/proof constructors or completed V2 closure.
+Published checkpoint `269923bb7` adds the selected finite path's bounded client
+payload partitions; `ee8cc4674` adds streaming custody history and indexed
+family/asset-operation membership. The pinned host all-target core+daemon+
+cluster-fixture check passed in 112.938 seconds, and a later core-only check
+passed in 12.445 seconds. Their receipts are recorded above. Exact native archive
+checking for `269923bb7` is still RUNNING, so it has no result yet.
 
-Historical pinned 1.97.1 receipts for the earlier `7b783effa` source snapshot:
-host core all-target PASS in 11.885s; combined core/daemon PASS in 108.631s,
-with unchanged daemon source. Seven host bodies compiled, NOT RUN; two Linux-only
-bodies for that snapshot compiled by controller Linux check, NOT host. These
-were warning-level checks, not strict Clippy; the initial closure-type failure
-and fix remain retained. Controller Linux 117.758s and Windows 132.363s checks
-also cover only the exact `7b783effa` scope and unchanged native step/statx/test
-sources. They do not qualify the current source. No behavior/restart
-qualification. Earlier source/evidence remains retained.
+The selected ordinary Linux software-transcode path is connected through local
+admission, source/output custody, producer joins, publication, HTTP readers,
+recovery and settlement. Other recipes remain legacy. S now keeps the enforced
+immutable metadata, client-state, response and native partitions after known
+retirement; strict proof that S is smaller than R has not run. Same-process
+seeks reuse the existing full-plan owner, while cold-cache/restart remains open.
+The M1 writer samples registered-process CPU/RSS only after durable publication
+and exposes advisory diagnostics; M2 policy does not consume those observations.
+Direct-source adapter work is active. All V1–V5 and R1/M0–M7 remain OPEN; tests
+remain NOT RUN, and there has been no final review or qualification.
 
-The authoritative [V1–V5 checklist](ADAPTIVE-PLAYBACK-DELIVERY.md#authoritative-first-ordinary-vod-source-checklist)
-has ALL FIVE OPEN. Missing: ordinary pre-acquisition/source/producer composition,
-actual held-child + known-output outcome before manifest/readers, markers/sync,
-bounded native/index memory and overage debt/fence, retained snapshot/private-proof
-ONE atomic R→S and same-ledger swap, exact settlement/capacity reuse. Conservative
-restored holds remain; R1 selective/positive old-domain recovery and later M0–M7
-remain separate required integration. No ordinary finite/physical-quota pass.
-
-Retained `83ec55303` shares root/source handle and read/drain memory bounds;
-cancelled/completed-unconsumed reads remain charged. `92dd41a48` arms before
-audited task creation; actual abort+join proves ONLY those pipes. `66291c562`
-owns prepare/root/settle-before-refund; `c39c30542` opens the lock-bound runtime
-before scratch/probes. Full recovered costs/edges/epochs/trials/paths remain
-cleanup-only UnknownHeld. Pending startup refusal is safe interim behavior,
-NOT selective recovery or unaffected serving. These bounds do not estimate
-process/containment kernel overhead or production demand.
-
-Released M4 `6169e9b18` remains integrated through `5d7eba0f1`: Store installers,
-Source guards and claim/Prepared/winner/adoption/fence authority, not worker RPC,
-advertisement or a normal Closed writer. Preserve ALL earlier anchors/receipts
-and the strict-default child failure. See [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md).
-
-See the [finite delivery table](ADAPTIVE-PLAYBACK-DELIVERY.md): implemented/missing
-M0–M7 deliverables, dependencies, owners, observable behavior and first finite VOD
-closure target. No milestone is accepted end-to-end; ordinary playback is still
-legacy. Complete source/review/fixes precede once-only qualification/merge, with
-no new handoff gate/deployment. Unsupported Windows has NO ledger, not zero usage.
-
-Runtime base `a06be68b90db5e32527f8f72a512ab09cce643fe`;
-document import `86687104def4cfd55f53dcf4a4eee08b171bdcfe`.
-Approved plan SHA-256 `be993867c7b1db568663f9d793fefbf87c9679e027f67064b7884d281209f77f`
-and acceptance SHA-256 `16868e4e3eca9d870f3f32e3bff5d47aa11d89ef8c00eecbed18d2c1fe55d6e0`
-were verified against the clone before work.
-
-Historical `rustup run` receipts lacked subprocess provenance and are NOT pinned.
-Corrected `evidence/compiler-pinned.json` supersedes `compiler-baseline.json`;
-baseline170s/current2s/Clippy72s and logs212528/212837/212839 remain retained.
-Current checks use explicit toolchain-bin PATH/RUSTC/RUSTDOC/cargo1.97.1. Durable
-build/scratch only. Ripwire absent; bounded source fallback is not absence proof.
+Earlier compiler receipts and source scopes remain historical evidence only.
+They do not cover the checkpoints above or the in-progress native archive check.
+See the [finite delivery table](ADAPTIVE-PLAYBACK-DELIVERY.md) for remaining
+adapters and the [custody limits](ADAPTIVE-RESOURCE-CUSTODY.md) for recovery
+scope.
 
 ## M0 current anchors and coverage
 

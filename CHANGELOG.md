@@ -19,6 +19,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Selected Linux finite software VOD retains client controls, terminal replies
+  and HTTP failure bodies within explicit memory partitions until their final
+  owners drop. Cancellation drains the original driver and native jobs before
+  settlement; retained output releases only producer resources. Custody startup
+  streams historical authority and indexes per-asset reconstruction while
+  preserving every historical migration row.
+
 - Web prepared quality switches reattach selected subtitles without cancelling
   the pending quality request or sending a contradictory commit to the server.
   Visible successors retain HLS failure recovery; established retries and

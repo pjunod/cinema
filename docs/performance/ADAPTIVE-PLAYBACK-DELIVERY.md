@@ -1,22 +1,22 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete. Source checkpoint
-`483f8b616be60b9bdec70cb9fe5c83fdb4a9ad95` passed exact native Linux
-core+daemon all-target compilation, including the existing cluster integration
-fixture feature (Rust 1.97.1, EXIT 0/201.830 seconds; log SHA-256
-`5f70f1d9e0316e6768d42c0b80b9cd69a08607074599010667b0ef3fb8aaf2a0`).
-The ordinary lifecycle and two-process restart fixture bodies compiled; neither
-ran. Stable host compilation passed at parent source
-`18648c5fdc03f80d74d78619bd93a4a030128415` in 158.391 seconds (log SHA-256
-`efc58e4f37f8aebbb20d38ab4365c68dff2b2e6ba3a3b92bbb74f251a5064436`);
-the descendant source change is a Linux-only fixture import. Static catalog
-and paperwork passed at that parent source (36 points/43 checks/4,206 files;
-15/15 bookkeeping checks). There are 459 authored regression anchors, NOT RUN.
-Source connects repeated unchanged-head recovered-R adoption, original engine
-check jobs through cancellation, explicit immutable metadata sizing/lifetime,
-and compact event-driven daemon cleanup. The original memory component remains
-at S until mutable reader/client-state accounting is bounded. All V1–V5 and
-R1/M0–M7 remain OPEN. Final independent actual Fable review, qualification,
+**Status:** open · implementation incomplete. Published source checkpoints
+`269923bb7` and `ee8cc4674` add bounded client payload partitions and indexed
+custody history. The corrected source checkpoint `26633a1a9d75e2631d52cbb1799e40ee10c99115`
+passed pinned Rust 1.97.1 native Linux daemon all-target compilation, including
+cluster fixtures, in 231.509 seconds (archive SHA-256
+`64edbf1ce91945e20f35cc31c5c606961f2e639a8705bf646c4e1d0f6b088227`, log
+SHA-256 `7ecb186feef175f59dd8d7d97cf3b974e0d22414c8ae827f87b44a0a440d8a46`,
+task receipt `direct-linux-26633a1a9d75-RESULT.json`). This retry
+compiled the daemon and its core dependency; it was not a core test-target
+PASS. The earlier host all-target core+daemon+cluster-fixture compilation
+passed in 112.938 seconds (log SHA-256
+`652e173afdea2098959099136202d057432d664592079b11efa659730a68bbeb`); host
+checks exclude Linux-only test bodies. Authored behavioral tests have not run.
+Candidate S now retains
+the selected path's enforced immutable, client, response and native partitions
+after known retirement; strict S<R memory-return behavior remains unrun. All
+V1–V5 and R1/M0–M7 remain OPEN. Independent final Fable review, qualification,
 fast lane and merge have not run. Draft PR #1248 carries the live owner/state.
 Primary owner: direct Codex harness
 (`/root`; actual model unspecified), sole integration writer. Work remains on
@@ -26,20 +26,33 @@ breakdown of the existing
 not new design, feature scope, a framework or another review gate.
 The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
+The current integration extends bounded reader/demand tables and transient
+control-clone reservations. HTTP terminal/error chunks retain their actual
+slot until the final `Bytes` alias drops; cancellation does not return credit
+early. Custody v6 streams the full operation history and validates indexed
+family/asset-operation membership while retaining bidirectional comparisons
+for old SQL rows; it adds no family/history count cap. Candidate S narrows its
+memory reservation only to enforced retained partitions after known retirement;
+the strict S<R behavior is still unrun. Direct-source adapter and root
+diagnostic-event edits remain uncommitted and are not covered by the native
+receipt above. Other pipelines, full memory limits, partial startup, cold
+cache/restart and client-state growth remain outside this selected path. No
+authored behavioral test has run.
+
 ## Authoritative first ordinary VOD source checklist
 
 All five items remain **OPEN**. The selected Linux ordinary software-transcode
 branch connects producer/source custody, counted HTTP, cleanup, R→S transfer,
-positively adopted cold-cache reuse and protection from legacy deletion. The
-complete allocation profile and remaining restart/task contracts are unfinished;
-this path is not behavior-verified or qualified.
+same-process reuse and protection from legacy deletion. Cold-cache/restart
+adoption, the complete allocation profile and remaining task contracts are
+unfinished; this path is not behavior-verified or qualified.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
 | V1 — admission/source — OPEN | The selected Linux ordinary software-transcode branch enters finite preparation with its held source and original producer ownership. Other recipes still use the legacy path. The full production capacity/memory profile, partial-start closure and cold restart/cache adoption remain open. |
 | V2 — held output/durability — OPEN | The selected branch uses the same held child, selected-ID publisher and sync jobs. Counted HTTP selection and actual S cleanup/R→S transfer are connected. Full memory accounting and other legacy recipes remain outside this path; this does not close V2. |
 | V3 — producer/stop — OPEN | The selected branch joins its original writer/root and already-registered native jobs outside the bundle lock. Stop retains the original task/control through registration, and source-parent closure uses its original job. Partial-start/inherited-copy closure and the complete memory profile remain unresolved; the branch is not qualified. |
-| V4 — retained output — OPEN | The selected branch connects counted HTTP readers, cleanup and one journal R→S transfer to the retained native output. The original memory component remains held for S while metadata coverage is completed; storage, process and task components can shrink only through the known transfer. Unknown cleanup/commit keeps ownership charged. Cold restart/cache adoption and broader recipe integration remain open. |
+| V4 — retained output — OPEN | The selected branch connects counted HTTP readers, cleanup and one journal R→S transfer to the retained native output. After known retirement, S retains the enforced immutable metadata, client, response and native partitions; strict S<R memory-return behavior remains unrun. Producer-only storage/process/task components shrink only through known transfer. Unknown cleanup/commit keeps ownership charged. Cold restart/cache adoption and broader recipe integration remain open. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
 Current sequence: complete the selected ordinary branch’s remaining capacity,
@@ -78,23 +91,16 @@ charges and refuse reuse. Obsolete mismatched recovered-cache eviction remains
 unimplemented after automatic approval review rejected that destructive change;
 no rejected edit or live deletion was performed.
 
-Engine freshness now uses the original registered check worker across cancelled
-waits, with explicit once-only digest-file close. Unknown close/join prevents
-settlement. Explicit requested-capacity helpers describe immutable daemon
-metadata. A separate lifetime lease keeps that metadata charged until actual
-rendition owners drain; a compact closing owner uses the existing maintenance
-pass to retry original cleanup without holding the build gate over that drain.
-Known prepared cancellation disposes its planning cycle and settled registry
-entry. Completed finite output with no producer reports a missing publication
-instead of arming an unsatisfiable demand wait.
-
-Source checkpoint and compiler limits are pinned above. No behavioral result,
-final review or milestone closure follows from compilation. Reader maps,
-per-reader marker state and remaining finite demand-state bounds still prevent
-a truthful narrower S memory component; the native lifecycle fixture's strict
-memory-return criterion is still a required future qualification. Other agreed
-pipeline adapters, live learning/policy, worker preparation/placement, selective
-startup and complete operations/client explanations remain below.
+Engine freshness uses the original registered check worker across cancelled
+waits, and settlement requires its known close/join. Immutable retained metadata
+has requested-capacity accounting and a lifetime lease. Native archive checking
+is pending for the exact current source; host compilation alone does not qualify
+the native lifecycle or strict S<R behavior. Direct-source adapter work is in
+progress. Same-process seeks reuse the current full-plan rendition owner; cold
+cache/restart adoption remains open. M1 sampling/diagnostics cover the selected
+finite writer only; live policy does not yet consume those observations. All
+authored tests remain unrun, all milestones remain open, and final review and
+qualification have not started.
 
 ## Actual distance to usable playback
 
