@@ -23,6 +23,20 @@ struct SyncResult {
     result: std::io::Result<()>,
 }
 impl Sync {
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn retained_heap_bytes(
+        &self,
+    ) -> Result<usize, OperationError> {
+        if !self.ready_for_transfer() || self.request.is_some() {
+            return Err(OperationError::State);
+        }
+        self.files
+            .capacity()
+            .checked_mul(std::mem::size_of::<v2::Id>())
+            .and_then(|bytes| {
+                bytes.checked_add(self.result.as_ref()?.native.retained_heap_bytes()?)
+            })
+            .ok_or(OperationError::State)
+    }
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn ready_for_transfer(
         &self,
     ) -> bool {

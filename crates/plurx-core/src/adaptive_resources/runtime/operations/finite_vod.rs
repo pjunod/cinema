@@ -721,7 +721,9 @@ impl NodeResourceRuntime {
             if joined.selection() != task {
                 return Err(OperationError::State);
             }
-            Some(joined.summary()?)
+            let summary = joined.summary()?;
+            control.release_joined_task()?;
+            Some(summary)
         } else {
             None
         };

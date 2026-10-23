@@ -971,6 +971,51 @@ impl Encoding {
             "VOD producer resource phase");
     }
 
+    /// Durable finite output updates service diagnostics independently of the
+    /// legacy recipe-proof window. It cannot mint compatibility or admission.
+    pub(crate) fn note_finite_resource_segment(
+        &self,
+        generation: u64,
+        entry: u32,
+        end_ms: i64,
+        phase: plurx_core::resource_observation::WorkPhase,
+    ) {
+        use plurx_core::process::observation::{Metric, UnknownReason};
+        use plurx_core::resource_observation::{ServiceUnit, WorkSample};
+        let mut window = self.active_production.lock().expect("active production");
+        if window
+            .service_entry
+            .is_some_and(|previous| previous.checked_add(1) != Some(entry))
+        {
+            window.service = Default::default();
+        }
+        window.service_entry = Some(entry);
+        let Ok(completed) = u64::try_from(end_ms) else {
+            window.service = Default::default();
+            window.service_entry = None;
+            return;
+        };
+        window.service.observe(WorkSample {
+            generation,
+            phase,
+            unit: ServiceUnit::MediaMilliseconds,
+            completed,
+            deadline_slack_ms: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            queued_bytes: Metric::Unknown(UnknownReason::InsufficientEvidence),
+            at: Instant::now(),
+        });
+    }
+
+    pub(crate) fn resource_service_observation(
+        &self,
+    ) -> Option<plurx_core::resource_observation::ServiceObservation> {
+        self.active_production
+            .lock()
+            .ok()?
+            .service
+            .snapshot(Instant::now())
+    }
+
     pub(crate) fn reset_active_production(&self, generation: u64, active: bool) {
         let mut window = self.active_production.lock().expect("active production");
         *window = ActiveProductionWindow {

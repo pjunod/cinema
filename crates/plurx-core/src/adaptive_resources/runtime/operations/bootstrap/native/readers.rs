@@ -16,6 +16,13 @@ struct RecycledBuffer {
     slot: Mutex<Option<Vec<u8>>>,
     notify: Arc<Notify>,
 }
+pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn recycled_structural_bytes(
+) -> Option<usize> {
+    std::mem::size_of::<RecycledBuffer>()
+        .checked_add(2 * std::mem::size_of::<usize>())?
+        .checked_add(std::mem::size_of::<Notify>())?
+        .checked_add(2 * std::mem::size_of::<usize>())
+}
 
 /// One acknowledged range's original fixed-capacity buffer. It contains no
 /// native handle. Dropping it returns the buffer to the SAME reader cell; a
@@ -113,6 +120,37 @@ pub(in crate::adaptive_resources::runtime::operations) struct ReaderCell {
     read_acknowledged: bool,
     close_fact: Option<(v2::Id, v2::Id, bool)>,
     close_acknowledged: bool,
+}
+impl ReaderCell {
+    /// Non-buffer metadata only. The fixed-capacity positional payload stays
+    /// in the separate reader resident-memory partition during R and S.
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn retained_metadata_bytes(
+        &self,
+    ) -> Result<usize, OperationError> {
+        if self.pending.is_some() || self.failed_join {
+            return Err(OperationError::State);
+        }
+        let mut bytes = self
+            .basename
+            .as_bytes_with_nul()
+            .len()
+            .checked_add(
+                super::native_metadata_bytes(&self.expected_native).ok_or(OperationError::State)?,
+            )
+            .and_then(|n| n.checked_add(super::directory_metadata_bytes(&self.directory_observed)?))
+            .and_then(|n| {
+                n.checked_add(
+                    std::mem::size_of::<RecycledBuffer>() + 2 * std::mem::size_of::<usize>(),
+                )
+            })
+            .ok_or(OperationError::State)?;
+        if let Some(opened) = &self.opened {
+            bytes = bytes
+                .checked_add(super::native_metadata_bytes(opened).ok_or(OperationError::State)?)
+                .ok_or(OperationError::State)?;
+        }
+        Ok(bytes)
+    }
 }
 
 fn invalid() -> OperationError {

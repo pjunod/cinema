@@ -24,6 +24,12 @@ impl FinitePublication {
         }
     }
 
+    pub(super) fn requested_heap_bytes(&self) -> Option<usize> {
+        // Self and pending's inline ticket are in PendingWrites. Output
+        // selectors clone without allocating; count their shared path once.
+        self.output.requested_heap_bytes()
+    }
+
     pub(super) async fn join(&self) -> io::Result<()> {
         let mut pending = self.pending.lock().await;
         self.finish_pending(&mut pending).await

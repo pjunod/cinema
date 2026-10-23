@@ -131,7 +131,18 @@ impl RenditionDir {
     }
 
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
-        Self::projected_heap_bytes(self.dir.capacity())
+        let bytes = Self::projected_heap_bytes(self.dir.capacity())?;
+        #[cfg(unix)]
+        let bytes = match &self.writes.finite {
+            Some(finite) => bytes.checked_add(finite.requested_heap_bytes()?)?,
+            None => bytes,
+        };
+        #[cfg(target_os = "linux")]
+        let bytes = match &self.writes.finite_producer {
+            Some(producer) => bytes.checked_add(producer.requested_heap_bytes()?)?,
+            None => bytes,
+        };
+        Some(bytes)
     }
 
     pub(crate) fn projected_heap_bytes(path_capacity: usize) -> Option<usize> {

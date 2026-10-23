@@ -291,6 +291,25 @@ function playbackModeDetail(player){
 function statsCount(value){
   return String(Math.max(0,Math.trunc(Number(value)||0))).replace(/\B(?=(\d{3})+(?!\d))/g," ");
 }
+function statsResourceService(service,healthAgeMs){
+  if(!service||typeof service!=="object") return "Work unavailable · speed unavailable";
+  const phase=({preparing:"preparing",producing:"producing",input_paced:"input paced",
+    buffer_paced:"buffer paced",client_backpressured:"client backpressured",
+    source_backpressured:"source backpressured",paused:"paused",retrying:"retrying",retiring:"retiring"})[service.phase]||"unavailable";
+  const metric=service.units_per_second;
+  const fresh=Number.isSafeInteger(service.interval_ms)&&service.interval_ms>0&&service.interval_ms<=15000&&
+    Number.isFinite(healthAgeMs)&&healthAgeMs>=0&&healthAgeMs<=15000;
+  let speed="unavailable";
+  if(service.phase==="producing"&&service.unit==="media_milliseconds"&&metric&&metric.state==="known"&&
+      Number.isSafeInteger(metric.value)&&metric.value>=0&&fresh){
+    speed=`${(metric.value/1000).toFixed(2)}×`;
+  }else if(metric&&metric.state==="unknown"&&typeof metric.value==="string"&&/^[a-z_]+$/.test(metric.value)){
+    speed=`unavailable (${metric.value})`;
+  }else if(!fresh){
+    speed="unavailable (stale)";
+  }
+  return `Work ${phase} · speed ${speed}`;
+}
 function statsServerReady(health){
   if(!health||health.server_ready_state==null) return {value:"Unavailable",state:"Unavailable"};
   const state=String(health.server_ready_state).toLowerCase();
@@ -469,7 +488,10 @@ function playbackStatsTelemetry(){
     status,encoder,encoder_note:stream?.pipeline_label?`Renderer: ${stream.pipeline_label} · ${stream.provenance||"Attached recipe"}`:null,encode_speed:speed==null?null:`${speed.toFixed(2)}×${h&&h.recent_speed==null?" (avg)":""}`,
     production_actual:h&&h.production_ahead_seconds!=null?`${Math.max(0,h.production_ahead_seconds).toFixed(1)} s`:null,
     production_target:h&&h.production_target_seconds!=null?`${Math.max(0,h.production_target_seconds).toFixed(1)} s`:null,
-    producer_state:h&&h.producer_state?String(h.producer_state):null,
+    producer_state:h&&Object.prototype.hasOwnProperty.call(h,"resource_service")?
+      [h.producer_state?String(h.producer_state):null,
+        statsResourceService(h.resource_service,p.healthObservedAt==null?null:Math.max(0,Math.round(performance.now()-p.healthObservedAt)))].filter(Boolean).join(" · "):
+      h&&h.producer_state?String(h.producer_state):null,
     fetch_reserve:h&&h.ahead_seconds!=null?`${Math.max(0,h.ahead_seconds).toFixed(1)} s`:null,
     fetch_reserve_note:serverAheadNote,ahead_bytes:h&&h.ahead_bytes!=null?(fmtBytes(h.ahead_bytes)||"0 B"):null,
     produced:h&&h.out_time_ms!=null?clockFromSec(h.out_time_ms/1000):null,

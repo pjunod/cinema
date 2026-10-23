@@ -28,6 +28,20 @@ struct PublicationResult {
     result: std::io::Result<()>,
 }
 impl Publication {
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn retained_heap_bytes(
+        &self,
+    ) -> Result<usize, OperationError> {
+        if !self.ready_for_transfer() || self.request.is_some() {
+            return Err(OperationError::State);
+        }
+        self.result
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .native
+            .retained_heap_bytes()
+            .and_then(|bytes| bytes.checked_add(self.content_binding.capacity()))
+            .ok_or(OperationError::State)
+    }
     pub(super) fn acknowledged(&self) -> bool {
         self.acknowledged
     }

@@ -31,6 +31,20 @@ pub(super) struct BootstrapMember {
     retirement: Option<retirement::CleanupRun>,
 }
 
+/// BTree node storage reserves eleven entries, including unused slots. One
+/// leaf plus one internal node per item is a conservative sparse-tree bound.
+/// The requested-capacity scope excludes allocator headers and RSS.
+pub(super) fn btree_requested_upper_bound<K, V>(len: usize) -> Option<usize> {
+    if len == 0 {
+        return Some(0);
+    }
+    let entry = std::mem::size_of::<K>().checked_add(std::mem::size_of::<V>())?;
+    let node = entry
+        .checked_mul(11)?
+        .checked_add(16 * std::mem::size_of::<usize>())?;
+    node.checked_mul(len)?.checked_mul(2)
+}
+
 #[cfg(unix)]
 pub(super) enum NeverRootBootstrap {
     UnarmedPlaceholder,
@@ -48,6 +62,9 @@ pub(super) struct PreparedBootstrapTransfer {
 
 #[cfg(unix)]
 impl PreparedBootstrapTransfer {
+    pub(super) fn retained_plan(&self) -> &ScratchPlanV3 {
+        &self.target_plan
+    }
     pub(super) fn resident_inventory_bytes(&self) -> Result<u64, OperationError> {
         self.target_fold
             .resident_inventory_bytes()
@@ -76,6 +93,42 @@ impl PreparedBootstrapTransfer {
 }
 
 impl BootstrapMember {
+    /// Dynamic native-cell metadata surviving the exact R→S move. The staged
+    /// fold inventory and each reader's fixed payload have distinct charged
+    /// partitions and are deliberately excluded here.
+    #[cfg(unix)]
+    pub(super) fn retained_native_metadata_bytes(&self) -> Result<usize, OperationError> {
+        if self.change.is_some() || self.next_arm.is_some() || self.retirement.is_some() {
+            return Err(OperationError::State);
+        }
+        let mut bytes = self
+            .native_root
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .retained_heap_bytes()?;
+        if let Some(publication) = &self.publication {
+            bytes = bytes
+                .checked_add(publication.retained_heap_bytes()?)
+                .ok_or(OperationError::State)?;
+        }
+        if let Some(sync) = &self.sync {
+            bytes = bytes
+                .checked_add(sync.retained_heap_bytes()?)
+                .ok_or(OperationError::State)?;
+        }
+        bytes = bytes
+            .checked_add(
+                btree_requested_upper_bound::<Uuid, readers::ReaderEntry>(self.readers.len())
+                    .ok_or(OperationError::State)?,
+            )
+            .ok_or(OperationError::State)?;
+        for reader in self.readers.values() {
+            bytes = bytes
+                .checked_add(reader.retained_metadata_bytes()?)
+                .ok_or(OperationError::State)?;
+        }
+        Ok(bytes)
+    }
     #[cfg(unix)]
     pub(super) fn has_root_arm(&self) -> bool {
         self.root_arm.is_some()

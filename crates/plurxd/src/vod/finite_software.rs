@@ -27,6 +27,10 @@ const ENCODED_MARKER_BYTES: u64 = 4 * 1024;
 /// only core's original receipts and known journal commits release resources.
 pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
+    // Captured before publication. Source-spec paths are only removed and
+    // source Vec capacities never grow; no live owner lock is needed while
+    // the original driver holds it through production and retirement.
+    owner_heap_bound: Option<usize>,
     control: SoftwareVodControl,
     stage: AtomicU8,
     produced_through: AtomicU64,
@@ -69,6 +73,7 @@ impl FiniteSoftwareProducer {
     pub(crate) fn new(owner: SoftwareVodOwner) -> Self {
         Self {
             control: owner.control(),
+            owner_heap_bound: owner.requested_heap_bytes(),
             owner: Mutex::new(owner),
             stage: AtomicU8::new(PREPARED),
             produced_through: AtomicU64::new(0),
@@ -77,6 +82,19 @@ impl FiniteSoftwareProducer {
             driver_change: Notify::new(),
         }
     }
+    /// Dynamic application heap retained by the one Arc producer. Its owner
+    /// helper excludes the path allocation shared with FiniteOutput; the
+    /// directory counts that allocation exactly once.
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        Self::projected_heap_bytes(self.owner_heap_bound?)
+    }
+
+    fn projected_heap_bytes(owner_heap: usize) -> Option<usize> {
+        std::mem::size_of::<Self>()
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(owner_heap)
+    }
+
     pub(super) fn begin_driver(self: &Arc<Self>) -> FiniteDriverCompletion {
         assert_eq!(
             self.driver_state.compare_exchange(
@@ -300,6 +318,13 @@ pub(super) async fn build(
         .await
         .map_err(|error| format!("recovered finite software output is unresolved: {error}"))?;
     if let Some(output) = recovered {
+        let projected_metadata = projected_metadata
+            .checked_add(
+                output
+                    .requested_heap_bytes()
+                    .ok_or("recovered finite output metadata overflowed")?,
+            )
+            .ok_or("recovered finite metadata projection overflowed")?;
         let (metadata_lease, client_lease) = output
             .reserve_metadata_partitions(
                 projected_metadata,
@@ -404,10 +429,31 @@ pub(super) async fn build(
         .await
         .map_err(|error| format!("finite admission observer failed: {error}"))?
         .map_err(|error| format!("observing finite admission: {error:?}"))?;
-    let capacity = runtime
+    let accounting = runtime
         .accounting()
-        .map_err(|error| format!("reading finite admission: {error:?}"))?
-        .capacity;
+        .map_err(|error| format!("reading finite admission: {error:?}"))?;
+    // Retained/shared execution domains keep their own commitments. Plan
+    // encoder work against the unspent hard CPU budget; reservation rechecks
+    // this under the ledger lock, so concurrent preparation cannot overspend
+    // the same headroom. This is not an idle-CPU or history prediction.
+    let mut capacity = accounting.capacity;
+    capacity.cpu_ns_per_second = match capacity.cpu_ns_per_second {
+        plurx_core::process::observation::Metric::Known(cpu) => {
+            plurx_core::process::observation::Metric::Known(
+                cpu.saturating_sub(accounting.used.cpu_ns_per_second),
+            )
+        }
+        unknown => unknown,
+    };
+    if matches!(
+        capacity.cpu_ns_per_second,
+        plurx_core::process::observation::Metric::Known(0)
+    ) {
+        return Err(crate::transcode::vod_refusal_error(
+            "vod_family_capacity",
+            "finite software admission refused: no unspent hard CPU budget",
+        ));
+    }
     let request = finite_profile::compile(
         shared,
         key,
@@ -433,6 +479,29 @@ pub(super) async fn build(
             }
         })?;
     let output = owner.output();
+    // The original producer reservation is already charged. Measure its
+    // retained application allocations before reserving metadata or building
+    // any daemon owner; the actual post-build fit uses these same objects.
+    let projection = (|| {
+        projected_metadata
+            .checked_add(output.requested_heap_bytes()?)?
+            .checked_add(FiniteSoftwareProducer::projected_heap_bytes(
+                owner.requested_heap_bytes()?,
+            )?)
+    })();
+    let Some(projected_metadata) = projection else {
+        // Preparation already owns a charged journal operation. Even a
+        // metadata-fit refusal must retain that exact owner for cleanup.
+        shared
+            .retain_unattached_finite(
+                key,
+                None,
+                output,
+                Arc::new(FiniteSoftwareProducer::new(owner)),
+            )
+            .await;
+        return Err("finite owner metadata projection overflowed".into());
+    };
     let (metadata_lease, client_lease) = match output
         .reserve_metadata_partitions(
             projected_metadata,
@@ -513,6 +582,10 @@ async fn run_body(
         return;
     }
     producer.stage.store(PREPARING, Release);
+    note_resource_phase(
+        &rendition,
+        plurx_core::resource_observation::WorkPhase::Preparing,
+    );
     let Some(mut events) = owner.take_events() else {
         return;
     };
@@ -537,6 +610,10 @@ async fn run_body(
     }
     producer.stage.store(RUNNING, Release);
     let completion = join_and_observe(&shared, &rendition, &producer, &owner, &mut events).await;
+    // The original join drained the terminal notifications. Destroy the
+    // receiver before S so completed producer event-channel allocations do
+    // not survive the return of producer-only memory.
+    drop(events);
     let success = completion.as_ref().is_ok_and(|completion| {
         completion
             .root_status
@@ -572,6 +649,10 @@ async fn run_body(
     // Tokio actually drops the cancelled future.
     rendition.clear_all_demands();
     producer.stage.store(RETIRING, Release);
+    note_resource_phase(
+        &rendition,
+        plurx_core::resource_observation::WorkPhase::Retiring,
+    );
     let deadline = Instant::now() + rendition.materialize_budget;
     let retired = async {
         owner.freeze_output(deadline).await?;
@@ -647,6 +728,10 @@ fn fail(
     cause: String,
 ) {
     producer.stage.store(FAILED, Release);
+    note_resource_phase(
+        rendition,
+        plurx_core::resource_observation::WorkPhase::Retiring,
+    );
     let _ = producer.request_stop();
     record_failure(
         shared,
@@ -654,6 +739,12 @@ fn fail(
         crate::playback_control::ProducerDecisionReason::ProducerWriteFailed,
         cause,
     );
+}
+
+fn note_resource_phase(rendition: &Rendition, phase: plurx_core::resource_observation::WorkPhase) {
+    if let Some(encoding) = &rendition.recipe.encoding {
+        encoding.note_resource_phase(rendition.gen_epoch.load(Acquire), phase);
+    }
 }
 
 async fn observe(
@@ -708,6 +799,25 @@ async fn observe(
                 producer
                     .produced_through
                     .store(u64::from(entry) + 1, Release);
+                if let (Some(encoding), Some(planned)) =
+                    (&rendition.recipe.encoding, rendition.plan.entry(entry))
+                {
+                    // Only this fresh durably published event advances useful
+                    // output. Retained/cache reads never enter this window.
+                    // The first output establishes the producing baseline,
+                    // excluding startup; a held producer is not spare capacity.
+                    let phase = if producer.suspended.load(Acquire) {
+                        plurx_core::resource_observation::WorkPhase::BufferPaced
+                    } else {
+                        plurx_core::resource_observation::WorkPhase::Producing
+                    };
+                    encoding.note_finite_resource_segment(
+                        epoch,
+                        entry,
+                        ticks_to_ms(planned.end_ticks(), rendition.timescale),
+                        phase,
+                    );
+                }
             }
             shared.working_set.fetch_add(bytes, Relaxed);
             rendition.clear_demand(entry);

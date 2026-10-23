@@ -134,6 +134,11 @@ impl SoftwareVodRequest {
         producer: &SoftwareAvcPumpPlan,
         output: &FiniteOutputLimits,
     ) -> std::io::Result<u64> {
+        let retained_structure =
+            super::operations::finite_retirement::finite_retained_structural_bytes(
+                output.reader_leases,
+            )
+            .ok_or_else(|| std::io::Error::other("finite retained layout overflow"))?;
         producer
             .minimum_memory_bytes()?
             .checked_add(
@@ -146,6 +151,8 @@ impl SoftwareVodRequest {
             .and_then(|bytes| bytes.checked_add(output.bootstrap_memory_bytes))
             .and_then(|bytes| bytes.checked_add(output.retained_metadata_bytes))
             .and_then(|bytes| bytes.checked_add(output.client_state_bytes))
+            .and_then(|bytes| bytes.checked_add(retained_structure))
+            .and_then(|bytes| bytes.checked_add(64 * 1024))
             .ok_or_else(|| std::io::Error::other("finite memory overflow"))
     }
 }
@@ -208,6 +215,17 @@ impl FiniteControl {
             abort.abort();
         }
         *task = Some(abort);
+        Ok(())
+    }
+    /// The original producer task has positively joined. Its abort selection
+    /// is no longer needed to signal native work and must not persist in S.
+    pub(in crate::adaptive_resources::runtime) fn release_joined_task(
+        &self,
+    ) -> std::io::Result<()> {
+        self.task
+            .lock()
+            .map_err(|_| std::io::Error::other("finite task control unavailable"))?
+            .take();
         Ok(())
     }
     fn suspend(&self, suspended: bool) -> std::io::Result<()> {
@@ -274,7 +292,7 @@ pub struct SoftwareVodOwner {
     source_specs: Vec<Option<SourceOpenSpec>>,
     media_source_count: usize,
     scratch_member: Uuid,
-    directory_path: PathBuf,
+    directory_path: Arc<PathBuf>,
     encoded_process_marker: bool,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
     control: Arc<FiniteControl>,
@@ -287,7 +305,7 @@ pub struct FiniteOutput {
     runtime: Arc<NodeResourceRuntime>,
     preparation: OwnedPreparation,
     member: Uuid,
-    directory_path: PathBuf,
+    directory_path: Arc<PathBuf>,
     encoded_process_marker: bool,
 }
 
@@ -323,6 +341,14 @@ impl FiniteFile {
 }
 
 impl FiniteOutput {
+    /// Requested heap unique to the shared directory selector. Additional
+    /// FiniteOutput clones share this allocation; their inline frames are
+    /// counted by their callers. The path is immutable for its whole lifetime.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        std::mem::size_of::<PathBuf>()
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(self.directory_path.capacity())
+    }
     /// Recheck the same originally held source files around publication. A
     /// latched drift prevents later freezing/retirement of mixed-source bytes.
     async fn validate_sources(&self) -> Result<(), FiniteVodError> {
@@ -558,7 +584,7 @@ impl NodeResourceRuntime {
                 runtime: self.clone(),
                 preparation,
                 member,
-                directory_path,
+                directory_path: Arc::new(directory_path),
                 encoded_process_marker,
             },
         ))
@@ -566,6 +592,26 @@ impl NodeResourceRuntime {
 }
 
 impl SoftwareVodOwner {
+    /// Requested dynamic heap retained by this owner through R. Source specs
+    /// are only taken from their slots, so this value cannot grow after
+    /// construction. The directory Arc payload is counted once by the output.
+    pub fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .source_members
+            .capacity()
+            .checked_mul(std::mem::size_of::<Uuid>())?
+            .checked_add(
+                self.source_specs
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Option<SourceOpenSpec>>())?,
+            )?
+            .checked_add(std::mem::size_of::<FiniteControl>())?
+            .checked_add(2 * std::mem::size_of::<usize>())?;
+        for spec in self.source_specs.iter().flatten() {
+            bytes = bytes.checked_add(spec.path.capacity())?;
+        }
+        Some(bytes)
+    }
     pub fn control(&self) -> SoftwareVodControl {
         SoftwareVodControl(Arc::clone(&self.control))
     }
@@ -867,7 +913,7 @@ impl NodeResourceRuntime {
         let scratch_member = id();
         let asset = id();
         let protected_child = format!("{root}/{}", request.rendition_id);
-        let directory_path = PathBuf::from(&protected_child);
+        let directory_path = Arc::new(PathBuf::from(&protected_child));
         let slot = |member_id, protected_paths| v2::MemberSlot {
             member_id,
             owned_by: None,

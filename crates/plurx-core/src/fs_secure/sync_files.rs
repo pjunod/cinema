@@ -111,6 +111,18 @@ pub struct SyncIo {
 }
 
 impl SyncIo {
+    /// Requested file-name/vector heap retained by the original completed
+    /// sync cell. No native close authority follows from this measurement.
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = self
+            .files
+            .capacity()
+            .checked_mul(std::mem::size_of::<SyncFile>())?;
+        for file in &self.files {
+            bytes = bytes.checked_add(file.name.as_bytes_with_nul().len())?;
+        }
+        Some(bytes)
+    }
     /// Move the caller's already-held directory into this operation.
     pub fn from_held_directory(request: SyncRequest, directory: File) -> Self {
         Self {

@@ -96,6 +96,45 @@ pub(super) struct ReaderEntry {
     opened: bool,
     terminal: bool,
 }
+/// Maximum fixed metadata for the configured concurrent reader count. Each
+/// real native identity/name remains checked by the 64KiB dynamic allowance;
+/// each fixed read payload remains in the scratch resident-memory partition.
+pub(in crate::adaptive_resources::runtime::operations) fn retained_reader_structural_bytes(
+    max_readers: u32,
+) -> Option<usize> {
+    let count = usize::try_from(max_readers).ok()?;
+    let map = super::btree_requested_upper_bound::<Uuid, ReaderEntry>(count)?;
+    let control = std::mem::size_of::<ReaderControl>()
+        .checked_add(2 * std::mem::size_of::<usize>())?
+        .checked_add(std::mem::size_of::<tokio::sync::Notify>())?
+        .checked_add(2 * std::mem::size_of::<usize>())?;
+    let recycled = native::readers::recycled_structural_bytes()?;
+    map.checked_add(count.checked_mul(control.checked_add(recycled)?)?)
+}
+impl ReaderEntry {
+    pub(super) fn retained_metadata_bytes(&self) -> Result<usize, OperationError> {
+        if self.current.is_some() {
+            return Err(OperationError::State);
+        }
+        let control = std::mem::size_of::<ReaderControl>()
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .and_then(|n| {
+                n.checked_add(
+                    std::mem::size_of::<tokio::sync::Notify>() + 2 * std::mem::size_of::<usize>(),
+                )
+            })
+            .ok_or(OperationError::State)?;
+        control
+            .checked_add(
+                self.cell
+                    .as_ref()
+                    .map(|cell| cell.retained_metadata_bytes())
+                    .transpose()?
+                    .unwrap_or_default(),
+            )
+            .ok_or(OperationError::State)
+    }
+}
 /// Retained retirement may discard only fully acknowledged terminal rows.
 /// A live response chunk keeps its original ReaderCell/buffer and refuses this.
 pub(super) fn clear_terminal_readers(

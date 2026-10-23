@@ -1907,6 +1907,16 @@ presentation, and its arm carries `producer_state`, `producer_hold`,
 `planned_segments`/`_bytes`, `working_set_bytes` and its budget, `admitted`,
 `delivered_bytes`, `delivered_bps`, `suspended`, `final`.
 
+Selected finite software producers also expose optional `resource_service`:
+`generation`, `phase`, `unit`, `completed`, `units_per_second`, `interval_ms`,
+`advancing_samples`, `deadline_slack_ms` and `queued_bytes`. Metrics are tagged
+`{"state":"known","value":...}` or `{"state":"unknown","value":"reason"}`.
+Only fresh durable output advances this observation. Startup, pacing and
+retained-cache reads do not establish encoder capacity; unknown speed is never
+zero. Media-millisecond rates divided by 1000 give realtime multiples. The web
+player's Producer row displays this diagnostic when present; older responses
+retain their existing display. It conveys no reservation or compatibility proof.
+
 `published_end_ms` and `ready_ahead_end_ms` answer different questions.
 `published_end_ms` is how much of the title exists, measured from segment 0;
 `ready_ahead_end_ms` is the end of the contiguous run measured from the

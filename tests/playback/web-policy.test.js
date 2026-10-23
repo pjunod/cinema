@@ -4131,6 +4131,7 @@ test("playback-info row builders follow the shared web field list in fixture ord
 function attachedOutputTelemetry(player){
   return new PlaybackContextFunction("player", "policy", `
     const PLAYER=player, PlaybackPolicy=policy, PLAYBACK_SURFACE={surface:null}, STATS_MODE="debug";
+    const performance={now:()=>10000};
     const video={videoWidth:2583,videoHeight:1080,paused:true,readyState:4};
     const document={getElementById:()=>video};
     const playbackOwnsAttachedMedia=()=>true, pbTotalSec=()=>600, pbShownSec=()=>300;
@@ -4142,6 +4143,7 @@ function attachedOutputTelemetry(player){
     const fmtMbps=String,fmtBytes=String,fmtChannels=String,langName=String;
     const hdrLabel=String,statsRunwayTone=()=>"good";
     ${shippedSource("statsCount")}
+    ${shippedSource("statsResourceService")}
     ${shippedSource("statsServerReady")}
     ${shippedSource("statsHttpWait")}
     ${shippedSource("statsToneMapPeak")}
@@ -4166,6 +4168,40 @@ test("attached cached output reports its frozen frame and Metal renderer", () =>
   assert.equal(observed.stream_format,"H264");
   assert.equal(observed.encoder,"h264_videotoolbox");
   assert.match(observed.encoder_note,/GPU tone-map \(Metal\)/);
+});
+
+test("resource service stats require fresh known media speed and preserve legacy producer rows", () => {
+  const player={fileId:15,sessionId:"service-a",vod:true,method:"transcode",healthObservedAt:9000,
+    health:{id:"service-a",producer_state:"producing",resource_service:{phase:"producing",unit:"media_milliseconds",
+      units_per_second:{state:"known",value:1250},interval_ms:2000}}};
+  assert.match(attachedOutputTelemetry(player).producer_state,/Work producing · speed 1\.25×/);
+
+  player.health.resource_service={phase:"buffer_paced",unit:"bytes",units_per_second:{state:"known",value:0},interval_ms:2000};
+  assert.match(attachedOutputTelemetry(player).producer_state,/Work buffer paced · speed unavailable/);
+  assert.doesNotMatch(attachedOutputTelemetry(player).producer_state,/0\.00×/);
+
+  player.health.resource_service={phase:"buffer_paced",unit:"media_milliseconds",
+    units_per_second:{state:"known",value:1250},interval_ms:2000};
+  assert.match(attachedOutputTelemetry(player).producer_state,/Work buffer paced · speed unavailable/);
+  assert.doesNotMatch(attachedOutputTelemetry(player).producer_state,/1\.25×/);
+
+  player.health.resource_service={phase:"producing",unit:"media_milliseconds",
+    units_per_second:{state:"unknown",value:"stale"},interval_ms:2000};
+  assert.match(attachedOutputTelemetry(player).producer_state,/speed unavailable \(stale\)/);
+  player.health.resource_service={phase:"producing",unit:"media_milliseconds",
+    units_per_second:{state:"unknown",value:"insufficient_evidence"},interval_ms:2000};
+  assert.match(attachedOutputTelemetry(player).producer_state,/speed unavailable \(insufficient_evidence\)/);
+
+  player.health.resource_service={phase:"producing",unit:"media_milliseconds",
+    units_per_second:{state:"known",value:1250},interval_ms:2000};
+  player.healthObservedAt=0;
+  assert.match(attachedOutputTelemetry(player).producer_state,/speed unavailable \(stale\)/);
+
+  player.healthObservedAt=9000;
+  delete player.health.resource_service;
+  assert.equal(attachedOutputTelemetry(player).producer_state,"producing");
+  player.health.resource_service=null;
+  assert.match(attachedOutputTelemetry(player).producer_state,/Work unavailable · speed unavailable/);
 });
 
 

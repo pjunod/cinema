@@ -27,7 +27,57 @@ struct RootResult {
     files: BTreeMap<v2::Id, File>,
     audit: BootstrapResultV1,
 }
+pub(super) fn native_metadata_bytes(native: &v2::NativeObject) -> Option<usize> {
+    let mut bytes = 0usize;
+    for value in [
+        &native.device,
+        &native.inode,
+        &native.mount_id,
+        &native.filesystem_domain.mount_namespace,
+    ] {
+        if let v2::NativeValue::Unknown { reason } = value {
+            bytes = bytes.checked_add(reason.capacity())?;
+        }
+    }
+    bytes.checked_add(match &native.filesystem_domain.os_boot {
+        crate::resource_custody::BootIdentity::Known { provider, .. } => provider.capacity(),
+        crate::resource_custody::BootIdentity::Unknown { reason } => reason.capacity(),
+    })
+}
+
+pub(super) fn directory_metadata_bytes(
+    directory: &v2::scratch::DirectoryObservedV1,
+) -> Option<usize> {
+    directory
+        .held_copy_ids
+        .capacity()
+        .checked_mul(std::mem::size_of::<v2::Id>())?
+        .checked_add(native_metadata_bytes(&directory.native_object)?)
+}
 impl RootCell {
+    pub(super) fn retained_heap_bytes(&self) -> Result<usize, OperationError> {
+        if self.pending.is_some() || self.failed_join {
+            return Err(OperationError::State);
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        let files = super::btree_requested_upper_bound::<v2::Id, File>(result.files.len())
+            .ok_or(OperationError::State)?;
+        let closed = result
+            .audit
+            .closed_copy_ids
+            .capacity()
+            .checked_mul(std::mem::size_of::<v2::Id>())
+            .ok_or(OperationError::State)?;
+        let acquired = result
+            .audit
+            .acquired
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        files
+            .checked_add(closed)
+            .and_then(|n| n.checked_add(directory_metadata_bytes(acquired)?))
+            .ok_or(OperationError::State)
+    }
     /// Import the two actual descriptors held by a journal-verified retained
     /// adoption. These are newly held native owners, not replayed historical
     /// root-open jobs. The adoption id is only their local baseline.

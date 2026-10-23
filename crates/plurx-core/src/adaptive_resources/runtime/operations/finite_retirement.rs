@@ -1,5 +1,6 @@
 //! One retained native-output owner across the journal's R→S boundary. The
 //! provisional target stays under the full original R charge until known COMMIT.
+use super::bootstrap::btree_requested_upper_bound;
 use super::*;
 use crate::adaptive_resources::physical_graph::finite_vod::FiniteVodProcessClosure;
 use crate::adaptive_resources::retained::RetainedSwap;
@@ -23,7 +24,7 @@ impl FiniteRetirementClosure {
 }
 
 pub(super) struct FiniteRetirement {
-    source: ObligationHandle,
+    source: Option<ObligationHandle>,
     target: ObligationHandle,
     source_member: Uuid,
     target_member: Uuid,
@@ -32,6 +33,7 @@ pub(super) struct FiniteRetirement {
     native: Option<bootstrap::BootstrapMember>,
     operation: Option<JournalOperation>,
     committed: Option<CommittedRetirementReceipt>,
+    known_sequence: Option<i64>,
     installed: bool,
 }
 
@@ -79,18 +81,25 @@ impl NodeResourceRuntime {
             }
         }
         let mut bundle = owner.state.lock().await;
+        let bundle_metadata_bytes = retained_bundle_metadata_bytes(&bundle)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.retirement.is_none() {
-            self.prepare_finite_retirement(role, source_member, deadline)?;
+            self.prepare_finite_retirement(role, source_member, bundle_metadata_bytes, deadline)?;
         }
-        self.finish_finite_retirement(role, source_member, deadline)
-            .await
+        let member = self
+            .finish_finite_retirement(role, source_member, deadline)
+            .await?;
+        // The prepare result is a producer-only replay copy. Its durable
+        // operation was already acknowledged, and S keeps its own handle.
+        bundle.prepare.result = None;
+        Ok(member)
     }
 
     fn prepare_finite_retirement(
         &self,
         role: &mut OwnedRole,
         source_member: Uuid,
+        bundle_metadata_bytes: usize,
         deadline: Instant,
     ) -> Result<(), OperationError> {
         if role.refunded
@@ -177,11 +186,12 @@ impl NodeResourceRuntime {
             .as_ref()
             .ok_or(OperationError::State)?
             .limit_bytes()?;
-        // Keep every future output/reader subpartition, the configured-root
-        // bootstrap allowance, the actual inventory payload, the complete
-        // response budget, and the existing persistent metadata allowance.
-        // These are known requested capacities, not a whole-RSS estimate.
-        const PERSISTENT_METADATA_BYTES: u64 = 64 * 1024;
+        // The same structural layout was charged at R admission. Its bounded
+        // dynamic allowance is usable only after every actual cloned capacity
+        // and retained native-cell metadata fits, before any R credit returns.
+        let persistent_metadata_bytes = finite_retained_structural_bytes(plan.limits.reader_leases)
+            .and_then(|n| n.checked_add(64 * 1024))
+            .ok_or(OperationError::State)?;
         let retained_memory_bytes = plan
             .limits
             .resident_memory_bytes
@@ -190,7 +200,7 @@ impl NodeResourceRuntime {
                 bytes.checked_add(current_inventory_bytes.max(frozen_inventory_bytes))
             })
             .and_then(|bytes| bytes.checked_add(response_memory_bytes))
-            .and_then(|bytes| bytes.checked_add(PERSISTENT_METADATA_BYTES))
+            .and_then(|bytes| bytes.checked_add(persistent_metadata_bytes))
             .and_then(|bytes| {
                 bytes.checked_add(role.response_budget.as_ref()?.metadata_limit_bytes().ok()?)
             })
@@ -307,6 +317,18 @@ impl NodeResourceRuntime {
             // partition; the entire original R charge remains held.
             return Err(OperationError::State);
         }
+        let metadata_bytes = retained_role_metadata_bytes(
+            role,
+            bundle_metadata_bytes,
+            &target_manifest,
+            prepared.retained_plan(),
+            bootstrap,
+        )?;
+        if u64::try_from(metadata_bytes).map_err(|_| OperationError::State)?
+            > persistent_metadata_bytes
+        {
+            return Err(OperationError::State);
+        }
         let key = TransitionKey {
             handle: source.clone(),
             operation_id: operation_id.uuid(),
@@ -317,7 +339,7 @@ impl NodeResourceRuntime {
         // The provisional S slot is installed before the physical receipt and
         // journal command. No await can strand its owner between those steps.
         role.retirement = Some(FiniteRetirement {
-            source,
+            source: Some(source),
             target: target.clone(),
             source_member,
             target_member: target_member.uuid(),
@@ -326,6 +348,7 @@ impl NodeResourceRuntime {
             native: None,
             operation: None,
             committed: None,
+            known_sequence: None,
             installed: false,
         });
         let staged = prepared.move_to_retained(
@@ -381,37 +404,66 @@ impl NodeResourceRuntime {
         if retirement.installed {
             return Ok(retirement.target_member);
         }
-        let operation = retirement.operation.as_mut().ok_or(OperationError::State)?;
-        if operation.pending.is_none() && !matches!(operation.result, Some(Ok(_))) {
-            operation.retry(&self.journal, deadline)?;
-        }
-        let OperationResult::RetiredWithAssets { ack, target } = operation.resolve().await? else {
-            return Err(OperationError::State);
-        };
-        if ack.operation_id.uuid() != operation.id
-            || ack.sequence <= role.sequence
-            || ack.source_obligation_id.uuid() != retirement.source.obligation_id()
-            || ack.source_graph_id.uuid() != retirement.source.graph_id()
-            || ack.target_obligation_id.uuid() != retirement.target.obligation_id()
-            || ack.target_graph_id.uuid() != retirement.target.graph_id()
-            || target.obligation_id() != retirement.target.obligation_id()
-            || target.graph_id() != retirement.target.graph_id()
-            || retirement.native.is_none()
-        {
-            return Err(OperationError::State);
-        }
-        if retirement.committed.is_none() {
-            retirement.committed = Some(self.journal.take_retirement_receipt(
+        let source_obligation_id = retirement
+            .source
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .obligation_id();
+        let known_sequence = if let Some(sequence) = retirement.known_sequence {
+            // A prior waiter observed exact journal COMMIT, took its original
+            // receipt, and released the rich replay result while R remained
+            // charged. Resume the SAME ledger swap, never mint a new command.
+            if retirement.committed.is_none()
+                || retirement.operation.is_some()
+                || sequence <= role.sequence
+                || retirement.native.is_none()
+            {
+                return Err(OperationError::State);
+            }
+            sequence
+        } else {
+            let operation = retirement.operation.as_mut().ok_or(OperationError::State)?;
+            if operation.pending.is_none() && !matches!(operation.result, Some(Ok(_))) {
+                operation.retry(&self.journal, deadline)?;
+            }
+            let OperationResult::RetiredWithAssets { ack, target } = operation.resolve().await?
+            else {
+                return Err(OperationError::State);
+            };
+            if ack.operation_id.uuid() != operation.id
+                || ack.sequence <= role.sequence
+                || ack.source_obligation_id.uuid() != source_obligation_id
+                || ack.source_graph_id.uuid()
+                    != retirement
+                        .source
+                        .as_ref()
+                        .ok_or(OperationError::State)?
+                        .graph_id()
+                || ack.target_obligation_id.uuid() != retirement.target.obligation_id()
+                || ack.target_graph_id.uuid() != retirement.target.graph_id()
+                || target.obligation_id() != retirement.target.obligation_id()
+                || target.graph_id() != retirement.target.graph_id()
+                || retirement.native.is_none()
+            {
+                return Err(OperationError::State);
+            }
+            let receipt = self.journal.take_retirement_receipt(
                 operation.id,
-                &retirement.source,
+                retirement.source.as_ref().ok_or(OperationError::State)?,
                 &retirement.target,
-            )?);
-        }
+            )?;
+            retirement.committed = Some(receipt);
+            retirement.known_sequence = Some(ack.sequence);
+            // No fallible step or await separates retaining compact known
+            // state from dropping the producer-only replay result.
+            retirement.operation = None;
+            ack.sequence
+        };
         // The journal has positively committed R→S and this continuation
         // retains its original operation, target native cell and receipt.
         // Release producer-only heap/native owners while R is STILL charged;
         // a failed ledger swap can retry with the same committed capability.
-        role.members.clear();
+        role.members = Vec::new();
         role.typed_members = None;
         role.armed.clear();
         role.invoked.clear();
@@ -427,7 +479,7 @@ impl NodeResourceRuntime {
             || book
                 .bindings
                 .get(&role.binding)
-                .is_none_or(|h| h.obligation_id() != retirement.source.obligation_id())
+                .is_none_or(|h| h.obligation_id() != source_obligation_id)
             || book
                 .bindings
                 .contains_key(&retirement.swap.target_binding())
@@ -469,9 +521,14 @@ impl NodeResourceRuntime {
         role.finite_vod = None;
         role._cleanup = cleanup;
         role.handle = Some(retirement.target.clone());
-        role.sequence = ack.sequence;
+        role.sequence = known_sequence;
         role.phase = Phase::Sealed;
         retirement.installed = true;
+        // The exact command and physical receipt were required until this
+        // known ledger replacement. Neither may keep producer-scale payloads
+        // alive after credit returns to the node.
+        retirement.committed = None;
+        retirement.source = None;
         bootstrap::readers::notify_progress(
             role.bootstrap
                 .get(&retirement.target_member)
@@ -572,4 +629,182 @@ fn closed_members(
         result.push(v2::MemberDisposition::Closed { member_id, fact });
     }
     Ok(result)
+}
+
+fn retained_bundle_metadata_bytes(bundle: &Bundle) -> Result<usize, OperationError> {
+    if bundle.roles.len() != 1 || !bundle.prepare.acknowledged {
+        return Err(OperationError::State);
+    }
+    let bytes = std::mem::size_of::<Bundle>()
+        .checked_add(finite_bundle_arc_overhead_bytes().ok_or(OperationError::State)?)
+        .and_then(|n| n.checked_add(finite_book_entries_bytes()?))
+        .ok_or(OperationError::State)?
+        .checked_add(
+            bundle
+                .roles
+                .capacity()
+                .checked_mul(std::mem::size_of::<OwnedRole>())
+                .ok_or(OperationError::State)?,
+        )
+        .and_then(|n| {
+            n.checked_add(
+                bundle
+                    .typed_obligation_ids
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<Uuid>())?,
+            )
+        })
+        .and_then(|n| {
+            n.checked_add(
+                bundle
+                    .family_ids
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<FamilyIdentity>())?,
+            )
+        })
+        .and_then(|n| {
+            n.checked_add(btree_requested_upper_bound::<ReservationBinding, ()>(
+                bundle.retained.len(),
+            )?)
+        })
+        .ok_or(OperationError::State)?;
+    // The known prepare result is discarded after the conserving swap; no
+    // historical source manifest or in-flight replay survives in this budget.
+    Ok(bytes)
+}
+
+/// One finite role's post-swap fixed container layout. This source-derived
+/// quantity is included in original R admission and S; the additional 64KiB
+/// dynamic allowance is separately checked against actual requested capacity.
+/// A live BootstrapFold's inline body is charged by resident_inventory_bytes;
+/// all unused BTree node slots still belong to this structural allowance.
+pub(in crate::adaptive_resources::runtime) fn finite_retained_structural_bytes(
+    max_readers: u32,
+) -> Option<u64> {
+    let bootstrap_node = retained_bootstrap_node_bytes()?;
+    let fixed = std::mem::size_of::<Bundle>()
+        .checked_add(finite_bundle_arc_overhead_bytes()?)?
+        .checked_add(finite_book_entries_bytes()?)?
+        .checked_add(std::mem::size_of::<OwnedRole>())?
+        .checked_add(std::mem::size_of::<Uuid>())?
+        .checked_add(std::mem::size_of::<FamilyIdentity>())?
+        .checked_add(btree_requested_upper_bound::<ReservationBinding, ()>(1)?)?
+        .checked_add(bootstrap_node)?
+        .checked_add(btree_requested_upper_bound::<Uuid, ()>(1)?.checked_mul(2)?)?
+        .checked_add(std::mem::size_of::<v2::MemberPlan>())?
+        .checked_add(std::mem::size_of::<
+            super::super::response_memory::ResponseBudget,
+        >())?
+        .checked_add(2 * std::mem::size_of::<usize>())?
+        .checked_add(bootstrap::readers::retained_reader_structural_bytes(
+            max_readers,
+        )?)?;
+    u64::try_from(fixed).ok()
+}
+
+fn finite_bundle_arc_overhead_bytes() -> Option<usize> {
+    std::mem::size_of::<AsyncMutex<Bundle>>()
+        .checked_sub(std::mem::size_of::<Bundle>())?
+        .checked_add(2 * std::mem::size_of::<usize>())
+}
+
+fn finite_book_entries_bytes() -> Option<usize> {
+    // The book's global frame belongs to the runtime. These are the exact
+    // one-family/one-bundle/one-binding entries retained for this finite role.
+    btree_requested_upper_bound::<FamilyIdentity, FamilyHandle>(1)?
+        .checked_add(btree_requested_upper_bound::<FamilyIdentity, BTreeSet<Uuid>>(1)?)?
+        .checked_add(btree_requested_upper_bound::<Uuid, ()>(1)?)?
+        .checked_add(btree_requested_upper_bound::<
+            ReservationBinding,
+            ObligationHandle,
+        >(1)?)?
+        .checked_add(btree_requested_upper_bound::<Uuid, Arc<AsyncMutex<Bundle>>>(1)?)
+}
+
+fn retained_bootstrap_node_bytes() -> Option<usize> {
+    btree_requested_upper_bound::<Uuid, bootstrap::BootstrapMember>(1)?
+        .checked_sub(std::mem::size_of::<v2::scratch::bootstrap::BootstrapFold>())
+}
+
+fn scratch_plan_requested_heap(plan: &v2::scratch::bootstrap::ScratchPlanV3) -> Option<usize> {
+    let root = plan.bootstrap();
+    let boot = match &plan.filesystem_domain.os_boot {
+        crate::resource_custody::BootIdentity::Known { provider, .. } => provider.capacity(),
+        crate::resource_custody::BootIdentity::Unknown { reason } => reason.capacity(),
+    };
+    let mount = match &plan.filesystem_domain.mount_namespace {
+        v2::NativeValue::Known { .. } => 0,
+        v2::NativeValue::Unknown { reason } => reason.capacity(),
+    };
+    let mut bytes = plan
+        .rendition_id
+        .capacity()
+        .checked_add(boot)?
+        .checked_add(mount)?
+        .checked_add(root.authority.resolved_absolute_root.capacity())?
+        .checked_add(
+            root.components
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())?,
+        )?
+        .checked_add(root.child_component.capacity())?
+        .checked_add(root.protected_child_path.capacity())?;
+    for component in &root.components {
+        bytes = bytes.checked_add(component.capacity())?;
+    }
+    Some(bytes)
+}
+
+fn member_slot_requested_heap(slot: &v2::MemberSlot) -> Option<usize> {
+    let mut bytes = slot
+        .depends_on
+        .capacity()
+        .checked_mul(std::mem::size_of::<v2::Id>())?
+        .checked_add(
+            slot.protected_paths
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())?,
+        )?;
+    for path in &slot.protected_paths {
+        bytes = bytes.checked_add(path.capacity())?;
+    }
+    Some(bytes)
+}
+
+fn retained_role_metadata_bytes(
+    role: &OwnedRole,
+    bundle_bytes: usize,
+    manifest: &v2::Manifest,
+    staged_plan: &v2::scratch::bootstrap::ScratchPlanV3,
+    source_bootstrap: &bootstrap::BootstrapMember,
+) -> Result<usize, OperationError> {
+    let [v2::MemberPlan::ScratchAssetsV3 { slot, plan }] = manifest.members.as_slice() else {
+        return Err(OperationError::State);
+    };
+    if plan != staged_plan || role.response_budget.is_none() {
+        return Err(OperationError::State);
+    }
+    let role_maps = retained_bootstrap_node_bytes()
+        .and_then(|n| n.checked_add(btree_requested_upper_bound::<Uuid, ()>(1)?))
+        .and_then(|n| n.checked_add(btree_requested_upper_bound::<Uuid, ()>(1)?))
+        .ok_or(OperationError::State)?;
+    let typed_members = manifest
+        .members
+        .capacity()
+        .checked_mul(std::mem::size_of::<v2::MemberPlan>())
+        .and_then(|n| n.checked_add(member_slot_requested_heap(slot)?))
+        .and_then(|n| n.checked_add(scratch_plan_requested_heap(plan)?))
+        .ok_or(OperationError::State)?;
+    bundle_bytes
+        .checked_add(role_maps)
+        .and_then(|n| n.checked_add(typed_members))
+        .and_then(|n| n.checked_add(scratch_plan_requested_heap(staged_plan)?))
+        .and_then(|n| n.checked_add(source_bootstrap.retained_native_metadata_bytes().ok()?))
+        .and_then(|n| {
+            n.checked_add(
+                std::mem::size_of::<super::super::response_memory::ResponseBudget>()
+                    + 2 * std::mem::size_of::<usize>(),
+            )
+        })
+        .ok_or(OperationError::State)
 }

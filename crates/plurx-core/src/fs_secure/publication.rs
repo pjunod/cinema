@@ -127,6 +127,16 @@ impl PublicationRequest {
 }
 
 impl PublicationIo {
+    /// Requested heap still held by this original native cell after publish.
+    /// The payload capacity is included until its acknowledged release.
+    pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
+        self.path
+            .as_ref()
+            .map_or(Some(0), |path| Some(path.capacity()))?
+            .checked_add(self.temporary_name.as_bytes_with_nul().len())?
+            .checked_add(self.destination_name.as_bytes_with_nul().len())?
+            .checked_add(self.payload.capacity())
+    }
     pub fn new(path: PathBuf, name: &str, payload: Vec<u8>) -> io::Result<Self> {
         // Local UUID selection is restricted to the existing legacy profile.
         let request = PublicationRequest::for_operation(name, payload, uuid::Uuid::new_v4())?;

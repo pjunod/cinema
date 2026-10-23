@@ -2,7 +2,6 @@
 //! Only completed, serveable output may enter a sample. Pacing and lifecycle
 //! changes break speed windows; a held/paused graph is not free capacity.
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::process::observation::{Metric, UnknownReason};
@@ -58,12 +57,21 @@ pub struct ServiceObservation {
 /// a single stream or turn input-paced 1x into an encoder capacity estimate.
 #[derive(Debug, Default)]
 pub struct ServiceWindow {
-    points: VecDeque<WorkSample>,
+    // Fixed inline storage: taking observations never grows retained heap.
+    points: [Option<WorkSample>; 16],
+    points_len: usize,
     last: Option<WorkSample>,
     last_observation: Option<ServiceObservation>,
 }
 
 impl ServiceWindow {
+    fn remove_first(&mut self) {
+        debug_assert!(self.points_len > 0);
+        self.points.copy_within(1..self.points_len, 0);
+        self.points_len -= 1;
+        self.points[self.points_len] = None;
+    }
+
     pub fn observe(&mut self, sample: WorkSample) -> Option<ServiceObservation> {
         let previous = self.last;
         if previous.is_some_and(|old| sample.at <= old.at) {
@@ -78,7 +86,8 @@ impl ServiceWindow {
                 || sample.at.duration_since(old.at) > Duration::from_secs(15)
         });
         if changed {
-            self.points.clear();
+            self.points.fill(None);
+            self.points_len = 0;
         }
         if !changed
             && previous.is_some_and(|old| sample.at.duration_since(old.at) < Duration::from_secs(1))
@@ -88,30 +97,31 @@ impl ServiceWindow {
             return None;
         }
         self.last = Some(sample);
-        while self
-            .points
-            .front()
-            .is_some_and(|point| sample.at.duration_since(point.at) > Duration::from_secs(15))
+        while self.points_len > 0
+            && self.points[0]
+                .is_some_and(|point| sample.at.duration_since(point.at) > Duration::from_secs(15))
         {
-            self.points.pop_front();
+            self.remove_first();
         }
-        self.points.push_back(sample);
-        while self.points.len() > 16 {
-            self.points.pop_front();
+        if self.points_len == self.points.len() {
+            self.remove_first();
         }
-        let first = *self.points.front()?;
+        self.points[self.points_len] = Some(sample);
+        self.points_len += 1;
+        let first = self.points[0]?;
         let elapsed = sample.at.duration_since(first.at);
-        let advancing = self
-            .points
+        let points = &self.points[..self.points_len];
+        let advancing = points
             .iter()
-            .zip(self.points.iter().skip(1))
+            .flatten()
+            .zip(points.iter().flatten().skip(1))
             .filter(|(a, b)| b.completed > a.completed)
             .count();
         let rate = if sample.phase != WorkPhase::Producing {
             // Intentional pacing/backpressure never supplies positive encoder
             // capacity evidence or a below-margin capacity failure.
             Metric::Unknown(UnknownReason::InsufficientEvidence)
-        } else if self.points.len() < 3 || advancing < 2 || elapsed < Duration::from_secs(2) {
+        } else if self.points_len < 3 || advancing < 2 || elapsed < Duration::from_secs(2) {
             Metric::Unknown(UnknownReason::InsufficientEvidence)
         } else {
             let delta = sample.completed.checked_sub(first.completed)?;
@@ -161,6 +171,38 @@ mod tests {
             deadline_slack_ms: Metric::Unknown(UnknownReason::Inaccessible),
             queued_bytes: Metric::Known(1024),
         }
+    }
+
+    #[test]
+    fn bounded_window_keeps_current_rate_and_discards_prior_generation() {
+        let now = Instant::now();
+        let mut window = ServiceWindow::default();
+        for second in 0..40 {
+            window.observe(sample(
+                now + Duration::from_secs(second),
+                7,
+                WorkPhase::Producing,
+                second * 2_000,
+            ));
+        }
+        let current = window.snapshot(now + Duration::from_secs(39)).unwrap();
+        assert_eq!(current.units_per_second, Metric::Known(2_000));
+        assert_eq!(current.interval_ms, 15_000);
+        assert_eq!(current.advancing_samples, 15);
+        let replaced = window
+            .observe(sample(
+                now + Duration::from_secs(40),
+                8,
+                WorkPhase::Producing,
+                1_000,
+            ))
+            .unwrap();
+        assert_eq!(replaced.generation, 8);
+        assert_eq!(replaced.interval_ms, 0);
+        assert_eq!(
+            replaced.units_per_second,
+            Metric::Unknown(UnknownReason::InsufficientEvidence)
+        );
     }
 
     #[test]

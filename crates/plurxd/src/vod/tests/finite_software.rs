@@ -242,6 +242,42 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     )
     .await;
     let retained = runtime.accounting().expect("known retained S accounting");
+    let status = serve
+        .status("finite-software-client")
+        .await
+        .expect("ordinary status");
+    let service = status
+        .resource_service
+        .expect("actual finite output diagnostics");
+    assert_eq!(service.generation, rendition.gen_epoch.load(Acquire));
+    assert_eq!(
+        service.phase,
+        plurx_core::resource_observation::WorkPhase::Retiring
+    );
+    assert_eq!(
+        service.unit,
+        plurx_core::resource_observation::ServiceUnit::MediaMilliseconds
+    );
+    let end = rendition
+        .plan
+        .entries
+        .last()
+        .expect("nonempty ordinary plan")
+        .end_ticks();
+    assert_eq!(
+        service.completed,
+        u64::try_from(ticks_to_ms(end, rendition.timescale)).unwrap()
+    );
+    assert!(
+        rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .unwrap()
+            .active_production_evidence()
+            .is_none(),
+        "resource service observations must not grant legacy recipe compatibility proof"
+    );
     assert!(
         retained.used.peak_memory_bytes < initial.used.peak_memory_bytes,
         "producer-only memory allowance must return after the known R-to-S commit"

@@ -858,6 +858,11 @@ impl VodServe {
         let tone_map_peak = stream_format::tone_map_peak(&rendition);
         Some(VodPublication {
             result: Ok(VodSessionInfo {
+                resource_service: rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .and_then(|encoding| encoding.resource_service_observation()),
                 stream_format: StreamFormat::for_rendition(&rendition),
                 active_encode_milli_realtime: active_production.map(|proof| proof.milli_realtime),
                 active_encode_age_ms: active_production.map(|proof| {

@@ -531,6 +531,10 @@ impl<T> VodPublication<T> {
 /// numbers would make the player diagnose the wrong system.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VodSessionInfo {
+    /// Actual useful-output service; Unknown stays explicit and pacing is
+    /// separate from production. This diagnostic grants no admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_service: Option<plurx_core::resource_observation::ServiceObservation>,
     /// Optional facts from this attached rendition's immutable recipe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_format: Option<StreamFormat>,

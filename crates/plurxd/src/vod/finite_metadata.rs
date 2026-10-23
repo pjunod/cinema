@@ -27,7 +27,9 @@ fn recipe_heap_bytes(recipe: &Recipe) -> Option<usize> {
         // Include the separately allocated Arc payload and its recursively
         // owned immutable recipes. Mutable producer/admission state remains
         // explicitly outside this metadata partition.
-        bytes = bytes.checked_add(value.requested_heap_bytes()?)?;
+        bytes = bytes
+            .checked_add(value.requested_heap_bytes()?)?
+            .checked_add(2 * std::mem::size_of::<usize>())?;
     }
     Some(bytes)
 }

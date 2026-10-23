@@ -247,10 +247,10 @@ operation. Unknown outcomes retain the closing entry and block replacement.
 Known cancellation disposes planning payloads before credit and removes its
 settled registry entry. These changes remain unqualified source.
 
-**Limits and next source work.** The estimator covers immutable requested heap
-capacities; it does not establish a whole-RSS or allocator bound. Reader maps,
-per-reader marker state and missing-output demand state still need an enforced
-client-state subpartition. The complete original memory component therefore
-remains charged at S. The native lifecycle fixture's strict producer-memory
-return criterion is intentionally still unmet until this accounting is complete.
-No milestone is closed by the helper, lease or compiler alone.
+**Limits and next source work.** Fixed reader/demand tables and charged marker,
+control, terminal and response payloads now have an enforced client-state
+partition. Candidate S retains those partitions; its actual core and daemon
+persistent-owner capacities are being checked before the narrower swap. This
+requested-capacity accounting does not establish a whole-RSS or allocator bound.
+The native lifecycle fixture's strict producer-memory return remains unrun.
+No milestone is closed by a helper, lease or compiler alone.
