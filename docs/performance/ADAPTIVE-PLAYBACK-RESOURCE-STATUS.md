@@ -1,23 +1,23 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete. Published draft checkpoint
-`c3847b9a069153351438344b7a31367c1fa48a5f` retains the earlier exact native
-Linux source compile `fdda9a593491021e70e74b965c71d5488e5f3436` (Rust 1.97.1,
-EXIT 0/270.488 seconds; log SHA-256
-`2e7cf823d44cf93967aa0e1f06e7a4a89a2f134670d26485c99bc1f4b71c42d0`).
-That compile excluded the native lifecycle fixture because of a wrong feature
-name. Later checks enable the existing cluster-integration-tests feature and
-have exposed source errors; fixes and new source remain outside a passing
-native receipt. Local commits now connect stable finite cache identity,
-recovered-R native cleanup/typed settlement, live history-mix revalidation and
-an actual two-process restart fixture. Current work closes engine-check job
-custody, repeated recovered-R adoption and explicit daemon metadata accounting.
-The full original memory charge remains at S until complete retained metadata
-coverage is proven. A separate metadata lifetime lease must prevent settlement
-while actual daemon allocations survive; native closure alone is insufficient.
-All V1–V5 and R1/M0–M7 remain OPEN. Behavioral tests, final independent actual
-Fable review, qualification and merge have not run. See draft PR #1248 for the
-live owner, published head, exact receipts and pending authored anchors.
+**Status:** open · implementation incomplete. Source checkpoint
+`483f8b616be60b9bdec70cb9fe5c83fdb4a9ad95` passed exact native Linux
+core+daemon all-target compilation, including the existing cluster integration
+fixture feature (Rust 1.97.1, EXIT 0/201.830 seconds; log SHA-256
+`5f70f1d9e0316e6768d42c0b80b9cd69a08607074599010667b0ef3fb8aaf2a0`).
+The ordinary lifecycle and two-process restart fixture bodies compiled; neither
+ran. Stable host compilation passed at parent source
+`18648c5fdc03f80d74d78619bd93a4a030128415` in 158.391 seconds (log SHA-256
+`efc58e4f37f8aebbb20d38ab4365c68dff2b2e6ba3a3b92bbb74f251a5064436`);
+the descendant source change is a Linux-only fixture import. Static catalog
+and paperwork passed at that parent source (36 points/43 checks/4,206 files;
+15/15 bookkeeping checks). There are 459 authored regression anchors, NOT RUN.
+Source connects repeated unchanged-head recovered-R adoption, original engine
+check jobs through cancellation, explicit immutable metadata sizing/lifetime,
+and compact event-driven daemon cleanup. The original memory component remains
+at S until mutable reader/client-state accounting is bounded. All V1–V5 and
+R1/M0–M7 remain OPEN. Final independent actual Fable review, qualification,
+fast lane and merge have not run. Draft PR #1248 carries the live owner/state.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker

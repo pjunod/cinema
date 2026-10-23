@@ -1,23 +1,23 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete. Published draft checkpoint
-`c3847b9a069153351438344b7a31367c1fa48a5f` retains the earlier exact native
-Linux source compile `fdda9a593491021e70e74b965c71d5488e5f3436` (Rust 1.97.1,
-EXIT 0/270.488 seconds; log SHA-256
-`2e7cf823d44cf93967aa0e1f06e7a4a89a2f134670d26485c99bc1f4b71c42d0`).
-That compile excluded the native lifecycle fixture because of a wrong feature
-name. Later checks enable the existing cluster-integration-tests feature and
-have exposed source errors; fixes and new source remain outside a passing
-native receipt. Local commits now connect stable finite cache identity,
-recovered-R native cleanup/typed settlement, live history-mix revalidation and
-an actual two-process restart fixture. Current work closes engine-check job
-custody, repeated recovered-R adoption and explicit daemon metadata accounting.
-The full original memory charge remains at S until complete retained metadata
-coverage is proven. A separate metadata lifetime lease must prevent settlement
-while actual daemon allocations survive; native closure alone is insufficient.
-All V1–V5 and R1/M0–M7 remain OPEN. Behavioral tests, final independent actual
-Fable review, qualification and merge have not run. See draft PR #1248 for the
-live owner, published head, exact receipts and pending authored anchors.
+**Status:** open · implementation incomplete. Source checkpoint
+`483f8b616be60b9bdec70cb9fe5c83fdb4a9ad95` passed exact native Linux
+core+daemon all-target compilation, including the existing cluster integration
+fixture feature (Rust 1.97.1, EXIT 0/201.830 seconds; log SHA-256
+`5f70f1d9e0316e6768d42c0b80b9cd69a08607074599010667b0ef3fb8aaf2a0`).
+The ordinary lifecycle and two-process restart fixture bodies compiled; neither
+ran. Stable host compilation passed at parent source
+`18648c5fdc03f80d74d78619bd93a4a030128415` in 158.391 seconds (log SHA-256
+`efc58e4f37f8aebbb20d38ab4365c68dff2b2e6ba3a3b92bbb74f251a5064436`);
+the descendant source change is a Linux-only fixture import. Static catalog
+and paperwork passed at that parent source (36 points/43 checks/4,206 files;
+15/15 bookkeeping checks). There are 459 authored regression anchors, NOT RUN.
+Source connects repeated unchanged-head recovered-R adoption, original engine
+check jobs through cancellation, explicit immutable metadata sizing/lifetime,
+and compact event-driven daemon cleanup. The original memory component remains
+at S until mutable reader/client-state accounting is bounded. All V1–V5 and
+R1/M0–M7 remain OPEN. Final independent actual Fable review, qualification,
+fast lane and merge have not run. Draft PR #1248 carries the live owner/state.
 Primary owner: direct Codex harness
 (`/root`; actual model unspecified), sole integration writer. Work remains on
 `effort/adaptive-playback-resources`, draft PR #1248. This is a delivery
@@ -68,59 +68,33 @@ independent actual Fable review/fixes → once-only affected qualification/fast 
 
 ## Active integration — 2026-10-23
 
-Checkpoint `c816041edb6425722013d11e4a24bcbbefa9a5d9` has exact native Linux
-compilation evidence described above. The recovered cache caller verifies current
-source/plan compatibility before serving through the same counted S owner.
-Unknown or mismatched output stays held and refuses reuse. Automatic obsolete
-cache eviction is pending an owner decision following an automatic approval
-review rejection; no live cleanup or rejected source edit was performed.
-Forward PID-namespace/root-exit proof and an actual ordinary lifecycle regression
-are authored outside that receipt; the latter has not run. Active-R recovery,
-production history sampling and distinct kernel-task accounting are in progress.
+The selected ordinary Linux software-transcode request enters the finite owner
+before selected native acquisition. It retains the real source, fixed software
+process, publication jobs and counted HTTP bodies through native close and one
+known journal settlement. Stable same-boot engine identity permits compatible
+cold-S reuse; original owner records remain immutable across ordered recovery
+adoptions. Partial cleanup, unsupported continuity and unknown commits keep
+charges and refuse reuse. Obsolete mismatched recovered-cache eviction remains
+unimplemented after automatic approval review rejected that destructive change;
+no rejected edit or live deletion was performed.
 
-Core exposes a concrete
-[`finite_vod` runtime interface](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
-`SoftwareVodOwner` reserves the whole role before source or output acquisition;
-nonserde `FiniteOutput` selects that same custodian and returns opaque tickets
-for retained publications. The core-owned VOD generation engine now includes
-identity and conversion modules; the daemon re-exports it while keeping its
-existing test bodies. The explicit `PublishMetadata` operation records
-opted-in `identity.json` and software-transcode marker output; copy omits the
-marker. A same-child sync cell keeps its original job through known
-Arm/Observe and limits batches to 16. Parser input is preflighted against
-track/run/sample limits; `Init`, `Fragment` and `Segmenter` capacities and
-bounded-generation accumulation/transfer are accounted. Exact registered-child
-signals use the original registration and pidfd, not a numeric PID lookup, and
-introduce no root-wait-lock dependency. The graph retains the original concrete software pump task, actual pipes and
-diagnostics; the adapter does not grant a physical-close receipt. The finite
-request requires `SoftwareAvcCommand` and `SoftwareAvcPumpPlan` before I/O and
-checks source identity/path/scanner sizes against command inputs. It resolves
-and prearms source cells without a lease, then uses the predeclared root copy ID
-and same retained `File` through spawn. Only after actual root launch does it
-stage source-copy enrichment; it arms/joins the retained pump and acknowledges
-its typed task observation once. A cancelled graph-lock wait leaves the root
-entry latch untouched, and the pump remains in the bundle until registration.
-Shared-fd helpers are extracted with daemon re-exports preserving behavior. The
-bounded AVC merge artifact preflights workspace/output before allocation but is
-not connected to Segmenter or `GenerationMemoryLimits`. Existing
-[`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) and daemon
-[`PendingWrites` adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
-remain available. The selected Linux ordinary software-transcode branch is
-connected; other recipes still use legacy admission. Full memory partitioning,
-partial-start ownership and cold restart/cache adoption remain incomplete.
+Engine freshness now uses the original registered check worker across cancelled
+waits, with explicit once-only digest-file close. Unknown close/join prevents
+settlement. Explicit requested-capacity helpers describe immutable daemon
+metadata. A separate lifetime lease keeps that metadata charged until actual
+rendition owners drain; a compact closing owner uses the existing maintenance
+pass to retry original cleanup without holding the build gate over that drain.
+Known prepared cancellation disposes its planning cycle and settled registry
+entry. Completed finite output with no producer reports a missing publication
+instead of arming an unsatisfiable demand wait.
 
-All V1–V5 remain OPEN. Same-process seeks reuse one rendition owner and its
-full-plan producer; cold-cache reuse remains an R1 gap. Full memory profile,
-partial-start handling and broader recipe selection remain incomplete. The
-[source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#implementation-history-through-2026-10-22)
-records the limits. The latest published checkpoint is
-`dd0a5b4cb068abb051678186648d5968488c67fe`; its native Linux core+daemon
-all-target Rust 1.97.1 compile passed in 230.430 seconds (EXIT 0). The current
-cancellation and diagnostic host compile remains pending.
-This is warning-level compilation.
-Host-eligible authored cases compiled; Linux-only bodies and Windows remain
-outside that evidence. No behavioral tests or review ran for this slice.
-Review and qualification wait for the complete integrated candidate.
+Source checkpoint and compiler limits are pinned above. No behavioral result,
+final review or milestone closure follows from compilation. Reader maps,
+per-reader marker state and remaining finite demand-state bounds still prevent
+a truthful narrower S memory component; the native lifecycle fixture's strict
+memory-return criterion is still a required future qualification. Other agreed
+pipeline adapters, live learning/policy, worker preparation/placement, selective
+startup and complete operations/client explanations remain below.
 
 ## Actual distance to usable playback
 
