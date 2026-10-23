@@ -16,21 +16,7 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-22 · display-targeted HDR10-E PR #1216:** the reviewed base-receipt
-  repair's new regression and both real P8/1000+1600 cells passed. P7 preparation
-  passed, but its scanner refused a positive-origin selected-track duration tag:
-  the tag declares the timestamp endpoint, not elapsed duration. Sol corrected
-  only that comparison; scanner-only linking and independent delta approval passed.
-  Nine new P7 scanner observations passed before a time-limited synthetic remux
-  produced 14 rather than the asserted 17 packets, before its truncation scan.
-  The control now copies exactly 17 coded packets and preserves unrelated audio,
-  original payload/timing and the full 18-picture declaration. Hash-bound continuation
-  retains nine passes without replay. Independent control-delta closure, repaired
-  P7 truncation and ten unexecuted P8 observations remain before P7 runtime checks.
-  Existing 99 Rust / 141 shader / 70 helper passes and P8 results are retained,
-  not relabelled as new-scanner runs. Coordinator owns native execution/publication;
-  P7 mapped cells, separate FEL integration, fast lane and merge stay open in the
-  [canonical build ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md).
+- **2026-10-22 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). User-confirmed flow is stage PRs into `effort/display-targeted-dv`, then one promotion PR to `main`; PR #1216 remains draft/unmerged. General-FEL focused checks pass, and both mapped P7 targets pass at #348. E’s 14-case neutral-L3 comparison is observational, not creative-accuracy acceptance. The Main promotion gate, exact-candidate qualification, complete L8 contract and device acceptance remain open.
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,

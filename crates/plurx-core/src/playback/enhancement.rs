@@ -52,7 +52,10 @@ pub enum EnhancementRoute {
     /// The reconstructed picture re-encoded as 8.1 with the FEL baked in.
     ReconstructedProfile81 { fel_contributed: bool },
     /// Server-processed HDR10 (HDR10-E).
-    ProcessedHdr10 { fel_contributed: bool },
+    ProcessedHdr10 {
+        fel_contributed: bool,
+        display_target: Option<u32>,
+    },
     /// The HDR10 base layer with the Dolby Vision metadata removed.
     Hdr10Base,
     /// Tone-mapped to SDR for an SDR display: nothing of Dolby Vision reaches
@@ -169,7 +172,10 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
                 "DYN: L1/L2/L8 dynamic metadata carried to the display",
             ));
         }
-        EnhancementRoute::ProcessedHdr10 { fel_contributed } => {
+        EnhancementRoute::ProcessedHdr10 {
+            fel_contributed,
+            display_target,
+        } => {
             requires_effective_processing = true;
             if has_el {
                 details.push(detail(
@@ -189,8 +195,11 @@ pub fn playback_enhancement(facts: &EnhancementFacts<'_>) -> Option<PlaybackEnha
             ));
             details.push(detail(
                 Dyn,
-                false,
-                "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata",
+                display_target.is_some(),
+                display_target.map_or_else(
+                    || "DYN: not carried — HDR10 has no Dolby Vision dynamic metadata".into(),
+                    |nits| format!("DYN: per-shot L1 metadata mapped for a {nits}-nit display by the server (L1 only; creative trims are not applied)"),
+                ),
             ));
         }
         EnhancementRoute::Hdr10Base => {
@@ -251,11 +260,26 @@ mod tests {
     fn processed_hdr10_with_fel_shows_fel_and_rpu_only() {
         let shown = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
             fel_contributed: true,
+            display_target: None,
         }))
         .expect("DV source");
         assert_eq!(shown.active, [Fel, Rpu]);
         assert!(shown.requires_effective_processing);
         assert!(shown.details.iter().any(|d| d.badge == Dyn && !d.active));
+    }
+
+    #[test]
+    fn targeted_hdr10_dyn_names_bucket_and_l1_limit() {
+        let shown = playback_enhancement(&facts(EnhancementRoute::ProcessedHdr10 {
+            fel_contributed: true,
+            display_target: Some(1600),
+        }))
+        .expect("DV source");
+        assert_eq!(shown.active, [Fel, Rpu, Dyn]);
+        let dyn_detail = shown.details.iter().find(|d| d.badge == Dyn).expect("DYN");
+        assert!(dyn_detail.text.contains("1600-nit"));
+        assert!(dyn_detail.text.contains("L1 only"));
+        assert!(shown.requires_effective_processing);
     }
 
     #[test]

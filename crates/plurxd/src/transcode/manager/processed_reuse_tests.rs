@@ -908,6 +908,14 @@ async fn fixture_with_audio(
         )
     };
     let source_tick = rational("time_base");
+    let source_clock = crate::transcode::source_preparation::held_source_clock(&actual.to_string())
+        .expect("observed held FORMAT clock");
+    let source_origin = crate::transcode::source_preparation::held_dv_source_origin(
+        video,
+        source_tick,
+        source_clock,
+    )
+    .expect("observed common origin");
     let (rate_num, rate_den) = rational("avg_frame_rate");
     let grid = plurx_core::transcode::VodFrameGrid::new(rate_num, rate_den).expect("measured grid");
     assert_eq!(source_tick, (1, 24000));
@@ -1219,6 +1227,7 @@ async fn fixture_with_audio(
         source_keys: &keys,
         source_rpus: &rpus,
         source_tick,
+        source_origin,
         grid,
         first_global_frame: 0,
         encoded: &bytes,
@@ -1253,9 +1262,14 @@ async fn fixture_with_audio(
         )),
         source: Arc::clone(&source),
         source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+        display_target: None,
+        display: None,
+        display_target_note: None,
         source_tick,
+        source_origin,
         native_bl: (64, 64),
-        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        source_clock,
+        source_mastering: Ok(None),
         preferences,
         destination,
         mode: DvProcessingMode::Fel,

@@ -354,6 +354,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
       <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-dolby-vision-processing"><h2>Dolby Vision processing</h2><p>Independent opt-in preferences awaiting production qualification.</p></div>${dolbyVisionHdrProcessingCard(settings,readiness)}${dolbyVisionFelReencodeCard(settings,readiness)}
+      <div class="setsection" id="enable-display-target-hdr10"><h2>Display-targeted HDR10-E</h2><p>Per-shot L1 mapping for the viewer's reported peak. Readiness is advisory; the saved choice always applies to new playback.</p></div>${displayTargetHdr10Card(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
@@ -694,4 +695,27 @@ function subtitleTranslationCard(){
     <p>Install a compatible multilingual model, then choose Translate to English in the player. Partial captions may lag or be wrong; original captions and Off remain available.</p>
     <p class="hint">Supported on local web direct playback with one audio stream. Other delivery routes, multiple audio streams and native clients remain unsupported.</p>
     <button type="button" class="sm" onclick="openTranslationSettings()">Configure English translation</button><div id="subtitle-translation-form"></div>`,{id:"enable-subtitle-translation"});
+}
+
+function displayTargetHdr10Card(settings,readiness){
+  return setCard(`${cardHead("Display-targeted HDR10-E","Map per-shot L1 metadata to a supported display bucket. L1 only: creative trims are not applied; displays may still apply their own tone mapping.")}
+    ${togRow("dv-display-target","Display-targeted HDR10-E","Default off. Applies to new HDR10-E sessions; unknown display peaks and ineligible titles keep the master grade.",!!settings.dolby_vision_display_target)}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_helper","Helper installed and HDR10-E enabled","Readings describe this node and never disable this switch or its Save.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_peak","Client peak reports","Platform and viewer reports select the same bucket; the source is attribution only.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_scan","Complete-title L1 scan","A whole title must have valid L1; missing or unknown facts keep the master grade.")}
+    ${devReq(readiness,"dolby_vision_display_target","dv_target_cache","Bucket storage on this node","Targeted playback renders live. Pre-encodes and retained VOD stay master-only. Private roots retain existing reader and reservation fences.")}
+    ${devGraduation("output metadata, live delivery and named physical HDR display qualification pass with truthful L1-only reporting.","the permanent targeting switch moves to Playback, preserving the saved choice.")}
+    <div class="err" id="dv-display-target-error" role="alert"></div>${setCardFoot("saveDisplayTargetHdr10")}`,{id:"dv-display-target-card"});
+}
+async function saveDisplayTargetHdr10(btn){
+  const card=document.getElementById("dv-display-target-card");
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const err=document.getElementById("dv-display-target-error");if(err)err.textContent="";if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{dolby_vision_display_target:(/** @type {HTMLInputElement} */ (document.getElementById("dv-display-target"))).checked}}));
+    if(!card||document.getElementById("dv-display-target-card")!==card)return;
+    if(Number(card.dataset&&card.dataset.revision||0)!==revision){toast("Earlier preference saved; newer edit remains unsaved");return;}
+    card.outerHTML=displayTargetHdr10Card(saved,DEVELOPER_READINESS);
+    toast("Display targeting saved; applies to new playback");
+  }catch(error){if(err)err.textContent=error.message||String(error);}finally{if(btn)btn.disabled=false;}
 }

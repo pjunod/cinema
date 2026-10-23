@@ -83,6 +83,15 @@ class PlaybackEnhancementTest {
     }
 
     @Test
+    fun displayTargetOperationObjectRetainsTheCurrentReport() {
+        val generation = "11111111-1111-4111-8111-111111111111"
+        val wire = """{"generation":"$generation","hdr10_enhanced":true,"fel_contributed":false,"applied_operations":["RpuColorConversion","TargetMapping",{"DisplayTargetMapping":{"nits":1600}}]}"""
+        val report = EffectiveProcessingReport.fromJson(json.parseToJsonElement(wire))
+        assertEquals(true, report?.matches(generation, "hdr10"))
+        assertEquals(true, report?.appliedOperations?.contains("DisplayTargetMapping:1600"))
+    }
+
+    @Test
     fun aProcessedDeliveryIsShownOnlyWithACurrentMatchingReport() {
         val generation = "11111111-1111-4111-8111-111111111111"
         val enhancement = PlaybackEnhancement(

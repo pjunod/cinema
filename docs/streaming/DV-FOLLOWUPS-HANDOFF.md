@@ -131,27 +131,36 @@ incident and general remote processed requalification remain out of B scope.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
-**Current qualification (2026-10-22):** the base-receipt repair is compiled,
-independently approved, and its new regression and both real P8 mapped cells
-passed. P7 demux/payload/audio/FEL/raw-L1 preparation passed; the subsequent
-scanner exited 1 with no aggregate because a positive-origin Matroska selected
-track's DURATION tag was compared as elapsed duration instead of its endpoint.
-Sol corrected only the two tag comparisons, preserving the one-tick allowance
-and all independent-video/drain/count guards. New manual
-`test_scan_duration_tag.py::test_selected_video_duration_tag_uses_endpoint`
-controls cover P7/P8 positive-origin multistreams, unchanged L1/coded payloads,
-old-code sensitivity and contradictory/missing/malformed/truncated declarations.
-Scanner-only linking and independent delta review passed. Nine P7 observations
-passed; the truncation fixture then had 14 rather than the asserted 17 packets,
-before its scanner ran. The control-only repair copies exactly 17 AUs, retains
-full unrelated audio and checks payload/absolute timing before preserving the
-18-picture endpoint declaration. Pinned continuation reuses the nine passes
-without executing their preparation/scans again. Independent control-delta closure,
-repaired P7 truncation and ten unexecuted P8 observations remain before failed
-P7 scanner and both mapped cells. No scanner rebuild. Retain prior software,
-NEW core and P8 passes without replay or relabelling them as new-scanner runs.
-Coordinator owns native execution/publication. One fast lane/API merge and
-separate FEL integration remain; no deployment/device/client-DYN acceptance.
+**Current qualification (2026-10-22):** original `a49`/`c036` source review is
+retained; scanner controls have 20 passes. Standalone P7 retained the actual
+`c036` listing, 17,983 valid frames, observed maximum 3,441 nits, and passing
+policy results. Owner-interrupted attempt 258 stopped at 137/1,000 for 1,000
+nits; it is neither a product defect nor a pass, and 1,600 nits was not run.
+Additive continuation 259 is running 1,000 nits and proceeds to 1,600 only if
+that cell passes. There are zero new mapped-P7 passes at this snapshot.
+
+Current-main integration is `a316`, plus test-only scanner fixture repair
+`fb0a691dcd33b0c3a1c9b992f39ddcdb34d239b8`. Pinned Rust formatting passed on
+`a316`. The original compile's E0063 was in the scanner `/bin/false` fixture;
+failed-only compile 261 passed on pinned Rust 1.97.1 with true outer exit 0,
+checking `plurxd` and `plurx-core` all targets with `hiqlite-contract-tests`
+and running no units. PR B integration `2038269` is queued for pinned compile
+262. Retain the prior 99 Rust passes, receipt regression, 141 shader cases / 866,304 samples,
+70 helper results, and P8 passes under their original attribution; do not replay
+or relabel them.
+
+The separate FEL comparison/interpreter lane is excluded from PR A because no
+reviewed production fix is available to integrate, consistent with the original
+contract §§113–115. Full-app C1 still has a final source-EOF failure; no
+full-clip or general FEL accuracy claim is made. PR #1216 is owned by direct
+GPT/root, with existing full and delta reviews retained. Narrow integration
+review, completed P7 evidence, current fast lane, and API merge with 22 regression
+anchors remain open. B metadata `2038269` is complete but unqualified. C server
+and D clients are being implemented by separate Sol agents in isolated clones;
+E/F remain planned. No setting is exposed before B. Apple peak reporting,
+device acceptance, and deployment are not claimed.
+
+### Historical qualification record (not current status)
 
 **Latest qualification correction (2026-10-21):** the genuine bright P8 excerpt
 reached complete L1 observation and master preparation, but the exact single

@@ -2076,6 +2076,18 @@ mod tests {
         // Reconstructed: the RGB video input replaces the source decoder and
         // its offset; the source soundtrack keeps the ordinary held origin.
         assert_eq!(offsets(&reconstructed), ["-1.500000"]);
+        let positive = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(125_000),
+        )
+        .expect("positive common source origin");
+        assert_eq!(offsets(&positive), ["-0.125000"]);
         let zero = vod_reconstructed_pipe_args(
             &source,
             &plan,

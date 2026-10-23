@@ -875,6 +875,66 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
     }
 }
 #[test]
+fn resolved_source_floor_is_the_completed_plan_black_level_and_semantic_identity() {
+    use crate::scan::dv_title::*;
+    let stats = DvTitleStats {
+        schema: SCHEMA,
+        complete: true,
+        decoded_frames: 1,
+        valid_l1_frames: 1,
+        missing_l1_frames: 0,
+        invalid_l1_frames: 0,
+        max_l1_pq: Some(4095),
+        mastering_luminance: TitleConstant::Unknown,
+        mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+            index: 0,
+            custom_xy: None,
+        }),
+    };
+    let DvDisplayTargetChoice::Target(proposal) =
+        DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+    else {
+        panic!("target");
+    };
+    let export = |target| DvExportPolicy::DisplayTargetYuv420p10V1 {
+        raster: (64, 64),
+        target,
+    };
+    assert!(
+        completed_target_policy(export(proposal)).is_err(),
+        "no unresolved completed plan"
+    );
+    let source = DvSourceMastering {
+        primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+        min_1e4_nits: 17,
+    };
+    let resolved = proposal.resolve_source(Some(source)).expect("source floor");
+    let fallback = proposal.resolve_source(None).expect("renderer floor");
+    let mut source_plan = plan(DvDestination::Hdr10);
+    source_plan.capability.target =
+        completed_target_policy(export(resolved)).expect("completed target");
+    let mut fallback_plan = source_plan.clone();
+    fallback_plan.capability.target =
+        completed_target_policy(export(fallback)).expect("fallback target");
+    assert_eq!(source_plan.capability.target.black_1e4_nits, Some(17));
+    assert_eq!(source_plan.capability.target.black_millinit, 1);
+    assert_eq!(fallback_plan.capability.target.black_1e4_nits, Some(50));
+    assert_eq!(
+        source_plan.capability.target.parameters,
+        export(resolved).target_parameters()
+    );
+    assert_ne!(
+        source_plan.semantic_digest(),
+        fallback_plan.semantic_digest()
+    );
+    assert_eq!(
+        serde_json::to_value(&source_plan.capability.target).expect("completed report target")
+            ["black_1e4_nits"],
+        17
+    );
+}
+
+#[test]
 fn successor_generations_do_not_reset_recovery_episode() {
     let mut episode = DvRecoveryEpisode::default();
     episode
@@ -1471,7 +1531,12 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
             display_ordinal: ordinal as u64,
         })
         .collect();
-    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), grid, 0, 48)
+    let origin = DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1).expect("valid zero origin timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(0),
+    )
+    .expect("valid observed zero source origin");
+    let mapped = dv_map_source_to_output_grid(&source, (1, 1_000), origin, grid, 0, 48)
         .expect("valid bounded clock fixture");
     assert_eq!(mapped.len(), 48);
     assert_eq!(
@@ -1482,12 +1547,435 @@ fn output_grid_mapping_preserves_rounded_source_keys_and_refuses_drops() {
         mapped[1].output_pts,
         DvTimestamp::new(1_001, 24_000).expect("valid bounded clock fixture")
     );
-    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source[..47], (1, 1_000), origin, grid, 0, 48).is_err());
     let mut dropped = source.clone();
     dropped[24].pts = dropped[25].pts;
-    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&dropped, (1, 1_000), origin, grid, 0, 48).is_err());
     let mut wrong = source.clone();
     wrong[47].pts = DvTimestamp::new(1_970, 1_000).expect("valid bounded clock fixture");
-    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), grid, 0, 48).is_err());
-    assert!(dv_map_source_to_output_grid(&source, (1, 24), grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&wrong, (1, 1_000), origin, grid, 0, 48).is_err());
+    assert!(dv_map_source_to_output_grid(&source, (1, 24), origin, grid, 0, 48).is_err());
+}
+
+#[test]
+fn common_source_origin_preserves_absolute_keys_across_film_windows() {
+    let grid = super::super::VodFrameGrid::new(24_000, 1_001).expect("valid NTSC cadence");
+    for millis in [0, 125] {
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(millis, 1000).expect("valid origin timestamp"),
+            super::super::VodSourceClock::ReportedOrigin(millis * 1000),
+        )
+        .expect("valid observed source origin");
+        for entry in [0, 1, 2, 360] {
+            let first = entry * 48_u64;
+            let keys: Vec<_> = (first..first + 48)
+                .map(|frame| DvFrameKey {
+                    absolute_video_index: 0,
+                    continuity_epoch: 11,
+                    pts: DvTimestamp::new(
+                        millis + i64::try_from(frame * 1001 / 24).expect("frame PTS fits i64"),
+                        1000,
+                    )
+                    .expect("valid source PTS"),
+                    display_ordinal: frame,
+                })
+                .collect();
+            let mapped = dv_map_source_to_output_grid(&keys, (1, 1000), origin, grid, first, 48)
+                .expect("complete bounded source window");
+            assert_eq!(
+                mapped.iter().map(|m| m.source.clone()).collect::<Vec<_>>(),
+                keys
+            );
+            assert_eq!(
+                mapped[0].output_pts,
+                DvTimestamp::new(
+                    i64::try_from(first * 1001).expect("output frame index fits i64"),
+                    24000,
+                )
+                .expect("valid output timestamp")
+            );
+            assert!(
+                dv_map_source_to_output_grid(&keys[..47], (1, 1000), origin, grid, first, 48)
+                    .is_err()
+            );
+            let mut duplicate = keys.clone();
+            duplicate[24] = duplicate[23].clone();
+            assert!(
+                dv_map_source_to_output_grid(&duplicate, (1, 1000), origin, grid, first, 48)
+                    .is_err()
+            );
+            let mut drift = keys.clone();
+            drift[47].pts = DvTimestamp::new(
+                millis
+                    + i64::try_from((first + 47) * 1001 / 24).expect("drift frame PTS fits i64")
+                    + 2,
+                1000,
+            )
+            .expect("valid drift PTS");
+            assert!(
+                dv_map_source_to_output_grid(&drift, (1, 1000), origin, grid, first, 48).is_err()
+            );
+            let wrong = DvSourceOrigin::observed_common(
+                DvTimestamp::new(millis + 2, 1000).expect("valid shifted origin timestamp"),
+                super::super::VodSourceClock::ReportedOrigin((millis + 2) * 1000),
+            )
+            .expect("valid shifted source origin");
+            assert!(
+                dv_map_source_to_output_grid(&keys, (1, 1000), wrong, grid, first, 48).is_err()
+            );
+            assert!(
+                dv_map_source_to_output_grid(&keys, (1, 1000), origin, grid, u64::MAX, 48).is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn common_source_origin_bounds_are_absolute_exact_and_seek_stable() {
+    for millis in [0, 125] {
+        let origin = DvSourceOrigin::observed_common(
+            DvTimestamp::new(millis, 1000).expect("valid boundary origin timestamp"),
+            super::super::VodSourceClock::ReportedOrigin(millis * 1000),
+        )
+        .expect("valid observed source origin");
+        for entry in [0, 1, 2, 360] {
+            let first = entry * 48 * 1001_u64;
+            let start = origin
+                .source_boundary(first, 24000, (1, 1000))
+                .expect("bounded source start boundary");
+            let end = origin
+                .source_boundary(first + 48 * 1001, 24000, (1, 1000))
+                .expect("bounded source end boundary");
+            let expected = if entry == 0 {
+                DvTimestamp::new(millis, 1000).expect("valid expected start timestamp")
+            } else {
+                DvTimestamp::new(
+                    i64::try_from(first * 1000 / 24000).expect("expected boundary offset fits i64")
+                        + millis
+                        - 1,
+                    1000,
+                )
+                .expect("valid expected boundary timestamp")
+            };
+            assert_eq!(
+                DvTimestamp::new(start.0, start.1).expect("valid actual boundary timestamp"),
+                expected
+            );
+            assert_eq!(
+                end,
+                origin
+                    .source_boundary((entry + 1) * 48 * 1001, 24000, (1, 1000))
+                    .expect("bounded expected next boundary")
+            );
+        }
+        assert!(origin.source_boundary(u64::MAX, 24000, (1, 1000)).is_err());
+        assert!(origin.source_boundary(1, 0, (1, 1000)).is_err());
+    }
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1).expect("valid default clock timestamp"),
+        super::super::VodSourceClock::ProducerDefaultZero
+    )
+    .is_err());
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(1, 8).expect("valid mismatched clock timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(0)
+    )
+    .is_err());
+    assert!(DvSourceOrigin::observed_common(
+        DvTimestamp::new(-1, 8).expect("valid negative origin timestamp"),
+        super::super::VodSourceClock::ReportedOrigin(-125000)
+    )
+    .is_err());
+}
+
+#[test]
+fn effective_target_report_rejects_ambiguous_or_unsupported_buckets() {
+    let generation = "00000000-0000-4000-8000-000000000001";
+    let report = |targets: &[u32]| {
+        let mut operations = vec![DvOperation::RpuColorConversion, DvOperation::TargetMapping];
+        operations.extend(
+            targets
+                .iter()
+                .map(|nits| DvOperation::DisplayTargetMapping { nits: *nits }),
+        );
+        serde_json::to_vec(
+            &serde_json::json!({"generation":generation,"hdr10_enhanced":true,
+            "fel_contributed":false,"applied_operations":operations}),
+        )
+        .expect("report")
+    };
+    let master =
+        DvEffectiveProcessingReport::from_owner_wire(&report(&[]), generation, Some("hdr10"))
+            .expect("master report");
+    assert_eq!(master.display_target_nits(), None);
+    let targeted =
+        DvEffectiveProcessingReport::from_owner_wire(&report(&[1600]), generation, Some("hdr10"))
+            .expect("target report");
+    assert_eq!(targeted.display_target_nits(), Some(1600));
+    for buckets in [&[999][..], &[1000, 1600][..], &[1600, 1600][..]] {
+        assert!(DvEffectiveProcessingReport::from_owner_wire(
+            &report(buckets),
+            generation,
+            Some("hdr10")
+        )
+        .is_none());
+    }
+    assert!(DvEffectiveProcessingReport::from_owner_wire(
+        &report(&[1600]),
+        generation,
+        Some("sdr")
+    )
+    .is_none());
+    assert!(DvEffectiveProcessingReport::from_owner_wire(
+        &report(&[1600]),
+        "00000000-0000-4000-8000-000000000002",
+        Some("hdr10")
+    )
+    .is_none());
+}
+
+// Numeric metadata shape from public inspection; encoded pictures remain the
+// existing authored synthetic control, never a private movie fixture.
+fn general_fel_control_rpu() -> dolby_vision::rpu::dovi_rpu::DoviRpu {
+    use dolby_vision::rpu::{
+        dovi_rpu::DoviRpu,
+        rpu_data_mapping::{DoviMMRCurve, DoviMappingMethod},
+    };
+    let mut rpu = DoviRpu::parse_unspec62_nalu(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/frame-000.nal"
+    ))
+    .expect("authored FEL control");
+    let mapping = rpu.rpu_data_mapping.as_mut().expect("control mapping");
+    let curve = &mut mapping.curves[0];
+    curve.num_pivots_minus2 = 7;
+    curve.pivots = vec![0, 128, 128, 128, 128, 128, 128, 128, 127];
+    let polynomial = curve.polynomial.as_mut().expect("control polynomial");
+    polynomial.poly_order_minus1 = vec![0; 8];
+    polynomial.linear_interp_flag = vec![false; 8];
+    fn split(values: &[i64]) -> (Vec<i64>, Vec<u64>) {
+        (
+            values.iter().map(|v| v.div_euclid(8_388_608)).collect(),
+            values
+                .iter()
+                .map(|v| u64::try_from(v.rem_euclid(8_388_608)).expect("nonnegative fraction"))
+                .collect(),
+        )
+    }
+    let luma: [[i64; 2]; 8] = [
+        [3626, 8388608],
+        [3626, 8388607],
+        [26593, 8296738],
+        [34580, 8275440],
+        [-22003, 8388606],
+        [-22004, 8388608],
+        [-22004, 8388608],
+        [-22004, 8388608],
+    ];
+    polynomial.poly_coef_int = luma
+        .iter()
+        .map(|v| split(v).0.into_iter().collect())
+        .collect();
+    polynomial.poly_coef = luma
+        .iter()
+        .map(|v| split(v).1.into_iter().collect())
+        .collect();
+    let chroma: [[i64; 21]; 2] = [
+        [
+            -230431, 11051188, 7235011, -5083283, 1418656, -9439323, 8448648, 2927811, -9479913,
+            -11794478, -849379, -11216816, 14289784, 1876340, 862433, 8308635, 4327467, -587533,
+            -6229824, 13894123, -2858171,
+        ],
+        [
+            -2612310, -432811, 7716669, -5781593, 7848329, -3804433, 5194520, 4692332, 2594927,
+            2650192, 2542064, -18029098, -1373643, 2228015, -564564, -205162, -2612863, 3987001,
+            -7321630, 5786752, 802095,
+        ],
+    ];
+    for (component, values) in chroma.iter().enumerate() {
+        let curve = &mut mapping.curves[component + 1];
+        curve.mapping_idc = DoviMappingMethod::MMR;
+        curve.polynomial = None;
+        curve.mmr = Some(DoviMMRCurve {
+            mmr_order_minus1: vec![2],
+            mmr_constant_int: vec![0],
+            mmr_constant: vec![[26_163, 566_438][component]],
+            mmr_coef_int: vec![values
+                .chunks(7)
+                .map(|v| split(v).0.into_iter().collect())
+                .collect()],
+            mmr_coef: vec![values
+                .chunks(7)
+                .map(|v| split(v).1.into_iter().collect())
+                .collect()],
+        });
+    }
+    let nlq = mapping.nlq.as_mut().expect("control NLQ");
+    nlq.nlq_offset = [512; 3];
+    nlq.linear_deadzone_slope_int = [0; 3];
+    nlq.linear_deadzone_slope = [2048; 3];
+    nlq.linear_deadzone_threshold_int = [0; 3];
+    nlq.linear_deadzone_threshold = [0; 3];
+    nlq.vdr_in_max_int = [0; 3];
+    nlq.vdr_in_max = [1_048_576; 3];
+    rpu.modified = true;
+    rpu
+}
+
+#[test]
+fn fresh_general_fel_metadata_keeps_piecewise_mmr_and_refuses_unsupported_nlq() {
+    let raw = general_fel_control_rpu()
+        .write_hevc_unspec62_nalu()
+        .expect("valid general FEL control");
+    let parsed = DvFelMetadata::from_raw_rpu(&raw, (64, 64)).expect("bounded general FEL");
+    assert_eq!((parsed.polynomial_segments, parsed.mmr_segments), (8, 2));
+    for op in [
+        DvOperation::PolynomialReshape,
+        DvOperation::MmrReshape,
+        DvOperation::LinearNlqResidual,
+    ] {
+        assert!(parsed.applied_operations.contains(&op));
+    }
+    assert!(
+        DvParsedMetadata::from_raw_rpu(&raw).is_err(),
+        "synthetic projection remains narrow"
+    );
+    let mut clipped = general_fel_control_rpu();
+    clipped
+        .rpu_data_mapping
+        .as_mut()
+        .expect("mapping")
+        .nlq
+        .as_mut()
+        .expect("NLQ")
+        .vdr_in_max = [16_384; 3];
+    let clipped = clipped
+        .write_hevc_unspec62_nalu()
+        .expect("valid binding NLQ wire control");
+    assert!(DvFelMetadata::from_raw_rpu(&clipped, (64, 64)).is_err());
+    let mut reused = general_fel_control_rpu();
+    reused.header.use_prev_vdr_rpu_flag = true;
+    let reused = reused
+        .write_hevc_unspec62_nalu()
+        .expect("valid reused-RPU wire control");
+    assert!(DvFelMetadata::from_raw_rpu(&reused, (64, 64)).is_err());
+    assert!(DvFelMetadata::from_raw_rpu(&[], (64, 64)).is_err());
+    assert!(DvFelMetadata::from_raw_rpu(
+        include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal"),
+        (64, 64)
+    )
+    .is_err());
+}
+
+fn general_fel_hdr10_control_window() -> Vec<u8> {
+    use crate::fmp4::{self, Unit};
+    let mut reader = fmp4::FragmentReader::new();
+    reader.push(include_bytes!(
+        "../../../tests/fixtures/dv-runtime/authored.mp4"
+    ));
+    let Some(Unit::Init(mut init)) = reader.next_unit().expect("control init") else {
+        panic!("control init missing");
+    };
+    fmp4::remove_dolby_vision_record(&mut init).expect("remove control DV record");
+    let video = init.video().expect("video").id;
+    let mut encoded = init.bytes.clone();
+    while let Some(unit) = reader.next_unit().expect("control unit") {
+        let Unit::Fragment(mut fragment) = unit else {
+            continue;
+        };
+        fmp4::rewrite_video_samples(&mut fragment, &init.tracks, video, |sample| {
+            let mut output = Vec::new();
+            let mut at = 0;
+            while at < sample.len() {
+                let count =
+                    u32::from_be_bytes(sample[at..at + 4].try_into().expect("NAL length")) as usize;
+                let end = at + 4 + count;
+                if (sample[at + 4] >> 1) & 63 != 62 {
+                    output.extend_from_slice(&sample[at..end]);
+                }
+                at = end;
+            }
+            Ok(output)
+        })
+        .expect("strip synthetic RPUs while preserving Main10 packets");
+        encoded.extend_from_slice(&fragment.bytes);
+    }
+    assert!(reader.saw_trailer());
+    encoded.extend_from_slice(&completed_window_trailer(&init));
+    encoded
+}
+
+#[test]
+fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
+    let raw = general_fel_control_rpu()
+        .write_hevc_unspec62_nalu()
+        .expect("general FEL wire control");
+    let rpus = vec![raw; 3];
+    let keys: Vec<_> = (48..51)
+        .map(|ordinal| DvFrameKey {
+            pts: DvTimestamp::new(ordinal * 1001, 24000).expect("control PTS"),
+            ..key(u64::try_from(ordinal).expect("control ordinal"))
+        })
+        .collect();
+    let duration = DvDuration::new(1001, 24000, DvDurationProvenance::CodedPacketObserved)
+        .expect("control duration");
+    let encoded = general_fel_hdr10_control_window();
+    let mut facts = source();
+    facts.coverage =
+        Some(DvSourceCoverage::sampled(7, keys.clone()).expect("complete source keys"));
+    let origin = DvSourceOrigin::observed_common(
+        DvTimestamp::new(0, 1000).expect("control origin"),
+        super::super::VodSourceClock::ReportedOrigin(0),
+    )
+    .expect("observed control origin");
+    let make = |source_keys: &[DvFrameKey], source_rpus: &[Vec<u8>]| {
+        dv_plan_completed_window(DvCompletedWindowInput {
+            source: facts.clone(),
+            preferences: input(DvDestination::Hdr10).preferences,
+            backend: backend(),
+            destination: DvDestination::Hdr10,
+            encoder: Encoder::Software,
+            mode: DvProcessingMode::Fel,
+            source_keys,
+            source_rpus,
+            source_tick: (1, 1000),
+            source_origin: origin,
+            grid: super::super::VodFrameGrid::new(24000, 1001).expect("control grid"),
+            first_global_frame: 48,
+            encoded: &encoded,
+            raster: (64, 64),
+            export_policy: DvExportPolicy::NativeRgb48V1,
+            source_trace: digest('d'),
+            observed_at: 1,
+            decoder: DecodeBackend::Software,
+        })
+    };
+    // This exercises the typed factory against retained synthetic encoded data.
+    // It is neither a real helper receipt nor native/GPU acceptance evidence.
+    let completed = make(&keys, &rpus).expect("bounded general FEL factory");
+    assert!(completed
+        .graph
+        .required_operations()
+        .contains(&DvOperation::MmrReshape));
+    let receipt = dv_receipt_completed_window(&completed, &keys, &[duration; 3], &rpus)
+        .expect("general FEL receipt");
+    for frame in receipt.served_frames() {
+        assert!(frame
+            .applied_operations
+            .contains(&DvOperation::PolynomialReshape));
+        assert!(frame.applied_operations.contains(&DvOperation::MmrReshape));
+        assert!(frame
+            .applied_operations
+            .contains(&DvOperation::LinearNlqResidual));
+    }
+    assert_eq!(
+        receipt.counts().operations_applied[&DvOperation::MmrReshape],
+        3
+    );
+    assert_eq!(receipt.counts().el_accepted, 3);
+    assert!(make(&keys[..2], &rpus).is_err());
+    assert!(make(&keys, &rpus[..2]).is_err());
+    assert!(
+        dv_author_profile81_window(&encoded, (64, 64), 24000, 48048, 1001, &rpus, 1).is_err(),
+        "P8.1 authoring remains narrow"
+    );
 }

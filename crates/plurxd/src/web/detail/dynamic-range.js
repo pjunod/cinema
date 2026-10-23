@@ -107,7 +107,10 @@ function effectiveHdrProcessing(report,generation,delivered){
     ||!/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.test(generation)
     ||!Array.isArray(report.applied_operations)||!report.applied_operations.length
     ||report.applied_operations.length>16
-    ||!report.applied_operations.every(op=>typeof op==='string'&&op.length>0&&op.length<=64)) return null;
+    ||!report.applied_operations.every(op=>typeof op==='string'?op.length>0&&op.length<=64
+      :op&&typeof op==='object'&&Object.keys(op).length===1
+        &&op.DisplayTargetMapping&&Object.keys(op.DisplayTargetMapping).length===1
+        &&[400,600,1000,1600,2000,4000].includes(op.DisplayTargetMapping.nits))) return null;
   return report;
 }
 function effectiveProcessingDetail(report){
