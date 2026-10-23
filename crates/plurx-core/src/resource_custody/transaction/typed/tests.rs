@@ -76,6 +76,21 @@ fn prepare(f: &mut Fixture) -> PreparedBatch {
         _ => panic!("prepare result"),
     }
 }
+
+#[test]
+fn typed_prepare_accepts_current_exact_v6_storage_schema() {
+    let mut f = fixture(false);
+    let version: i64 = f
+        .storage
+        .connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+
+    let prepared = prepare(&mut f);
+    assert_eq!(prepared.obligations.len(), 1);
+}
+
 fn change_command(handle: &ObligationHandle, sequence: i64, mutation: Mutation) -> QueuedOperation {
     let id = Uuid::new_v4();
     QueuedOperation {
