@@ -1,6 +1,8 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · published native Linux all-targets compile passed on Rust 1.97.1; current HTTP and S-cleanup integration passes host compilation; native check pending; behavioral tests not run.
+**Status:** open · implementation incomplete · published native Linux core+daemon
+all-targets compile passed on Rust 1.97.1; current in-role response-buffer
+changes pass host compilation, with native compilation pending; behavioral tests not run.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -12,19 +14,22 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at published checkpoint `1a4e015bf`. The immediate target is one ordinary
+All five items are **OPEN** at published checkpoint
+`4993339f81d7045950c13cb9ec42977c5a62ce50`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
-Current integration adds HTTP `ReadyFile` counted-range selection and
-native-error causality, plus S cleanup through original native cells, typed
-settlement and retryable dormant eviction. Host daemon all-target compilation
-passes on Rust 1.97.1 (140.517 seconds, stable source hashes); core all-target
-compilation completed in the preceding adapter-failure iterations. Native
-compilation of this new snapshot remains pending. Initialization
-inspection/copy remains outside the ledger; peak-memory bounds, per-dimension
-capacity and partial-start ownership remain unresolved. No V1–V5 or M0–M7 item
-is closed.
+The published checkpoint passed native Linux core+daemon all-targets compilation
+with Rust 1.97.1 (EXIT 0, 201.134 seconds); behavioral tests did not run. Current
+uncommitted work adds in-role counted response partitioning and opaque
+`ReadyBytes` buffer/body ownership. The host daemon all-target check passes
+on Rust 1.97.1 (123.394 seconds, stable source hashes); native checking of this
+new snapshot is pending. Finite buffers reserve before allocation, stay charged
+through body/inspection ownership, and block every terminal refund while live.
+Buffered ranges share their original allocation. Parser inspection copies remain
+outside that narrow payload partition; parser/framework/runtime-index
+overheads, unknown-peak cold policy, per-dimension capacity and partial-start
+ownership remain unresolved. No V1–V5 or M0–M7 item is closed.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
@@ -64,13 +69,13 @@ jobs and a recycled fixed buffer. Only known durable observation releases an
 opaque chunk; Drop requests closure for the same retained owner. Active reader
 cells/leases now transfer with the same native bootstrap owner across R→S. The
 actual prepare-bundle ledger tag is explicitly retained separately from journal
-obligation identity. A bounded S cleanup event/native-cell sequence and typed
-terminal settlement transaction are authored; S cleanup execution, typed settlement and dormant
-eviction are connected and pass host compilation, along with HTTP counted
-range selection and native-error causality. Native compilation is pending. Image verification now reuses only prior
-successful full-S1/digest/ELF attestations on the same rechecked held file.
-Published-checkpoint host compilation passed; behavioral tests are NOT RUN and
-no V item closes from this checkpoint.
+obligation identity. S cleanup execution, typed settlement and dormant eviction
+are connected; HTTP counted-range selection and native-error causality are in
+the published source. Image verification now reuses only prior successful
+full-S1/digest/ELF attestations on the same rechecked held file. The published
+checkpoint passed native Linux core+daemon all-targets compilation; current
+in-role response-buffer changes await compilation. Behavioral tests are NOT RUN
+and no V item closes from this checkpoint.
 
 The current source binds a hashed native ELF held in the same source custodian
 to fd-based fixed launch. A process-only graph witness now requires original
@@ -79,8 +84,9 @@ Source-copy audits and staged same-owner frozen-bootstrap transfer are authored;
 the private retirement adapter now installs the same native output in provisional
 S before its receipt/command, preserves full R over unknown results, then performs
 one post-COMMIT ledger swap and role rebinding. S retains the whole R nonproducer
-allowance. Published native Linux all-targets compilation passed on Rust 1.97.1
-in 195.199 seconds; current uncommitted edits await compilation. Actual serving,
+allowance. Published native Linux core+daemon all-targets compilation passed on
+Rust 1.97.1 in 201.134 seconds; current in-role response-buffer edits await
+compilation. Actual serving,
 complete quotas, S cleanup and ordinary wiring remain open. No behavioral tests
 have run. This does not close any V item.
 
@@ -120,10 +126,11 @@ connection, full memory profile, serving leases, retained-output transfer,
 conserving retirement and exact settlement/capacity reuse still lack their
 production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
-records the limits. The latest published checkpoint is `1a4e015bf`. Its native
-Linux all-target Rust 1.97.1 compile passed in 195.199 seconds. Current
-uncommitted HTTP and S-cleanup changes are outside that receipt and await
-compilation. This is warning-level compilation.
+records the limits. The latest published checkpoint is
+`4993339f81d7045950c13cb9ec42977c5a62ce50`. Its native Linux core+daemon
+all-target Rust 1.97.1 compile passed in 201.134 seconds (EXIT 0). Current
+in-role response-buffer changes are outside that receipt and await compilation.
+This is warning-level compilation.
 Host-eligible authored cases compiled; Linux-only bodies and Windows remain
 outside that evidence. No behavioral tests or review ran for this slice.
 Review and qualification wait for the complete integrated candidate.

@@ -1392,9 +1392,11 @@ impl VodServe {
                     .rendition_build_gate(rendition_id)
                     .lock_owned()
                     .await;
-                let init = super::vod_serve_serve::read_quality_artifact(
-                    &found.rendition.dir.path().join(INIT_NAME),
+                let init = super::vod_serve_serve::read_rendition_artifact(
+                    &found.rendition,
+                    None,
                     256 * 1024,
+                    deadline,
                 )
                 .await?;
                 let (verified_rung, verified_interval) = (rung.clone(), interval.clone());
@@ -1459,9 +1461,11 @@ impl VodServe {
                             .rendition_build_gate(audio.rendition_id())
                             .lock_owned()
                             .await;
-                        let init = super::vod_serve_serve::read_quality_artifact(
-                            &soundtrack.rendition.dir.path().join(INIT_NAME),
+                        let init = super::vod_serve_serve::read_rendition_artifact(
+                            &soundtrack.rendition,
+                            None,
                             256 * 1024,
+                            deadline,
                         )
                         .await?;
                         let entry = soundtrack
@@ -1815,7 +1819,7 @@ async fn read_child_init(
     ready: &mut SegmentReady,
     expected: &str,
     deadline: Instant,
-) -> Result<Option<Vec<u8>>, VodError> {
+) -> Result<Option<ready_file::ReadyBytes>, VodError> {
     if ready.len > 256 * 1024 {
         return Ok(None);
     }

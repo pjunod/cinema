@@ -162,14 +162,12 @@ impl VodServe {
                 {
                     return Err("reserved media is not materialized on its exact clock".into());
                 }
-                let init = read_quality_artifact(&rendition.dir.path().join(INIT_NAME), 256 * 1024)
-                    .await?;
-                let media = read_quality_artifact(
-                    &rendition
-                        .dir
-                        .path()
-                        .join(segment_name(u64::from(entry.index))),
+                let init = read_rendition_artifact(&rendition, None, 256 * 1024, deadline).await?;
+                let media = read_rendition_artifact(
+                    &rendition,
+                    Some(entry.index),
                     interval.byte_length,
+                    deadline,
                 )
                 .await?;
                 verify_cached_quality_interval(&init, &media, rung, interval)?;
@@ -216,8 +214,7 @@ impl VodServe {
                         )
                         .map_err(|error| error.to_string())?;
                     let init =
-                        read_quality_artifact(&soundtrack.dir.path().join(INIT_NAME), 256 * 1024)
-                            .await?;
+                        read_rendition_artifact(&soundtrack, None, 256 * 1024, deadline).await?;
                     for index in dependencies {
                         let entry = soundtrack
                             .plan
@@ -232,9 +229,11 @@ impl VodServe {
                         {
                             return Err("shared AAC dependency is not materialized".into());
                         }
-                        let media = read_quality_artifact(
-                            &soundtrack.dir.path().join(segment_name(u64::from(index))),
+                        let media = read_rendition_artifact(
+                            &soundtrack,
+                            Some(index),
                             16 * 1024 * 1024,
+                            deadline,
                         )
                         .await?;
                         let dependency =
@@ -1369,6 +1368,43 @@ async fn open_with_read_custody(
         Some(custody) => custody.open_ready(path, etag_stem, delivery).await,
         None => open_ready(path, etag_stem, delivery).await,
     }
+}
+
+pub(super) async fn read_rendition_artifact(
+    rendition: &Rendition,
+    index: Option<u32>,
+    limit: u64,
+    deadline: Instant,
+) -> Result<crate::vodserve::ReadyBytes, String> {
+    #[cfg(unix)]
+    if let Some(output) = rendition.dir.finite_output() {
+        use plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile;
+        let file = index.map_or(FiniteFile::Init, FiniteFile::Segment);
+        let len = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            output.file_len(file),
+        )
+        .await
+        .map_err(|_| "continuous artifact inspection deadline elapsed".to_owned())?
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "continuous artifact is missing".to_owned())?;
+        if len == 0 || len > limit {
+            return Err("continuous artifact is missing or exceeds its byte bound".into());
+        }
+        let mut ready = crate::vodserve::ReadyFile::Finite { output, file, len };
+        return ready
+            .read_all_bounded(limit, deadline)
+            .await
+            .map_err(|error| error.to_string());
+    }
+
+    let path = match index {
+        Some(index) => rendition.dir.path().join(segment_name(u64::from(index))),
+        None => rendition.dir.path().join(INIT_NAME),
+    };
+    read_quality_artifact(&path, limit)
+        .await
+        .map(crate::vodserve::ReadyBytes::Local)
 }
 
 pub(super) async fn read_quality_artifact(path: &Path, limit: u64) -> Result<Vec<u8>, String> {

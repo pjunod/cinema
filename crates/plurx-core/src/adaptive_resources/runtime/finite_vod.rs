@@ -75,9 +75,15 @@ pub struct FiniteSourceRequest {
     pub scanner_mtime: i64,
 }
 
+pub use super::response_memory::FiniteResponseBuffer;
+use super::response_memory::ResponseBudget;
+
 /// Explicit logical/reported-allocation profile. These are admission bounds,
 /// not a claim that a filesystem or host enforces a physical-byte quota.
 pub struct FiniteOutputLimits {
+    /// Fixed same-role partition for buffered response payloads and owners.
+    /// Separate from the V3 scratch/native reader resident-memory bound.
+    pub response_memory_bytes: u64,
     pub resident_file_objects: u32,
     pub resident_logical_bytes: u64,
     pub reserved_storage_bytes: u64,
@@ -241,6 +247,19 @@ impl FiniteFile {
 }
 
 impl FiniteOutput {
+    /// Reserve the complete buffered response under the same retained role
+    /// before allocating or opening the native reader.
+    pub async fn allocate_response_buffer(
+        &self,
+        capacity: usize,
+        deadline: Instant,
+    ) -> Result<FiniteResponseBuffer, FiniteVodError> {
+        self.runtime
+            .allocate_finite_response_buffer(&self.preparation, 0, self.member, capacity, deadline)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Read immutable published metadata without opening a native file.
     pub async fn file_len(&self, file: FiniteFile) -> Result<Option<u64>, FiniteVodError> {
         self.runtime
@@ -629,6 +648,28 @@ impl NodeResourceRuntime {
         {
             return Err(invalid());
         }
+        let task_memory = request
+            .producer
+            .minimum_memory_bytes()?
+            .checked_add(
+                u64::try_from(request.command.resident_memory_bytes()?).map_err(|_| invalid())?,
+            )
+            .and_then(|bytes| bytes.checked_add(64 * 1024))
+            .ok_or_else(invalid)?;
+        let response_memory = request.output.response_memory_bytes;
+        let response_limit = usize::try_from(response_memory).map_err(|_| invalid())?;
+        let total_memory = request
+            .output
+            .resident_memory_bytes
+            .checked_add(task_memory)
+            .and_then(|bytes| bytes.checked_add(response_memory))
+            .ok_or_else(invalid)?;
+        if resources.peak_memory_bytes < total_memory || response_memory == 0 {
+            return Err(invalid());
+        }
+        // This owner is allocated before the reservation and installed before
+        // any selected source/output native entry. Its partition remains in S.
+        let response_budget = ResponseBudget::new(response_limit).map_err(FiniteVodError)?;
         let namespace = std::fs::metadata("/proc/self/ns/mnt")
             .map_err(|e| FiniteVodError(OperationError::Physical(e)))?
             .ino();
@@ -656,21 +697,6 @@ impl NodeResourceRuntime {
         let diagnostic_owner = id();
         let sink_owner = id();
         let task_buffer = id();
-        let task_memory = request
-            .producer
-            .minimum_memory_bytes()?
-            .checked_add(
-                u64::try_from(request.command.resident_memory_bytes()?).map_err(|_| invalid())?,
-            )
-            .and_then(|bytes| bytes.checked_add(64 * 1024))
-            .ok_or_else(invalid)?;
-        if resources
-            .peak_memory_bytes
-            .checked_sub(request.output.resident_memory_bytes)
-            .is_none_or(|remaining| remaining < task_memory)
-        {
-            return Err(invalid());
-        }
         let task_source = &request.sources[0];
         let task_association = v2::SourceAssociation {
             media_file_id: task_source.media_file_id.clone(),
@@ -891,12 +917,13 @@ impl NodeResourceRuntime {
                 return Err(error.into());
             }
         };
+        self.install_finite_response_budget(&preparation, 0, response_budget)?;
         let output = FiniteOutput {
             runtime: Arc::clone(self),
             preparation: preparation.clone(),
             member: scratch_member.uuid(),
             directory_path: directory_path.clone(),
-            encoded_process_marker: true,
+            encoded_process_marker: request.encoded_process_marker,
         };
         let (pump, events) = pump::SoftwarePump::new(output, request.producer)
             .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;

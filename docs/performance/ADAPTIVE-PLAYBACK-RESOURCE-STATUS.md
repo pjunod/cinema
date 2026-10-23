@@ -1,7 +1,11 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; published native Linux all-targets compile passed on Rust 1.97.1; current HTTP and S-cleanup integration passes host compilation; native check pending; behavioral tests not run.
-**Updated:** 2026-10-22 at published checkpoint `1a4e015bf`; current uncommitted work described below.
+**Status:** open · implementation incomplete; published native Linux core+daemon
+all-targets compile passed on Rust 1.97.1; current in-role response-buffer
+changes pass host compilation, with native compilation pending; behavioral tests not run.
+**Updated:** 2026-10-22 at published checkpoint
+`4993339f81d7045950c13cb9ec42977c5a62ce50`; current uncommitted work described
+below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -27,17 +31,22 @@ acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
 
-Published checkpoint `1a4e015bf` passed the native Linux all-targets Rust
-1.97.1 compile in 195.199 seconds. No behavioral tests ran. Current integration adds HTTP `ReadyFile` counted-range selection and native
-error causality, S cleanup through original native cells, typed settlement and
-retryable dormant eviction. Host daemon all-target compilation passes on Rust
-1.97.1 (140.517 seconds, stable source hashes; receipt
-`direct-check-20261022-215906.json`). Core all-target compilation completed in
-the preceding adapter-failure iterations. Native compilation of this new
-snapshot remains pending. All V1–V5 and R1/M0–M7 remain open.
-Ordinary VOD still uses legacy admission. Initialization inspection/copy remains
-outside the ledger, peak-memory bounds and per-dimension capacity are not
-implemented, and partial-start ownership remains unresolved.
+Published checkpoint `4993339f81d7045950c13cb9ec42977c5a62ce50` passed native
+Linux core+daemon all-targets compilation with pinned Rust 1.97.1 (EXIT 0,
+201.134 seconds). Stable source archive SHA-256:
+`22c564c22efaa24b79afd0d880ebeda9c3b3dcb75260be9228a6a444162efb85`; log
+SHA-256: `97d38b39c566cd0b98dc8602052f48f662bcacd17c2b0f33e9cdda1f48fe1672`.
+No behavioral tests ran. Current uncommitted work adds in-role counted response
+partitioning and opaque `ReadyBytes` buffer/body ownership. The host daemon
+all-target check passes on Rust 1.97.1 (123.394 seconds, stable source hashes;
+`direct-check-20261022-222315.json`); native checking of this new snapshot is
+pending. Finite allocation reserves its slot before allocating and keeps it
+through actual byte-owner drop, including sliced HTTP bodies. S cleanup and
+every generic refund refuse live buffers. Three focused budget regressions are
+authored and not run. All V1–V5 and R1/M0–M7 remain open.
+Ordinary VOD still uses legacy admission. Parser inspection copies remain outside the response payload partition; parser/framework/runtime-index overhead remains incomplete.
+Unknown-peak cold policy, per-dimension capacity and partial-start ownership
+remain unresolved.
 
 The selected executable now uses a fixed eight-entry verification cache keyed by
 all seven S1 identity fields and digest. Only a prior successful held-file native
@@ -124,11 +133,11 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `1a4e015bf`. The native Linux all-target Rust 1.97.1
-source compile passed in 195.199 seconds. No behavioral tests ran. The current
-uncommitted HTTP `ReadyFile` counted-range selection/native-error causality and
-S-cleanup state-machine/typed-settlement/eviction changes are not covered by that
-receipt and await compilation. No strict Clippy, final independent review,
+The latest published base is `4993339f81d7045950c13cb9ec42977c5a62ce50`. Its
+native Linux core+daemon all-target Rust 1.97.1 compile passed in 201.134 seconds.
+No behavioral tests ran. Current uncommitted in-role response partitioning and
+opaque `ReadyBytes` buffer-body ownership are outside that receipt and await
+compilation. No strict Clippy, final independent review,
 qualification/fast lane, merge or deployment is claimed. Ordinary admission and
 terminal integration remain open. Initialization inspection/copy is outside the
 ledger; peak-memory bounds, per-dimension capacity and partial-start ownership

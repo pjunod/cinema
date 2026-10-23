@@ -198,7 +198,7 @@ pub(super) async fn exact_hls_context_at(
     // playlist request can never allocate without limit. VOD init bytes come
     // through their own registry; live bytes retain the internal delivery
     // tracker that keeps this probe out of player throughput telemetry.
-    let mut init = Vec::new();
+    let init;
     match state
         .transcode
         .vod_segment_before(session, &init_object, deadline)
@@ -295,13 +295,16 @@ pub(super) async fn exact_hls_context_at(
                 delivery.finish_without_body();
                 return Err(HlsInitInspectionError::invalid());
             }
-            init.reserve(opened.len as usize);
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(opened.len as usize)
+                .map_err(|_| HlsInitInspectionError::unavailable())?;
             // No response body exists here — this is the playlist generator
             // reading `hvcC` for itself.
             delivery.expect_at_most(opened.len);
             let started = Instant::now();
             let mut reader = opened.file.take(opened.len);
-            match reader.read_to_end(&mut init).await {
+            match reader.read_to_end(&mut bytes).await {
                 Ok(bytes) => {
                     delivery.note_read(bytes as u64, started.elapsed());
                     delivery.finish();
@@ -314,6 +317,7 @@ pub(super) async fn exact_hls_context_at(
                     return Err(HlsInitInspectionError::unavailable());
                 }
             }
+            init = crate::vodserve::ReadyBytes::Local(bytes);
         }
     }
     bind_hls_init_context(context, &init, sample_entry)

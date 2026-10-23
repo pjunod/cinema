@@ -1125,7 +1125,7 @@ mod reader;
 #[path = "vod/ready_file.rs"]
 mod ready_file;
 use reader::*;
-pub(crate) use ready_file::ReadyFile;
+pub(crate) use ready_file::{ReadyBytes, ReadyFile};
 // split: end vod-reader
 
 // split: begin vod-marker-prewarm

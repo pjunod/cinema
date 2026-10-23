@@ -107,6 +107,7 @@ impl NodeResourceRuntime {
         // their retained inventories before the journal can authorize refund.
         // The only live authority is now the original command below.
         role.bootstrap.clear();
+        role.response_budget = None;
         role.retirement = None;
         role.typed_members = None;
         role.armed.clear();

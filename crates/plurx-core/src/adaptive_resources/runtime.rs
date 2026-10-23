@@ -23,6 +23,8 @@ use crate::resource_custody::{
 pub mod finite_vod;
 mod operations;
 #[cfg(unix)]
+mod response_memory;
+#[cfg(unix)]
 pub(super) use operations::bootstrap::retirement::RetainedFiniteClosure;
 #[cfg(unix)]
 pub(super) use operations::finite_retirement::FiniteRetirementClosure;

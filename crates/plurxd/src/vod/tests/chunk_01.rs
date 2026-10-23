@@ -2236,8 +2236,12 @@ fn describe(answer: Option<VodPublication<Option<SegmentReady>>>) -> String {
 
 async fn read_ready(ready: SegmentReady) -> Vec<u8> {
     let mut ready = ready;
-    ready.file.read_all_bounded(ready.len, std::time::Instant::now() + Duration::from_secs(30))
-        .await.expect("read segment")
+    let bytes = ready
+        .file
+        .read_all_bounded(ready.len, std::time::Instant::now() + Duration::from_secs(30))
+        .await
+        .expect("read segment");
+    bytes.to_vec()
 }
 
 async fn plan_len(serve: &Arc<VodServe>, session: &str) -> usize {

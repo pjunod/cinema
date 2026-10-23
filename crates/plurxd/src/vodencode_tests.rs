@@ -397,7 +397,7 @@ async fn fetched_bytes(serve: &Arc<VodServe>, session: &str, name: &str) -> Vec<
         .read_all_bounded(ready.len, Instant::now() + std::time::Duration::from_secs(30))
         .await.expect("read served file");
     assert_eq!(bytes.len() as u64, ready.len);
-    bytes
+    bytes.to_vec()
 }
 
 #[tokio::test]

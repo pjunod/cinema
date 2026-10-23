@@ -3,7 +3,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 #[cfg(unix)]
 use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteFile, FiniteOutput, FiniteReader, FiniteVodError,
+    FiniteFile, FiniteOutput, FiniteReader, FiniteResponseBuffer, FiniteVodError,
 };
 use std::fmt;
 use std::io;
@@ -12,6 +12,59 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub(crate) type MediaByteStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>;
+
+/// Buffered bytes retain their original allocation owner through inspection
+/// and the final HTTP body. Finite bytes have no uncounted Vec escape.
+pub(crate) enum ReadyBytes {
+    Local(Vec<u8>),
+    #[cfg(unix)]
+    Finite(FiniteResponseBuffer),
+}
+impl std::ops::Deref for ReadyBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Local(bytes) => bytes,
+            #[cfg(unix)]
+            Self::Finite(bytes) => bytes,
+        }
+    }
+}
+impl std::ops::DerefMut for ReadyBytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Local(bytes) => bytes,
+            #[cfg(unix)]
+            Self::Finite(bytes) => bytes,
+        }
+    }
+}
+impl AsRef<[u8]> for ReadyBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+impl fmt::Debug for ReadyBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadyBytes")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+impl<T: AsRef<[u8]>> PartialEq<T> for ReadyBytes {
+    fn eq(&self, other: &T) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+impl ReadyBytes {
+    pub(crate) fn into_bytes(self) -> Bytes {
+        match self {
+            Self::Local(bytes) => Bytes::from(bytes),
+            #[cfg(unix)]
+            Self::Finite(bytes) => Bytes::from_owner(bytes),
+        }
+    }
+}
 
 /// A selected response object. The finite variant retains only a counted
 /// selection and file key; it never exports the native file or its payload.
@@ -49,7 +102,7 @@ impl ReadyFile {
         &mut self,
         limit: u64,
         deadline: Instant,
-    ) -> io::Result<Vec<u8>> {
+    ) -> io::Result<ReadyBytes> {
         let len = match self {
             Self::Local(file) => timeout(deadline, file.metadata()).await??.len(),
             #[cfg(unix)]
@@ -72,25 +125,34 @@ impl ReadyFile {
                 timeout(deadline, file.seek(std::io::SeekFrom::Start(0))).await??;
                 let mut bytes = vec![0; size];
                 timeout(deadline, file.read_exact(&mut bytes)).await??;
-                Ok(bytes)
+                Ok(ReadyBytes::Local(bytes))
             }
             #[cfg(unix)]
             Self::Finite { output, file, len } => {
+                let buffer = timeout(deadline, output.allocate_response_buffer(size, deadline))
+                    .await?
+                    .map_err(finite_error)?;
                 if *len == 0 {
-                    return Ok(Vec::new());
+                    return Ok(ReadyBytes::Finite(buffer));
                 }
                 let mut reader = timeout(
                     deadline,
-                    output.prepare_reader(*file, 0, *len, limit, deadline),
+                    output.prepare_reader(
+                        *file,
+                        0,
+                        *len,
+                        (*len).min(crate::media_sessions::MEDIA_BODY_READ_BUFFER as u64),
+                        deadline,
+                    ),
                 )
                 .await?
                 .map_err(finite_error)?;
-                let result = read_finite_all(&mut reader, size, deadline).await;
+                let result = read_finite_all(&mut reader, buffer, size, deadline).await;
                 let closed = reader.close(deadline).await.map_err(finite_error);
                 match (result, closed) {
                     (Err(error), _) => Err(error),
                     (Ok(_), Err(error)) => Err(error),
-                    (Ok(bytes), Ok(())) => Ok(bytes),
+                    (Ok(bytes), Ok(())) => Ok(ReadyBytes::Finite(bytes)),
                 }
             }
         }
@@ -229,10 +291,10 @@ async fn next_range_chunk(
 #[cfg(unix)]
 async fn read_finite_all(
     reader: &mut FiniteReader,
+    mut result: FiniteResponseBuffer,
     size: usize,
     deadline: Instant,
-) -> io::Result<Vec<u8>> {
-    let mut result = Vec::with_capacity(size);
+) -> io::Result<FiniteResponseBuffer> {
     while result.len() < size {
         let Some(chunk) = reader.next_chunk(deadline).await.map_err(finite_error)? else {
             return Err(io::Error::new(
@@ -247,7 +309,7 @@ async fn read_finite_all(
                 "invalid finite chunk length",
             ));
         }
-        result.extend_from_slice(chunk.as_ref());
+        result.try_extend_from_slice(chunk.as_ref())?;
     }
     Ok(result)
 }

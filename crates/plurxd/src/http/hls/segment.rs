@@ -899,6 +899,7 @@ async fn vod_segment_response_before(
                     return Ok(response);
                 }
             };
+        let init = init.into_bytes();
         let (status, body, content_range) = match requested_range {
             Some((start, end)) => {
                 let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
@@ -908,7 +909,7 @@ async fn vod_segment_response_before(
                 }
                 (
                     StatusCode::PARTIAL_CONTENT,
-                    init[start..=end].to_vec(),
+                    init.slice(start..=end),
                     Some(format!("bytes {start}-{end}/{}", init.len())),
                 )
             }

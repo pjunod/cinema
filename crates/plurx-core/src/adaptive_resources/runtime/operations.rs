@@ -27,6 +27,8 @@ mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
 pub(super) mod plans;
+#[cfg(unix)]
+mod response_memory;
 mod scratch;
 #[cfg(unix)]
 pub(super) mod source_files;
@@ -90,6 +92,8 @@ struct OwnedRole {
     finite_vod: Option<finite_vod::FiniteLaunch>,
     #[cfg(unix)]
     retirement: Option<finite_retirement::FiniteRetirement>,
+    #[cfg(unix)]
+    response_budget: Option<Arc<super::response_memory::ResponseBudget>>,
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
@@ -498,6 +502,8 @@ impl NodeResourceRuntime {
                 finite_vod: None,
                 #[cfg(unix)]
                 retirement: None,
+                #[cfg(unix)]
+                response_budget: None,
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),
@@ -1323,6 +1329,13 @@ fn refund(
         .is_some_and(|receipt| receipt.custody_binding() != role.binding)
     {
         return Err(OperationError::State);
+    }
+    #[cfg(unix)]
+    if let Some(budget) = role.response_budget.as_ref() {
+        // This also protects prepared cancellation and other generic terminal
+        // paths: no live response allocation may survive a ledger refund.
+        budget.begin_close_if_empty()?;
+        role.response_budget = None;
     }
     let mut state = ledger.inner.lock().map_err(|_| OperationError::State)?;
     let entry = state

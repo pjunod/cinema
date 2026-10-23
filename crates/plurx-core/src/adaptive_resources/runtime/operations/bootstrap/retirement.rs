@@ -209,6 +209,19 @@ fn retry_transition(
 }
 
 impl BootstrapMember {
+    pub(in crate::adaptive_resources::runtime::operations) fn response_allocation_ready(
+        &self,
+    ) -> bool {
+        self.change.is_none()
+            && self.retirement.is_none()
+            && self.fold.as_ref().is_some_and(|fold| {
+                matches!(
+                    fold.state().asset.lifecycle,
+                    ScratchLifecycleV1::Open | ScratchLifecycleV1::RetainedReadOnly
+                )
+            })
+    }
+
     /// Read-only prebuild fact. The one-shot native capability remains in this
     /// member until the outer settlement is completely validated.
     pub(in crate::adaptive_resources::runtime) fn retained_close_fact(
@@ -287,8 +300,8 @@ impl NodeResourceRuntime {
                 return Err(OperationError::State);
             }
             readers::clear_terminal_readers(bootstrap)?;
-            if bootstrap.retirement.is_none() {
-                if bootstrap
+            if bootstrap.retirement.is_none()
+                && bootstrap
                     .fold
                     .as_ref()
                     .ok_or(OperationError::State)?
@@ -297,9 +310,14 @@ impl NodeResourceRuntime {
                     .totals
                     .pending_jobs
                     != 0
-                {
-                    return Err(OperationError::State);
-                }
+            {
+                return Err(OperationError::State);
+            }
+            role.response_budget
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .begin_close_if_empty()?;
+            if bootstrap.retirement.is_none() {
                 // Install the owner before the first await, journal arm or
                 // destructive native entry.
                 bootstrap.retirement = Some(CleanupRun::new());
@@ -604,6 +622,10 @@ impl NodeResourceRuntime {
             retry_transition(role, &self.journal, member, deadline)?;
             self.finish_transition(bundle_id, role).await?;
         }
+        let budget_closed = role
+            .response_budget
+            .as_ref()
+            .is_some_and(|budget| budget.closed_and_empty());
         let bootstrap = role
             .bootstrap
             .get_mut(&member)
@@ -632,7 +654,8 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .ok_or(OperationError::State)?
                 .state();
-            if !io.cell.positive_close_acknowledged()
+            if !budget_closed
+                || !io.cell.positive_close_acknowledged()
                 || !bootstrap
                     .native_root
                     .as_ref()
