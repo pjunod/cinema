@@ -1,9 +1,10 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
 mod inventory;
+mod recovery;
 mod retained_settlement;
 mod retirement;
-mod scratch;
+pub(in crate::resource_custody) mod scratch;
 mod typed;
 use super::*;
 use crate::adaptive_resources::MemoryClaim;
@@ -114,6 +115,7 @@ pub(super) fn snapshot(
     let mut all_ids = BTreeMap::new();
     let mut legacy_ids = BTreeSet::new();
     let mut last_operations = BTreeMap::new();
+    let mut original_owners = BTreeMap::new();
     let mut graphs = BTreeSet::new();
     let mut total = ResourceVector::default();
     let mut trials = BTreeSet::new();
@@ -193,6 +195,7 @@ pub(super) fn snapshot(
             codec::text(reason)?;
         }
         last_operations.insert(id, (operation, graph, sequence, phase, trial));
+        original_owners.insert(id, owner);
         let inventory = inventory::load(
             connection,
             id,
@@ -282,12 +285,23 @@ pub(super) fn snapshot(
     {
         return Err(codec::invalid());
     }
+    let recovered_s_holders = recovery::load_overlay(
+        connection,
+        schema_version,
+        &original_owners,
+        &last_operations,
+        &retained_assets,
+        &obligations,
+        &owners,
+        next,
+    )?;
     // Validate operation records too: unknown/truncated codecs cannot be ignored.
     let mut stmt =
         connection.prepare("SELECT operation_id,request_json,result_json FROM operations")?;
     let mut rows = stmt.query([])?;
     let mut operation_sequences = BTreeSet::new();
     let mut validated_last = BTreeSet::new();
+    let mut validated_holders = BTreeSet::new();
     while let Some(row) = rows.next()? {
         let operation_id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
         let fingerprint: String = codec::decode(&row.get::<_, String>(1)?)?;
@@ -448,19 +462,33 @@ pub(super) fn snapshot(
                     validated_last.insert(ack.target_obligation_id.uuid());
                 }
             }
+            DiskResult::RecoveredSAdoption(ack) => {
+                let holder = recovered_s_holders
+                    .iter()
+                    .find(|holder| holder.operation_id == operation_id)
+                    .ok_or_else(codec::invalid)?;
+                if ack.operation_id != operation_id
+                    || ack.obligation_id != holder.obligation_id
+                    || ack.previous_owner_id != holder.previous_owner_id
+                    || ack.current_owner_id != holder.current_owner_id
+                    || ack.sequence != holder.adoption_sequence
+                    || !validated_holders.insert(operation_id)
+                    || !operation_sequences.insert(ack.sequence)
+                {
+                    return Err(codec::invalid());
+                }
+            }
         }
     }
     // v1 retains all operation history; a gap is missing authority, not a
     // pruned diagnostic. A future pruning format needs an explicit checkpoint.
     if validated_last.len() != all_ids.len()
+        || validated_holders.len() != recovered_s_holders.len()
         || i64::try_from(operation_sequences.len()).ok() != Some(next)
     {
         return Err(codec::invalid());
     }
-    let pending_owners = owner_records
-        .into_values()
-        .filter(|owner| obligations.iter().any(|o| o.owner_id == owner.owner_id))
-        .collect();
+    let pending_owners = owner_records.into_values().collect();
     Ok(RecoverySnapshot {
         journal_id: witness.journal_id,
         installation_id: witness.installation_id,
@@ -471,6 +499,7 @@ pub(super) fn snapshot(
         trial_groups: trials.into_iter().collect(),
         protected_paths: protected.into_iter().collect(),
         owners: pending_owners,
+        recovered_s_holders,
     })
 }
 
@@ -545,6 +574,7 @@ enum DiskResult {
     AssetChangedV2(scratch::AssetChangedV2),
     AssetChangedV3(scratch::bootstrap::AssetChangedV3),
     RetiredWithAssets(RetirementAck),
+    RecoveredSAdoption(RecoveryAdoptionAck),
 }
 
 pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
@@ -641,8 +671,40 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
                     }
                 }),
             };
-            serde_json::json!({"id":key.handle.obligation_id,"graph":key.handle.graph_id,"owner":key.handle.owner_id,"sequence":key.expected_sequence,"action":action})
+            let mut value = serde_json::json!({"id":key.handle.obligation_id,"graph":key.handle.graph_id,"owner":key.handle.owner_id,"sequence":key.expected_sequence,"action":action});
+            #[cfg(target_os = "linux")]
+            if let Some(authority) = &key.handle.recovery {
+                value.as_object_mut().ok_or_else(codec::invalid)?.insert(
+                    "recovered_s_holder".into(),
+                    serde_json::json!({
+                        "journal": authority.journal_id(),
+                        "installation": authority.installation_id(),
+                        "obligation": authority.obligation_id(),
+                        "original_owner": authority.original_owner_id(),
+                        "previous_owner": authority.previous_owner_id(),
+                        "current_owner": authority.current_owner_id(),
+                        "adoption_operation": authority.adoption_operation_id(),
+                        "adoption_sequence": authority.adoption_sequence(),
+                        "import_head": authority.state_head(),
+                        "frozen_inventory": authority.frozen_digest(),
+                    }),
+                );
+            }
+            value
         }
+        #[cfg(target_os = "linux")]
+        Command::RecoverRetainedS { proof, exit } => serde_json::json!({
+            "recover_retained_s_v1": {
+                "journal": proof.journal_id(),
+                "installation": proof.installation_id(),
+                "obligation": proof.obligation_id(),
+                "previous_owner": proof.previous_owner_id(),
+                "current_owner": proof.current_owner_id(),
+                "head": proof.state_head(),
+                "frozen_inventory": proof.frozen_digest(),
+                "exit_owner": exit.owner_id(),
+            }
+        }),
     };
     let bytes = serde_json::to_vec(&value).map_err(|_| codec::invalid())?;
     if bytes.len() > 1024 * 1024 {
@@ -742,7 +804,11 @@ pub(super) fn execute(
                 *trial,
             )?,
             Command::Change { key, mutation } => {
-                change(&tx, storage.witness.journal_id, owner, key, mutation)?
+                change(&tx, &storage.witness, owner, key, mutation)?
+            }
+            #[cfg(target_os = "linux")]
+            Command::RecoverRetainedS { proof, exit } => {
+                recovery::adopt(&tx, &storage.witness, owner, operation.id, proof, exit)?
             }
         };
         tx.execute(
@@ -776,7 +842,23 @@ pub(super) fn execute(
         e.certainty = CommitCertainty::Unknown;
         e
     })?;
+    #[cfg(target_os = "linux")]
+    if matches!(operation.command, Command::RecoverRetainedS { .. }) {
+        snapshot(&storage.connection, &storage.witness).map_err(|mut error| {
+            error.certainty = CommitCertainty::Unknown;
+            error
+        })?;
+    }
     match (&operation.command, disk_result) {
+        #[cfg(target_os = "linux")]
+        (Command::RecoverRetainedS { proof, .. }, DiskResult::RecoveredSAdoption(ack))
+            if ack.operation_id == operation.id
+                && ack.obligation_id == proof.obligation_id()
+                && ack.previous_owner_id == proof.previous_owner_id()
+                && ack.current_owner_id == proof.current_owner_id() =>
+        {
+            Ok(OperationResult::RecoveredSAdoption(ack))
+        }
         (
             Command::Change {
                 key,
@@ -1150,14 +1232,19 @@ fn insert_families(
 
 fn change(
     tx: &Transaction<'_>,
-    journal: Uuid,
+    witness: &storage::Witness,
     owner: Uuid,
     key: &TransitionKey,
     mutation: &Mutation,
 ) -> Result<DiskResult, CustodyError> {
+    let journal = witness.journal_id;
     let h = &key.handle;
     if h.journal_id != journal || h.owner_id != owner || key.expected_sequence < 1 {
         return Err(codec::invalid());
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(authority) = &h.recovery {
+        return recovery::change(tx, witness, owner, key, mutation, authority);
     }
     let (graph, recorded_owner, prior_phase, seq, manifest): (Vec<u8>,Vec<u8>,String,i64,String) = tx.query_row("SELECT graph_id,owner_id,phase,sequence,manifest_json FROM obligations WHERE obligation_id=?1",[h.obligation_id.as_bytes()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
     if codec::uuid_from_bytes(&graph)? != h.graph_id

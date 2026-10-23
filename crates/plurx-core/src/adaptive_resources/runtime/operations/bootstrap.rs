@@ -31,6 +31,12 @@ pub(super) struct BootstrapMember {
     retirement: Option<retirement::CleanupRun>,
 }
 
+#[cfg(unix)]
+pub(super) enum NeverRootBootstrap {
+    UnarmedPlaceholder,
+    ObservedNeverEntered,
+}
+
 /// Fully validated target fold while the actual native cells remain owned by
 /// the source member. Construction and consumption must occur under the same
 /// retained-bundle lock, with no await or source mutation between them.
@@ -64,6 +70,90 @@ impl PreparedBootstrapTransfer {
 }
 
 impl BootstrapMember {
+    #[cfg(unix)]
+    pub(super) fn has_root_arm(&self) -> bool {
+        self.root_arm.is_some()
+    }
+
+    /// Inspect only the original retained cell. A missing in-memory
+    /// placeholder is never treated as native non-entry after a durable arm.
+    #[cfg(unix)]
+    pub(super) fn never_root_disposition(
+        &self,
+        armed: bool,
+    ) -> Result<NeverRootBootstrap, OperationError> {
+        let fold = self.fold.as_ref().ok_or(OperationError::State)?;
+        let state = fold.state();
+        if self.change.is_some()
+            || self.next_arm.is_some()
+            || state.bootstrap.phase != BootstrapPhase::Unstarted
+        {
+            return Err(OperationError::State);
+        }
+        if self.root_arm.is_none() {
+            if armed
+                || self.native_root.is_some()
+                || self.publication.is_some()
+                || self.sync.is_some()
+                || !self.readers.is_empty()
+                || self.retirement.is_some()
+                || state.asset.head.is_some()
+                || state.asset.totals.pending_jobs != 0
+                || state.asset.directory.is_some()
+                || !fold.files().is_empty()
+            {
+                return Err(OperationError::State);
+            }
+            return Ok(NeverRootBootstrap::UnarmedPlaceholder);
+        }
+        if !self
+            .native_root
+            .as_ref()
+            .is_some_and(|root| root.initial_root_never_entered())
+        {
+            return Err(OperationError::State);
+        }
+        Ok(NeverRootBootstrap::ObservedNeverEntered)
+    }
+
+    /// Move a journal-adopted S and its two newly held directory descriptors
+    /// into the live owner. Recovery validates the fold and native identities
+    /// before yielding these parts; there is no fallible step after that take.
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_recovered(
+        parts: crate::adaptive_resources::runtime::recovery::RecoveredNativeParts,
+    ) -> Self {
+        let crate::adaptive_resources::runtime::recovery::RecoveredNativeParts {
+            plan,
+            fold,
+            parent,
+            child,
+            parent_observed,
+            child_observed,
+            adoption_id,
+        } = parts;
+        let native_root = native::RootCell::from_recovered(
+            parent,
+            child,
+            &parent_observed,
+            &child_observed,
+            adoption_id,
+        );
+        Self {
+            plan,
+            fold: Some(fold),
+            change: None,
+            root_arm: None,
+            root_ready: true,
+            next_arm: None,
+            native_root: Some(native_root),
+            publication: None,
+            sync: None,
+            readers: BTreeMap::new(),
+            retirement: None,
+        }
+    }
+
     pub(super) fn frozen_inventory(&self) -> Result<FrozenScratchV3, OperationError> {
         self.fold
             .as_ref()

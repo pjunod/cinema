@@ -87,6 +87,7 @@ fn snapshot(phases: &[Phase], trial: bool) -> RecoverySnapshot {
         obligations,
         trial_groups: trial_id.into_iter().collect(),
         protected_paths: Vec::new(),
+        recovered_s_holders: Vec::new(),
         owners: vec![owner],
         retained_assets: Vec::new(),
     }
@@ -103,6 +104,10 @@ fn every_persisted_phase_restores_full_cleanup_only_unknown_held_above_new_cap()
         ],
         false,
     );
+    assert!(recovered
+        .obligations
+        .iter()
+        .all(|record| record.allocation_epoch == u64::MAX));
     let (ledger, bindings) = restore_accounting(10, Metric::Known(vector(1)), &recovered)
         .expect("over-cap holds must not be clamped or discarded");
     let held = ledger.snapshot().expect("held snapshot");
@@ -128,7 +133,7 @@ fn every_persisted_phase_restores_full_cleanup_only_unknown_held_above_new_cap()
         .entries
         .values()
         .all(|entry| {
-            entry.binding.allocation_epoch == u64::MAX
+            entry.binding.allocation_epoch == 10
                 && entry.state == ReservationState::UnknownHeld
                 && entry.custody.is_none()
         }));
@@ -199,10 +204,13 @@ fn truncated_totals_trials_and_family_edges_never_construct_empty_accounting() {
 fn restored_binding_is_fresh_and_an_old_receipt_cannot_refund_it() {
     let recovered = snapshot(&[Phase::Sealed], false);
     let (old, old_bindings) =
-        restore_accounting(1, Metric::Known(vector(100)), &recovered).expect("old");
+        restore_accounting(0, Metric::Known(vector(100)), &recovered).expect("old");
     let (new, new_bindings) =
-        restore_accounting(2, Metric::Known(vector(1)), &recovered).expect("new");
+        restore_accounting(0, Metric::Known(vector(1)), &recovered).expect("new");
     let obligation = recovered.obligations[0].obligation_id;
+    assert_eq!(recovered.obligations[0].allocation_epoch, u64::MAX);
+    assert_eq!(old_bindings[&obligation].allocation_epoch, 0);
+    assert_eq!(new_bindings[&obligation].allocation_epoch, 0);
     assert_ne!(old_bindings[&obligation], new_bindings[&obligation]);
     let cleanup = CleanupAuthority {
         ledger: new.clone(),

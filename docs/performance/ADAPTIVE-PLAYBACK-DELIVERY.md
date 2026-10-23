@@ -1,14 +1,16 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation incomplete · published checkpoint
-`dd0a5b4cb068abb051678186648d5968488c67fe` passed exact native Linux core+daemon
-compilation on Rust 1.97.1 (230.430 seconds;
-`../evidence/direct-linux-dd0a5b4cb068-RESULT.json`, log SHA-256
-`37b14a4bceb08c322eef719b155e5ebad8e3f6e5eafb4dc745f2154da6cf65ca`). The
-published source has 415 authored regression anchors, not run. Current
-uncommitted cancellation/diagnostic integration is compiling on the host; that
-check has not completed. Behavioral tests, final Fable review and qualification
-have not run.
+`4d094726a55f14f3f236085d348b2a079bb0321d` passed exact native Linux core+daemon
+compilation on Rust 1.97.1 (218.172 seconds; log SHA-256
+`02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`). The
+published source has 415 authored regression anchors, not run. The current
+parser/metadata/strict-import prototype passed a host compile in 87.870 seconds
+(stable source log SHA-256
+`ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
+`../evidence/direct-check-20261023-141059.json`). Later early-bootstrap cleanup
+and journal-holder overlay work is not covered. There are 423 local authored
+anchors; tests are NOT RUN. Final Fable review and qualification have not run.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -21,35 +23,37 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 ## Authoritative first ordinary VOD source checklist
 
 All five items are **OPEN** at published checkpoint
-`dd0a5b4cb068abb051678186648d5968488c67fe`. The immediate target is one ordinary
+`4d094726a55f14f3f236085d348b2a079bb0321d`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
-Published checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe` passed exact
-native Linux core+daemon compilation with Rust 1.97.1 (EXIT 0, 230.430 seconds);
-its 415 authored regression anchors were not run. The published source already
-has the ordinary branch, same-held-source before/after-publication drift latch
-and root-only cancellation. Current uncommitted work extends cancellation to
-the original registered writer and the no-root/all-sources-registered/unstarted
-bootstrap case, including once-only close of the same file on identity
-rejection. Typed capacity routing, finite progress belief and advisory output
-measurement are also integrated. Earlier partial startup traversal, possible
-child, restart/adoption/seeks and the full allocation profile remain open. The
-host compile is running and has not passed. All V1–V5 and M0–M7 remain OPEN; no
-behavioral tests, final Fable review or qualification has run.
+Published checkpoint `4d094726a55f14f3f236085d348b2a079bb0321d` passed exact
+native Linux core+daemon compilation with Rust 1.97.1 (EXIT 0, 218.172 seconds;
+log SHA-256 `02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`);
+its 415 authored regression anchors were not run. A later parser/metadata/strict-
+import prototype passed a host compile in 87.870 seconds (stable source log SHA-
+256 `ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
+`../evidence/direct-check-20261023-141059.json`). Subsequent early-bootstrap
+cleanup/journal-holder overlay work is not covered. There are 423 local authored
+anchors and tests are NOT RUN. The selected Linux ordinary software-transcode
+branch is connected; other recipes remain legacy. Counted HTTP, S cleanup and
+native R→S transfer are connected. Full memory accounting, partial-start
+closure, cold restart/cache adoption and broader selection remain open. All
+V1–V5/R1/M0–M7 remain OPEN; final review and qualification have not run.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
-| V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
-| V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The concrete finite request carries an immutable `SoftwareAvcCommand` and pump plan in the same reserved bundle before I/O, checks source identity/path/scanner values, prearms source cells without a lease, and uses the predeclared root acquisition ID. The same retained `File` crosses spawn; after known launch, source-copy observation is enriched, then the retained pump task is observed and acknowledged. The bounded Segmenter prefix/merge/finish split/published batch now flows through `GenerationMemoryLimits`/`Generation`; init parsing has a four-copy bound, parser/read/inventory allocations and plan-boundary vectors are fallible, and canonical grid/producer-clock alignment is compiled. These components do not establish an end-to-end quota: parser metadata, native process, launcher and runtime-journal memory remain unresolved. Known durable Observe ends pending-I/O payload accounting; actual payload is cleared and the same directory returned under the original bundle lock before another queue operation can enter. The whole role reservation remains held until retirement. Ordinary `build_rendition_with_storage` still uses legacy admission. |
-| V3 — producer/stop — OPEN | Core now joins the same retained writer/root outside the publication bundle lock and quiesces already-registered native jobs. Stop aborts the original task through its retained handle, including late registration; result summaries do not move the graph-owned diagnostics. Observed parent source descriptors close once, but inherited-copy/fixed-process/partial-start closure and all charges remain held. Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
-| V4 — retained output — OPEN | Compact V3 frozen references, a proof-bearing atomic SQLite R→S mutation/recovery and a post-COMMIT same-ledger swap primitive are authored; private native retirement/S ownership is connected for fully acquired output with exact active-reader transfer; ordinary integration and native qualification are open. Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
+| V1 — admission/source — OPEN | The selected Linux ordinary software-transcode branch enters finite preparation with its held source and original producer ownership. Other recipes still use the legacy path. The full production capacity/memory profile, partial-start closure and cold restart/cache adoption remain open. |
+| V2 — held output/durability — OPEN | The selected branch uses the same held child, selected-ID publisher and sync jobs. Counted HTTP selection and actual S cleanup/R→S transfer are connected. Full memory accounting and other legacy recipes remain outside this path; this does not close V2. |
+| V3 — producer/stop — OPEN | The selected branch joins its original writer/root and already-registered native jobs outside the bundle lock. Stop retains the original task/control through registration, and source-parent closure uses its original job. Partial-start/inherited-copy closure and the complete memory profile remain unresolved; the branch is not qualified. |
+| V4 — retained output — OPEN | The selected branch connects counted HTTP readers, cleanup and one journal R→S transfer to the retained native output. The whole role reservation remains held for S; unknown cleanup/commit keeps ownership charged. Cold restart/cache adoption and broader recipe integration remain open. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
-Current sequence: wire this finite runtime composition into ordinary
-`build_rendition_with_storage`, then close V1/V3; proceed to V4
-serving/transfer → V5 settlement/reuse. All V1–V5 remain OPEN; no source item
-has newly closed. The
+Current sequence: complete the selected ordinary branch’s remaining capacity,
+partial-start and cold-cache/restart gaps, then close V1/V3; proceed to V5
+settlement/reuse. Same-process seeks reuse the existing
+rendition owner and its full-plan producer; the cold-cache reuse gap is R1.
+All V1–V5 remain OPEN; no source item has newly closed. The
 detailed execution artifact remains the existing
 `operator/FIRST-VOD-DELIVERY-CHECKLIST.md` under
 `~/.hermes/hdr-collaboration/workspaces/adaptive-playback-parallel-20261021/`,
@@ -125,14 +129,13 @@ bounded AVC merge artifact preflights workspace/output before allocation but is
 not connected to Segmenter or `GenerationMemoryLimits`. Existing
 [`SourceFence`](../../crates/plurxd/src/fragment_index_cluster.rs) and daemon
 [`PendingWrites` adapter](../../crates/plurxd/src/renditiondir/finite_publication.rs)
-remain available. Ordinary `build_rendition_with_storage` still selects legacy
-admission; full memory partitioning remains incomplete. This is runtime
-composition, not ordinary source closure.
+remain available. The selected Linux ordinary software-transcode branch is
+connected; other recipes still use legacy admission. Full memory partitioning,
+partial-start ownership and cold restart/cache adoption remain incomplete.
 
-All V1–V5 remain OPEN. Ordinary request entry and the production capacity
-connection, full memory profile, serving leases, retained-output transfer,
-conserving retirement and exact settlement/capacity reuse still lack their
-production connections. The
+All V1–V5 remain OPEN. Same-process seeks reuse one rendition owner and its
+full-plan producer; cold-cache reuse remains an R1 gap. Full memory profile,
+partial-start handling and broader recipe selection remain incomplete. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
 records the limits. The latest published checkpoint is
 `dd0a5b4cb068abb051678186648d5968488c67fe`; its native Linux core+daemon
@@ -145,9 +148,10 @@ Review and qualification wait for the complete integrated candidate.
 
 ## Actual distance to usable playback
 
-Ordinary production playback still uses legacy admission. The new policy,
-accounting, persistence and Store components exist, but they are not a completed
-adaptive playback feature. No M0–M7 milestone is claimed accepted end-to-end.
+The selected Linux ordinary software-transcode path now uses the connected
+admission, accounting, persistence and serving path; other recipes remain
+legacy. This is not a completed adaptive playback feature. No M0–M7 milestone
+is claimed accepted end-to-end.
 There is no defensible percentage-complete or merge-date estimate from compiler
 passes, source lines or authored test counts. Significant integration remains,
 not just final tests. The table below distinguishes reusable source already

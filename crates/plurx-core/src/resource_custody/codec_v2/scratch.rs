@@ -380,11 +380,12 @@ pub(crate) fn validate_projection(
     plan: &ScratchPlanV2,
     state: &ScratchStateV2,
 ) -> Result<(), CustodyError> {
-    validate_output_projection(plan.output_view(), state)
+    validate_output_projection(plan.output_view(), state, false)
 }
 fn validate_output_projection(
     plan: OutputPlanView<'_>,
     state: &ScratchStateV2,
+    partial_bootstrap_retiring: bool,
 ) -> Result<(), CustodyError> {
     let t = &state.totals;
     let l = &plan.limits;
@@ -412,7 +413,9 @@ fn validate_output_projection(
                 || t.readers != 0
                 || t.pending_jobs != 0
                 || state.directory_synced))
-        || (state.lifecycle == ScratchLifecycleV1::Retiring && state.directory.is_none())
+        || (state.lifecycle == ScratchLifecycleV1::Retiring
+            && state.directory.is_none()
+            && !partial_bootstrap_retiring)
         || (state.lifecycle == ScratchLifecycleV1::RetirementUncertain
             && (state.directory.is_none()
                 || t.readers != 0

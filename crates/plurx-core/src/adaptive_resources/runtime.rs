@@ -4,6 +4,8 @@
 //! The journal remains separate from replicated Store and advisory telemetry.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -22,6 +24,8 @@ use crate::resource_custody::{
 #[cfg(unix)]
 pub mod finite_vod;
 mod operations;
+#[cfg(target_os = "linux")]
+pub(crate) mod recovery;
 #[cfg(unix)]
 mod response_memory;
 #[cfg(unix)]
@@ -66,6 +70,12 @@ pub struct NodeResourceRuntime {
     recovered: RecoverySnapshot,
     ledger: ResourceLedger,
     recovered_bindings: BTreeMap<Uuid, ReservationBinding>,
+    // Reopened native S owners remain under their complete restored holds.
+    // Import alone cannot authorize serving or old-owner journal settlement.
+    #[cfg(target_os = "linux")]
+    recovered_s: Mutex<BTreeMap<Uuid, Arc<recovery::ImportedRetainedS>>>,
+    #[cfg(target_os = "linux")]
+    recovered_adoptions: Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryAdoption>>>>,
     operations: Mutex<operations::Operations>,
     // Immutable actual daemon configuration, not a path authorized by audit JSON.
     rendition_root: Option<PathBuf>,
@@ -90,6 +100,10 @@ impl NodeResourceRuntime {
             recovered,
             ledger,
             recovered_bindings,
+            #[cfg(target_os = "linux")]
+            recovered_s: Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
+            recovered_adoptions: Mutex::new(BTreeMap::new()),
             operations: Mutex::new(operations::Operations::default()),
             rendition_root: None,
         })
@@ -338,7 +352,10 @@ fn restore_accounting(
             let binding = ReservationBinding {
                 ledger: ledger.id,
                 reservation: id,
-                allocation_epoch: record.allocation_epoch,
+                // This is the fresh process-local ledger generation. Keep the
+                // prior allocation epoch in the durable journal record; the
+                // new ledger identity already makes old capabilities stale.
+                allocation_epoch: epoch,
             };
             state.entries.insert(
                 id,

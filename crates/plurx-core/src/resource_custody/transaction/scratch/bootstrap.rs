@@ -69,7 +69,7 @@ pub(in crate::resource_custody::transaction) fn validate_record_binding(
 /// Bootstrap and output events share ONE head; a different member/version cannot
 /// silently continue this asset. Full state equality includes possible/unknown
 /// copies and partial child effects, not just the compact output revision.
-pub(in crate::resource_custody::transaction) fn restore(
+pub(in crate::resource_custody) fn restore(
     connection: &Connection,
     obligation: Uuid,
     graph: Uuid,

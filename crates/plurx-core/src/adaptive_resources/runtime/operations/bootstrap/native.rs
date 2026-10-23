@@ -20,6 +20,7 @@ pub(super) struct RootCell {
     pending: Option<JoinHandle<RootResult>>,
     result: Option<RootResult>,
     failed_join: bool,
+    imported_retained: bool,
 }
 struct RootResult {
     // Even a partial fstat failure keeps the ACTUAL descriptor, not only JSON.
@@ -27,6 +28,61 @@ struct RootResult {
     audit: BootstrapResultV1,
 }
 impl RootCell {
+    /// Import the two actual descriptors held by a journal-verified retained
+    /// adoption. These are newly held native owners, not replayed historical
+    /// root-open jobs. The adoption id is only their local baseline.
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_recovered(
+        parent: File,
+        child: File,
+        parent_observed: &v2::scratch::DirectoryObservedV1,
+        child_observed: &v2::scratch::DirectoryObservedV1,
+        adoption_id: v2::Id,
+    ) -> Self {
+        // RecoveredNativeParts can be consumed only after its source owner
+        // validates both native objects and exact one-copy inventory. There
+        // is no fallible step after moving either File out of that owner.
+        let files = BTreeMap::from([
+            (parent_observed.held_copy_ids[0], parent),
+            (child_observed.held_copy_ids[0], child),
+        ]);
+        Self {
+            io_id: adoption_id,
+            observe_id: adoption_id,
+            join_id: adoption_id,
+            pending: None,
+            result: Some(RootResult {
+                files,
+                audit: BootstrapResultV1 {
+                    outcome: v2::scratch::NativeOutcomeV1::Completed,
+                    acquired: Some(child_observed.clone()),
+                    closed_copy_ids: vec![],
+                    child_effect: ChildEffect::Unchanged,
+                    inventory: InventoryCertainty::Exact,
+                },
+            }),
+            failed_join: false,
+            imported_retained: true,
+        }
+    }
+
+    pub(super) fn imported_retained(&self) -> bool {
+        self.imported_retained
+    }
+
+    pub(super) fn initial_root_never_entered(&self) -> bool {
+        self.pending.is_none()
+            && !self.failed_join
+            && self.result.as_ref().is_some_and(|result| {
+                result.files.is_empty()
+                    && result.audit.outcome == v2::scratch::NativeOutcomeV1::NeverEntered
+                    && result.audit.acquired.is_none()
+                    && result.audit.closed_copy_ids.is_empty()
+                    && result.audit.child_effect == ChildEffect::None
+                    && result.audit.inventory == InventoryCertainty::Exact
+            })
+    }
+
     pub(super) fn retained_child_ready(
         &self,
         expected_directories: &[v2::scratch::DirectoryObservedV1],
@@ -144,15 +200,24 @@ impl RootCell {
             return Err(OperationError::State);
         }
         let held = self.result.as_mut().ok_or(OperationError::State)?;
-        let child = held.audit.acquired.as_ref().ok_or(OperationError::State)?;
-        if held.audit.outcome != v2::scratch::NativeOutcomeV1::Completed {
+        let last_known = held.audit.outcome == v2::scratch::NativeOutcomeV1::Completed
+            && held.audit.acquired.as_ref() == observed.last();
+        let never_entered = held.audit.outcome == v2::scratch::NativeOutcomeV1::NeverEntered
+            && held.audit.acquired.is_none()
+            && held.audit.closed_copy_ids.is_empty()
+            && held.audit.child_effect == ChildEffect::None
+            && held.audit.inventory == InventoryCertainty::Exact;
+        // A cancelled next-step latch reports NeverEntered but leaves the
+        // preceding original directory File in this cell. Its exact copy ID
+        // and native identity are checked below before any File is moved.
+        if (!last_known && !never_entered) || held.files.len() != observed.len() {
             return Err(OperationError::State);
         }
+        let domain = &observed[0].native_object.filesystem_domain;
         let mut copies = std::collections::BTreeSet::new();
         for directory in observed {
             if directory.held_copy_ids.len() != 1
-                || directory.native_object.filesystem_domain
-                    != child.native_object.filesystem_domain
+                || &directory.native_object.filesystem_domain != domain
             {
                 return Err(OperationError::State);
             }
@@ -267,6 +332,7 @@ impl RootCell {
             pending: Some(pending),
             result: None,
             failed_join: false,
+            imported_retained: false,
         };
         // The caller must register this original handle in OwnedRole before it
         // releases `enter`. If registration fails, no native call is entered.
@@ -397,6 +463,32 @@ impl NodeResourceRuntime {
         member: Uuid,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        self.observe_scratch_bootstrap_root(owner, index, member, deadline, true)
+            .await
+    }
+
+    /// Cancellation joins an already-entered original root-open job, or
+    /// registers its still-unlaunched arm with a closed latch. The latter is
+    /// an actual NeverEntered result, never a guessed missing descriptor.
+    pub(in crate::adaptive_resources::runtime::operations) async fn observe_finite_bootstrap_root(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.observe_scratch_bootstrap_root(owner, index, member, deadline, false)
+            .await
+    }
+
+    async fn observe_scratch_bootstrap_root(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+        allow_entry: bool,
+    ) -> Result<(), OperationError> {
         if !cfg!(target_os = "linux") {
             return Err(OperationError::State);
         }
@@ -466,7 +558,11 @@ impl NodeResourceRuntime {
             let (cell, enter) =
                 RootCell::launch(bootstrap.plan.filesystem_domain.clone(), io, copy)?;
             bootstrap.native_root = Some(cell);
-            self.release_native_entry(role.binding, enter)?;
+            if allow_entry {
+                self.release_native_entry(role.binding, enter)?;
+            } else {
+                drop(enter);
+            }
         }
         let native = bootstrap
             .native_root
@@ -474,6 +570,7 @@ impl NodeResourceRuntime {
             .ok_or(OperationError::State)?;
         let audit = native.join().await?.audit.clone();
         let completed = audit.outcome == v2::scratch::NativeOutcomeV1::Completed;
+        let never_entered = !allow_entry && native.initial_root_never_entered();
         let observe_id = native.observe_id;
         if state
             .asset
@@ -484,7 +581,7 @@ impl NodeResourceRuntime {
             && role.transition.is_none()
         {
             bootstrap.root_ready = completed;
-            return if completed {
+            return if completed || never_entered {
                 Ok(())
             } else {
                 Err(OperationError::State)
@@ -522,6 +619,8 @@ impl NodeResourceRuntime {
                 .get_mut(&member)
                 .ok_or(OperationError::State)?
                 .root_ready = true;
+            Ok(())
+        } else if never_entered {
             Ok(())
         } else {
             Err(OperationError::State)

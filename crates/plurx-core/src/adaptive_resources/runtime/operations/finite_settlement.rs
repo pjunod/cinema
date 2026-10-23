@@ -76,9 +76,17 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         let operation_id = v2::Id::new(Uuid::new_v4())?;
+        #[cfg(target_os = "linux")]
+        let settlement_owner = handle
+            .recovery_authority()
+            .map_or(self.owner.owner_id, |authority| {
+                authority.original_owner_id()
+            });
+        #[cfg(not(target_os = "linux"))]
+        let settlement_owner = self.owner.owner_id;
         let settlement = v2::Settlement {
             version: 2,
-            owner_id: v2::Id::new(self.owner.owner_id)?,
+            owner_id: v2::Id::new(settlement_owner)?,
             graph_id: v2::Id::new(handle.graph_id())?,
             operation_id,
             members: vec![v2::MemberDisposition::Closed {
@@ -129,6 +137,16 @@ impl NodeResourceRuntime {
 
 fn retained_member(role: &OwnedRole, requested: Uuid) -> Result<Uuid, OperationError> {
     if role.retirement.is_none() {
+        #[cfg(target_os = "linux")]
+        if role
+            .handle
+            .as_ref()
+            .and_then(|handle| handle.recovery_authority())
+            .is_some()
+            && role.bootstrap.contains_key(&requested)
+        {
+            return Ok(requested);
+        }
         return Err(OperationError::State);
     }
     if role.bootstrap.contains_key(&requested) {

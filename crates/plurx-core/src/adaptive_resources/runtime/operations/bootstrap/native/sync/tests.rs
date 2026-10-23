@@ -66,6 +66,7 @@ fn held_root(path: &Path) -> (RootCell, DirectoryObservedV1, i32) {
             },
         }),
         failed_join: false,
+        imported_retained: false,
     };
     (root, directory, original_fd)
 }

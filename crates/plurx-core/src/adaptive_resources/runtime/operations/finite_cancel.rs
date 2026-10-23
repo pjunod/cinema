@@ -32,10 +32,9 @@ impl FiniteCancellationClosure {
 }
 
 impl NodeResourceRuntime {
-    /// First narrow pre-root path: every source cell is registered, but no
-    /// output bootstrap cell and no root/task native acquisition ever entered.
-    /// The original graph proves absence; each source closes its own File if
-    /// an open returned one before metadata rejected it.
+    /// A pre-root path retains the original source cells and at most one
+    /// original bootstrap cell. The graph proves absence of root/task entry;
+    /// the bootstrap arm separately proves whether its native open entered.
     async fn close_finite_never_root(
         &self,
         owner: &OwnedPreparation,
@@ -46,15 +45,21 @@ impl NodeResourceRuntime {
         let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
-        if finite.never_root_closure.is_none()
-            && (finite.entered || !role.roots.is_empty() || !role.bootstrap.is_empty())
-        {
+        if finite.never_root_closure.is_none() && (finite.entered || !role.roots.is_empty()) {
             return Ok(false);
         }
         if role.refunded
             || role.retirement.is_some()
-            || !role.bootstrap.is_empty()
-            || role.sources.len() != finite.source_members.len()
+            || role.bootstrap.len() > 1
+            || role.sources.len() != finite.registered_source_members.len()
+            || role
+                .sources
+                .keys()
+                .any(|member| !finite.registered_source_members.contains(member))
+            || finite
+                .registered_source_members
+                .iter()
+                .any(|member| !finite.source_members.contains(member))
         {
             return Err(OperationError::State);
         }
@@ -65,6 +70,21 @@ impl NodeResourceRuntime {
             // Resume only the original captured operation. Unknown remains
             // held, even when the source open physically returned no File.
             self.finish_transition(bundle_id, role).await?;
+        }
+        if let Some(member) = role.bootstrap.keys().next().copied() {
+            let disposition = role
+                .bootstrap
+                .get(&member)
+                .ok_or(OperationError::State)?
+                .never_root_disposition(role.armed.contains(&member))?;
+            if matches!(
+                disposition,
+                bootstrap::NeverRootBootstrap::UnarmedPlaceholder
+            ) {
+                // This exact empty in-memory placeholder has no durable arm
+                // and no native owner; the planned slot remains unacquired.
+                role.bootstrap.remove(&member);
+            }
         }
         self.close_retained_entry(role.binding)?;
         if let Some(graph) = role.graph.take() {
@@ -103,6 +123,31 @@ impl NodeResourceRuntime {
         for source in role.sources.values() {
             let _ = source.finite_never_root_closed_fact(proof)?;
         }
+        let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+        let planned = role.typed_members.as_ref().ok_or(OperationError::State)?;
+        for member in &finite.source_members {
+            if !finite.registered_source_members.contains(member) {
+                if role.armed.contains(member)
+                    || role.sources.contains_key(member)
+                    || planned
+                        .iter()
+                        .filter(|plan| plan.member_id() == *member)
+                        .count()
+                        != 1
+                {
+                    return Err(OperationError::State);
+                }
+                let plan = planned
+                    .iter()
+                    .find(|plan| plan.member_id() == *member)
+                    .ok_or(OperationError::State)?;
+                let _ = source_files::finite_unregistered_closed_fact(plan, proof)?;
+            }
+        }
+        role.finite_vod
+            .as_mut()
+            .ok_or(OperationError::State)?
+            .retiring = true;
         Ok(true)
     }
 
@@ -137,9 +182,40 @@ impl NodeResourceRuntime {
                 return self.finish_transition(bundle_id, role).await;
             }
         }
+        let initial_member = {
+            let bundle = owner.state.lock().await;
+            let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+            let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+            if !finite.entered
+                && role.roots.is_empty()
+                && role.bootstrap.len() == 1
+                && role
+                    .bootstrap
+                    .values()
+                    .next()
+                    .is_some_and(|bootstrap| bootstrap.has_root_arm())
+            {
+                Some(*role.bootstrap.keys().next().ok_or(OperationError::State)?)
+            } else {
+                None
+            }
+        };
+        if let Some(initial_member) = initial_member {
+            self.observe_finite_bootstrap_root(owner, index, initial_member, deadline)
+                .await?;
+        }
         let never_root = self.close_finite_never_root(owner, index).await?;
         let member = if never_root {
-            None
+            let member = {
+                let bundle = owner.state.lock().await;
+                let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+                role.bootstrap.keys().next().copied()
+            };
+            if let Some(member) = member {
+                self.close_producer_finite_native(owner, index, member, deadline)
+                    .await?;
+            }
+            member
         } else {
             // A never-registered task retains a root-only proof; a registered
             // writer retains its distinct joined proof. Neither can be
@@ -157,6 +233,10 @@ impl NodeResourceRuntime {
                 }
                 *role.bootstrap.keys().next().ok_or(OperationError::State)?
             };
+            // Reconcile the original armed traversal/create result before
+            // choosing a cleanup action. This never advances to a new child.
+            self.observe_finite_bootstrap_arm(owner, index, member, deadline)
+                .await?;
             self.close_producer_finite_native(owner, index, member, deadline)
                 .await?;
             Some(member)
@@ -190,7 +270,7 @@ impl NodeResourceRuntime {
         let sealed = role.sealed.as_ref().ok_or(OperationError::State)?;
         let (root_member, generation, root_selection, close_operation_id, native_matches) =
             match (never_root, root_only, process) {
-                (Some(absent), None, None) if member.is_none() && !finite.producer_joined => (
+                (Some(absent), None, None) if !finite.producer_joined => (
                     absent.root_member(),
                     absent.generation(),
                     None,
@@ -225,7 +305,7 @@ impl NodeResourceRuntime {
             })
             .transpose()?;
         let planned = role.typed_members.as_ref().ok_or(OperationError::State)?;
-        if planned.len() != role.sources.len() + 3 {
+        if planned.len() != finite.source_members.len() + 3 {
             return Err(OperationError::State);
         }
         let close_id = v2::Id::new(close_operation_id)?;
@@ -233,20 +313,26 @@ impl NodeResourceRuntime {
         for plan in planned {
             let member_id = v2::Id::new(plan.member_id())?;
             let fact = match plan {
-                v2::MemberPlan::SourceV1 { .. } => {
-                    let source = role
-                        .sources
-                        .get(&plan.member_id())
-                        .ok_or(OperationError::State)?;
-                    match (never_root, root_only, process) {
+                v2::MemberPlan::SourceV1 { .. } => match role.sources.get(&plan.member_id()) {
+                    Some(source) => match (never_root, root_only, process) {
                         (Some(absent), None, None) => {
                             source.finite_never_root_closed_fact(absent)?
                         }
                         (None, Some(root), None) => source.finite_root_only_closed_fact(root)?,
                         (None, None, Some(process)) => source.finite_closed_fact(process)?,
                         _ => return Err(OperationError::State),
+                    },
+                    None if never_root.is_some()
+                        && !finite.registered_source_members.contains(&plan.member_id())
+                        && !role.armed.contains(&plan.member_id()) =>
+                    {
+                        source_files::finite_unregistered_closed_fact(
+                            plan,
+                            never_root.ok_or(OperationError::State)?,
+                        )?
                     }
-                }
+                    None => return Err(OperationError::State),
+                },
                 v2::MemberPlan::LegacyV1 { planned }
                     if never_root.is_some()
                         && planned.member_id == root_member

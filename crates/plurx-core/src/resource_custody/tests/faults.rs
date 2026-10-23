@@ -21,6 +21,8 @@ fn uncertain_commit_retry_rereads_exact_operation_without_double_charge_or_rearm
         obligation_id: Uuid::new_v4(),
         graph_id: new.manifest.graph_id,
         runtime_binding: new.runtime_binding,
+        #[cfg(target_os = "linux")]
+        recovery: None,
     };
     let family = FamilyHandle {
         journal_id: store.witness.journal_id,

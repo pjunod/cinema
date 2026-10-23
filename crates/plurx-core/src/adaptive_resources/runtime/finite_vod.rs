@@ -499,6 +499,41 @@ impl FiniteOutput {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl NodeResourceRuntime {
+    /// Reuse a complete current-holder cache without opening a source or
+    /// creating a replacement producer. A matching unresolved old obligation
+    /// refuses; it never falls through to uncounted pathname cache adoption.
+    pub async fn recovered_software_output(
+        self: &Arc<Self>,
+        rendition_id: &str,
+        media_file_id: &str,
+        object_version: &str,
+        source_members: usize,
+        segment_count: u32,
+    ) -> Result<Option<FiniteOutput>, FiniteVodError> {
+        let selection = self
+            .recovered_finite_selection(
+                rendition_id,
+                media_file_id,
+                object_version,
+                source_members,
+                segment_count,
+            )
+            .await
+            .map_err(|_| OperationError::State)?;
+        Ok(selection.map(
+            |(preparation, member, directory_path, encoded_process_marker)| FiniteOutput {
+                runtime: self.clone(),
+                preparation,
+                member,
+                directory_path,
+                encoded_process_marker,
+            },
+        ))
+    }
+}
+
 impl SoftwareVodOwner {
     pub fn control(&self) -> SoftwareVodControl {
         SoftwareVodControl(Arc::clone(&self.control))

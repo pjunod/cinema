@@ -2,7 +2,7 @@
 //! SQL history is audit authority; it never manufactures native proof.
 use super::*;
 use crate::resource_custody::codec_v2::{self as v2, scratch::*};
-pub(super) mod bootstrap;
+pub(in crate::resource_custody) mod bootstrap;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

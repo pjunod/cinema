@@ -298,7 +298,63 @@ pub(crate) fn validate_projection(
     {
         return Err(codec::invalid());
     }
-    validate_output_projection(plan.output_view(), &state.asset)?;
+    validate_output_projection(
+        plan.output_view(),
+        &state.asset,
+        partial_producer_cancellation_projection(plan, state),
+    )?;
     codec::encode(state)?;
     Ok(())
+}
+
+/// A data-shape exception for V3's producer cancellation before the child
+/// exists. Only full journal replay may establish the native effects behind
+/// these IDs; this projection never grants physical close authority.
+fn partial_producer_cancellation_projection(plan: &ScratchPlanV3, state: &ScratchStateV3) -> bool {
+    let asset = &state.asset;
+    let bootstrap = &state.bootstrap;
+    if asset.lifecycle != ScratchLifecycleV1::Retiring
+        || asset.directory.is_some()
+        || bootstrap.possible_child.is_some()
+        || bootstrap.retained_parent_synced
+        || asset.totals.resident_file_objects != 0
+        || asset.totals.logical_bytes != 0
+        || asset.totals.charged_storage_bytes != 0
+        || asset.totals.readers != 0
+        || asset.totals.handles_reserved == 0
+    {
+        return false;
+    }
+    let mut observed = bootstrap.current.iter().chain(bootstrap.parent.iter());
+    let Some(directory) = observed.next().map(|entry| &entry.observed) else {
+        return false;
+    };
+    if observed.next().is_some() {
+        return false;
+    }
+    if directory.held_copy_ids.len() != 1
+        || asset.totals.handles_reserved != 1
+        || directory.native_object.file_type != FileType::Directory
+        || directory.native_object.filesystem_domain != plan.filesystem_domain
+        || !matches!(directory.native_object.device, NativeValue::Known { .. })
+        || !matches!(directory.native_object.inode, NativeValue::Known { .. })
+        || !matches!(directory.native_object.mount_id, NativeValue::Known { .. })
+    {
+        return false;
+    }
+    match bootstrap.phase {
+        BootstrapPhase::Traversing => {
+            bootstrap.current.is_some()
+                && bootstrap.parent.is_none()
+                && asset.totals.pending_jobs == 0
+        }
+        BootstrapPhase::ParentReady => {
+            bootstrap.parent.is_some()
+                && bootstrap.current.is_none()
+                && asset.totals.pending_jobs == 0
+        }
+        BootstrapPhase::Closing => asset.totals.pending_jobs == 1,
+        BootstrapPhase::UnknownHeld => asset.totals.pending_jobs == 0,
+        _ => false,
+    }
 }

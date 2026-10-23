@@ -1,5 +1,5 @@
-//! Same-file recognized v1 -> v2 -> v3 upgrades; no missing-authority repair.
-use super::{validate, DDL, DDL_V2};
+//! Same-file recognized v1 -> v2 -> v3 -> v4 upgrades; no missing-authority repair.
+use super::{validate, DDL, DDL_V2, DDL_V3};
 use crate::resource_custody::{
     codec, storage::Witness, transaction, CommitCertainty, CustodyError, ErrorKind,
 };
@@ -27,6 +27,9 @@ pub(in crate::resource_custody) fn upgrade(
     }
     if version <= 2 {
         upgrade_v2_to_v3(connection, witness)?;
+    }
+    if version <= 3 {
+        upgrade_v3_to_v4(connection, witness)?;
     }
     Ok(())
 }
@@ -136,7 +139,7 @@ fn upgrade_v2_to_v3(connection: &mut Connection, witness: &Witness) -> Result<()
     // The original v2 obligations DDL is unchanged by this migration. SQLite's
     // ADD COLUMN produces the same canonical catalog text as v3.sql.
     let canonical = Connection::open_in_memory()?;
-    canonical.execute_batch(DDL)?;
+    canonical.execute_batch(DDL_V3)?;
     let journal_meta: String = canonical.query_row(
         "SELECT sql FROM sqlite_schema WHERE name='journal_meta'",
         [],
@@ -184,6 +187,69 @@ fn upgrade_v2_to_v3(connection: &mut Connection, witness: &Witness) -> Result<()
     for table in TABLES.into_iter().chain(["retained_asset_owners"]) {
         tx.execute_batch(&format!("DROP TABLE temp.custody_upgrade_v3_{table};"))?;
     }
+    tx.commit().map_err(|_| {
+        let mut error = CustodyError::new(
+            ErrorKind::Storage,
+            "custody schema upgrade commit uncertain",
+        );
+        error.certainty = CommitCertainty::Unknown;
+        error
+    })
+}
+
+/// Add only the append-only recovered-holder overlay. Historical obligations,
+/// operations, owners and retained custody keep their original bytes and owner.
+fn upgrade_v3_to_v4(connection: &mut Connection, witness: &Witness) -> Result<(), CustodyError> {
+    validate(connection)?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let foreign_keys: bool = connection.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    if version != 3 || !foreign_keys {
+        return Err(codec::invalid());
+    }
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    validate(&tx)?;
+    let before = transaction::snapshot(&tx, witness)?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE custody_upgrade_v4_meta AS SELECT * FROM main.journal_meta;",
+    )?;
+    let canonical = Connection::open_in_memory()?;
+    canonical.execute_batch(DDL)?;
+    let meta_sql: String = canonical.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='journal_meta'",
+        [],
+        |r| r.get(0),
+    )?;
+    let overlay_sql: String = canonical.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name='recovered_s_holders'",
+        [],
+        |r| r.get(0),
+    )?;
+    tx.execute_batch("DROP TABLE journal_meta;")?;
+    tx.execute_batch(&meta_sql)?;
+    tx.execute_batch(
+        "INSERT INTO journal_meta SELECT singleton,4,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.custody_upgrade_v4_meta;",
+    )?;
+    tx.execute_batch(&overlay_sql)?;
+    tx.execute_batch("PRAGMA user_version=4;")?;
+    validate(&tx)?;
+    let unchanged: bool = tx.query_row(
+        "SELECT NOT EXISTS(SELECT singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM main.journal_meta EXCEPT SELECT singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.custody_upgrade_v4_meta) AND NOT EXISTS(SELECT singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM temp.custody_upgrade_v4_meta EXCEPT SELECT singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id FROM main.journal_meta) AND (SELECT count(*) FROM main.journal_meta)=(SELECT count(*) FROM temp.custody_upgrade_v4_meta)",
+        [], |r| r.get(0),
+    )?;
+    if !unchanged {
+        return Err(codec::invalid());
+    }
+    let after = transaction::snapshot(&tx, witness)?;
+    if before.total != after.total
+        || before.trial_groups != after.trial_groups
+        || before.obligations.len() != after.obligations.len()
+        || before.families.len() != after.families.len()
+        || before.retained_assets.len() != after.retained_assets.len()
+        || before.protected_paths != after.protected_paths
+    {
+        return Err(codec::invalid());
+    }
+    tx.execute_batch("DROP TABLE temp.custody_upgrade_v4_meta;")?;
     tx.commit().map_err(|_| {
         let mut error = CustodyError::new(
             ErrorKind::Storage,

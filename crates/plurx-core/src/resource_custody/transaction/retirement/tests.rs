@@ -62,6 +62,8 @@ fn make_fixture(corrupt_snapshot: bool) -> RetirementFixture {
         obligation_id: target_obligation_id,
         graph_id: target_graph_id,
         runtime_binding: new_target.runtime_binding,
+        #[cfg(target_os = "linux")]
+        recovery: None,
     };
     target_manifest.owner_id = v2::Id::new(source.owner).unwrap();
     let retained = v2::RetainedAssetsV2 {

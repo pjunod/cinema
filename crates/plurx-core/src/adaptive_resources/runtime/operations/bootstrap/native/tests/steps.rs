@@ -92,6 +92,7 @@ fn held_fixture(path: &Path, plan: &ScratchPlanV3) -> RootCell {
         join_id: id(),
         pending: None,
         failed_join: false,
+        imported_retained: false,
         result: Some(RootResult {
             files: BTreeMap::from([(copy, file)]),
             audit: BootstrapResultV1 {

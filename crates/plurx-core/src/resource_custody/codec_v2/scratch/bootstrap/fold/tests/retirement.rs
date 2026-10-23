@@ -31,7 +31,7 @@ fn observe_asset(
     .unwrap()
 }
 
-fn retained(plan: &ScratchPlanV3, with_reader: bool) -> (BootstrapFold, Id, NativeObject) {
+fn producer_open(plan: &ScratchPlanV3, with_reader: bool) -> (BootstrapFold, Id, NativeObject) {
     let mut fold = parent_ready(plan);
     let parent_id = fold
         .bootstrap
@@ -155,6 +155,11 @@ fn retained(plan: &ScratchPlanV3, with_reader: bool) -> (BootstrapFold, Id, Nati
         );
     }
 
+    (fold, file_id, native)
+}
+
+fn retained(plan: &ScratchPlanV3, with_reader: bool) -> (BootstrapFold, Id, NativeObject) {
+    let (mut fold, file_id, native) = producer_open(plan, with_reader);
     let fence_id = id();
     fold = output_event(
         fold,
@@ -495,4 +500,400 @@ fn unresolved_file_removal_keeps_its_charge_and_cannot_be_retried() {
         },
     )
     .is_err());
+}
+
+#[test]
+fn producer_cancel_is_only_for_open_output_with_no_pending_io_or_readers() {
+    let plan = plan();
+    let (open, _, _) = producer_open(&plan, false);
+    let head = open.output.state.head.clone().unwrap();
+    let cancelled = output_event(
+        open,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        cancelled.output.state.lifecycle,
+        ScratchLifecycleV1::Retiring
+    );
+
+    let (open, _, _) = producer_open(&plan, false);
+    let head = open.output.state.head.clone().unwrap();
+    assert!(output_event(
+        open,
+        &plan,
+        id(),
+        AssetEventV1::BeginRetirement {
+            exact_head_before_retirement: head,
+        },
+    )
+    .is_err());
+
+    let (read_only, _, _) = retained(&plan, false);
+    let head = read_only.output.state.head.clone().unwrap();
+    assert!(output_event(
+        read_only,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .is_err());
+
+    let (with_reader, _, _) = producer_open(&plan, true);
+    let head = with_reader.output.state.head.clone().unwrap();
+    assert!(output_event(
+        with_reader,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .is_err());
+
+    let (open, file_id, _) = producer_open(&plan, false);
+    let io_id = id();
+    let pending = output_event(
+        open,
+        &plan,
+        io_id,
+        AssetEventV1::ArmIo {
+            io_id,
+            operation: AssetIoV1::SyncFiles {
+                file_ids: vec![file_id],
+            },
+        },
+    )
+    .unwrap();
+    let head = pending.output.state.head.clone().unwrap();
+    assert!(output_event(
+        pending,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn unstarted_root_requires_observed_never_entry_before_terminal_cancel() {
+    let plan = plan();
+    let fold = BootstrapFold::empty(&plan, id(), id()).unwrap();
+    let root_io = id();
+    let fold = apply(
+        fold,
+        &plan,
+        root_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: root_io,
+            operation: BootstrapIoV1::OpenNamespaceRoot { copy_id: id() },
+        },
+    )
+    .unwrap();
+    let other_io = id();
+    let still_armed = apply(
+        BootstrapFold::empty(&plan, id(), id()).unwrap(),
+        &plan,
+        other_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: other_io,
+            operation: BootstrapIoV1::OpenNamespaceRoot { copy_id: id() },
+        },
+    )
+    .unwrap();
+    let armed_head = still_armed.state().asset.head.unwrap();
+    assert!(output_event(
+        still_armed,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: armed_head,
+        },
+    )
+    .is_err());
+    let fold = apply(
+        fold,
+        &plan,
+        id(),
+        AssetEventV3::ObserveBootstrapV1 {
+            io_id: root_io,
+            native_join_operation_id: id(),
+            result: BootstrapResultV1 {
+                outcome: NativeOutcomeV1::NeverEntered,
+                acquired: None,
+                closed_copy_ids: vec![],
+                child_effect: ChildEffect::None,
+                inventory: InventoryCertainty::Exact,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(fold.state().bootstrap.phase, BootstrapPhase::Unstarted);
+    let head = fold.state().asset.head.unwrap();
+    let closed = output_event(
+        fold,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        closed.state().asset.lifecycle,
+        ScratchLifecycleV1::RetiredClosed
+    );
+    assert_eq!(closed.state().bootstrap.phase, BootstrapPhase::Closed);
+    assert!(closed.files().is_empty());
+}
+
+#[test]
+fn partial_producer_cancel_closes_exact_parent_and_refuses_possible_child() {
+    let plan = plan();
+    let open = parent_ready(&plan);
+    let parent = open.state().bootstrap.parent.unwrap().observed;
+    let head = open.state().asset.head.unwrap();
+    let retiring = output_event(
+        open,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        retiring.state().asset.lifecycle,
+        ScratchLifecycleV1::Retiring
+    );
+    let close_io = id();
+    let copy_ids = parent.held_copy_ids.clone();
+    let closing = apply(
+        retiring,
+        &plan,
+        close_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: close_io,
+            operation: BootstrapIoV1::CloseBootstrapHandles {
+                copy_ids: copy_ids.clone(),
+            },
+        },
+    )
+    .unwrap();
+    let closed = apply(
+        closing,
+        &plan,
+        id(),
+        AssetEventV3::ObserveBootstrapV1 {
+            io_id: close_io,
+            native_join_operation_id: id(),
+            result: BootstrapResultV1 {
+                outcome: NativeOutcomeV1::Completed,
+                acquired: None,
+                closed_copy_ids: copy_ids,
+                child_effect: ChildEffect::None,
+                inventory: InventoryCertainty::Exact,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        closed.state().asset.lifecycle,
+        ScratchLifecycleV1::RetiredClosed
+    );
+    assert_eq!(closed.state().bootstrap.phase, BootstrapPhase::Closed);
+    assert_eq!(closed.state().asset.totals.handles_reserved, 0);
+    let mut forged_partial = closed.state();
+    forged_partial.asset.lifecycle = ScratchLifecycleV1::Retiring;
+    forged_partial.bootstrap.phase = BootstrapPhase::ParentReady;
+    assert!(validate_projection(&plan, &forged_partial).is_err());
+
+    let old_plan = crate::resource_custody::codec_v2::scratch::tests::plan();
+    let old_retiring = crate::resource_custody::codec_v2::scratch::ScratchStateV2 {
+        version: 2,
+        asset_id: old_plan.asset_id,
+        directory: None,
+        head: None,
+        revision: 0,
+        lifecycle: ScratchLifecycleV1::Retiring,
+        totals: AssetTotalsV1::default(),
+        directory_synced: false,
+    };
+    assert!(
+        crate::resource_custody::codec_v2::scratch::validate_projection(&old_plan, &old_retiring,)
+            .is_err()
+    );
+
+    let open = parent_ready(&plan);
+    let parent = open.state().bootstrap.parent.unwrap().observed;
+    let obligation = open.obligation;
+    let member = open.member;
+    let create_io = id();
+    let possible = apply(
+        open,
+        &plan,
+        create_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: create_io,
+            operation: BootstrapIoV1::CreateRenditionChild {
+                parent: OwnedDirectoryRefV1 {
+                    owning_obligation: obligation,
+                    member_id: member,
+                    directory_id: parent.directory_id,
+                },
+                copy_id: id(),
+            },
+        },
+    )
+    .unwrap();
+    let head = possible.state().asset.head.unwrap();
+    assert!(output_event(
+        possible,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn traversing_producer_cancel_closes_only_the_original_anchor() {
+    let plan = plan();
+    let fold = BootstrapFold::empty(&plan, id(), id()).unwrap();
+    let root_io = id();
+    let anchor_copy = id();
+    let fold = apply(
+        fold,
+        &plan,
+        root_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: root_io,
+            operation: BootstrapIoV1::OpenNamespaceRoot {
+                copy_id: anchor_copy,
+            },
+        },
+    )
+    .unwrap();
+    let fold = observe(
+        fold,
+        &plan,
+        root_io,
+        directory(&plan, id(), root_io, anchor_copy),
+        vec![],
+        ChildEffect::None,
+    );
+    assert_eq!(fold.state().bootstrap.phase, BootstrapPhase::Traversing);
+    let head = fold.state().asset.head.unwrap();
+    let fold = output_event(
+        fold,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: head,
+        },
+    )
+    .unwrap();
+    let close_io = id();
+    let fold = apply(
+        fold,
+        &plan,
+        close_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: close_io,
+            operation: BootstrapIoV1::CloseBootstrapHandles {
+                copy_ids: vec![anchor_copy],
+            },
+        },
+    )
+    .unwrap();
+    let closed = apply(
+        fold,
+        &plan,
+        id(),
+        AssetEventV3::ObserveBootstrapV1 {
+            io_id: close_io,
+            native_join_operation_id: id(),
+            result: BootstrapResultV1 {
+                outcome: NativeOutcomeV1::Completed,
+                acquired: None,
+                closed_copy_ids: vec![anchor_copy],
+                child_effect: ChildEffect::None,
+                inventory: InventoryCertainty::Exact,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        closed.state().asset.lifecycle,
+        ScratchLifecycleV1::RetiredClosed
+    );
+    assert_eq!(closed.state().bootstrap.phase, BootstrapPhase::Closed);
+}
+
+#[test]
+fn possible_child_never_entered_must_be_observed_before_partial_cancel() {
+    let plan = plan();
+    let fold = parent_ready(&plan);
+    let parent = fold.state().bootstrap.parent.unwrap().observed;
+    let obligation = fold.obligation;
+    let member = fold.member;
+    let create_io = id();
+    let fold = apply(
+        fold,
+        &plan,
+        create_io,
+        AssetEventV3::ArmBootstrapV1 {
+            io_id: create_io,
+            operation: BootstrapIoV1::CreateRenditionChild {
+                parent: OwnedDirectoryRefV1 {
+                    owning_obligation: obligation,
+                    member_id: member,
+                    directory_id: parent.directory_id,
+                },
+                copy_id: id(),
+            },
+        },
+    )
+    .unwrap();
+    let head = fold.state().asset.head.unwrap();
+    assert_eq!(fold.state().bootstrap.phase, BootstrapPhase::ChildPossible);
+    let fold = apply(
+        fold,
+        &plan,
+        id(),
+        AssetEventV3::ObserveBootstrapV1 {
+            io_id: create_io,
+            native_join_operation_id: id(),
+            result: BootstrapResultV1 {
+                outcome: NativeOutcomeV1::NeverEntered,
+                acquired: None,
+                closed_copy_ids: vec![],
+                child_effect: ChildEffect::None,
+                inventory: InventoryCertainty::Exact,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(fold.state().bootstrap.phase, BootstrapPhase::ParentReady);
+    let observed_head = fold.state().asset.head.unwrap();
+    assert_ne!(head, observed_head);
+    output_event(
+        fold,
+        &plan,
+        id(),
+        AssetEventV1::BeginProducerCancellation {
+            exact_head_before_cancellation: observed_head,
+        },
+    )
+    .unwrap();
 }

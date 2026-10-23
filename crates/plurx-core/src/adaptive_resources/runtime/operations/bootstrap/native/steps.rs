@@ -435,3 +435,104 @@ impl NodeResourceRuntime {
         }
     }
 }
+
+impl NodeResourceRuntime {
+    /// Reconcile only an already-armed traversal/create operation. Cancellation
+    /// never advances to another component or enters a child creation that had
+    /// not already entered. An unlaunched registered arm records NeverEntered.
+    pub(in crate::adaptive_resources::runtime::operations) async fn observe_finite_bootstrap_arm(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        let bundle_id = bundle.id;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        if role.refunded
+            || role
+                .transition
+                .as_ref()
+                .is_some_and(|transition| transition.effect != Effect::Bootstrap(member))
+        {
+            return Err(OperationError::State);
+        }
+        resume_change(&self.journal, role, member, deadline)?;
+        if role.transition.is_some() {
+            self.finish_transition(bundle_id, role).await?;
+        }
+        let bootstrap = role
+            .bootstrap
+            .get_mut(&member)
+            .ok_or(OperationError::State)?;
+        let Some((io, operation)) = bootstrap.next_arm.clone() else {
+            return Ok(());
+        };
+        let state = bootstrap
+            .fold
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .state();
+        let native = bootstrap
+            .native_root
+            .as_mut()
+            .ok_or(OperationError::State)?;
+        if state
+            .asset
+            .head
+            .as_ref()
+            .is_some_and(|head| head.operation_id == native.observe_id)
+            && bootstrap.change.is_none()
+        {
+            bootstrap.next_arm = None;
+            return Ok(());
+        }
+        if state
+            .asset
+            .head
+            .as_ref()
+            .is_none_or(|head| head.operation_id != io)
+            || state.asset.totals.pending_jobs != 1
+            || bootstrap.change.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        if native.io_id != io {
+            // The original arm committed but native entry was never released.
+            // Retain the worker in this cell and drop its latch: it reports
+            // NeverEntered, with no openat/mkdirat on cancellation.
+            let enter = native.launch_next(&bootstrap.plan, io, &operation)?;
+            drop(enter);
+        }
+        let audit = native.join().await?.audit.clone();
+        let observe_id = native.observe_id;
+        let change = AssetChangeV3 {
+            scratch_member_id: v2::Id::new(member)?,
+            asset_id: bootstrap.plan.asset_id,
+            generation_epoch: bootstrap.plan.generation_epoch,
+            previous: state.asset.head,
+            event: AssetEventV3::ObserveBootstrapV1 {
+                io_id: io,
+                native_join_operation_id: native.join_id,
+                result: audit,
+            },
+        };
+        bootstrap.change = Some((observe_id, change.clone()));
+        start_named_transition(
+            &self.journal,
+            role,
+            observe_id.uuid(),
+            Mutation::AssetChangeV3 { change },
+            Effect::Bootstrap(member),
+            deadline,
+        )?;
+        self.finish_transition(bundle_id, role).await?;
+        role.bootstrap
+            .get_mut(&member)
+            .ok_or(OperationError::State)?
+            .next_arm = None;
+        Ok(())
+    }
+}

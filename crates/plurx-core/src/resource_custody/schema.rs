@@ -71,7 +71,8 @@ PRAGMA user_version=1;
 "#;
 
 pub(super) const DDL_V2: &str = include_str!("schema/v2.sql");
-pub(super) const DDL: &str = include_str!("schema/v3.sql");
+pub(super) const DDL_V3: &str = include_str!("schema/v3.sql");
+pub(super) const DDL: &str = include_str!("schema/v4.sql");
 
 fn shape(connection: &Connection) -> Result<Vec<(String, String, String)>, CustodyError> {
     let mut statement = connection.prepare(
@@ -86,7 +87,8 @@ pub(super) fn validate(connection: &Connection) -> Result<(), CustodyError> {
     let ddl = match version {
         1 => DDL_V1,
         2 => DDL_V2,
-        3 => DDL,
+        3 => DDL_V3,
+        4 => DDL,
         _ => {
             return Err(CustodyError::new(
                 ErrorKind::UnreadableAuthority,

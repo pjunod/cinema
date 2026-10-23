@@ -29,6 +29,8 @@ mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
 pub(super) mod plans;
+#[cfg(target_os = "linux")]
+mod recovered;
 #[cfg(unix)]
 mod response_memory;
 mod scratch;

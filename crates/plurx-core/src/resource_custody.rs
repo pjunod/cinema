@@ -5,6 +5,8 @@
 //! before startup cleanup. No journal operation touches the accounting mutex.
 mod codec;
 pub(crate) mod codec_v2;
+#[cfg(target_os = "linux")]
+pub(crate) mod recovery;
 mod schema;
 mod storage;
 #[cfg(test)]
@@ -236,6 +238,21 @@ pub struct RecoverySnapshot {
     pub protected_paths: Vec<PathBuf>,
     /// Native old-owner identities needed by a positive fencing backend.
     pub owners: Vec<OwnerIdentity>,
+    /// Append-only effective custodians for retained S; historical R→S owners
+    /// in obligations and custody documents remain unchanged.
+    pub(crate) recovered_s_holders: Vec<RecoveredSHolder>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveredSHolder {
+    pub(crate) obligation_id: Uuid,
+    pub(crate) adoption_sequence: i64,
+    pub(crate) operation_id: Uuid,
+    pub(crate) previous_owner_id: Uuid,
+    pub(crate) current_owner_id: Uuid,
+    pub(crate) original_s_sequence: i64,
+    pub(crate) head: codec_v2::scratch::AssetEventRefV1,
+    pub(crate) frozen_digest: String,
 }
 
 /// Private runtime capability, never deserialized from an obligation row.
@@ -246,8 +263,16 @@ pub(crate) struct ObligationHandle {
     obligation_id: Uuid,
     graph_id: Uuid,
     runtime_binding: ReservationBinding,
+    #[cfg(target_os = "linux")]
+    recovery: Option<crate::adaptive_resources::runtime::recovery::RecoveredSAuthority>,
 }
 impl ObligationHandle {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recovery_authority(
+        &self,
+    ) -> Option<&crate::adaptive_resources::runtime::recovery::RecoveredSAuthority> {
+        self.recovery.as_ref()
+    }
     pub(crate) fn obligation_id(&self) -> Uuid {
         self.obligation_id
     }
@@ -423,6 +448,11 @@ struct QueuedOperation {
     command: Command,
 }
 enum Command {
+    #[cfg(target_os = "linux")]
+    RecoverRetainedS {
+        proof: crate::adaptive_resources::runtime::recovery::NativeRetainedSImportProof,
+        exit: recovery::PositivePreviousOwnerExit,
+    },
     Prepare {
         batch: PrepareBatch,
         handles: Vec<ObligationHandle>,
@@ -440,10 +470,22 @@ enum Command {
 }
 #[derive(Clone, Debug)]
 pub(crate) enum OperationResult {
+    #[cfg(target_os = "linux")]
+    RecoveredSAdoption(RecoveryAdoptionAck),
     Prepared(PreparedBatch),
     Changed(CommitAck),
     RetiredWithAssets {
         ack: RetirementAck,
         target: ObligationHandle,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecoveryAdoptionAck {
+    pub(crate) operation_id: Uuid,
+    pub(crate) obligation_id: Uuid,
+    pub(crate) previous_owner_id: Uuid,
+    pub(crate) current_owner_id: Uuid,
+    pub(crate) sequence: i64,
 }

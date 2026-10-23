@@ -281,9 +281,35 @@ impl BootstrapFold {
                     && self.output.state.lifecycle == ScratchLifecycleV1::RetainedReadOnly;
                 let retirement_ready = self.bootstrap.phase == BootstrapPhase::SinkReady
                     && self.output.state.lifecycle == ScratchLifecycleV1::Retiring;
+                let empty_cancel = matches!(event, AssetEventV1::BeginProducerCancellation { .. })
+                    && self.bootstrap.phase == BootstrapPhase::Unstarted
+                    && self.output.state.lifecycle == ScratchLifecycleV1::Open
+                    && self.output.state.head.is_some()
+                    && self.output.state.totals.pending_jobs == 0
+                    && self.bootstrap.current.is_none()
+                    && self.bootstrap.parent.is_none()
+                    && self.bootstrap.possible_child.is_none()
+                    && self.possible_copy.is_none()
+                    && self.uncertain_copies.is_empty()
+                    && self.output.state.directory.is_none()
+                    && self.output.files.is_empty()
+                    && self.output.readers().is_empty();
+                let partial_cancel =
+                    matches!(event, AssetEventV1::BeginProducerCancellation { .. })
+                        && matches!(
+                            self.bootstrap.phase,
+                            BootstrapPhase::Traversing | BootstrapPhase::ParentReady
+                        )
+                        && self.output.state.lifecycle == ScratchLifecycleV1::Open
+                        && self.bootstrap.possible_child.is_none()
+                        && self.possible_copy.is_none()
+                        && self.uncertain_copies.is_empty()
+                        && self.output.state.directory.is_none();
                 if !matches!(event, AssetEventV1::Fence { .. })
                     && ((!retained_child_ready
                         && !retirement_ready
+                        && !partial_cancel
+                        && !empty_cancel
                         && self.bootstrap.phase != BootstrapPhase::SinkReady)
                         || self.pending.is_some())
                 {
@@ -296,6 +322,13 @@ impl BootstrapFold {
                 }
                 self.output
                     .apply_event(plan.output_view(), operation_id, event)?;
+                if empty_cancel {
+                    // The full lineage has already observed the original
+                    // root-open arm as NeverEntered. No child or File exists
+                    // to close, so cancellation itself is the terminal audit.
+                    self.output.state.lifecycle = ScratchLifecycleV1::RetiredClosed;
+                    self.bootstrap.phase = BootstrapPhase::Closed;
+                }
             }
         }
         self.output.state.revision = self
@@ -309,7 +342,11 @@ impl BootstrapFold {
             revision: self.output.state.revision,
         });
         self.recount(plan)?;
-        validate_output_projection(plan.output_view(), &self.output.state)?;
+        validate_output_projection(
+            plan.output_view(),
+            &self.output.state,
+            partial_producer_cancellation_projection(plan, &self.state()),
+        )?;
         if self.output.state.lifecycle == ScratchLifecycleV1::RetiredClosed
             && (self.bootstrap.phase != BootstrapPhase::Closed
                 || self.bootstrap.current.is_some()
@@ -370,8 +407,24 @@ impl BootstrapFold {
             }
             BootstrapIoV1::CloseBootstrapHandles { copy_ids } => {
                 let held = self.held_copies();
-                if self.output.state.lifecycle == ScratchLifecycleV1::Retiring
-                    || (copy_ids.is_empty()
+                let partial_cancel = self.output.state.lifecycle == ScratchLifecycleV1::Retiring
+                    && matches!(
+                        state.phase,
+                        BootstrapPhase::Traversing | BootstrapPhase::ParentReady
+                    )
+                    && state.possible_child.is_none()
+                    && self.possible_copy.is_none()
+                    && self.uncertain_copies.is_empty()
+                    && self.output.state.directory.is_none()
+                    && self.output.files.is_empty()
+                    && self.output.readers().is_empty()
+                    && !self.output.has_pending()
+                    && !held.is_empty()
+                    && copy_ids.iter().copied().collect::<BTreeSet<_>>() == held
+                    && copy_ids.len() == held.len();
+                if (self.output.state.lifecycle == ScratchLifecycleV1::Retiring && !partial_cancel)
+                    || (!partial_cancel
+                        && copy_ids.is_empty()
                         && (state.phase != BootstrapPhase::UnknownHeld
                             || state.possible_child.is_some()))
                     || copy_ids.len() > 2
@@ -746,6 +799,16 @@ impl BootstrapFold {
                     && self.bootstrap.possible_child.is_none()
                 {
                     self.bootstrap.phase = BootstrapPhase::Closed;
+                    if self.output.state.lifecycle == ScratchLifecycleV1::Retiring {
+                        if self.output.state.directory.is_some()
+                            || !self.output.files.is_empty()
+                            || !self.output.readers().is_empty()
+                            || self.output.has_pending()
+                        {
+                            return Err(codec::invalid());
+                        }
+                        self.output.state.lifecycle = ScratchLifecycleV1::RetiredClosed;
+                    }
                 }
             }
             BootstrapIoV1::RemoveRenditionChild { .. } => {

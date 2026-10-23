@@ -13,6 +13,9 @@ pub(super) struct FiniteLaunch {
     pub(super) task_member: Uuid,
     pub(super) acquisition_id: Uuid,
     pub(super) source_members: Vec<Uuid>,
+    /// Synchronous original registrations; absence is meaningful only with
+    /// the sealed no-root graph and a matching unarmed planned slot.
+    pub(super) registered_source_members: std::collections::BTreeSet<Uuid>,
     command: SoftwareAvcCommand,
     pump: Option<SoftwarePump>,
     pub(super) entered: bool,
@@ -66,6 +69,8 @@ impl NodeResourceRuntime {
         if role.refunded || role.finite_vod.is_some() || role.graph.is_none()
             || source_members.len() < 2 || source_members.len() > 3
             || source_members.len() != command.source_count() + 1 || acquisition_id.is_nil()
+            || source_members.iter().collect::<std::collections::BTreeSet<_>>().len()
+                != source_members.len()
             || role.typed_members.as_ref().is_none_or(|members| !members.iter().any(|member|
                 matches!(member, v2::MemberPlan::VodOutputTaskV1 { slot, task }
                     if slot.member_id.uuid() == task_member && task.root_member_id.uuid() == root_member))) {
@@ -76,6 +81,7 @@ impl NodeResourceRuntime {
             task_member,
             acquisition_id,
             source_members,
+            registered_source_members: std::collections::BTreeSet::new(),
             command,
             pump: Some(pump),
             entered: false,

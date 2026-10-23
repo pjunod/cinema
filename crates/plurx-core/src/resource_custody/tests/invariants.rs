@@ -25,6 +25,8 @@ fn prepared_store(
         obligation_id: Uuid::new_v4(),
         graph_id: new.manifest.graph_id,
         runtime_binding: new.runtime_binding,
+        #[cfg(target_os = "linux")]
+        recovery: None,
     };
     let operation = QueuedOperation {
         id: Uuid::new_v4(),

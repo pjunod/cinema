@@ -461,6 +461,12 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         let acquisition_id = copy.acquisition_operation_id;
+        if role.finite_vod.as_ref().is_some_and(|finite| {
+            !finite.source_members.contains(&member)
+                || finite.registered_source_members.contains(&member)
+        }) {
+            return Err(OperationError::State);
+        }
         role.sources.insert(
             member,
             SourceCell {
@@ -481,6 +487,9 @@ impl NodeResourceRuntime {
                 parent_close: ParentCloseState::NotStarted,
             },
         );
+        if let Some(finite) = role.finite_vod.as_mut() {
+            finite.registered_source_members.insert(member);
+        }
         Ok(())
     }
 
@@ -614,6 +623,74 @@ impl NodeResourceRuntime {
         }
         Ok(())
     }
+}
+
+/// A slot without an original SourceCell cannot enter an open worker. The
+/// caller must prove that exact slot was unregistered and unarmed under the
+/// sealed original no-root graph before using this data-only audit.
+pub(in crate::adaptive_resources::runtime::operations) fn finite_unregistered_closed_fact(
+    member: &v2::MemberPlan,
+    closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure,
+) -> Result<v2::ClosedFact, OperationError> {
+    let v2::MemberPlan::SourceV1 { slot, source } = member else {
+        return Err(OperationError::State);
+    };
+    let v2::SourceRecovery::LocalSourceHandlesV1 {
+        graph_id,
+        owner_id,
+        filesystem_domain,
+    } = &source.recovery;
+    if source.member_id != slot.member_id
+        || graph_id.uuid() != closure.generation()
+        || *owner_id != source.filesystem_domain.daemon_owner_id
+        || filesystem_domain != &source.filesystem_domain
+        || source.planned_copies.len() != 2
+    {
+        return Err(OperationError::State);
+    }
+    let mut parents = source.planned_copies.iter().filter(|copy| {
+        matches!(copy.owner,
+            v2::CopyOwner::DaemonSourceCell {
+                owner_id: held_owner,
+                graph_id: held_graph,
+                member_id,
+            } if held_owner == *owner_id
+                && held_graph == *graph_id
+                && member_id == source.member_id
+                && copy.parent_copy_id.is_none())
+    });
+    let parent = parents.next().ok_or(OperationError::State)?;
+    if parents.next().is_some() {
+        return Err(OperationError::State);
+    }
+    let mut children = source.planned_copies.iter().filter(|copy| {
+        matches!(copy.owner,
+            v2::CopyOwner::OwnedRoot {
+                graph_id: held_graph,
+                root_member_id,
+            } if held_graph == *graph_id
+                && root_member_id.uuid() == closure.root_member())
+            && copy.parent_copy_id == Some(parent.copy_id)
+            && copy.acquisition_operation_id.uuid() == closure.acquisition_id()
+    });
+    let child = children.next().ok_or(OperationError::State)?;
+    if children.next().is_some() || parent.copy_id == child.copy_id {
+        return Err(OperationError::State);
+    }
+    let operation_id = v2::Id::new(closure.close_operation_id())?;
+    Ok(v2::ClosedFact::SourceV1 {
+        holder_id: source.holder_id,
+        copies: vec![
+            v2::CopyClosed::ProvenNeverAcquired {
+                copy: parent.clone(),
+                operation_id,
+            },
+            v2::CopyClosed::ProvenNeverAcquired {
+                copy: child.clone(),
+                operation_id,
+            },
+        ],
+    })
 }
 
 impl SourceCell {

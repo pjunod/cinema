@@ -333,3 +333,196 @@ fn pending_output_io_cannot_be_reclassified_as_retired_assets() {
     });
     assert!(retained_minimum_resources(&manifest).is_err());
 }
+
+fn never_acquired_v3_fixture() -> (Manifest, Vec<Envelope>, Settlement) {
+    use scratch::bootstrap::*;
+    let mut manifest = fixture();
+    let old = scratch::tests::plan();
+    let MemberPlan::SourceV1 { source, .. } = &manifest.members[1] else {
+        unreachable!()
+    };
+    let MemberPlan::ScratchAssetsV1 { slot, scratch } = &manifest.members[2] else {
+        unreachable!()
+    };
+    let MemberPlan::VodOutputTaskV1 { task, .. } = &manifest.members[3] else {
+        unreachable!()
+    };
+    let source_copy = source.planned_copies[0].clone();
+    let holder_id = source.holder_id;
+    let source_member_id = source.member_id;
+    let asset_id = scratch.asset_id;
+    let generation_epoch = task.generation_epoch;
+    let mut domain = old.filesystem_domain;
+    domain.daemon_owner_id = manifest.owner_id;
+    let plan = ScratchPlanV3 {
+        version: 3,
+        asset_id,
+        rendition_id: old.rendition_id,
+        generation_epoch,
+        filesystem_domain: domain,
+        directory: DirectoryOriginV1::ConfiguredRootBootstrapV1 {
+            bootstrap: RootBootstrapPlanV1 {
+                version: 1,
+                authority: ConfiguredRootAuthorityV1 {
+                    installation_id: id(),
+                    purpose: RootPurpose::RenditionCacheV1,
+                    resolved_absolute_root: "/cache".into(),
+                    traversal: RootTraversal::NamespaceRootToConfiguredRootV1,
+                    descendant_mounts: DescendantMounts::RefuseV1,
+                },
+                components: vec!["cache".into()],
+                child_component: "film".into(),
+                protected_child_path: "/cache/film".into(),
+                bounds: BootstrapBoundsV1 {
+                    max_components: 64,
+                    max_path_bytes: 4096,
+                    max_component_bytes: 255,
+                    peak_directory_handles: 2,
+                    pending_native_jobs: 1,
+                    resident_memory_bytes: 4096,
+                    child_directory_reserve_bytes: 4096,
+                    parent_entry_reserve_bytes: 4096,
+                },
+            },
+        },
+        outputs: old.outputs,
+        limits: scratch::ScratchLimitsV1 {
+            resident_file_objects: 8,
+            resident_logical_bytes: 65536,
+            reserved_storage_bytes: 131072,
+            one_file_logical_bytes: 16384,
+            one_io_payload_bytes: 16384,
+            pending_native_jobs: 1,
+            live_handles: 8,
+            reader_leases: 2,
+            resident_memory_bytes: 131072,
+            allocation: scratch::AllocationAccountingV1::LogicalAndReportedAllocationV1 {
+                allocation_unit_bytes: 4096,
+                per_object_reserve_bytes: 4096,
+                directory_reserve_bytes: 4096,
+            },
+        },
+    };
+    let scratch_member_id = slot.member_id;
+    manifest.members[2] = MemberPlan::ScratchAssetsV3 {
+        slot: MemberSlot {
+            protected_paths: vec!["/cache/film".into()],
+            ..slot.clone()
+        },
+        plan: plan.clone(),
+    };
+    validate_manifest(&manifest).unwrap();
+    let envelopes: Vec<_> = manifest
+        .members
+        .iter()
+        .cloned()
+        .map(|planned| Envelope {
+            version: 2,
+            planned,
+            observed: None,
+        })
+        .collect();
+    let MemberPlan::LegacyV1 { planned } = &manifest.members[0] else {
+        unreachable!()
+    };
+    let root = planned.clone();
+    let MemberPlan::VodOutputTaskV1 { task, .. } = &manifest.members[3] else {
+        unreachable!()
+    };
+    let task = task.clone();
+    let settlement = Settlement {
+        version: 2,
+        owner_id: manifest.owner_id,
+        graph_id: manifest.graph_id,
+        operation_id: id(),
+        members: vec![
+            MemberDisposition::Closed {
+                member_id: Id::new(root.member_id).unwrap(),
+                fact: ClosedFact::LegacyNeverAcquiredV1 {
+                    planned: root,
+                    operation_id: id(),
+                },
+            },
+            MemberDisposition::Closed {
+                member_id: source_member_id,
+                fact: ClosedFact::SourceV1 {
+                    holder_id,
+                    copies: vec![CopyClosed::ProvenNeverAcquired {
+                        copy: source_copy,
+                        operation_id: id(),
+                    }],
+                },
+            },
+            MemberDisposition::Closed {
+                member_id: scratch_member_id,
+                fact: ClosedFact::ScratchAssetsNeverAcquiredV3 {
+                    plan,
+                    operation_id: id(),
+                },
+            },
+            MemberDisposition::Closed {
+                member_id: task.member_id,
+                fact: ClosedFact::VodOutputTaskNeverAcquiredV1 {
+                    task,
+                    operation_id: id(),
+                },
+            },
+        ],
+    };
+    (manifest, envelopes, settlement)
+}
+
+#[test]
+fn never_acquired_settlement_requires_exact_unobserved_plans() {
+    let (manifest, envelopes, settlement) = never_acquired_v3_fixture();
+    validate_settlement(&manifest, &envelopes, &settlement).unwrap();
+
+    let mut observed_root = envelopes.clone();
+    let MemberPlan::LegacyV1 { planned } = &observed_root[0].planned else {
+        unreachable!()
+    };
+    let root_observed = Observed::LegacyV1 {
+        identity: super::super::ObservedIdentity {
+            version: 1,
+            member_id: planned.member_id,
+            adapter: planned.adapter.clone(),
+            adapter_version: planned.adapter_version,
+            domain: planned.domain.clone(),
+            object_identity: "original-root".into(),
+            process: None,
+        },
+    };
+    observed_root[0].observed = Some(root_observed);
+    assert!(validate_settlement(&manifest, &observed_root, &settlement).is_err());
+
+    let mut observed_task = envelopes.clone();
+    let MemberPlan::VodOutputTaskV1 { task, .. } = &observed_task[3].planned else {
+        unreachable!()
+    };
+    let task_observed = Observed::VodOutputTaskV1 { task: task.clone() };
+    observed_task[3].observed = Some(task_observed);
+    assert!(validate_settlement(&manifest, &observed_task, &settlement).is_err());
+
+    let mut observed_scratch = envelopes.clone();
+    let MemberPlan::ScratchAssetsV3 { slot, plan } = &observed_scratch[2].planned else {
+        unreachable!()
+    };
+    let scratch_observed = Observed::ScratchAssetsV3 {
+        state: scratch::bootstrap::BootstrapFold::empty(plan, id(), slot.member_id)
+            .unwrap()
+            .state(),
+    };
+    observed_scratch[2].observed = Some(scratch_observed);
+    assert!(validate_settlement(&manifest, &observed_scratch, &settlement).is_err());
+
+    let mut foreign_task = settlement.clone();
+    let MemberDisposition::Closed {
+        fact: ClosedFact::VodOutputTaskNeverAcquiredV1 { task, .. },
+        ..
+    } = &mut foreign_task.members[3]
+    else {
+        unreachable!()
+    };
+    task.member_id = id();
+    assert!(validate_settlement(&manifest, &envelopes, &foreign_task).is_err());
+}

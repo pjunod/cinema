@@ -34,6 +34,8 @@ fn fixture(trial: bool) -> Fixture {
         obligation_id: Uuid::new_v4(),
         graph_id: manifest.graph_id.uuid(),
         runtime_binding: legacy.runtime_binding,
+        #[cfg(target_os = "linux")]
+        recovery: None,
     };
     let batch = TypedPrepareBatch {
         obligations: vec![TypedNewObligation {
@@ -428,6 +430,8 @@ fn legacy_prepare_command(f: &Fixture) -> (QueuedOperation, ResourceReservation)
         obligation_id: Uuid::new_v4(),
         graph_id: new.manifest.graph_id,
         runtime_binding: new.runtime_binding,
+        #[cfg(target_os = "linux")]
+        recovery: None,
     };
     let command = QueuedOperation {
         id: Uuid::new_v4(),

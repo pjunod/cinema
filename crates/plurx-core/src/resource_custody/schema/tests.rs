@@ -182,7 +182,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     for (table, old) in tables.iter().zip(before) {
         assert_eq!(logical_rows(&db, table), old, "{table}");
@@ -193,7 +193,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(snapshot.obligations[0].allocation_epoch, u64::MAX);
     assert_eq!(snapshot.trial_groups.len(), 1);
     assert!(snapshot.retained_assets.is_empty());
-    // Exact-v3 reopen is a no-op; old shape recognition cannot accept the new DB.
+    // Exact-v4 reopen is a no-op; old shape recognition cannot accept the new DB.
     let rows = logical_rows(&db, "operations");
     upgrade(&mut db, &store.witness).unwrap();
     assert_eq!(rows, logical_rows(&db, "operations"));
@@ -292,8 +292,28 @@ fn ready_v1_open_upgrades_same_inode_without_replacing_witness() {
 #[test]
 fn v3_schema_is_exact_and_rejects_extra_shape() {
     let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(DDL_V3).unwrap();
+    validate(&db).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    db.execute_batch("CREATE TABLE extra_authority(value TEXT) STRICT;")
+        .unwrap();
+    assert!(validate(&db).is_err());
+}
+
+#[test]
+fn v4_schema_is_exact_and_rejects_extra_shape() {
+    let db = Connection::open_in_memory().unwrap();
     db.execute_batch(DDL).unwrap();
     validate(&db).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
     db.execute_batch("CREATE TABLE extra_authority(value TEXT) STRICT;")
         .unwrap();
     assert!(validate(&db).is_err());
@@ -356,7 +376,7 @@ fn recognized_v2_history_upgrades_to_v3_with_conservative_claim_and_unchanged_by
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert_eq!(logical_rows(&db, "obligations"), before_obligations);
     assert_eq!(logical_rows(&db, "operations"), before_operations);

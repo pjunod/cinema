@@ -29,6 +29,13 @@ pub struct CustodyJournal {
     sender: mpsc::SyncSender<Work>,
     book: Arc<Mutex<Book>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    #[cfg(target_os = "linux")]
+    recovery_candidates: Mutex<
+        Vec<(
+            recovery::RetainedSImportClaim,
+            recovery::PositivePreviousOwnerExit,
+        )>,
+    >,
 }
 /// Waiter only. Drop does not cancel queued work, proof retention, or accounting.
 #[must_use]
@@ -59,6 +66,8 @@ impl PendingOperation {
 }
 fn obligations(command: &Command) -> Vec<Uuid> {
     match command {
+        #[cfg(target_os = "linux")]
+        Command::RecoverRetainedS { proof, .. } => vec![proof.obligation_id()],
         Command::Prepare { handles, .. } | Command::PrepareTyped { handles, .. } => {
             handles.iter().map(|h| h.obligation_id).collect()
         }
@@ -89,6 +98,33 @@ impl CustodyJournal {
         transaction::validate_owner(&options.owner)?;
         let mut storage = storage::Storage::open(&options)?;
         let snapshot = transaction::snapshot(&storage.connection, &storage.witness)?;
+        #[cfg(target_os = "linux")]
+        let recovery_candidates = snapshot
+            .retained_assets
+            .iter()
+            .filter_map(|asset| {
+                let original = snapshot
+                    .obligations
+                    .iter()
+                    .find(|o| o.obligation_id == asset.obligation_id)?;
+                let effective = snapshot
+                    .recovered_s_holders
+                    .iter()
+                    .filter(|holder| holder.obligation_id == asset.obligation_id)
+                    .max_by_key(|holder| holder.adoption_sequence)
+                    .map_or(original.owner_id, |holder| holder.current_owner_id);
+                let exit =
+                    recovery::prove_previous_daemon_exit(&options, &snapshot, effective).ok()?;
+                let claim = recovery::select_dormant_retained_s(
+                    &storage.connection,
+                    &snapshot,
+                    &exit,
+                    asset.obligation_id,
+                )
+                .ok()?;
+                Some((claim, exit))
+            })
+            .collect();
         transaction::register_owner(&mut storage.connection, &options.owner)?;
         storage.verify()?;
         let journal_id = storage.witness.journal_id;
@@ -116,8 +152,65 @@ impl CustodyJournal {
                 sender,
                 book,
                 worker: Some(worker),
+                #[cfg(target_os = "linux")]
+                recovery_candidates: Mutex::new(recovery_candidates),
             },
             snapshot,
+        ))
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_recovery_candidates(
+        &self,
+    ) -> Vec<(
+        recovery::RetainedSImportClaim,
+        recovery::PositivePreviousOwnerExit,
+    )> {
+        self.recovery_candidates
+            .lock()
+            .map(|mut candidates| std::mem::take(&mut *candidates))
+            .unwrap_or_default()
+    }
+    /// Mint a recovered-S handle only from the exact native proof retained by
+    /// a durably acknowledged adoption. The handle itself retains that owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_recovered_s_handle(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<(ObligationHandle, i64), CustodyError> {
+        let book = self.book.lock().map_err(|_| unavailable())?;
+        let owned = book.operations.get(&operation_id).ok_or_else(unavailable)?;
+        let operation = owned.lock().map_err(|_| unavailable())?;
+        if operation.queued {
+            return Err(unavailable());
+        }
+        let (
+            Command::RecoverRetainedS { proof, .. },
+            Some(Ok(OperationResult::RecoveredSAdoption(ack))),
+        ) = (&operation.operation.command, &operation.result)
+        else {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "recovered S adoption unacknowledged",
+            ));
+        };
+        if ack.operation_id != operation_id
+            || proof.journal_id() != self.journal_id
+            || proof.current_owner_id() != self.owner_id
+        {
+            return Err(codec::invalid());
+        }
+        let authority = proof.adopted_authority(ack).ok_or_else(codec::invalid)?;
+        let sequence = proof.claim().sequence();
+        Ok((
+            ObligationHandle {
+                journal_id: self.journal_id,
+                owner_id: self.owner_id,
+                obligation_id: proof.obligation_id(),
+                graph_id: proof.claim().graph_id(),
+                runtime_binding: proof.binding(),
+                recovery: Some(authority),
+            },
+            sequence,
         ))
     }
     pub(crate) fn new_family(&self) -> FamilyHandle {
@@ -147,6 +240,8 @@ impl CustodyJournal {
             obligation_id,
             graph_id,
             runtime_binding,
+            #[cfg(target_os = "linux")]
+            recovery: None,
         })
     }
     /// Create once and retain operation_id in the runtime before submission.
@@ -167,6 +262,8 @@ impl CustodyJournal {
                 obligation_id: Uuid::new_v4(),
                 graph_id: n.manifest.graph_id,
                 runtime_binding: n.runtime_binding,
+                #[cfg(target_os = "linux")]
+                recovery: None,
             })
             .collect();
         let trial = batch.trial.then(Uuid::new_v4);
@@ -199,6 +296,8 @@ impl CustodyJournal {
                 obligation_id: Uuid::new_v4(),
                 graph_id: n.manifest.graph_id.uuid(),
                 runtime_binding: n.runtime_binding,
+                #[cfg(target_os = "linux")]
+                recovery: None,
             })
             .collect();
         let trial = batch.trial.then(Uuid::new_v4);
@@ -233,6 +332,27 @@ impl CustodyJournal {
                 mutation,
             });
         }
+        #[cfg(target_os = "linux")]
+        if let Some(authority) = &key.handle.recovery {
+            if authority.journal_id() != self.journal_id
+                || authority.current_owner_id() != self.owner_id
+                || authority.obligation_id() != key.handle.obligation_id
+                || authority.binding() != key.handle.runtime_binding
+                || !matches!(
+                    mutation,
+                    Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
+                )
+            {
+                return Err(RejectedTransition {
+                    error: CustodyError::new(
+                        ErrorKind::Conflict,
+                        "recovered S writer authority differs",
+                    ),
+                    key,
+                    mutation,
+                });
+            }
+        }
         match self.enqueue(QueuedOperation {
             id: key.operation_id,
             deadline,
@@ -248,8 +368,47 @@ impl CustodyJournal {
                 Command::Prepare { .. } | Command::PrepareTyped { .. } => {
                     unreachable!("change constructs only a transition")
                 }
+                #[cfg(target_os = "linux")]
+                Command::RecoverRetainedS { .. } => {
+                    unreachable!("change constructs only a transition")
+                }
             },
         }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recover_retained_s(
+        &self,
+        operation_id: Uuid,
+        proof: crate::adaptive_resources::runtime::recovery::NativeRetainedSImportProof,
+        exit: recovery::PositivePreviousOwnerExit,
+        deadline: Instant,
+    ) -> Result<
+        PendingOperation,
+        (
+            CustodyError,
+            crate::adaptive_resources::runtime::recovery::NativeRetainedSImportProof,
+            recovery::PositivePreviousOwnerExit,
+        ),
+    > {
+        if operation_id.is_nil()
+            || proof.journal_id() != self.journal_id
+            || proof.current_owner_id() != self.owner_id
+        {
+            return Err((
+                CustodyError::new(ErrorKind::Conflict, "foreign recovered S import"),
+                proof,
+                exit,
+            ));
+        }
+        self.enqueue(QueuedOperation {
+            id: operation_id,
+            deadline,
+            command: Command::RecoverRetainedS { proof, exit },
+        })
+        .map_err(|(error, operation)| match operation.command {
+            Command::RecoverRetainedS { proof, exit } => (error, proof, exit),
+            _ => unreachable!("recovery constructs only an adoption"),
+        })
     }
     fn enqueue(
         &self,

@@ -132,12 +132,52 @@ fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationErr
         && state.asset.lifecycle == ScratchLifecycleV1::RetainedReadOnly)
         || (mode == CleanupMode::Producer
             && state.asset.lifecycle == ScratchLifecycleV1::Open
-            && state.bootstrap.phase == BootstrapPhase::SinkReady)
+            && (matches!(
+                state.bootstrap.phase,
+                BootstrapPhase::Traversing
+                    | BootstrapPhase::ParentReady
+                    | BootstrapPhase::SinkReady
+            ) || (state.bootstrap.phase == BootstrapPhase::Unstarted
+                && bootstrap.root_arm.is_some()
+                && bootstrap
+                    .native_root
+                    .as_ref()
+                    .is_some_and(|root| root.initial_root_never_entered()))))
     {
         return Ok(CleanupPending::Begin { operation: id()? });
     }
     if state.asset.lifecycle != ScratchLifecycleV1::Retiring {
         return Err(OperationError::State);
+    }
+    if mode == CleanupMode::Producer
+        && matches!(
+            state.bootstrap.phase,
+            BootstrapPhase::Traversing | BootstrapPhase::ParentReady
+        )
+        && state.asset.directory.is_none()
+        && fold.files().is_empty()
+        && state.bootstrap.possible_child.is_none()
+    {
+        // The original traversal cell owns exactly this observed directory.
+        // No child name was entered, so a descriptor-only close suffices.
+        let observed = state
+            .bootstrap
+            .current
+            .iter()
+            .chain(state.bootstrap.parent.iter())
+            .map(|directory| directory.observed.clone())
+            .collect::<Vec<_>>();
+        let mut copy_ids = observed
+            .iter()
+            .flat_map(|directory| directory.held_copy_ids.iter().copied())
+            .collect::<Vec<_>>();
+        copy_ids.sort_unstable();
+        return io(
+            CleanupOperation::Bootstrap(BootstrapIoV1::CloseBootstrapHandles {
+                copy_ids: copy_ids.clone(),
+            }),
+            CleanupCell::close_retained(&observed, &copy_ids)?,
+        );
     }
     let child = state
         .asset
@@ -386,10 +426,14 @@ impl NodeResourceRuntime {
                 || (mode == CleanupMode::Producer
                     && (role.retirement.is_some()
                         || role.finite_vod.as_ref().is_none_or(|finite| {
+                            let never_root = finite.never_root_closure.is_some();
                             let root_only = finite.root_only_closure.is_some();
                             let joined = finite.process_closure.is_some();
                             !finite.retiring
-                                || root_only == joined
+                                || usize::from(never_root)
+                                    + usize::from(root_only)
+                                    + usize::from(joined)
+                                    != 1
                                 || finite.producer_joined != joined
                         })))
             {
@@ -500,6 +544,24 @@ impl NodeResourceRuntime {
             .asset
             .head;
         if begin {
+            let empty_cancel = {
+                let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+                let state = bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state();
+                bootstrap
+                    .retirement
+                    .as_ref()
+                    .is_some_and(|run| run.mode == CleanupMode::Producer)
+                    && state.bootstrap.phase == BootstrapPhase::Unstarted
+                    && bootstrap.root_arm.is_some()
+                    && bootstrap
+                        .native_root
+                        .as_ref()
+                        .is_some_and(|root| root.initial_root_never_entered())
+            };
             let mode = role
                 .bootstrap
                 .get(&member)
@@ -535,6 +597,53 @@ impl NodeResourceRuntime {
                 resume_change(&self.journal, role, member, deadline)?;
                 retry_transition(role, &self.journal, member, deadline)?;
                 self.finish_transition(bundle_id, role).await?;
+            }
+            if empty_cancel {
+                let budget_closed = role
+                    .response_budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.closed_and_empty());
+                let bootstrap = role
+                    .bootstrap
+                    .get_mut(&member)
+                    .ok_or(OperationError::State)?;
+                let state = bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state();
+                if !budget_closed
+                    || bootstrap.change.is_some()
+                    || bootstrap.next_arm.is_some()
+                    || bootstrap.publication.is_some()
+                    || bootstrap.sync.is_some()
+                    || !bootstrap.readers.is_empty()
+                    || !bootstrap
+                        .native_root
+                        .as_ref()
+                        .is_some_and(|root| root.initial_root_never_entered())
+                    || state.asset.lifecycle != ScratchLifecycleV1::RetiredClosed
+                    || state.bootstrap.phase != BootstrapPhase::Closed
+                    || state.asset.totals.pending_jobs != 0
+                    || state.asset.directory.is_some()
+                    || !bootstrap
+                        .fold
+                        .as_ref()
+                        .ok_or(OperationError::State)?
+                        .files()
+                        .is_empty()
+                {
+                    return Err(OperationError::State);
+                }
+                bootstrap
+                    .retirement
+                    .as_mut()
+                    .ok_or(OperationError::State)?
+                    .producer_closed = Some(ProducerFiniteClosure {
+                    binding: role.binding,
+                    member,
+                    head: state.asset.head.ok_or(OperationError::State)?,
+                });
             }
             role.bootstrap
                 .get_mut(&member)
@@ -709,10 +818,15 @@ impl NodeResourceRuntime {
             }
             CleanupFact::Bootstrap(result) => result.outcome == NativeOutcomeV1::Completed,
         };
-        let is_close = matches!(
-            operation,
-            CleanupOperation::Bootstrap(BootstrapIoV1::CloseRetainedHandles { .. })
+        let partial_close = matches!(
+            &operation,
+            CleanupOperation::Bootstrap(BootstrapIoV1::CloseBootstrapHandles { .. })
         );
+        let is_close = partial_close
+            || matches!(
+                &operation,
+                CleanupOperation::Bootstrap(BootstrapIoV1::CloseRetainedHandles { .. })
+            );
         if head
             .as_ref()
             .is_none_or(|head| head.operation_id != observe_id)
@@ -788,14 +902,31 @@ impl NodeResourceRuntime {
                     .ok_or(OperationError::State)?
                     .no_original_handles()
                 || !bootstrap.readers.is_empty()
-                || !bootstrap
-                    .publication
-                    .as_ref()
-                    .is_some_and(|publication| publication.ready_for_transfer())
-                || !bootstrap
-                    .sync
-                    .as_ref()
-                    .is_some_and(|sync| sync.ready_for_transfer())
+                || (partial_close && (bootstrap.publication.is_some() || bootstrap.sync.is_some()))
+                || (!partial_close
+                    && bootstrap
+                        .native_root
+                        .as_ref()
+                        .is_some_and(|root| root.imported_retained())
+                    && (bootstrap.publication.is_some() || bootstrap.sync.is_some()))
+                || (!partial_close
+                    && !bootstrap
+                        .native_root
+                        .as_ref()
+                        .is_some_and(|root| root.imported_retained())
+                    && !bootstrap
+                        .publication
+                        .as_ref()
+                        .is_some_and(|publication| publication.ready_for_transfer()))
+                || (!partial_close
+                    && !bootstrap
+                        .native_root
+                        .as_ref()
+                        .is_some_and(|root| root.imported_retained())
+                    && !bootstrap
+                        .sync
+                        .as_ref()
+                        .is_some_and(|sync| sync.ready_for_transfer()))
                 || state.asset.lifecycle != ScratchLifecycleV1::RetiredClosed
                 || state.asset.directory.is_some()
                 || !bootstrap

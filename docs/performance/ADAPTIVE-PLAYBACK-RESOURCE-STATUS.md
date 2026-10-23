@@ -1,17 +1,18 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete; published checkpoint
-`dd0a5b4cb068abb051678186648d5968488c67fe` passed exact native Linux core+daemon
-compilation on Rust 1.97.1 (230.430 seconds;
-`../evidence/direct-linux-dd0a5b4cb068-RESULT.json`, log SHA-256
-`37b14a4bceb08c322eef719b155e5ebad8e3f6e5eafb4dc745f2154da6cf65ca`). Its 415
-authored regression anchors were not run. Current uncommitted
-cancellation/diagnostic integration is compiling on the host; that check has
-not completed. Behavioral tests, final Fable review and qualification have not
-run.
-**Updated:** 2026-10-22 at published checkpoint
-`dd0a5b4cb068abb051678186648d5968488c67fe`; current uncommitted work described
-below.
+`4d094726a55f14f3f236085d348b2a079bb0321d` passed exact native Linux core+daemon
+compilation on Rust 1.97.1 (218.172 seconds; log SHA-256
+`02366bf282056ce847dcce09584fbb56954b8b1c9a1415f7d5a790084dea7c48`). Its 415
+published regression anchors were not run. The parser/metadata/strict-import
+prototype passed a host compile in 87.870 seconds (stable source log SHA-256
+`ea8c7d9c7ce1e18f0e55679db4661e4f42f0c3357c3f529b92bc8b009635a745`,
+`../evidence/direct-check-20261023-141059.json`); later early-bootstrap cleanup
+and journal-holder overlay are not covered. There are 423 local authored
+anchors; tests are NOT RUN. Final Fable review and qualification have not run.
+**Updated:** 2026-10-23 at published checkpoint
+`4d094726a55f14f3f236085d348b2a079bb0321d`; current overlay work is not covered
+by the host compile.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -83,12 +84,15 @@ refund; unresolved cleanup preserves the rendition registry and charge. Host
 compilation passes; native compilation and behavior qualification remain open.
 Typed S settlement reconstructs the latest closed fold in the journal transaction,
 checks exact retained lineage and empty files/readers/handles/storage, and retains
-the original physical receipt through known COMMIT. It has no production native
-S-close receipt caller yet. Source/reference JSON defaults preserve historical
-encoding. Ordinary admission/producer wiring, full quotas/cold memory policy,
-HTTP serving, S cleanup execution and usable capacity reuse remain open.
+the original physical receipt through known COMMIT. The selected Linux ordinary
+software-transcode branch now connects counted HTTP serving, S cleanup and
+native R→S transfer; other recipes remain on the legacy path. Full quotas/cold
+memory policy, partial-start ownership, restart/cache adoption and broader
+selection remain open. Source/reference JSON defaults preserve historical
+encoding.
 
-The active harness is connecting the first ordinary finite VOD path. Core exposes
+The active harness has connected the selected Linux ordinary software-transcode
+path. Core exposes
 [`finite_vod`](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
 `SoftwareVodOwner` reserves the whole role before source/output acquisition, and
 nonserde `FiniteOutput` uses exact retained publication tickets. The shared native
@@ -125,12 +129,13 @@ The core finite-request path requires an immutable `SoftwareAvcCommand` and `Sof
 
 The producer-join slice freezes graph entry while allowing the original writer to finish its admitted publication/sync work. The bundle lock is released before the same writer/root joins; terminal diagnostics stay in the original graph record and callers receive copy-only summaries. Stop intent retains an abort handle for the original task and the original root registration, including stop-before-registration. Existing source/root/publication/sync jobs are joined in place without launching or observing replacement work. After writer/root joins, the same ledger fences fresh entry and positively observed source parents close through their original close jobs. This is producer quiescence, not a physical-close receipt: inherited copies, Linux fixed-image/known-helper conclusion, unobserved partial starts and retained output/reader ownership remain unresolved; R is still charged.
 
-The next slice adds durable output Fence/Freeze only after original producer join, and a full V3 frozen inventory retaining bootstrap lineage, parent entry, child directory, files and readers. Its on-disk transfer reference streams SHA-256 over inventory instead of putting a movie-sized vector into one 64 KiB JSON row. A new proof-bearing journal mutation installs retained S and settles producer R in one SQLite transaction; recovery replays the original immutable R lineage, validates the exact reference, then applies S events after that transfer boundary. Adopted output is read-only and reader cost growth is checked against the same stored S resources. A separate ledger primitive preserves full R during preparation and replaces R with S under one lock only with the original post-COMMIT capability. Native publication now records a single positive writable-file close before releasing its held directory or payload; close failure/unknown stays charged without retry. The current private finite adapter connects those components to original fixed-process/source closure and a provisional same-native S owner, as described above; ordinary serving/cleanup/reuse remains open. Complete native/index/runtime memory accounting is still required before such proof and cost release.
+Durable output Fence/Freeze, the V3 frozen inventory, proof-bearing journal R→S mutation/recovery and post-COMMIT same-ledger swap are connected. Adopted output is read-only and reader cost growth is checked against the same stored S resources. Native publication records one positive writable-file close before releasing its held directory or payload; close failure/unknown stays charged without retry. The selected Linux ordinary software-transcode branch connects these components to original fixed-process/source closure, counted HTTP serving, cleanup and a provisional same-native S owner. Full native/index/runtime memory accounting is still required; partial-start ownership, restart/cache adoption and broader recipe selection remain open.
 
-This is still runtime composition, not ordinary request closure. Ordinary
-`build_rendition_with_storage` still uses legacy admission; the production
-capacity model and request connection, full memory profile, serving leases,
-retained transfer, R→S, cleanup and settlement/reuse remain open.
+The selected Linux ordinary software-transcode branch is connected; other
+recipes remain on legacy admission. Same-process seeks reuse one rendition
+owner and its full-plan producer; cold-cache reuse remains an R1 gap. Full
+memory profile, partial-start handling and broader recipe selection remain
+open.
 
 All V1–V5 remain **OPEN**. Still missing: ordinary entry and complete producer
 ownership/terminal composition; the first metadata-marker caller; complete
@@ -160,7 +165,8 @@ Entered errors/partial creation/EEXIST retain facts; no implicit adoption. The
 internal runtime can reach ParentReady/SinkReady, NOT ordinary application entry.
 `7184dcd01` rejects foreign owner/boot labels before arm. `735387e96` adapts the
 existing native publisher to consume a moved held directory and selected I/O ID,
-with no path fallback/local UUID; actual ordinary caller still uses legacy input.
+with no path fallback/local UUID; the selected Linux ordinary software-transcode
+caller now uses this path, while other recipes retain legacy input.
 These mechanisms are NOT permission/proof constructors or completed V2 closure.
 
 Historical pinned 1.97.1 receipts for the earlier `7b783effa` source snapshot:
