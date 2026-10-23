@@ -1,5 +1,7 @@
 # Display target session source contract follow-up
 
+**Status:** built; source-bound client checks pass; physical-device acceptance remains open.
+
 Build: 272
 Issue: #1216
 
