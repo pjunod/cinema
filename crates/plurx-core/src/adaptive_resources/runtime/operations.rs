@@ -17,7 +17,7 @@ use crate::resource_custody::{
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
-mod bootstrap;
+pub(super) mod bootstrap;
 #[cfg(unix)]
 pub(super) mod finite_retirement;
 #[cfg(unix)]
@@ -74,6 +74,9 @@ struct Bundle {
 
 struct OwnedRole {
     binding: ReservationBinding,
+    // The original prepare bundle tag is distinct from its journal obligation.
+    // A conserving R→S commit replaces it with the selected target durable tag.
+    durable_tag: Uuid,
     members: Vec<PlannedMember>,
     typed_members: Option<Vec<v2::MemberPlan>>,
     scratch: BTreeMap<Uuid, scratch::ScratchMember>,
@@ -482,6 +485,7 @@ impl NodeResourceRuntime {
             }
             roles.push(OwnedRole {
                 binding,
+                durable_tag: id,
                 members: plan.legacy,
                 typed_members,
                 scratch: BTreeMap::new(),
@@ -1124,7 +1128,7 @@ impl NodeResourceRuntime {
             }
             // Durable acknowledgement from THIS retained operation (never a
             // disk/DTO ack) precedes the sole private matching refund.
-            refund(&self.ledger, bundle_id, role)?;
+            refund(&self.ledger, role.durable_tag, role)?;
         }
         let transition = role.transition.as_mut().ok_or(OperationError::State)?;
         if transition.effect != Effect::Settle {

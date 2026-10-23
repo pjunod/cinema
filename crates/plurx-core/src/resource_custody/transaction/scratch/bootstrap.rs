@@ -152,7 +152,12 @@ pub(in crate::resource_custody::transaction) fn change(
         ),
         AssetEventV3::OutputV2 {
             event: AssetEventV1::ArmIo { operation, .. },
-        } => !matches!(operation, AssetIoV1::CloseReader { .. }),
+        } => !matches!(
+            operation,
+            AssetIoV1::CloseReader { .. }
+                | AssetIoV1::RemoveOwned { .. }
+                | AssetIoV1::SyncFiles { .. }
+        ),
         _ => false,
     };
     if !matches!(

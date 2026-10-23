@@ -389,7 +389,9 @@ impl CustodyJournal {
             || matches!(
                 operation.operation.command,
                 Command::Change {
-                    mutation: Mutation::Settle(_) | Mutation::RetireWithAssets(_),
+                    mutation: Mutation::Settle(_)
+                        | Mutation::SettleTyped(_)
+                        | Mutation::RetireWithAssets(_),
                     ..
                 }
             )
@@ -462,6 +464,7 @@ impl CustodyJournal {
             ));
         }
         if !matches!(&operation.operation.command,Command::Change { key,mutation:Mutation::Settle(proof) } if key.handle.journal_id==handle.journal_id && key.handle.owner_id==handle.owner_id && key.handle.runtime_binding==handle.runtime_binding && proof.receipt.custody_binding()==handle.runtime_binding)
+            && !matches!(&operation.operation.command,Command::Change { key,mutation:Mutation::SettleTyped(proof) } if key.handle.journal_id==handle.journal_id && key.handle.owner_id==handle.owner_id && key.handle.runtime_binding==handle.runtime_binding && proof.receipt.custody_binding()==handle.runtime_binding)
         {
             return Err(CustodyError::new(
                 ErrorKind::Conflict,
@@ -476,6 +479,10 @@ impl CustodyJournal {
         match std::mem::replace(&mut operation.operation.command, empty_command()) {
             Command::Change {
                 mutation: Mutation::Settle(proof),
+                ..
+            } => Ok(proof.receipt),
+            Command::Change {
+                mutation: Mutation::SettleTyped(proof),
                 ..
             } => Ok(proof.receipt),
             _ => Err(unavailable()),

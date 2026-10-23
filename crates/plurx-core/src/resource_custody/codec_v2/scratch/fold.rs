@@ -44,6 +44,7 @@ impl ScratchFold {
                 revision: 0,
                 lifecycle: ScratchLifecycleV1::Open,
                 totals: AssetTotalsV1::default(),
+                directory_synced: false,
             },
             files: Vec::new(),
             readers: Vec::new(),
@@ -96,7 +97,14 @@ impl ScratchFold {
                     AssetIoV1::ReadRange { .. } | AssetIoV1::CloseReader { .. }
                 ) || (self.state.lifecycle == ScratchLifecycleV1::RetainedReadOnly
                     && matches!(operation, AssetIoV1::OpenReader { .. }));
-                if (self.state.lifecycle != ScratchLifecycleV1::Open && !read_only)
+                let retirement_io = self.state.lifecycle == ScratchLifecycleV1::Retiring
+                    && matches!(
+                        operation,
+                        AssetIoV1::RemoveOwned { .. } | AssetIoV1::SyncFiles { .. }
+                    );
+                if (self.state.lifecycle != ScratchLifecycleV1::Open
+                    && !read_only
+                    && !retirement_io)
                     || self.pending.is_some()
                     || *io_id != operation_id
                 {
@@ -150,18 +158,37 @@ impl ScratchFold {
                             return Err(codec::invalid());
                         }
                     }
-                    AssetIoV1::RemoveOwned { file_id } => {
+                    AssetIoV1::RemoveOwned {
+                        file_id,
+                        expected_native_object,
+                    } => {
                         // First path removes only objects with no exported copies.
                         // Reader/copy support must not silently reuse this rule.
                         let f = self.file(*file_id)?;
-                        if !f.held_copy_ids.is_empty() {
+                        if !f.held_copy_ids.is_empty()
+                            || expected_native_object
+                                .as_ref()
+                                .is_some_and(|expected| expected != &f.native_object)
+                            || (self.state.lifecycle == ScratchLifecycleV1::Retiring
+                                && expected_native_object.as_ref() != Some(&f.native_object))
+                        {
                             return Err(codec::invalid());
                         }
                     }
                     AssetIoV1::SyncFiles { file_ids } => {
+                        let retirement_file_set_invalid = self.state.lifecycle
+                            == ScratchLifecycleV1::Retiring
+                            && if self.files.is_empty() {
+                                !file_ids.is_empty()
+                            } else {
+                                file_ids.is_empty()
+                                    || file_ids.len() != self.files.len()
+                                    || self.files.iter().any(|f| !file_ids.contains(&f.file_id))
+                            };
                         if self.state.directory.is_none()
                             || file_ids.len() > 16
                             || file_ids.iter().collect::<BTreeSet<_>>().len() != file_ids.len()
+                            || retirement_file_set_invalid
                         {
                             return Err(codec::invalid());
                         }
@@ -284,9 +311,10 @@ impl ScratchFold {
                             NativeOutcomeV1::NeverEntered => return Err(codec::invalid()),
                         }
                         self.files.push(f.clone());
+                        self.state.directory_synced = false;
                     }
                     (
-                        AssetIoV1::RemoveOwned { file_id },
+                        AssetIoV1::RemoveOwned { file_id, .. },
                         AssetObservationV1::Removed { file_id: removed },
                     ) => {
                         if file_id != removed || !matches!(outcome, NativeOutcomeV1::Completed) {
@@ -298,6 +326,25 @@ impl ScratchFold {
                             .position(|f| f.file_id == *file_id)
                             .ok_or_else(codec::invalid)?;
                         self.files.remove(index);
+                        self.state.directory_synced = false;
+                    }
+                    (
+                        AssetIoV1::RemoveOwned { file_id, .. },
+                        AssetObservationV1::RemovalUnresolved {
+                            file_id: unresolved,
+                        },
+                    ) => {
+                        if file_id != unresolved
+                            || self.state.lifecycle != ScratchLifecycleV1::Retiring
+                            || !matches!(outcome, NativeOutcomeV1::Failed { .. })
+                        {
+                            return Err(codec::invalid());
+                        }
+                        self.file(*file_id)?;
+                        // Keep the file and its charge. No retry is admitted
+                        // after a post-entry removal with unresolved effect.
+                        self.state.lifecycle = ScratchLifecycleV1::RetirementUncertain;
+                        self.state.directory_synced = false;
                     }
                     (AssetIoV1::SyncFiles { .. }, AssetObservationV1::Synced) => {
                         if !matches!(
@@ -305,6 +352,9 @@ impl ScratchFold {
                             NativeOutcomeV1::Completed | NativeOutcomeV1::Failed { .. }
                         ) {
                             return Err(codec::invalid());
+                        }
+                        if self.state.lifecycle == ScratchLifecycleV1::Retiring {
+                            self.state.directory_synced = *outcome == NativeOutcomeV1::Completed;
                         }
                     }
                     (
@@ -341,6 +391,20 @@ impl ScratchFold {
                     return Err(codec::invalid());
                 }
                 self.state.lifecycle = ScratchLifecycleV1::Frozen;
+            }
+            AssetEventV1::BeginRetirement {
+                exact_head_before_retirement,
+            } => {
+                if self.state.head.as_ref() != Some(exact_head_before_retirement)
+                    || self.state.lifecycle != ScratchLifecycleV1::RetainedReadOnly
+                    || self.pending.is_some()
+                    || !self.readers.is_empty()
+                    || self.state.totals.pending_jobs != 0
+                {
+                    return Err(codec::invalid());
+                }
+                self.state.lifecycle = ScratchLifecycleV1::Retiring;
+                self.state.directory_synced = false;
             }
         }
         Ok(())

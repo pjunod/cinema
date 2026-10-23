@@ -82,6 +82,18 @@ impl ScratchFold {
                 self.readers.push(lease.clone());
             }
             (
+                AssetIoV1::OpenReader { lease: planned },
+                AssetObservationV1::ReaderOpenRejected { lease_id, errno },
+            ) => {
+                if *lease_id != planned.lease_id
+                    || *errno <= 0
+                    || !matches!(outcome, NativeOutcomeV1::Failed { .. })
+                {
+                    return Err(codec::invalid());
+                }
+                // No descriptor was acquired; the planned lease remains absent.
+            }
+            (
                 AssetIoV1::ReadRange { lease_id, range },
                 AssetObservationV1::ReaderRead {
                     lease_id: observed,

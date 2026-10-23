@@ -1,5 +1,6 @@
 //! Authored deterministic audit regressions; COMPILE ONLY, not native evidence.
 use super::*;
+mod retirement;
 mod unknown;
 fn id() -> Id {
     Id::new(Uuid::new_v4()).unwrap()

@@ -1,6 +1,6 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `0cdb4c3c609ee347a0291235d52691424213f663`.
+**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `ad6d6c68178bc5bbddca3af03af0744239e98c5b`.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -12,7 +12,7 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at `0cdb4c3c60`. The immediate target is one ordinary
+All five items are **OPEN** at `ad6d6c6817`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
@@ -48,6 +48,17 @@ independent actual Fable review/fixes → once-only affected qualification/fast 
 → authorized merge. No pre-review behavioral tests or deployment.
 
 ## Active integration — 2026-10-22
+
+The current runtime reader path owns actual descriptor-relative open/read/close
+jobs and a recycled fixed buffer. Only known durable observation releases an
+opaque chunk; Drop requests closure for the same retained owner. Active reader
+cells/leases now transfer with the same native bootstrap owner across R→S. The
+actual prepare-bundle ledger tag is explicitly retained separately from journal
+obligation identity. A bounded S cleanup event/native-cell sequence and typed
+terminal settlement transaction are authored, but native S cleanup execution and
+HTTP adoption remain unwired. Image verification now reuses only prior successful
+full-S1/digest/ELF attestations on the same rechecked held file. Host compilation
+passes; behavioral tests are NOT RUN and no V item closes from this checkpoint.
 
 The current source binds a hashed native ELF held in the same source custodian
 to fd-based fixed launch. A process-only graph witness now requires original
@@ -97,7 +108,7 @@ conserving retirement and exact settlement/capacity reuse still lack their
 production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
 records the limits. The latest committed base is
-`0cdb4c3c609ee347a0291235d52691424213f663`. The frozen sixth-checkpoint source
+`ad6d6c68178bc5bbddca3af03af0744239e98c5b`. The frozen sixth-checkpoint source
 passed pinned Rust 1.97.1 host core+daemon all-target compilation in 132.333s
 with stable hashes; the source ledger records the exact receipt and the existing
 root-constructor field fixed before this pass. This is warning-level compilation.

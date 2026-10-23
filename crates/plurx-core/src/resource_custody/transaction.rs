@@ -1,6 +1,7 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
 mod inventory;
+mod retained_settlement;
 mod retirement;
 mod scratch;
 mod typed;
@@ -579,6 +580,10 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
                 Mutation::Hold { reason } => serde_json::json!({"hold":reason}),
                 Mutation::CancelPrepared => serde_json::json!("cancel_prepared"),
                 Mutation::Settle(proof) => serde_json::json!({"settle":proof.facts}),
+                Mutation::SettleTyped(proof) => serde_json::json!({
+                    "settle_typed_v2": proof.settlement,
+                    "receipt_binding": format!("{:?}", proof.receipt.custody_binding()),
+                }),
                 Mutation::RetireWithAssets(proof) => serde_json::json!({
                     "retire_with_assets_v2": {
                         "settlement":proof.settlement,"retained":proof.retained,
@@ -1024,6 +1029,9 @@ fn change(
         if let Mutation::RetireWithAssets(proof) = mutation {
             return retirement::change(tx, journal, owner, key, prior, &manifest, proof);
         }
+        if let Mutation::SettleTyped(proof) = mutation {
+            return retained_settlement::change(tx, owner, key, prior, &manifest, proof);
+        }
         return typed::change(tx, owner, key, mutation, prior, &manifest);
     }
     let manifest: Manifest = codec::decode(&manifest)?;
@@ -1037,6 +1045,7 @@ fn change(
     match mutation {
         Mutation::RecordTypedAcquired { .. }
         | Mutation::RetireWithAssets(_)
+        | Mutation::SettleTyped(_)
         | Mutation::AssetChangeV2 { .. }
         | Mutation::AssetChangeV3 { .. } => return Err(codec::invalid()),
         Mutation::Arm { members } => {

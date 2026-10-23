@@ -27,6 +27,7 @@ impl BootstrapFold {
                 current: None,
                 parent: None,
                 possible_child: None,
+                retained_parent_synced: false,
             },
             obligation,
             member,
@@ -251,6 +252,8 @@ impl BootstrapFold {
                             operation,
                             BootstrapIoV1::CloseBootstrapHandles { .. }
                                 | BootstrapIoV1::ResolvePossibleChild { .. }
+                                | BootstrapIoV1::RemoveRenditionChild { .. }
+                                | BootstrapIoV1::CloseRetainedHandles { .. }
                         ))
                 {
                     return Err(codec::invalid());
@@ -275,8 +278,11 @@ impl BootstrapFold {
                 // bootstrap is unfinished. No fresh output in that state.
                 let retained_child_ready = self.bootstrap.phase == BootstrapPhase::Closed
                     && self.output.state.lifecycle == ScratchLifecycleV1::RetainedReadOnly;
+                let retirement_ready = self.bootstrap.phase == BootstrapPhase::SinkReady
+                    && self.output.state.lifecycle == ScratchLifecycleV1::Retiring;
                 if !matches!(event, AssetEventV1::Fence { .. })
                     && ((!retained_child_ready
+                        && !retirement_ready
                         && self.bootstrap.phase != BootstrapPhase::SinkReady)
                         || self.pending.is_some())
                 {
@@ -303,6 +309,15 @@ impl BootstrapFold {
         });
         self.recount(plan)?;
         validate_output_projection(plan.output_view(), &self.output.state)?;
+        if self.output.state.lifecycle == ScratchLifecycleV1::RetiredClosed
+            && (self.bootstrap.phase != BootstrapPhase::Closed
+                || self.bootstrap.current.is_some()
+                || self.bootstrap.parent.is_some()
+                || self.bootstrap.possible_child.is_some()
+                || self.retained_copies_nonempty())
+        {
+            return Err(codec::invalid());
+        }
         codec::encode(&self.state())?;
         Ok(self)
     }
@@ -354,12 +369,86 @@ impl BootstrapFold {
             }
             BootstrapIoV1::CloseBootstrapHandles { copy_ids } => {
                 let held = self.held_copies();
-                if (copy_ids.is_empty()
-                    && (state.phase != BootstrapPhase::UnknownHeld
-                        || state.possible_child.is_some()))
+                if self.output.state.lifecycle == ScratchLifecycleV1::Retiring
+                    || (copy_ids.is_empty()
+                        && (state.phase != BootstrapPhase::UnknownHeld
+                            || state.possible_child.is_some()))
                     || copy_ids.len() > 2
                     || copy_ids.iter().collect::<BTreeSet<_>>().len() != copy_ids.len()
                     || copy_ids.iter().any(|id| !held.contains(id))
+                {
+                    return Err(codec::invalid());
+                }
+                None
+            }
+            BootstrapIoV1::RemoveRenditionChild {
+                parent,
+                child_directory_id,
+                child_component,
+            } => {
+                let directory = self
+                    .output
+                    .state
+                    .directory
+                    .as_ref()
+                    .ok_or_else(codec::invalid)?;
+                if self.bootstrap.phase != BootstrapPhase::SinkReady
+                    || self.output.state.lifecycle != ScratchLifecycleV1::Retiring
+                    || !self.output.files.is_empty()
+                    || !self.output.readers().is_empty()
+                    || self.output.has_pending()
+                    || !self.output.state.directory_synced
+                    || directory.directory_id != *child_directory_id
+                    || child_component != &plan.bootstrap().child_component
+                    || !self
+                        .bootstrap
+                        .parent
+                        .as_ref()
+                        .is_some_and(|d| self.matches_ref(parent, d))
+                {
+                    return Err(codec::invalid());
+                }
+                None
+            }
+            BootstrapIoV1::CloseRetainedHandles { copy_ids } => {
+                let mut exact = self.held_copies();
+                let directory = self
+                    .output
+                    .state
+                    .directory
+                    .as_ref()
+                    .ok_or_else(codec::invalid)?;
+                if self.bootstrap.phase != BootstrapPhase::RetainedChildRemoved
+                    || self.output.state.lifecycle != ScratchLifecycleV1::Retiring
+                    || !self.output.files.is_empty()
+                    || !self.output.readers().is_empty()
+                    || self.output.has_pending()
+                    || !self.bootstrap.retained_parent_synced
+                {
+                    return Err(codec::invalid());
+                }
+                exact.extend(directory.held_copy_ids.iter().copied());
+                let exact: Vec<_> = exact.into_iter().collect();
+                if exact.is_empty()
+                    || exact.len() > plan.limits.live_handles as usize
+                    || *copy_ids != exact
+                {
+                    return Err(codec::invalid());
+                }
+                None
+            }
+            BootstrapIoV1::SyncRetainedParent { parent } => {
+                if self.bootstrap.phase != BootstrapPhase::RetainedChildRemoved
+                    || self.output.state.lifecycle != ScratchLifecycleV1::Retiring
+                    || !self.output.files.is_empty()
+                    || !self.output.readers().is_empty()
+                    || self.output.has_pending()
+                    || self.bootstrap.retained_parent_synced
+                    || !self
+                        .bootstrap
+                        .parent
+                        .as_ref()
+                        .is_some_and(|d| self.matches_ref(parent, d))
                 {
                     return Err(codec::invalid());
                 }
@@ -409,8 +498,15 @@ impl BootstrapFold {
             });
             self.bootstrap.phase = BootstrapPhase::ChildPossible;
         }
-        if matches!(operation, BootstrapIoV1::CloseBootstrapHandles { .. }) {
+        if matches!(
+            operation,
+            BootstrapIoV1::CloseBootstrapHandles { .. }
+                | BootstrapIoV1::CloseRetainedHandles { .. }
+        ) {
             self.bootstrap.phase = BootstrapPhase::Closing;
+        }
+        if matches!(operation, BootstrapIoV1::RemoveRenditionChild { .. }) {
+            self.bootstrap.phase = BootstrapPhase::RemovingRetainedChild;
         }
         Ok(())
     }
@@ -422,6 +518,15 @@ impl BootstrapFold {
             .flat_map(|d| d.observed.held_copy_ids.iter().copied())
             .chain(self.uncertain_copies.iter().copied())
             .collect()
+    }
+    fn retained_copies_nonempty(&self) -> bool {
+        !self.held_copies().is_empty()
+            || self
+                .output
+                .state
+                .directory
+                .as_ref()
+                .is_some_and(|directory| !directory.held_copy_ids.is_empty())
     }
     fn observe(
         &mut self,
@@ -435,13 +540,22 @@ impl BootstrapFold {
             codec::text(error_class)?;
         }
         let completed = result.outcome == NativeOutcomeV1::Completed;
-        if result.closed_copy_ids.len() > 2
+        let mut all_held_copies = self.held_copies();
+        if let Some(directory) = &self.output.state.directory {
+            all_held_copies.extend(directory.held_copy_ids.iter().copied());
+        }
+        let close_limit = if matches!(operation, BootstrapIoV1::CloseRetainedHandles { .. }) {
+            usize::try_from(plan.limits.live_handles).unwrap_or(usize::MAX)
+        } else {
+            2
+        };
+        if result.closed_copy_ids.len() > close_limit
             || result.closed_copy_ids.iter().collect::<BTreeSet<_>>().len()
                 != result.closed_copy_ids.len()
             || result
                 .closed_copy_ids
                 .iter()
-                .any(|id| !self.held_copies().contains(id))
+                .any(|id| !all_held_copies.contains(id))
         {
             return Err(codec::invalid());
         }
@@ -465,7 +579,10 @@ impl BootstrapFold {
             | BootstrapIoV1::OpenNextComponent { copy_id, .. }
             | BootstrapIoV1::CreateRenditionChild { copy_id, .. } => Some(*copy_id),
             BootstrapIoV1::ResolvePossibleChild { .. } => self.possible_copy,
-            BootstrapIoV1::CloseBootstrapHandles { .. } => None,
+            BootstrapIoV1::CloseBootstrapHandles { .. }
+            | BootstrapIoV1::RemoveRenditionChild { .. }
+            | BootstrapIoV1::SyncRetainedParent { .. }
+            | BootstrapIoV1::CloseRetainedHandles { .. } => None,
         };
         if let Some(dir) = &result.acquired {
             if dir.directory_id != operation_id
@@ -493,7 +610,10 @@ impl BootstrapFold {
                 .observed
                 .held_copy_ids
                 .clone(),
-            BootstrapIoV1::CloseBootstrapHandles { copy_ids } => copy_ids.clone(),
+            BootstrapIoV1::CloseBootstrapHandles { copy_ids }
+            | BootstrapIoV1::CloseRetainedHandles { copy_ids } => copy_ids.clone(),
+            BootstrapIoV1::RemoveRenditionChild { .. } => vec![],
+            BootstrapIoV1::SyncRetainedParent { .. } => vec![],
             _ => vec![],
         };
         if result
@@ -625,6 +745,59 @@ impl BootstrapFold {
                     && self.bootstrap.possible_child.is_none()
                 {
                     self.bootstrap.phase = BootstrapPhase::Closed;
+                }
+            }
+            BootstrapIoV1::RemoveRenditionChild { .. } => {
+                if result.acquired.is_some()
+                    || !result.closed_copy_ids.is_empty()
+                    || (completed && result.child_effect != ChildEffect::Removed)
+                    || (!completed
+                        && !matches!(
+                            result.child_effect,
+                            ChildEffect::Unknown | ChildEffect::Unchanged
+                        ))
+                {
+                    return Err(codec::invalid());
+                }
+                if completed {
+                    self.bootstrap.retained_parent_synced = false;
+                    self.bootstrap.phase = BootstrapPhase::RetainedChildRemoved;
+                }
+            }
+            BootstrapIoV1::SyncRetainedParent { .. } => {
+                if result.acquired.is_some()
+                    || !result.closed_copy_ids.is_empty()
+                    || result.child_effect != ChildEffect::None
+                {
+                    return Err(codec::invalid());
+                }
+                if completed {
+                    self.bootstrap.retained_parent_synced = true;
+                }
+            }
+            BootstrapIoV1::CloseRetainedHandles { .. } => {
+                if result.acquired.is_some() || result.child_effect != ChildEffect::None {
+                    return Err(codec::invalid());
+                }
+                if completed {
+                    if self.output.state.directory.as_ref().is_none_or(|d| {
+                        d.held_copy_ids
+                            .iter()
+                            .any(|id| !result.closed_copy_ids.contains(id))
+                    }) {
+                        return Err(codec::invalid());
+                    }
+                    self.output.state.directory = None;
+                    self.output.state.lifecycle = ScratchLifecycleV1::RetiredClosed;
+                    self.output.state.directory_synced = false;
+                    self.bootstrap.retained_parent_synced = false;
+                    self.bootstrap.phase = BootstrapPhase::Closed;
+                } else if !result.closed_copy_ids.is_empty()
+                    || result.inventory != InventoryCertainty::Unknown
+                {
+                    // Do not claim a partial close inventory without a distinct
+                    // descriptor-by-descriptor result model.
+                    return Err(codec::invalid());
                 }
             }
         }

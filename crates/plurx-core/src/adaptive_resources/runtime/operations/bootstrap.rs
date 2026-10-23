@@ -7,6 +7,8 @@ use v2::scratch::bootstrap::*;
 use v2::scratch::{AssetEventV1, ScratchLifecycleV1};
 #[cfg(unix)]
 pub(super) mod native;
+#[cfg(unix)]
+pub(in crate::adaptive_resources::runtime) mod readers;
 
 pub(super) struct BootstrapMember {
     plan: ScratchPlanV3,
@@ -21,6 +23,8 @@ pub(super) struct BootstrapMember {
     publication: Option<native::publication::Publication>,
     #[cfg(unix)]
     sync: Option<native::sync::Sync>,
+    #[cfg(unix)]
+    readers: BTreeMap<Uuid, readers::ReaderEntry>,
 }
 
 /// Fully validated target fold while the actual native cells remain owned by
@@ -49,6 +53,7 @@ impl PreparedBootstrapTransfer {
             native_root: source.native_root.take(),
             publication: source.publication.take(),
             sync: source.sync.take(),
+            readers: std::mem::take(&mut source.readers),
         }
     }
 }
@@ -87,7 +92,7 @@ impl BootstrapMember {
             return Err(OperationError::State);
         }
         let full = fold.frozen_snapshot(&self.plan)?;
-        if &full != restored {
+        if &full != restored || !readers::transfer_readers_match(self, &full.readers) {
             return Err(OperationError::State);
         }
         validate_frozen_snapshot_ref(&self.plan, reference, &full)?;
@@ -260,6 +265,8 @@ impl NodeResourceRuntime {
                     publication: None,
                     #[cfg(unix)]
                     sync: None,
+                    #[cfg(unix)]
+                    readers: BTreeMap::new(),
                 },
             );
         }
@@ -525,5 +532,7 @@ pub(super) fn acknowledge(role: &mut OwnedRole, member: Uuid) -> Result<(), Oper
         .get_mut(&member)
         .ok_or(OperationError::State)?;
     bootstrap.change.take().ok_or(OperationError::State)?;
+    #[cfg(unix)]
+    readers::notify_progress(bootstrap);
     Ok(())
 }

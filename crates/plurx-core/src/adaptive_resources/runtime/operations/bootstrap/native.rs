@@ -5,7 +5,9 @@ use super::*;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use tokio::task::JoinHandle;
+pub(super) mod cleanup;
 pub(super) mod publication;
+pub(super) mod readers;
 pub(in crate::adaptive_resources::runtime::operations) mod steps;
 pub(super) mod sync;
 #[cfg(test)]
@@ -75,6 +77,164 @@ impl RootCell {
                 })
             })
         })
+    }
+
+    /// Lend the SAME charged child descriptor to one registered reader-open job.
+    /// No pathname fallback or descriptor duplication is possible.
+    pub(super) fn lend_held_child(
+        &mut self,
+        directory: &v2::scratch::DirectoryObservedV1,
+    ) -> Result<File, OperationError> {
+        if self.pending.is_some() || self.failed_join || directory.held_copy_ids.len() != 1 {
+            return Err(OperationError::State);
+        }
+        let held = self.result.as_mut().ok_or(OperationError::State)?;
+        if held.audit.acquired.as_ref() != Some(directory)
+            || held.audit.outcome != v2::scratch::NativeOutcomeV1::Completed
+        {
+            return Err(OperationError::State);
+        }
+        held.files
+            .remove(&directory.held_copy_ids[0])
+            .ok_or(OperationError::State)
+    }
+
+    /// Return the original lent descriptor after the original open job joins.
+    /// A failed validation leaves the File in `file` for the caller to retain.
+    pub(super) fn return_held_child(
+        &mut self,
+        directory: &v2::scratch::DirectoryObservedV1,
+        file: &mut Option<File>,
+    ) -> Result<(), OperationError> {
+        if self.pending.is_some() || self.failed_join || directory.held_copy_ids.len() != 1 {
+            return Err(OperationError::State);
+        }
+        let held = self.result.as_mut().ok_or(OperationError::State)?;
+        let copy = directory.held_copy_ids[0];
+        if held.audit.acquired.as_ref() != Some(directory) || held.files.contains_key(&copy) {
+            return Err(OperationError::State);
+        }
+        let actual = file.as_ref().ok_or(OperationError::State)?;
+        let metadata = actual.metadata()?;
+        if !metadata.is_dir()
+            || directory.native_object.device
+                != (v2::NativeValue::Known {
+                    value: metadata.dev(),
+                })
+            || directory.native_object.inode
+                != (v2::NativeValue::Known {
+                    value: metadata.ino(),
+                })
+            || directory.native_object.mount_id != steps::mount_id(actual)
+        {
+            return Err(OperationError::State);
+        }
+        held.files
+            .insert(copy, file.take().expect("validated original child"));
+        Ok(())
+    }
+
+    /// Lend an exact set of original charged directory Files to one cleanup
+    /// worker. Every identity is checked before the first File is moved.
+    pub(super) fn lend_observed_directories(
+        &mut self,
+        observed: &[v2::scratch::DirectoryObservedV1],
+    ) -> Result<BTreeMap<v2::Id, File>, OperationError> {
+        if self.pending.is_some() || self.failed_join || observed.is_empty() {
+            return Err(OperationError::State);
+        }
+        let held = self.result.as_mut().ok_or(OperationError::State)?;
+        let child = held.audit.acquired.as_ref().ok_or(OperationError::State)?;
+        if held.audit.outcome != v2::scratch::NativeOutcomeV1::Completed {
+            return Err(OperationError::State);
+        }
+        let mut copies = std::collections::BTreeSet::new();
+        for directory in observed {
+            if directory.held_copy_ids.len() != 1
+                || directory.native_object.filesystem_domain
+                    != child.native_object.filesystem_domain
+            {
+                return Err(OperationError::State);
+            }
+            let copy = directory.held_copy_ids[0];
+            if !copies.insert(copy) {
+                return Err(OperationError::State);
+            }
+            let file = held.files.get(&copy).ok_or(OperationError::State)?;
+            let metadata = file.metadata()?;
+            if !metadata.is_dir()
+                || directory.native_object.file_type != v2::FileType::Directory
+                || directory.native_object.device
+                    != (v2::NativeValue::Known {
+                        value: metadata.dev(),
+                    })
+                || directory.native_object.inode
+                    != (v2::NativeValue::Known {
+                        value: metadata.ino(),
+                    })
+                || !matches!(
+                    (&directory.native_object.mount_id, steps::mount_id(file)),
+                    (v2::NativeValue::Known { value }, v2::NativeValue::Known { value: actual })
+                        if *value == actual
+                )
+            {
+                return Err(OperationError::State);
+            }
+        }
+        Ok(copies
+            .into_iter()
+            .map(|copy| {
+                (
+                    copy,
+                    held.files.remove(&copy).expect("prevalidated held File"),
+                )
+            })
+            .collect())
+    }
+
+    /// Restore original lent directories only after the matching cleanup
+    /// Observe is durable. A rejection leaves all Files in the caller's map.
+    pub(super) fn return_observed_directories(
+        &mut self,
+        observed: &[v2::scratch::DirectoryObservedV1],
+        files: &mut BTreeMap<v2::Id, File>,
+    ) -> Result<(), OperationError> {
+        if self.pending.is_some() || self.failed_join || observed.len() != files.len() {
+            return Err(OperationError::State);
+        }
+        let held = self.result.as_mut().ok_or(OperationError::State)?;
+        for directory in observed {
+            if directory.held_copy_ids.len() != 1 {
+                return Err(OperationError::State);
+            }
+            let copy = directory.held_copy_ids[0];
+            let file = files.get(&copy).ok_or(OperationError::State)?;
+            if held.files.contains_key(&copy) {
+                return Err(OperationError::State);
+            }
+            let metadata = file.metadata()?;
+            if !metadata.is_dir()
+                || directory.native_object.device
+                    != (v2::NativeValue::Known {
+                        value: metadata.dev(),
+                    })
+                || directory.native_object.inode
+                    != (v2::NativeValue::Known {
+                        value: metadata.ino(),
+                    })
+                || directory.native_object.mount_id != steps::mount_id(file)
+            {
+                return Err(OperationError::State);
+            }
+        }
+        for directory in observed {
+            let copy = directory.held_copy_ids[0];
+            held.files.insert(
+                copy,
+                files.remove(&copy).expect("prevalidated returned File"),
+            );
+        }
+        Ok(())
     }
 
     fn launch(

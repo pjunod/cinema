@@ -35,6 +35,20 @@ pub(super) struct FiniteRetirement {
     installed: bool,
 }
 
+impl FiniteRetirement {
+    pub(in crate::adaptive_resources::runtime) fn resolve_source_member(
+        &self,
+        source: Uuid,
+    ) -> Option<Uuid> {
+        (self.installed && self.source_member == source).then_some(self.target_member)
+    }
+    pub(super) fn reader_progress(&self, lease: Uuid) -> Option<Arc<tokio::sync::Notify>> {
+        self.native
+            .as_ref()
+            .and_then(|native| bootstrap::readers::reader_progress(native, lease))
+    }
+}
+
 impl NodeResourceRuntime {
     /// Continue the same retirement, including after a cancelled/unknown wait.
     /// Return a selection only after the journal and ledger agree on S.
@@ -124,8 +138,7 @@ impl NodeResourceRuntime {
         let reference = frozen_snapshot_ref(plan, &full)?;
         // The first adapter has no response/native reader owner. Never invent
         // a retained reader from a serialized lease identifier.
-        if !full.readers.is_empty()
-            || full.obligation_id.uuid() != source.obligation_id()
+        if full.obligation_id.uuid() != source.obligation_id()
             || full.member_id != source_slot.member_id
         {
             return Err(OperationError::State);
@@ -140,7 +153,7 @@ impl NodeResourceRuntime {
                 .entries
                 .get(&role.binding.reservation)
                 .ok_or(OperationError::State)?;
-            if entry.binding != role.binding || entry.durable != Some(source.obligation_id()) {
+            if entry.binding != role.binding || entry.durable != Some(role.durable_tag) {
                 return Err(OperationError::State);
             }
             entry.resources
@@ -157,7 +170,7 @@ impl NodeResourceRuntime {
         let target_durable = Uuid::new_v4();
         let swap = self.ledger.prepare_retained_swap(
             role.binding,
-            source.obligation_id(),
+            role.durable_tag,
             target_durable,
             retained_resources,
         )?;
@@ -203,7 +216,7 @@ impl NodeResourceRuntime {
             target_graph_id: v2::Id::new(target.graph_id())?,
             target_owner_id: v2::Id::new(self.owner.owner_id)?,
             transfer: transfer.clone(),
-            reader_ids: vec![],
+            reader_ids: full.readers.iter().map(|reader| reader.lease_id).collect(),
             reconciliation: v2::Reconciliation::LiveOwned,
         };
         v2::validate_retained_resources_v2(&target_manifest, &retained, &full, retained_resources)?;
@@ -356,6 +369,7 @@ impl NodeResourceRuntime {
         book.bindings.remove(&role.binding);
         book.closing.remove(&role.binding);
         role.binding = retirement.swap.target_binding();
+        role.durable_tag = retirement.swap.target_durable();
         book.bindings
             .insert(role.binding, retirement.target.clone());
         role.bootstrap.clear();
@@ -381,6 +395,11 @@ impl NodeResourceRuntime {
         role.sequence = ack.sequence;
         role.phase = Phase::Sealed;
         retirement.installed = true;
+        bootstrap::readers::notify_progress(
+            role.bootstrap
+                .get(&retirement.target_member)
+                .expect("installed retained member"),
+        );
         Ok(retirement.target_member)
     }
 }

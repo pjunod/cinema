@@ -95,6 +95,7 @@ fn fixture() -> (Manifest, RetainedAssetsV2, FrozenScratchV3) {
                 head: Some(head),
                 revision: 1,
                 lifecycle: ScratchLifecycleV1::Frozen,
+                directory_synced: false,
                 totals: AssetTotalsV1 {
                     charged_storage_bytes: 8192,
                     memory_reserved_bytes: 4096,
@@ -112,6 +113,7 @@ fn fixture() -> (Manifest, RetainedAssetsV2, FrozenScratchV3) {
                     component_index: Some(0),
                 }),
                 possible_child: None,
+                retained_parent_synced: false,
             },
         },
         files: vec![],

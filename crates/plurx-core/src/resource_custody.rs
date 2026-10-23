@@ -318,6 +318,14 @@ pub(crate) struct PhysicalSettlement {
     pub facts: Vec<ClosedMemberFact>,
 }
 
+/// Typed retained-S close audit paired with the original nonclone physical
+/// receipt. The settlement is data; only the receipt can authorize accounting.
+#[derive(Debug)]
+pub(crate) struct PhysicalTypedSettlement {
+    pub receipt: PhysicalCloseReceipt,
+    pub settlement: codec_v2::Settlement,
+}
+
 /// Actual physical transfer proof and its complete target obligation. This is
 /// retained in the original journal command until the runtime takes it after
 /// the exact durable retirement acknowledgment.
@@ -374,6 +382,7 @@ pub(crate) enum Mutation {
     },
     CancelPrepared,
     Settle(PhysicalSettlement),
+    SettleTyped(Box<PhysicalTypedSettlement>),
     RetireWithAssets(Box<PhysicalAssetRetirement>),
 }
 /// Queue/deadline refusal returns actual proof to the existing cleanup owner.

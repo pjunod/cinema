@@ -130,6 +130,15 @@ fn bind_expected_executable(cell: &mut SourceCell, digest: [u8; 32]) {
 }
 
 #[cfg(target_os = "linux")]
+fn open_with_cache(cell: &mut SourceCell, cache: &Mutex<VerifiedExecutableCache>) -> SourceResult {
+    let spec = cell.spec.take().expect("fixture source spec");
+    let v2::MemberPlan::SourceV1 { source, .. } = &cell.plan else {
+        panic!("fixture source plan")
+    };
+    open_source_with_cache(spec, source.clone(), cache)
+}
+
+#[cfg(target_os = "linux")]
 fn fixture_elf() -> Vec<u8> {
     let mut bytes = vec![0u8; 32];
     bytes[..4].copy_from_slice(b"\x7fELF");
@@ -178,17 +187,15 @@ async fn binary_digest_uses_same_source_descriptor_without_changing_its_offset()
     let contents = fixture_elf();
     std::fs::write(&path, &contents).expect("fixture source");
     let mut cell = source_cell(&path, filesystem_domain(namespace()));
-    bind_expected_executable(&mut cell, Sha256::digest(contents).into());
+    let digest = Sha256::digest(&contents).into();
+    bind_expected_executable(&mut cell, digest);
 
     let enter = cell.launch().expect("register source job");
     enter.send(()).expect("enter source open");
     cell.join().await.expect("join source open");
     let result = cell.result.as_ref().expect("cached source result");
     assert!(result.observed.is_some());
-    assert_eq!(
-        result.verified_sha256,
-        Some(Sha256::digest(contents).into())
-    );
+    assert_eq!(result.verified_sha256, Some(digest));
     assert!(result.verified_elf);
     let file = result.file.as_ref().expect("same held descriptor");
     let mut descriptor = file.as_ref();
@@ -197,6 +204,63 @@ async fn binary_digest_uses_same_source_descriptor_without_changing_its_offset()
         .read_exact(&mut prefix)
         .expect("read original offset");
     assert_eq!(&prefix, b"\x7fELF");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repeated_held_source_uses_bounded_identity_cache_after_descriptor_stat_checks() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-digest-cache-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    let contents = fixture_elf();
+    std::fs::write(&path, &contents).expect("fixture source");
+    let digest = Sha256::digest(&contents).into();
+    let cache = Mutex::new(VerifiedExecutableCache::new());
+
+    let mut first = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut first, digest);
+    let first_result = open_with_cache(&mut first, &cache);
+    assert_eq!(first_result.verified_sha256, Some(digest));
+    assert!(!first_result.verified_sha256_cached);
+
+    let mut second = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut second, digest);
+    let second_result = open_with_cache(&mut second, &cache);
+    assert_eq!(second_result.verified_sha256, Some(digest));
+    assert!(second_result.verified_elf);
+    assert!(second_result.verified_sha256_cached);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn changed_source_identity_or_digest_cannot_reuse_cached_verification() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-digest-cache-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    let original = fixture_elf();
+    std::fs::write(&path, &original).expect("fixture source");
+    let original_digest = Sha256::digest(&original).into();
+    let cache = Mutex::new(VerifiedExecutableCache::new());
+    let mut first = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut first, original_digest);
+    assert!(open_with_cache(&mut first, &cache)
+        .verified_sha256
+        .is_some());
+
+    let mut changed = original.clone();
+    *changed.last_mut().expect("fixture has bytes") ^= 1;
+    std::fs::write(&path, &changed).expect("change executable bytes");
+    let mut second = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut second, original_digest);
+    let result = open_with_cache(&mut second, &cache);
+    assert!(result.file.is_some(), "actual descriptor remains retained");
+    assert!(result.observed.is_none());
+    assert_eq!(result.verified_sha256, None);
+    assert!(!result.verified_sha256_cached);
 }
 
 #[cfg(target_os = "linux")]

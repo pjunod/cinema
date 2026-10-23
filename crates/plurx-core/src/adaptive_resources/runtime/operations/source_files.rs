@@ -7,7 +7,70 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::sync::Mutex;
 use tokio::task::JoinHandle;
+
+const VERIFIED_EXECUTABLE_CACHE_CAPACITY: usize = 8;
+
+#[derive(Clone, Copy)]
+struct VerifiedExecutable {
+    identity: SourceIdentity,
+    digest: [u8; 32],
+}
+
+struct VerifiedExecutableCache {
+    entries: [Option<VerifiedExecutable>; VERIFIED_EXECUTABLE_CACHE_CAPACITY],
+    next: usize,
+}
+
+impl VerifiedExecutableCache {
+    const fn new() -> Self {
+        Self {
+            entries: [None; VERIFIED_EXECUTABLE_CACHE_CAPACITY],
+            next: 0,
+        }
+    }
+
+    fn contains(&self, identity: SourceIdentity, digest: &[u8; 32]) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.identity == identity && &entry.digest == digest)
+    }
+
+    fn insert(&mut self, identity: SourceIdentity, digest: [u8; 32]) {
+        self.entries[self.next] = Some(VerifiedExecutable { identity, digest });
+        self.next = (self.next + 1) % VERIFIED_EXECUTABLE_CACHE_CAPACITY;
+    }
+}
+
+static VERIFIED_EXECUTABLES: Mutex<VerifiedExecutableCache> =
+    Mutex::new(VerifiedExecutableCache::new());
+
+fn cached_executable_matches(
+    file: &File,
+    expected_identity: SourceIdentity,
+    expected_digest: &[u8; 32],
+    cache: &Mutex<VerifiedExecutableCache>,
+) -> bool {
+    let Ok(before) = file.metadata() else {
+        return false;
+    };
+    if SourceIdentity::from_metadata(&before) != expected_identity {
+        return false;
+    }
+    let cached = cache
+        .lock()
+        .map(|cache| cache.contains(expected_identity, expected_digest))
+        .unwrap_or(false);
+    if !cached {
+        return false;
+    }
+    file.metadata().is_ok_and(|after| {
+        SourceIdentity::from_metadata(&after) == expected_identity
+            && SourceIdentity::from_metadata(&after) == SourceIdentity::from_metadata(&before)
+    })
+}
 
 pub(in crate::adaptive_resources::runtime) fn executable_recipe_binding(
     digest: &[u8; 32],
@@ -150,12 +213,14 @@ pub(super) struct InheritedSource {
     pub acknowledged: bool,
     pub verified_sha256: Option<[u8; 32]>,
     pub verified_elf: bool,
+    pub verified_sha256_cached: bool,
 }
 struct SourceResult {
     file: Option<Arc<File>>,
     observed: Option<v2::SourceObserved>,
     verified_sha256: Option<[u8; 32]>,
     verified_elf: bool,
+    verified_sha256_cached: bool,
 }
 impl SourceCell {
     /// Await only the original source-open worker if it was registered. The
@@ -205,6 +270,7 @@ impl SourceCell {
                     observed: None,
                     verified_sha256: None,
                     verified_elf: false,
+                    verified_sha256_cached: false,
                 };
             }
             open_source(spec, plan)
@@ -214,11 +280,20 @@ impl SourceCell {
 }
 
 fn open_source(spec: SourceOpenSpec, plan: v2::SourcePlan) -> SourceResult {
+    open_source_with_cache(spec, plan, &VERIFIED_EXECUTABLES)
+}
+
+fn open_source_with_cache(
+    spec: SourceOpenSpec,
+    plan: v2::SourcePlan,
+    cache: &Mutex<VerifiedExecutableCache>,
+) -> SourceResult {
     let mut result = SourceResult {
         file: None,
         observed: None,
         verified_sha256: None,
         verified_elf: false,
+        verified_sha256_cached: false,
     };
     // No source path is opened unless the exact current domain is observed in
     // this original, registered native job. Domain equality is not restart proof.
@@ -255,34 +330,43 @@ fn open_source(spec: SourceOpenSpec, plan: v2::SourcePlan) -> SourceResult {
         return result;
     }
     if let Some(expected) = spec.expected_sha256 {
+        let before = SourceIdentity::from_metadata(&metadata);
         if !is_native_elf(file, metadata.len()) {
             return result;
         }
-        let before = SourceIdentity::from_metadata(&metadata);
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        let mut offset = 0u64;
-        while offset < metadata.len() {
-            let wanted = ((metadata.len() - offset).min(buffer.len() as u64)) as usize;
-            let Ok(read) = file.read_at(&mut buffer[..wanted], offset) else {
+        if cached_executable_matches(file, before, &expected, cache) {
+            result.verified_sha256 = Some(expected);
+            result.verified_elf = true;
+            result.verified_sha256_cached = true;
+        } else {
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 64 * 1024];
+            let mut offset = 0u64;
+            while offset < metadata.len() {
+                let wanted = ((metadata.len() - offset).min(buffer.len() as u64)) as usize;
+                let Ok(read) = file.read_at(&mut buffer[..wanted], offset) else {
+                    return result;
+                };
+                if read == 0 {
+                    return result;
+                }
+                hasher.update(&buffer[..read]);
+                offset += read as u64;
+            }
+            let Ok(after_metadata) = file.metadata() else {
                 return result;
             };
-            if read == 0 {
+            let after = SourceIdentity::from_metadata(&after_metadata);
+            let digest: [u8; 32] = hasher.finalize().into();
+            if before != after || digest != expected {
                 return result;
             }
-            hasher.update(&buffer[..read]);
-            offset += read as u64;
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(before, digest);
+            }
+            result.verified_sha256 = Some(digest);
+            result.verified_elf = true;
         }
-        let Ok(after_metadata) = file.metadata() else {
-            return result;
-        };
-        let after = SourceIdentity::from_metadata(&after_metadata);
-        let digest: [u8; 32] = hasher.finalize().into();
-        if before != after || digest != expected {
-            return result;
-        }
-        result.verified_sha256 = Some(digest);
-        result.verified_elf = true;
     }
     result.observed = Some(v2::SourceObserved {
         version: 1,
@@ -633,6 +717,7 @@ impl SourceCell {
             acknowledged: self.root_observed_committed,
             verified_sha256: result.verified_sha256,
             verified_elf: result.verified_elf,
+            verified_sha256_cached: result.verified_sha256_cached,
         })
     }
 

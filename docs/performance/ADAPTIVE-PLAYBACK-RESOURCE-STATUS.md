@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; fixed-executable/retirement host compilation passes, behavioral tests not run.
-**Updated:** 2026-10-22 at published checkpoint `0cdb4c3c609ee347a0291235d52691424213f663`; fixed-executable/process-closure source described below.
+**Status:** open · implementation incomplete; retained-reader/cleanup host compilation passes, behavioral tests not run.
+**Updated:** 2026-10-22 at published checkpoint `ad6d6c68178bc5bbddca3af03af0744239e98c5b`; retained-reader/cleanup source described below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -27,31 +27,37 @@ acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
 
-The current slice binds the selected executable to a predeclared SourceCell in
-that same reserved role. Its original held descriptor must match scanner/S1,
-SHA-256 and native ELF class/machine checks; launch maps that same object to fd 9
-and executes `/proc/self/fd/9`. Planning metadata alone cannot launch or prove
-closure. The fixed command clears ambient environment and explicitly carries a
-bounded Linux loader path when configured. This currently hashes the held image
-on each start; avoiding repeat reads requires a separately bound cached attestation.
+The selected executable now uses a fixed eight-entry verification cache keyed by
+all seven S1 identity fields and digest. Only a prior successful held-file native
+ELF/hash scan can populate it; a cache hit rechecks the same held descriptor before
+and after lookup. Miss/identity change/digest change never grants cached authority.
+This avoids repeated image reads without treating pathname metadata as a native
+launch proof. Private tests use isolated fixed caches, avoiding global eviction races.
 
-The graph now has a one-shot process-only witness for the trusted fixed software
-AVC profile. It requires the original root wait, writer join and both pipe closes,
-compacts retained diagnostics to a copy-only completion, then disposes the waited
-Child/ChildJob and pidfd registration. Source close audits require that witness
-plus positive original parent close and exact observed/planned copy identities.
-Missing writer registration and unsupported/ambiguous ownership remain held.
-The staged bootstrap transfer validates the full frozen reference and original
-parent/child/publication/sync owners before an infallible move. The private finite
-retirement adapter now installs those same owners in a provisional S runtime slot
-before minting its physical receipt and queuing the original R→S command. Unknown
-results retain full R and the same operation. Only its known-COMMIT capability
-permits one ledger swap and role rebinding. S conservatively retains the whole R
-handle/memory/storage allowance while CPU/process/hardware/tuner become zero.
-There are no native reader owners yet, so this adapter refuses reader-bearing
-snapshots. Ordinary entry, complete quotas, serving, S cleanup and usable capacity
-reuse remain open. Linux-specific source/control bodies still need native compilation.
+The retained runtime now owns response reader cells and exact OpenReader/ReadRange/
+CloseReader operations. The same held child opens and verifies the published file;
+original latched jobs retain the File and one fixed buffer. Only known durable
+read observation exposes an opaque chunk. Chunk drop returns that SAME buffer,
+and waits for it release the bundle lock. Drop requests closure rather than
+claiming it: normal completion, later serving and eviction use the same close
+operation; only positive original close permits removal of the lease. HTTP has
+not yet adopted this interface. Active native reader owners and their exact
+cursor/lease inventory now move with the same bootstrap owner through provisional
+S and known R→S; the old output selection resolves to S after rebind. The runtime
+also explicitly preserves its actual ledger durable tag: the initial prepare-
+bundle ID is distinct from the journal obligation ID.
 
+Retained cleanup vocabulary fences new readers, removes exact owned files, syncs
+the child, unlinks the child relative to the held parent, syncs that parent, then
+closes the exact folded descriptor-copy set. Failed/uncertain removals and closes
+retain charge and cannot retry a numeric descriptor. Native cleanup cells for
+those actions are authored; the S cleanup orchestrator is not connected yet.
+Typed S settlement reconstructs the latest closed fold in the journal transaction,
+checks exact retained lineage and empty files/readers/handles/storage, and retains
+the original physical receipt through known COMMIT. It has no production native
+S-close receipt caller yet. Source/reference JSON defaults preserve historical
+encoding. Ordinary admission/producer wiring, full quotas/cold memory policy,
+HTTP serving, S cleanup execution and usable capacity reuse remain open.
 
 The active harness is connecting the first ordinary finite VOD path. Core exposes
 [`finite_vod`](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
@@ -102,21 +108,22 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `0cdb4c3c609ee347a0291235d52691424213f663`.
-The fixed-executable/native-transfer/runtime-retirement slice passed pinned Rust
-1.97.1 host core+daemon all-target compilation in 115.583s (EXIT 0, stable hashes),
-`direct-check-20261022-204423.json`, log SHA-256
-`4da8698c3406ba301475c2e9c563985decf93c2ae176856dd49571340ae99349`.
-Earlier compile attempts exposed a visibility error, stale fixture call and missing
-import; those were fixed before this pass. The candidate has 382 unique regression
-anchors; the durable new list has 75. Authored regressions are NOT RUN; Linux-only
-fixtures/native bodies were not host-compiled. Compilation does not establish
-strict Clippy. Current native Linux/Windows compilation, final independent review,
-qualification/fast lane, merge and restart/behavior evidence remain open. Ordinary
-admission/terminal integration, actual serving leases and exact cleanup/reuse remain
-unwired. Native/index/runtime/journal memory is not an end-to-end bound. The child
-descriptor helper transient peak is `3N + 1` for N distinct source mappings; the
-combined parent/child standard spawn pipe/error-pipe peak remains unestablished.
+The latest published base is `ad6d6c68178bc5bbddca3af03af0744239e98c5b`.
+The retained-reader/native-cleanup/typed-settlement source passed pinned Rust 1.97.1
+host core+daemon all-target compilation in 249.207s (EXIT 0, stable hashes),
+`direct-check-20261022-211958.json`, log SHA-256
+`368f75510ad220a7b52cfa4b3acf06854aaf020a75b9e22ac80ae150b02a8933`.
+The candidate has 391 unique regression anchors; the durable new list has 84.
+Authored regressions are NOT RUN. The source-only Linux compiler loop is established
+in a pinned 1.97.1 container with credential-free archives, a private dependency
+cache and offline network-isolated compilation. Its first all-target check of
+`ad6d6c6817` found a Linux-only fixture Vec move; the current source fixes it.
+The current checkpoint still needs native compilation. No strict Clippy, final
+independent review, qualification/fast lane, merge or deployment is claimed.
+Ordinary admission/terminal integration, actual HTTP serving and exact S cleanup/
+reuse remain unwired. Native/index/runtime/journal memory is not an end-to-end
+bound. The child descriptor helper transient peak is `3N + 1` for N source
+mappings; the combined parent/child standard spawn peak remains unestablished.
 
 ## Current source and compiler receipt
 

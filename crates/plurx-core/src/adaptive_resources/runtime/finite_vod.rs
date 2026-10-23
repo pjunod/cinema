@@ -4,6 +4,7 @@ mod command;
 mod executable;
 mod initial_unit;
 pub(in crate::adaptive_resources) mod pump;
+pub use super::operations::bootstrap::readers::{FiniteReadChunk, FiniteReader};
 pub use command::SoftwareAvcCommand;
 pub use executable::SoftwareAvcExecutable;
 pub use pump::{
@@ -228,6 +229,40 @@ impl FiniteFile {
 }
 
 impl FiniteOutput {
+    /// Read immutable published metadata without opening a native file.
+    pub async fn file_len(&self, file: FiniteFile) -> Result<Option<u64>, FiniteVodError> {
+        self.runtime
+            .finite_file_len(&self.preparation, 0, self.member, &file.key())
+            .await
+            .map_err(Into::into)
+    }
+    /// Select the exact response range before opening its counted File. Drop
+    /// leaves a pending close request in the same retained runtime entry.
+    pub async fn prepare_reader(
+        &self,
+        file: FiniteFile,
+        start: u64,
+        end_exclusive: u64,
+        memory_cap: u64,
+        deadline: Instant,
+    ) -> Result<FiniteReader, FiniteVodError> {
+        self.runtime
+            .close_dropped_finite_readers(&self.preparation, 0, deadline)
+            .await?;
+        self.runtime
+            .prepare_finite_reader(
+                &self.preparation,
+                0,
+                self.member,
+                file.key(),
+                start,
+                end_exclusive,
+                memory_cap,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
     pub fn has_encoded_process_metadata(&self) -> bool {
         self.encoded_process_marker
     }

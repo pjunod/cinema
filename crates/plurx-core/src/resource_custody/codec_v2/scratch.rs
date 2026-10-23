@@ -154,6 +154,9 @@ pub(crate) enum ScratchLifecycleV1 {
     Freezing,
     Frozen,
     RetainedReadOnly,
+    Retiring,
+    RetirementUncertain,
+    RetiredClosed,
     Closing,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +180,13 @@ pub(crate) struct ScratchStateV2 {
     pub revision: u64,
     pub lifecycle: ScratchLifecycleV1,
     pub totals: AssetTotalsV1,
+    /// True only after a known successful directory sync at this exact head.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_false")]
+    pub directory_synced: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -237,6 +247,11 @@ pub(crate) enum AssetIoV1 {
     },
     RemoveOwned {
         file_id: Id,
+        /// Required for new retirement removals; absent only in historical
+        /// pre-retirement records, which remain decodable.
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_native_object: Option<NativeObject>,
     },
     SyncFiles {
         file_ids: Vec<Id>,
@@ -272,10 +287,19 @@ pub(crate) enum AssetObservationV1 {
     Removed {
         file_id: Id,
     },
+    RemovalUnresolved {
+        file_id: Id,
+    },
     Synced,
     ReaderOpened {
         lease: ReaderLeaseV1,
         native_object: NativeObject,
+    },
+    /// The prearmed open failed before a descriptor was acquired. This is
+    /// distinct from identity rejection after open, which must retain custody.
+    ReaderOpenRejected {
+        lease_id: Id,
+        errno: i32,
     },
     ReaderRead {
         lease_id: Id,
@@ -304,6 +328,9 @@ pub(crate) enum AssetEventV1 {
     },
     Freeze {
         exact_head_before_freeze: AssetEventRefV1,
+    },
+    BeginRetirement {
+        exact_head_before_retirement: AssetEventRefV1,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +397,26 @@ fn validate_output_projection(
         || t.handles_reserved > l.live_handles
         || t.readers > l.reader_leases
         || t.pending_jobs > l.pending_native_jobs
+        || (state.lifecycle == ScratchLifecycleV1::RetiredClosed
+            && (state.directory.is_some()
+                || t.resident_file_objects != 0
+                || t.logical_bytes != 0
+                || t.charged_storage_bytes != 0
+                || t.memory_reserved_bytes != 0
+                || t.handles_reserved != 0
+                || t.readers != 0
+                || t.pending_jobs != 0
+                || state.directory_synced))
+        || (state.lifecycle == ScratchLifecycleV1::Retiring && state.directory.is_none())
+        || (state.lifecycle == ScratchLifecycleV1::RetirementUncertain
+            && (state.directory.is_none()
+                || t.readers != 0
+                || t.pending_jobs != 0
+                || state.directory_synced))
+        || (state.directory_synced
+            && (state.lifecycle != ScratchLifecycleV1::Retiring
+                || state.directory.is_none()
+                || t.pending_jobs != 0))
     {
         return Err(codec::invalid());
     }

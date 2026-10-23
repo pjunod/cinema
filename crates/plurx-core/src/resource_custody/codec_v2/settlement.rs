@@ -93,6 +93,11 @@ pub(crate) enum ClosedFact {
         owners: Vec<OwnerClosed>,
         files: Vec<Id>,
     },
+    ScratchAssetsV3 {
+        plan: super::scratch::bootstrap::ScratchPlanV3,
+        exact_head: super::scratch::AssetEventRefV1,
+        operation_id: Id,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
@@ -275,6 +280,36 @@ pub(crate) fn validate_settlement(
                     let expected: BTreeSet<_> = scratch.files.iter().map(|f| f.file_id).collect();
                     let actual: BTreeSet<_> = files.iter().copied().collect();
                     if expected != actual || actual.len() != files.len() {
+                        return Err(codec::invalid());
+                    }
+                }
+                (
+                    MemberPlan::ScratchAssetsV3 { plan, .. },
+                    ClosedFact::ScratchAssetsV3 {
+                        plan: closed,
+                        exact_head,
+                        operation_id,
+                    },
+                ) => {
+                    let Some(Observed::ScratchAssetsV3 { state }) = &envelope.observed else {
+                        return Err(codec::invalid());
+                    };
+                    if plan != closed
+                        || operation_id.uuid().is_nil()
+                        || exact_head.operation_id != *operation_id
+                        || exact_head.revision == 0
+                        || state.version != 3
+                        || state.asset.asset_id != plan.asset_id
+                        || state.asset.lifecycle != scratch::ScratchLifecycleV1::RetiredClosed
+                        || state.asset.head.as_ref() != Some(exact_head)
+                        || state.asset.directory.is_some()
+                        || state.asset.totals != scratch::AssetTotalsV1::default()
+                        || state.bootstrap.phase != scratch::bootstrap::BootstrapPhase::Closed
+                        || state.bootstrap.current.is_some()
+                        || state.bootstrap.parent.is_some()
+                        || state.bootstrap.possible_child.is_some()
+                        || state.bootstrap.retained_parent_synced
+                    {
                         return Err(codec::invalid());
                     }
                 }

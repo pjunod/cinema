@@ -82,6 +82,8 @@ pub(crate) enum BootstrapPhase {
     SinkReady,
     Closing,
     Closed,
+    RemovingRetainedChild,
+    RetainedChildRemoved,
     UnknownHeld,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +107,7 @@ pub(crate) enum ChildEffect {
     Unchanged,
     Created,
     Unknown,
+    Removed,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,6 +131,13 @@ pub(crate) struct BootstrapStateV1 {
     pub current: Option<BootstrapDirectoryV1>,
     pub parent: Option<BootstrapDirectoryV1>,
     pub possible_child: Option<PossibleChildV1>,
+    /// Exact successful parent-directory sync after removing the owned child.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_false")]
+    pub retained_parent_synced: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +162,17 @@ pub(crate) enum BootstrapIoV1 {
         copy_id: Id,
     },
     CloseBootstrapHandles {
+        copy_ids: Vec<Id>,
+    },
+    RemoveRenditionChild {
+        parent: OwnedDirectoryRefV1,
+        child_directory_id: Id,
+        child_component: String,
+    },
+    SyncRetainedParent {
+        parent: OwnedDirectoryRefV1,
+    },
+    CloseRetainedHandles {
         copy_ids: Vec<Id>,
     },
     ResolvePossibleChild {
