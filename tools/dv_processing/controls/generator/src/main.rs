@@ -7,8 +7,12 @@ use dolby_vision::rpu::{
 };
 use std::{fs, path::PathBuf};
 mod base_profiles;
+mod xml_reference;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(std::env::args().nth(1).ok_or("root")?);
+    if std::env::args().nth(2).as_deref() == Some("xml-reference") {
+        return xml_reference::generate(&root);
+    }
     if std::env::args().nth(2).as_deref() == Some("base") {
         return base_profiles::generate(&root);
     }
