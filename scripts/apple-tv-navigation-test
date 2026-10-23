@@ -37,6 +37,7 @@ REQUIRED = [
     "TVPlaybackNavigationTests/testSharedLibraryRouteAndBackRestoreActualOpener",
     "TVSharedPlaybackNavigationTests/testSharedPlaybackRevealQualityReportAndBackRetainSession",
     "TVPlaybackNavigationTests/testLocalMovieHiddenRevealReportAndBackRetainPlayback",
+    "TVPlaybackNavigationTests/testLocalMovieTimelineSelectCommitsForwardAndBackwardPreview",
     "TVLiveNavigationTests/testGuide77ChannelsKeepsNativeFocusVisibleAndResponsive",
     "TVLiveNavigationTests/testGuideToolsAndTimeReturnKeepNativeFocus",
     "TVLiveNavigationTests/testLiveFullscreenRevealMoreReportAndBackRetainSession",
