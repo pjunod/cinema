@@ -49,7 +49,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -97,7 +97,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -131,7 +131,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -680,7 +680,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -696,7 +696,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -712,7 +712,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -728,7 +728,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -744,7 +744,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -760,7 +760,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -776,7 +776,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -925,7 +925,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1061,7 +1061,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "claim_library",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1077,7 +1077,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "ActiveBackgroundJob::finish",
         "anchor": "pub(crate) async fn finish(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1127,7 +1127,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "ActiveBackgroundJob::claim",
         "anchor": "let heartbeat = tokio::spawn(async move {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1159,7 +1159,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "ActiveBackgroundJob::finish",
         "anchor": "pub(crate) async fn finish(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",
@@ -1240,7 +1240,7 @@
         "file": "crates/plurxd/src/background_jobs.rs",
         "symbol": "ActiveBackgroundJob::finish",
         "anchor": "pub(crate) async fn finish(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       "held_across_await": [],
       "completed_by": "worker task",

@@ -16,7 +16,7 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-22 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). User-confirmed flow is stage PRs into `effort/display-targeted-dv`, then one promotion PR to `main`; PR #1216 remains draft/unmerged. General-FEL focused checks pass, but no mapped P7 cell has passed. E’s 14-case neutral-L3 comparison is observational, not creative-accuracy acceptance. The Main promotion gate, exact-candidate qualification, complete L8 contract and device acceptance remain open.
+- **2026-10-22 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). User-confirmed flow is stage PRs into `effort/display-targeted-dv`, then one promotion PR to `main`; PR #1216 remains draft/unmerged. General-FEL focused checks pass, and both mapped P7 targets pass at #348. E’s 14-case neutral-L3 comparison is observational, not creative-accuracy acceptance. The Main promotion gate, exact-candidate qualification, complete L8 contract and device acceptance remain open.
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,
