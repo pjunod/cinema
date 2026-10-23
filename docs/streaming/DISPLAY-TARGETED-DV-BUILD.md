@@ -1,7 +1,29 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A has reviewed source and completed non-P7 evidence; additive P7 continuation and promotion remain open · **Updated:** 2026-10-22 · **Owner:** direct GPT (PR #1216), Sol (source), coordinator (native/media/publication) ·
+**Status:** A–F source work is integrated on the private F branch; qualification is source-bound and promotion remains open · **Updated:** 2026-10-22 · **Owner:** direct GPT (PR #1216), Sol (source), coordinator (native/media/publication) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
+
+The matrix below is the current qualification record. Dated implementation
+checkpoints retain what was known at their authored heads; they are historical
+snapshots, not current status. Later merges do not move earlier results to a
+new source head.
+
+## Current qualification — source-bound evidence through F
+
+| Phase | Qualified evidence and source | Still open |
+|---|---|---|
+| A · title scan and HDR10-E | PR #1216 is draft and unmerged. Retained clock/shader results remain tied to their original heads; first P7 continuation 323 stopped at the identity/polygon MMR check. | P7 identity repair and remaining mapped cells; final review, fast lane and merge. |
+| B · output metadata | Seven focused Rust cases pass on `e53a221bf089c0a10daec572144fd06062be61d8`; pinned format/check 301 and Clippy/link 304 passed. Later integration leaves these code paths unchanged. | Independent review, current-head publication gate, encoder/device acceptance. |
+| C · server controls | Ten focused Rust cases pass on `a43fcf201defdfbd3e9f46704722ed70c3f3a919`; 14 badge and 72 distinct settings-web cases and pinned format/check 314 plus Clippy/link 316 also pass. These results remain source-bound after integration. | Current-head qualification and acceptance; no readiness advice overrides the saved preference. |
+| D · client presentation | 27 focused web cases pass on `clip600e`/`Dad802`; integration `d19abac` is in F. | No full current-head or physical-device acceptance is implied. |
+| Client builds | Android 30 tests and Apple 13 tests plus Apple test-build passed on `F7eed`; the client source closure is identical through F source `6d48d4c`. | Results were retained, not replayed on F; physical display acceptance remains open. |
+| E · L2/L8 trims | Public L2 and newly assumed L8 source is independently reviewed at `07c36ec`; software-reference comparison mechanics pass. | Substantial accuracy errors remain; no accuracy acceptance or L8 claim. |
+| F · SDR target | At `6d48d4c477446ab2609a449d5c5ba7873d6d272a`, pinned format/check 326 and Clippy/core+daemon links 324 passed. Ten distinct focused Rust regressions pass (three retained from 324 and seven completed in 331 with runtime FFmpeg); two focused web cases pass. Independent SDR pixel check 325 passed ten controls over 61,440 samples with maximum one-code error against a two-code limit; wrong-primary mutants differed by 13/37/68/74 codes. | Promotion, fast lane and physical acceptance remain open. |
+
+No PR in this series is merged to the target branch, and the stage fast lane has
+not run. Passing compiler, unit, web, client and pixel results above apply only
+to their named source heads or unchanged source closures. They do not establish
+qualification of an untested integration head or physical display behavior.
 
 ## PR B implementation checkpoint
 
@@ -124,7 +146,7 @@ Authored regression anchors (not executed):
 
 ## PR A implementation checkpoint
 
-- **Current qualification (2026-10-22):** the original `a49`/`c036` source
+- **Qualification at this checkpoint (2026-10-22):** the original `a49`/`c036` source
   review is retained. Scanner controls have 20 passes. The standalone P7 run
   retained its actual `c036` listing, 17,983 valid frames, observed maximum
   3,441 nits, and passing policy results. Owner-interrupted attempt 258 stopped
@@ -162,7 +184,7 @@ Authored regression anchors (not executed):
   precede only the missing P7 cells. No new test or native success is inferred
   from this candidate's source.
 
-  Current-main source integration is `a316`, plus test-only missing scanner
+  At this checkpoint, source integration was `a316`, plus test-only missing scanner
   fixture field repair `fb0a691dc`. Pinned Rust formatting passed on `a316`.
   The original compile exposed E0063 in a scanner `/bin/false` test fixture;
   that fixture-only repair passed failed-only compile 261 on exact
