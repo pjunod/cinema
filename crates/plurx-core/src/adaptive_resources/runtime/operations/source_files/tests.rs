@@ -4,6 +4,8 @@ use super::*;
 use crate::resource_custody::codec_v2 as v2;
 use crate::source_identity::SourceIdentity;
 #[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
 use std::fs::File;
 use std::fs::Metadata;
 #[cfg(target_os = "linux")]
@@ -99,6 +101,7 @@ fn source_cell(path: &Path, domain: v2::FilesystemDomain) -> SourceCell {
             path: path.to_owned(),
             scanner_size: i64::try_from(metadata.len()).expect("fixture source size"),
             scanner_mtime: scanner_mtime(&metadata),
+            expected_sha256: None,
         }),
         plan: member_plan,
         acquisition_id,
@@ -115,6 +118,136 @@ fn source_cell(path: &Path, domain: v2::FilesystemDomain) -> SourceCell {
         parent_close_operation_id: Uuid::new_v4(),
         parent_close: ParentCloseState::NotStarted,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bind_expected_executable(cell: &mut SourceCell, digest: [u8; 32]) {
+    cell.spec.as_mut().unwrap().expected_sha256 = Some(digest);
+    let v2::MemberPlan::SourceV1 { source, .. } = &mut cell.plan else {
+        unreachable!()
+    };
+    source.source_association.recipe_source_binding = executable_recipe_binding(&digest);
+}
+
+#[cfg(target_os = "linux")]
+fn fixture_elf() -> Vec<u8> {
+    let mut bytes = vec![0u8; 32];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = if cfg!(target_pointer_width = "64") {
+        2
+    } else {
+        1
+    };
+    bytes[5] = if cfg!(target_endian = "little") { 1 } else { 2 };
+    bytes[6] = 1;
+    let machine = if cfg!(target_arch = "x86_64") {
+        62u16
+    } else if cfg!(target_arch = "aarch64") {
+        183
+    } else if cfg!(target_arch = "x86") {
+        3
+    } else if cfg!(target_arch = "arm") {
+        40
+    } else if cfg!(target_arch = "riscv64") {
+        243
+    } else if cfg!(target_arch = "s390x") {
+        22
+    } else if cfg!(target_arch = "powerpc64") {
+        21
+    } else {
+        panic!("unsupported fixture architecture")
+    };
+    let endian_bytes = if cfg!(target_endian = "little") {
+        (3u16.to_le_bytes(), machine.to_le_bytes())
+    } else {
+        (3u16.to_be_bytes(), machine.to_be_bytes())
+    };
+    bytes[16..18].copy_from_slice(&endian_bytes.0);
+    bytes[18..20].copy_from_slice(&endian_bytes.1);
+    bytes
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn binary_digest_uses_same_source_descriptor_without_changing_its_offset() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-digest-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    let contents = fixture_elf();
+    std::fs::write(&path, &contents).expect("fixture source");
+    let mut cell = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut cell, Sha256::digest(contents).into());
+
+    let enter = cell.launch().expect("register source job");
+    enter.send(()).expect("enter source open");
+    cell.join().await.expect("join source open");
+    let result = cell.result.as_ref().expect("cached source result");
+    assert!(result.observed.is_some());
+    assert_eq!(
+        result.verified_sha256,
+        Some(Sha256::digest(contents).into())
+    );
+    assert!(result.verified_elf);
+    let file = result.file.as_ref().expect("same held descriptor");
+    let mut descriptor = file.as_ref();
+    let mut prefix = [0u8; 4];
+    descriptor
+        .read_exact(&mut prefix)
+        .expect("read original offset");
+    assert_eq!(&prefix, b"\x7fELF");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn binary_digest_mismatch_keeps_actual_file_and_withholds_observation() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-digest-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    std::fs::write(&path, fixture_elf()).expect("fixture source");
+    let mut cell = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut cell, [0u8; 32]);
+
+    let enter = cell.launch().expect("register source job");
+    enter.send(()).expect("enter source open");
+    cell.join().await.expect("join source open");
+    let result = cell.result.as_ref().expect("cached failed result");
+    assert!(
+        result.file.is_some(),
+        "actual opened descriptor remains owned"
+    );
+    assert!(
+        result.observed.is_none(),
+        "mismatch cannot produce observation"
+    );
+    assert_eq!(result.verified_sha256, None);
+    assert!(!result.verified_elf);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn script_with_matching_digest_is_not_accepted_as_executable_elf() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-digest-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    let script = b"#!/bin/sh\nexit 0\n";
+    std::fs::write(&path, script).expect("fixture source");
+    let mut cell = source_cell(&path, filesystem_domain(namespace()));
+    bind_expected_executable(&mut cell, Sha256::digest(script).into());
+
+    let enter = cell.launch().expect("register source job");
+    enter.send(()).expect("enter source open");
+    cell.join().await.expect("join source open");
+    let result = cell.result.as_ref().expect("cached rejected result");
+    assert!(result.file.is_some(), "actual file remains owned");
+    assert!(result.observed.is_none());
+    assert_eq!(result.verified_sha256, None);
+    assert!(!result.verified_elf);
 }
 
 #[cfg(target_os = "linux")]

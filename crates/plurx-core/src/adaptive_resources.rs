@@ -246,13 +246,19 @@ impl PhysicalCloseReceipt {
 /// Nonclone live retirement capability. Minting requires actual producer
 /// closure AND transfer of every retained native owner to the selected target.
 /// Journal audit records and successful waits alone cannot construct this.
-/// There is no production constructor until the concrete backend proves both.
+/// The private finite adapter supplies this only after original process/source
+/// closure and staging the same native output owners under the full R charge.
 #[derive(Debug)]
 pub(crate) struct PhysicalRetirementReceipt {
     source: ReservationBinding,
     target: ReservationBinding,
 }
 impl PhysicalRetirementReceipt {
+    #[cfg(unix)]
+    fn from_finite_vod(closure: runtime::FiniteRetirementClosure) -> Self {
+        let (source, target) = closure.into_bindings();
+        Self { source, target }
+    }
     /// Accounting/journal fixtures only, never native acceptance evidence.
     #[cfg(test)]
     pub(crate) fn adapter_fixture(source: ReservationBinding, target: ReservationBinding) -> Self {

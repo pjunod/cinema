@@ -103,6 +103,7 @@ struct Members {
     unaudited_handoff: bool,
     // One actual graph can mint at most one nonclone physical receipt.
     receipt_issued: bool,
+    finite_process_closed: bool,
     roots: Vec<Root>,
     writers: Vec<Writer>,
     joined_writers: usize,
@@ -255,6 +256,7 @@ impl ResourceReservation {
                 uncertain_launch: false,
                 unaudited_handoff: false,
                 receipt_issued: false,
+                finite_process_closed: false,
                 roots: Vec::new(),
                 writers: Vec::new(),
                 joined_writers: 0,

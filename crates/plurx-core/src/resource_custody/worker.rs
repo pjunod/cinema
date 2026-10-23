@@ -131,10 +131,11 @@ impl CustodyJournal {
     /// This creates no journal command and carries no physical-transfer proof.
     pub(crate) fn retirement_target(
         &self,
+        obligation_id: Uuid,
         graph_id: Uuid,
         runtime_binding: ReservationBinding,
     ) -> Result<ObligationHandle, CustodyError> {
-        if graph_id.is_nil() {
+        if obligation_id.is_nil() || graph_id.is_nil() {
             return Err(CustodyError::new(
                 ErrorKind::InvalidCommand,
                 "invalid retirement target graph",
@@ -143,7 +144,7 @@ impl CustodyJournal {
         Ok(ObligationHandle {
             journal_id: self.journal_id,
             owner_id: self.owner_id,
-            obligation_id: Uuid::new_v4(),
+            obligation_id,
             graph_id,
             runtime_binding,
         })

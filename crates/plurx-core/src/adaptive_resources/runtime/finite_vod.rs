@@ -1,9 +1,11 @@
 //! Concrete finite software-VOD preparation interface for the daemon.
 //! Request data selects plans, never native facts, callbacks or refund proofs.
 mod command;
+mod executable;
 mod initial_unit;
 pub(in crate::adaptive_resources) mod pump;
 pub use command::SoftwareAvcCommand;
+pub use executable::SoftwareAvcExecutable;
 pub use pump::{
     FiniteWriterCompletion, FiniteWriterFailureKind, FiniteWriterOutcome, SoftwareAvcPumpPlan,
     SoftwareVodEvent,
@@ -175,6 +177,7 @@ pub struct SoftwareVodOwner {
     preparation: OwnedPreparation,
     source_members: Vec<Uuid>,
     source_specs: Vec<Option<SourceOpenSpec>>,
+    media_source_count: usize,
     scratch_member: Uuid,
     directory_path: PathBuf,
     encoded_process_marker: bool,
@@ -364,6 +367,9 @@ impl SoftwareVodOwner {
         index: usize,
         deadline: Instant,
     ) -> Result<RetainedSourceLease, FiniteVodError> {
+        if index >= self.media_source_count {
+            return Err(invalid());
+        }
         let member = *self
             .source_members
             .get(index)
@@ -441,6 +447,23 @@ impl SoftwareVodOwner {
             .freeze_finite_output(&self.preparation, 0, self.scratch_member, deadline)
             .await?;
         Ok(completion)
+    }
+
+    /// Retain the same frozen output in S and return producer capacity only
+    /// after one known journal COMMIT and one conserving ledger replacement.
+    /// Cancellation/unknown results retain the original operation and full R.
+    pub async fn retire_output(&self, deadline: Instant) -> Result<FiniteOutput, FiniteVodError> {
+        let member = self
+            .runtime
+            .retire_finite_output(&self.preparation, 0, self.scratch_member, deadline)
+            .await?;
+        Ok(FiniteOutput {
+            runtime: Arc::clone(&self.runtime),
+            preparation: self.preparation.clone(),
+            member,
+            directory_path: self.directory_path.clone(),
+            encoded_process_marker: self.encoded_process_marker,
+        })
     }
 
     pub async fn stop_producer(&self) -> Result<FiniteProducerCompletion, FiniteVodError> {
@@ -529,7 +552,7 @@ impl NodeResourceRuntime {
         let Metric::Known(resources) = request.demand.resources else {
             return Err(invalid());
         };
-        let minimum_handles = u64::try_from(request.sources.len())
+        let minimum_handles = u64::try_from(request.sources.len() + 1)
             .map_err(|_| invalid())?
             .checked_mul(3)
             .and_then(|n| n.checked_add(u64::from(request.output.live_handles)))
@@ -579,6 +602,7 @@ impl NodeResourceRuntime {
             .checked_add(
                 u64::try_from(request.command.resident_memory_bytes()?).map_err(|_| invalid())?,
             )
+            .and_then(|bytes| bytes.checked_add(64 * 1024))
             .ok_or_else(invalid)?;
         if resources
             .peak_memory_bytes
@@ -593,10 +617,32 @@ impl NodeResourceRuntime {
             object_version: task_source.object_version.clone(),
             recipe_source_binding: request.recipe_source_binding.clone(),
         };
-        let mut plans = Vec::with_capacity(request.sources.len() + 3);
-        let mut source_members = Vec::with_capacity(request.sources.len());
-        let mut source_specs = Vec::with_capacity(request.sources.len());
-        for source in request.sources {
+        let media_source_count = request.sources.len();
+        let executable = request.command.executable();
+        let binary_identity = executable.source_identity();
+        let binary_digest = executable.sha256();
+        let binary_binding =
+            super::operations::source_files::executable_recipe_binding(&binary_digest);
+        let binary_source = FiniteSourceRequest {
+            path: executable.path().to_owned(),
+            media_file_id: binary_binding.clone(),
+            object_version: binary_identity.render_s1(),
+            scanner_size: i64::try_from(binary_identity.size).map_err(|_| invalid())?,
+            scanner_mtime: binary_identity.mtime,
+        };
+        let mut plans = Vec::with_capacity(media_source_count + 4);
+        let mut source_members = Vec::with_capacity(media_source_count + 1);
+        let mut source_specs = Vec::with_capacity(media_source_count + 1);
+        let sources = request
+            .sources
+            .into_iter()
+            .map(|source| (source, None, request.recipe_source_binding.clone()))
+            .chain(std::iter::once((
+                binary_source,
+                Some(binary_digest),
+                binary_binding,
+            )));
+        for (source, expected_sha256, recipe_source_binding) in sources {
             let member = id();
             let source_copy = id();
             plans.push(TypedMemberPlan::Source {
@@ -609,7 +655,7 @@ impl NodeResourceRuntime {
                     source_association: v2::SourceAssociation {
                         media_file_id: source.media_file_id,
                         object_version: source.object_version,
-                        recipe_source_binding: request.recipe_source_binding.clone(),
+                        recipe_source_binding,
                     },
                     filesystem_domain: domain.clone(),
                     copies: vec![
@@ -635,6 +681,7 @@ impl NodeResourceRuntime {
                 path: source.path,
                 scanner_size: source.scanner_size,
                 scanner_mtime: source.scanner_mtime,
+                expected_sha256,
             }));
         }
         let bounds = request.output;
@@ -810,6 +857,7 @@ impl NodeResourceRuntime {
             preparation,
             source_members,
             source_specs,
+            media_source_count,
             scratch_member: scratch_member.uuid(),
             directory_path,
             encoded_process_marker: request.encoded_process_marker,

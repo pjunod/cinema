@@ -1,7 +1,9 @@
 //! The one fixed software-AVC launch/task composition. Caller data cannot
 //! substitute a Command, future, pipe owner, source descriptor or close proof.
 use super::*;
-use crate::adaptive_resources::physical_graph::finite_vod::GraphFiniteVodTask;
+use crate::adaptive_resources::physical_graph::finite_vod::{
+    FiniteFixedImage, FiniteVodProcessClosure, GraphFiniteVodTask,
+};
 use crate::adaptive_resources::runtime::finite_vod::{pump::SoftwarePump, SoftwareAvcCommand};
 use std::process::Stdio;
 
@@ -16,6 +18,9 @@ pub(super) struct FiniteLaunch {
     pub(super) control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
     task_entered: bool,
     task: Option<GraphFiniteVodTask>,
+    fixed_image: Option<FiniteFixedImage>,
+    pub(super) process_closure: Option<FiniteVodProcessClosure>,
+    completion: Option<crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion>,
     task_observation: Uuid,
     task_observed_committed: bool,
     pub(super) retiring: bool,
@@ -40,8 +45,8 @@ impl NodeResourceRuntime {
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded || role.finite_vod.is_some() || role.graph.is_none()
-            || source_members.is_empty() || source_members.len() > 2
-            || source_members.len() != command.source_count() || acquisition_id.is_nil()
+            || source_members.len() < 2 || source_members.len() > 3
+            || source_members.len() != command.source_count() + 1 || acquisition_id.is_nil()
             || role.typed_members.as_ref().is_none_or(|members| !members.iter().any(|member|
                 matches!(member, v2::MemberPlan::VodOutputTaskV1 { slot, task }
                     if slot.member_id.uuid() == task_member && task.root_member_id.uuid() == root_member))) {
@@ -58,6 +63,9 @@ impl NodeResourceRuntime {
             control,
             task_entered: false,
             task: None,
+            fixed_image: None,
+            process_closure: None,
+            completion: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
             retiring: false,
@@ -109,7 +117,17 @@ impl NodeResourceRuntime {
             if finite.entered || finite.control.requested() {
                 return Err(OperationError::State);
             }
-            let mut descriptors = [(0, 3), (0, 4)];
+            let binary_digest = finite.command.executable().sha256();
+            let binary_version = finite.command.executable().source_identity().render_s1();
+            let binary_binding = source_files::executable_recipe_binding(&binary_digest);
+            let binary_path = finite
+                .command
+                .program()
+                .to_str()
+                .ok_or(OperationError::State)?
+                .to_owned();
+            let mut descriptors = [(0, 3), (0, 4), (0, 9)];
+            let mut verified_elf = false;
             for (index, member) in source_members.iter().enumerate() {
                 let source = role
                     .sources
@@ -119,7 +137,42 @@ impl NodeResourceRuntime {
                 if source.acquisition_id.uuid() != acquisition_id || source.acknowledged {
                     return Err(OperationError::State);
                 }
-                descriptors[index].0 = source.raw_fd;
+                if index + 1 == source_members.len() {
+                    if !source.verified_elf
+                        || source.verified_sha256 != Some(binary_digest)
+                        || !matches!(&source.envelope.planned,
+                            v2::MemberPlan::SourceV1 { slot, source }
+                                if slot.protected_paths == [binary_path.clone()]
+                                    && source.source_association.object_version == binary_version
+                                    && source.source_association.recipe_source_binding == binary_binding)
+                    {
+                        return Err(OperationError::State);
+                    }
+                } else if source.verified_sha256.is_some() {
+                    return Err(OperationError::State);
+                }
+                if index + 1 == source_members.len() {
+                    verified_elf = source.verified_elf;
+                }
+                descriptors[index] = (
+                    source.raw_fd,
+                    if index + 1 == source_members.len() {
+                        9
+                    } else {
+                        3 + index as i32
+                    },
+                );
+            }
+            let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+            if finite.fixed_image.is_none() {
+                finite.fixed_image = Some(FiniteFixedImage::from_verified_source(
+                    root_member,
+                    task_member,
+                    acquisition_id,
+                    finite.command.executable().source_identity(),
+                    binary_digest,
+                    verified_elf,
+                )?);
             }
             let selected = &role
                 .finite_vod
@@ -134,12 +187,20 @@ impl NodeResourceRuntime {
             if selected.program().to_str() != Some(root_plan.locator.as_str()) {
                 return Err(OperationError::State);
             }
-            let mut command = tokio::process::Command::new(selected.program());
+            // SourceCell has verified the selected digest on the SAME held
+            // executable. pre_exec installs its planned child copy as fd 9;
+            // pathname replacement cannot select a different launch object.
+            let mut command = tokio::process::Command::new("/proc/self/fd/9");
+            command.env_clear();
             command.args(selected.args());
             command
                 .env("XDG_CACHE_HOME", selected.runtime_cache())
                 .env("CUDA_CACHE_PATH", selected.runtime_cache())
-                .env("AV_LOG_FORCE_NOCOLOR", "1");
+                .env("AV_LOG_FORCE_NOCOLOR", "1")
+                .env("TMPDIR", selected.runtime_cache())
+                .env("HOME", selected.runtime_cache())
+                .env("LANG", "C")
+                .env("LC_ALL", "C");
             for (key, value) in selected.env() {
                 command.env(key, value);
             }
@@ -252,7 +313,15 @@ impl NodeResourceRuntime {
             };
             let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
             let (task, abort) = graph
-                .spawn_durable_finite_vod(root, member, arm, &mut finite.pump)
+                .spawn_durable_finite_vod(
+                    root,
+                    finite.root_member,
+                    member,
+                    finite.acquisition_id,
+                    arm,
+                    &mut finite.pump,
+                    &mut finite.fixed_image,
+                )
                 .await?;
             finite.task = Some(task);
             role.invoked.insert(member);
@@ -320,9 +389,8 @@ pub(super) fn acknowledge_task(
 }
 
 impl NodeResourceRuntime {
-    /// This is quiescence over original owners, not a physical-close receipt.
-    /// In particular a waited leader does not close inherited source copies or
-    /// establish the fixed graph's descendant conclusion.
+    /// Join the original fixed producer and retain its process-only closure.
+    /// Source and output disposition, journal settlement and refund are separate.
     pub(in crate::adaptive_resources::runtime) async fn join_finite_producer(
         &self,
         owner: &OwnedPreparation,
@@ -339,6 +407,9 @@ impl NodeResourceRuntime {
             }
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
             let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+            if let Some(completion) = finite.completion {
+                return Ok(completion);
+            }
             if role.refunded || (!finite.control.requested() && !finite.task_entered) {
                 return Err(OperationError::State);
             }
@@ -407,16 +478,37 @@ impl NodeResourceRuntime {
         if let Some(error) = first_error {
             return Err(error);
         }
-        Ok(
-            crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion {
-                writer,
-                root_status,
-                parent_sources_closed: role
-                    .sources
-                    .values()
-                    .filter(|source| source.parent_closed())
-                    .count(),
-            },
-        )
+        let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+        let task = task.ok_or(OperationError::State)?;
+        if finite.process_closure.is_none() {
+            // No await or fallible operation separates the original one-shot
+            // witness from installation into this retained runtime owner.
+            finite.process_closure = Some(graph.try_finite_vod_process_closure(task).await?);
+        }
+        let closure = finite
+            .process_closure
+            .as_ref()
+            .ok_or(OperationError::State)?;
+        if !closure.matches(&graph)
+            || closure.task() != task
+            || closure.root_member() != finite.root_member
+            || closure.acquisition_id() != finite.acquisition_id
+            || closure.executable_identity() != finite.command.executable().source_identity()
+            || closure.executable_sha256() != finite.command.executable().sha256()
+            || Some(closure.writer()) != writer
+        {
+            return Err(OperationError::State);
+        }
+        let completion = crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion {
+            writer,
+            root_status,
+            parent_sources_closed: role
+                .sources
+                .values()
+                .filter(|source| source.parent_closed())
+                .count(),
+        };
+        finite.completion = Some(completion);
+        Ok(completion)
     }
 }

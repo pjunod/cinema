@@ -1,7 +1,7 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; compact-retirement host compilation passes, behavioral tests not run.
-**Updated:** 2026-10-22 at committed checkpoint `765179517fd559d2220f4fcff2704b0821fafb55`; compact-retirement source checkpoint described below.
+**Status:** open · implementation incomplete; fixed-executable/retirement host compilation passes, behavioral tests not run.
+**Updated:** 2026-10-22 at published checkpoint `0cdb4c3c609ee347a0291235d52691424213f663`; fixed-executable/process-closure source described below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -26,6 +26,32 @@ Historical M0 proposals and manager direction are kept in the
 acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
+
+The current slice binds the selected executable to a predeclared SourceCell in
+that same reserved role. Its original held descriptor must match scanner/S1,
+SHA-256 and native ELF class/machine checks; launch maps that same object to fd 9
+and executes `/proc/self/fd/9`. Planning metadata alone cannot launch or prove
+closure. The fixed command clears ambient environment and explicitly carries a
+bounded Linux loader path when configured. This currently hashes the held image
+on each start; avoiding repeat reads requires a separately bound cached attestation.
+
+The graph now has a one-shot process-only witness for the trusted fixed software
+AVC profile. It requires the original root wait, writer join and both pipe closes,
+compacts retained diagnostics to a copy-only completion, then disposes the waited
+Child/ChildJob and pidfd registration. Source close audits require that witness
+plus positive original parent close and exact observed/planned copy identities.
+Missing writer registration and unsupported/ambiguous ownership remain held.
+The staged bootstrap transfer validates the full frozen reference and original
+parent/child/publication/sync owners before an infallible move. The private finite
+retirement adapter now installs those same owners in a provisional S runtime slot
+before minting its physical receipt and queuing the original R→S command. Unknown
+results retain full R and the same operation. Only its known-COMMIT capability
+permits one ledger swap and role rebinding. S conservatively retains the whole R
+handle/memory/storage allowance while CPU/process/hardware/tuner become zero.
+There are no native reader owners yet, so this adapter refuses reader-bearing
+snapshots. Ordinary entry, complete quotas, serving, S cleanup and usable capacity
+reuse remain open. Linux-specific source/control bodies still need native compilation.
+
 
 The active harness is connecting the first ordinary finite VOD path. Core exposes
 [`finite_vod`](../../crates/plurx-core/src/adaptive_resources/runtime/finite_vod.rs):
@@ -64,7 +90,7 @@ The core finite-request path requires an immutable `SoftwareAvcCommand` and `Sof
 
 The producer-join slice freezes graph entry while allowing the original writer to finish its admitted publication/sync work. The bundle lock is released before the same writer/root joins; terminal diagnostics stay in the original graph record and callers receive copy-only summaries. Stop intent retains an abort handle for the original task and the original root registration, including stop-before-registration. Existing source/root/publication/sync jobs are joined in place without launching or observing replacement work. After writer/root joins, the same ledger fences fresh entry and positively observed source parents close through their original close jobs. This is producer quiescence, not a physical-close receipt: inherited copies, Linux fixed-image/known-helper conclusion, unobserved partial starts and retained output/reader ownership remain unresolved; R is still charged.
 
-The next slice adds durable output Fence/Freeze only after original producer join, and a full V3 frozen inventory retaining bootstrap lineage, parent entry, child directory, files and readers. Its on-disk transfer reference streams SHA-256 over inventory instead of putting a movie-sized vector into one 64 KiB JSON row. A new proof-bearing journal mutation installs retained S and settles producer R in one SQLite transaction; recovery replays the original immutable R lineage, validates the exact reference, then applies S events after that transfer boundary. Adopted output is read-only and reader cost growth is checked against the same stored S resources. A separate ledger primitive preserves full R during preparation and replaces R with S under one lock only with the original post-COMMIT capability. Native publication now records a single positive writable-file close before releasing its held directory or payload; close failure/unknown stays charged without retry. These components are not yet connected to a production retirement owner: no supported fixed-process/source proof is minted, no S native owner is installed in the runtime, and ordinary serving/cleanup/reuse remains open. Complete native/index/runtime memory accounting is still required before such proof and cost release.
+The next slice adds durable output Fence/Freeze only after original producer join, and a full V3 frozen inventory retaining bootstrap lineage, parent entry, child directory, files and readers. Its on-disk transfer reference streams SHA-256 over inventory instead of putting a movie-sized vector into one 64 KiB JSON row. A new proof-bearing journal mutation installs retained S and settles producer R in one SQLite transaction; recovery replays the original immutable R lineage, validates the exact reference, then applies S events after that transfer boundary. Adopted output is read-only and reader cost growth is checked against the same stored S resources. A separate ledger primitive preserves full R during preparation and replaces R with S under one lock only with the original post-COMMIT capability. Native publication now records a single positive writable-file close before releasing its held directory or payload; close failure/unknown stays charged without retry. The current private finite adapter connects those components to original fixed-process/source closure and a provisional same-native S owner, as described above; ordinary serving/cleanup/reuse remains open. Complete native/index/runtime memory accounting is still required before such proof and cost release.
 
 This is still runtime composition, not ordinary request closure. Ordinary
 `build_rendition_with_storage` still uses legacy admission; the production
@@ -76,8 +102,21 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `765179517fd559d2220f4fcff2704b0821fafb55`.
-The compact-retirement source passed pinned Rust 1.97.1 host core+daemon all-target compilation in 140.016s (EXIT 0, stable hashes), `direct-check-20261022-200521.json`, log SHA-256 `c93c6f5efe5bf1b2d3d92c9d397d7fa585a70f35ce01582bda1e2bf53d10c227`. Static inspection then corrected only test fixture lifecycle ordering and active-only recovery expectations; final affected core all-target compilation passed in 48.994s (stable hashes), `direct-check-20261022-200927.json`, log SHA-256 `af388b37fe185eacd5ab41e5b07dfffe24489a375866cf266dc289f8b8b53c4d`. Compilation does not establish strict Clippy. The candidate has 374 unique regression anchors; the durable new list has 67. Host-eligible retirement/replay/accounting/reader/close cases compiled, NOT RUN. Linux-only source-parent/control bodies were not host-compiled. Current native Linux/Windows compilation, final independent review, qualification, fast lane, merge and restart/behavior evidence remain open. Production native/S-owner transfer, whole source closure, ordinary admission/terminal integration, actual serving leases and exact cleanup/reuse remain unwired. Native/index/runtime/journal memory is not an end-to-end bound. The descriptor helper transient peak is `3N + 1` for N distinct source mappings; standard spawn pipe/error-pipe overhead remains unestablished.
+The latest published base is `0cdb4c3c609ee347a0291235d52691424213f663`.
+The fixed-executable/native-transfer/runtime-retirement slice passed pinned Rust
+1.97.1 host core+daemon all-target compilation in 115.583s (EXIT 0, stable hashes),
+`direct-check-20261022-204423.json`, log SHA-256
+`4da8698c3406ba301475c2e9c563985decf93c2ae176856dd49571340ae99349`.
+Earlier compile attempts exposed a visibility error, stale fixture call and missing
+import; those were fixed before this pass. The candidate has 382 unique regression
+anchors; the durable new list has 75. Authored regressions are NOT RUN; Linux-only
+fixtures/native bodies were not host-compiled. Compilation does not establish
+strict Clippy. Current native Linux/Windows compilation, final independent review,
+qualification/fast lane, merge and restart/behavior evidence remain open. Ordinary
+admission/terminal integration, actual serving leases and exact cleanup/reuse remain
+unwired. Native/index/runtime/journal memory is not an end-to-end bound. The child
+descriptor helper transient peak is `3N + 1` for N distinct source mappings; the
+combined parent/child standard spawn pipe/error-pipe peak remains unestablished.
 
 ## Current source and compiler receipt
 

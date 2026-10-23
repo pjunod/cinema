@@ -23,6 +23,21 @@ struct SyncResult {
     result: std::io::Result<()>,
 }
 impl Sync {
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn ready_for_transfer(
+        &self,
+    ) -> bool {
+        self.acknowledged
+            && self.pending.is_none()
+            && !self.failed_join
+            && self.result.as_ref().is_some_and(|result| {
+                result.result.is_ok()
+                    && result.native.entered()
+                    && result.native.completed()
+                    && result.native.current_file().is_none()
+                    && !result.native.has_held_directory()
+            })
+    }
+
     fn launch(
         &mut self,
         root: &mut RootCell,

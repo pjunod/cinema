@@ -2,24 +2,37 @@
 //! reads the original root pipes. These fixtures cover that latch only; they
 //! are not journal or native-output qualification.
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::adaptive_resources::physical_graph::OwnedPhysicalGraph;
+#[cfg(target_os = "linux")]
 use crate::adaptive_resources::runtime::{daemon_owner, DurableArm, NodeResourceRuntime};
+#[cfg(target_os = "linux")]
 use crate::adaptive_resources::{
     FamilyDemand, FamilyRole, FamilyRoleDemand, Metric, ResourceLedger, ResourceVector,
     WorkloadDemand,
 };
+#[cfg(target_os = "linux")]
 use crate::fmp4::{CutPolicy, FiniteSegmenterLimits, FragmentReaderBounds, MergeMemoryLimits};
+#[cfg(target_os = "linux")]
 use crate::process::ChildWork;
+#[cfg(target_os = "linux")]
 use crate::resource_custody::{
     Adapter, DaemonLockGuard, InstallationContext, MemberKind, OpenOptions, PlannedMember,
     RecoveryMethod,
 };
+#[cfg(target_os = "linux")]
 use crate::segplan::{PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SEGPLAN_VERSION};
+#[cfg(target_os = "linux")]
 use crate::vod_generation::GenerationMemoryLimits;
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
+#[cfg(target_os = "linux")]
 use tokio::sync::mpsc;
 
+#[cfg(target_os = "linux")]
 fn resources() -> ResourceVector {
     ResourceVector {
         cpu_ns_per_second: 1_000_000,
@@ -32,10 +45,12 @@ fn resources() -> ResourceVector {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(30)
 }
 
+#[cfg(target_os = "linux")]
 fn runtime(root: &std::path::Path) -> Arc<NodeResourceRuntime> {
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -62,6 +77,7 @@ fn runtime(root: &std::path::Path) -> Arc<NodeResourceRuntime> {
     runtime
 }
 
+#[cfg(target_os = "linux")]
 fn preparation(runtime: &NodeResourceRuntime) -> super::super::operations::OwnedPreparation {
     let demand = WorkloadDemand {
         resources: Metric::Known(resources()),
@@ -103,6 +119,7 @@ fn preparation(runtime: &NodeResourceRuntime) -> super::super::operations::Owned
         .expect("actual preparation owner")
 }
 
+#[cfg(target_os = "linux")]
 fn pump_plan() -> SoftwareAvcPumpPlan {
     let grid = crate::transcode::VodFrameGrid::new(24_000, 1).expect("canonical grid");
     let plan = SegmentPlan {
@@ -157,6 +174,7 @@ fn pump_plan() -> SoftwareAvcPumpPlan {
     .expect("bounded pump plan")
 }
 
+#[cfg(target_os = "linux")]
 fn graph() -> (
     ResourceLedger,
     crate::adaptive_resources::ReservationBinding,
@@ -177,9 +195,18 @@ fn graph() -> (
     (ledger, binding, graph, cleanup)
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn finite_software_writer_waits_for_original_start_sender_before_reading() {
-    let runtime_dir = tempfile::tempdir().expect("runtime fixture");
+    use sha2::Digest;
+
+    let fixture_parent =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/finite-vod-fixtures");
+    std::fs::create_dir_all(&fixture_parent).expect("repo-local fixture parent");
+    let runtime_dir = tempfile::Builder::new()
+        .prefix("start-latch-")
+        .tempdir_in(&fixture_parent)
+        .expect("runtime fixture");
     let output_path = runtime_dir.path().join("not-opened-before-start");
     let runtime = runtime(runtime_dir.path());
     let preparation = preparation(&runtime);
@@ -207,12 +234,37 @@ async fn finite_software_writer_waits_for_original_start_sender_before_reading()
         .await
         .expect("actual child root");
     let arm = DurableArm::adapter_fixture(binding, graph.identity().generation);
+    let root_member = Uuid::new_v4();
+    let task_member = Uuid::new_v4();
+    let acquisition_id = Uuid::new_v4();
+    let executable = std::fs::read("/bin/true").expect("fixture ELF bytes");
+    assert_eq!(&executable[..4], b"\x7fELF");
+    let digest: [u8; 32] = sha2::Sha256::digest(&executable).into();
+    let identity = crate::source_identity::SourceIdentity::from_metadata(
+        &std::fs::metadata("/bin/true").expect("fixture ELF metadata"),
+    );
+    // Fixture metadata only: this latch test never asks for a close witness.
+    let mut fixed_image = Some(
+        crate::adaptive_resources::physical_graph::finite_vod::FiniteFixedImage::from_verified_source(
+            root_member, task_member, acquisition_id, identity, digest, true,
+        )
+        .expect("fixture fixed image"),
+    );
     let mut retained_pump = Some(pump);
     let (task, _abort) = graph
-        .spawn_durable_finite_vod(root, Uuid::new_v4(), arm, &mut retained_pump)
+        .spawn_durable_finite_vod(
+            root,
+            root_member,
+            task_member,
+            acquisition_id,
+            arm,
+            &mut retained_pump,
+            &mut fixed_image,
+        )
         .await
         .expect("retain concrete finite pump task");
     assert!(retained_pump.is_none());
+    assert!(fixed_image.is_none());
     let start = graph
         .take_finite_vod_start(task)
         .await

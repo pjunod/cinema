@@ -25,6 +25,58 @@ struct RootResult {
     audit: BootstrapResultV1,
 }
 impl RootCell {
+    pub(super) fn retained_child_ready(
+        &self,
+        expected_directories: &[v2::scratch::DirectoryObservedV1],
+    ) -> bool {
+        if self.pending.is_some() || self.failed_join {
+            return false;
+        }
+        let Some(result) = self.result.as_ref() else {
+            return false;
+        };
+        if expected_directories.is_empty()
+            || result.audit.outcome != v2::scratch::NativeOutcomeV1::Completed
+            || result.audit.inventory != InventoryCertainty::Exact
+            || result.audit.acquired.as_ref() != expected_directories.last()
+        {
+            return false;
+        }
+        let copies: Vec<_> = expected_directories
+            .iter()
+            .flat_map(|directory| directory.held_copy_ids.iter().copied())
+            .collect();
+        if copies
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != copies.len()
+            || result.files.len() != copies.len()
+        {
+            return false;
+        }
+        expected_directories.iter().all(|directory| {
+            directory.held_copy_ids.iter().all(|copy| {
+                let Some(file) = result.files.get(copy) else {
+                    return false;
+                };
+                file.metadata().is_ok_and(|metadata| {
+                    metadata.is_dir()
+                        && directory.native_object.file_type == v2::FileType::Directory
+                        && directory.native_object.device
+                            == (v2::NativeValue::Known {
+                                value: metadata.dev(),
+                            })
+                        && directory.native_object.inode
+                            == (v2::NativeValue::Known {
+                                value: metadata.ino(),
+                            })
+                        && directory.native_object.mount_id == steps::mount_id(file)
+                })
+            })
+        })
+    }
+
     fn launch(
         domain: v2::FilesystemDomain,
         io: v2::Id,

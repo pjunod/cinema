@@ -23,7 +23,7 @@ const ENV_ENTRY_LIMIT: usize = 32;
 /// Immutable argv and child configuration for the fixed ordinary AVC pump.
 /// This owns only planning data; it holds no source descriptor or child proof.
 pub struct SoftwareAvcCommand {
-    program: PathBuf,
+    executable: super::SoftwareAvcExecutable,
     source_path: PathBuf,
     source_id: i64,
     scanner_size: i64,
@@ -46,7 +46,7 @@ impl SoftwareAvcCommand {
         duration_seconds: f64,
         reorder: bool,
         source_clock: VodSourceClock,
-        program: PathBuf,
+        executable: super::SoftwareAvcExecutable,
         env: Vec<(OsString, OsString)>,
         runtime_cache: PathBuf,
     ) -> io::Result<Self> {
@@ -58,7 +58,7 @@ impl SoftwareAvcCommand {
                 "execution source does not match the planned source",
             ));
         }
-        if !program.is_absolute() || bounded_path_len(&program)? == 0 {
+        if !executable.path().is_absolute() || bounded_path_len(executable.path())? == 0 {
             return Err(invalid("program path must be absolute and bounded"));
         }
         if !runtime_cache.is_absolute() || bounded_path_len(&runtime_cache)? == 0 {
@@ -141,7 +141,7 @@ impl SoftwareAvcCommand {
             return Err(invalid("recipe input count differs from held source facts"));
         }
         let command = Self {
-            program,
+            executable,
             source_path: source.path.clone(),
             source_id: source.id,
             scanner_size: source.size,
@@ -175,8 +175,14 @@ impl SoftwareAvcCommand {
             && source.scanner_mtime == self.scanner_mtime
     }
 
-    pub(in crate::adaptive_resources::runtime) fn program(&self) -> &PathBuf {
-        &self.program
+    pub(in crate::adaptive_resources::runtime) fn program(&self) -> &std::path::Path {
+        self.executable.path()
+    }
+
+    pub(in crate::adaptive_resources::runtime) fn executable(
+        &self,
+    ) -> &super::SoftwareAvcExecutable {
+        &self.executable
     }
 
     pub(in crate::adaptive_resources::runtime) fn args(&self) -> &[String] {
@@ -201,7 +207,7 @@ impl SoftwareAvcCommand {
         &self,
     ) -> io::Result<usize> {
         let mut total = size_of::<Self>()
-            .checked_add(self.program.capacity())
+            .checked_add(self.executable.resident_memory_bytes()?)
             .and_then(|n| n.checked_add(self.source_path.capacity()))
             .and_then(|n| n.checked_add(self.runtime_cache.capacity()))
             .and_then(|n| n.checked_add(self.args.capacity().checked_mul(size_of::<String>())?))
@@ -248,8 +254,59 @@ fn validate_env(env: &[(OsString, OsString)]) -> io::Result<()> {
         if key_len == 0 || key_text.contains('=') || value > ITEM_LIMIT {
             return Err(invalid("child environment entry exceeds its bound"));
         }
+        let fixed_recipe_key = matches!(
+            key_text.as_ref(),
+            "FONTCONFIG_FILE" | "FONTCONFIG_PATH" | "FONTCONFIG_SYSROOT"
+        );
+        #[cfg(target_os = "linux")]
+        let fixed_recipe_key = fixed_recipe_key || key_text == "LD_LIBRARY_PATH";
+        if !fixed_recipe_key {
+            return Err(invalid(
+                "environment key is outside the fixed software recipe",
+            ));
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_environment_accepts_bounded_loader_and_font_entries() {
+        let env = vec![
+            (
+                OsString::from("LD_LIBRARY_PATH"),
+                OsString::from("/opt/ffmpeg/lib"),
+            ),
+            (
+                OsString::from("FONTCONFIG_FILE"),
+                OsString::from("/etc/fonts/fonts.conf"),
+            ),
+        ];
+        assert!(validate_env(&env).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finite_environment_rejects_unbounded_or_unapproved_entries() {
+        let too_long = vec![(
+            OsString::from("LD_LIBRARY_PATH"),
+            OsString::from("x".repeat(ITEM_LIMIT + 1)),
+        )];
+        assert!(validate_env(&too_long).is_err());
+
+        let unapproved = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
+        assert!(validate_env(&unapproved).is_err());
+
+        let nul_value = vec![(
+            OsString::from("LD_LIBRARY_PATH"),
+            OsString::from("/opt/ffmpeg\0/lib"),
+        )];
+        assert!(validate_env(&nul_value).is_err());
+    }
 }
 
 fn os_len(value: &OsStr) -> io::Result<usize> {

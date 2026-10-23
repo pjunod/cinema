@@ -3,10 +3,88 @@
 //! private to this counted custodian. It is neither cloneable nor deserializable.
 use super::*;
 use crate::source_identity::SourceIdentity;
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use tokio::task::JoinHandle;
+
+pub(in crate::adaptive_resources::runtime) fn executable_recipe_binding(
+    digest: &[u8; 32],
+) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    format!("software-avc-executable-sha256:{encoded}")
+}
+
+const EXECUTABLE_RECIPE_PREFIX: &str = "software-avc-executable-sha256:";
+
+fn digest_binding_matches(binding: &str, expected: Option<[u8; 32]>) -> bool {
+    match expected {
+        Some(digest) => binding == executable_recipe_binding(&digest),
+        None => !binding.starts_with(EXECUTABLE_RECIPE_PREFIX),
+    }
+}
+
+fn is_native_elf(file: &File, len: u64) -> bool {
+    if len < 20 {
+        return false;
+    }
+    let mut header = [0u8; 20];
+    let mut offset = 0usize;
+    while offset < header.len() {
+        let Ok(read) = file.read_at(&mut header[offset..], offset as u64) else {
+            return false;
+        };
+        if read == 0 {
+            return false;
+        }
+        offset += read;
+    }
+    if &header[..4] != b"\x7fELF"
+        || header[6] != 1
+        || header[5] != if cfg!(target_endian = "little") { 1 } else { 2 }
+        || header[4]
+            != if cfg!(target_pointer_width = "64") {
+                2
+            } else {
+                1
+            }
+    {
+        return false;
+    }
+    let u16_at = |bytes: [u8; 2]| {
+        if cfg!(target_endian = "little") {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        }
+    };
+    let file_type = u16_at([header[16], header[17]]);
+    let machine = u16_at([header[18], header[19]]);
+    let native_machine = if cfg!(target_arch = "x86_64") {
+        62
+    } else if cfg!(target_arch = "aarch64") {
+        183
+    } else if cfg!(target_arch = "x86") {
+        3
+    } else if cfg!(target_arch = "arm") {
+        40
+    } else if cfg!(target_arch = "riscv64") {
+        243
+    } else if cfg!(target_arch = "s390x") {
+        22
+    } else if cfg!(target_arch = "powerpc64") {
+        21
+    } else {
+        return false;
+    };
+    matches!(file_type, 2 | 3) && machine == native_machine
+}
 
 pub struct RetainedSourceLease {
     file: Arc<File>,
@@ -23,6 +101,7 @@ pub(crate) struct SourceOpenSpec {
     pub path: PathBuf,
     pub scanner_size: i64,
     pub scanner_mtime: i64,
+    pub expected_sha256: Option<[u8; 32]>,
 }
 
 pub(super) struct SourceCell {
@@ -69,10 +148,14 @@ pub(super) struct InheritedSource {
     pub observation_id: Uuid,
     pub envelope: v2::Envelope,
     pub acknowledged: bool,
+    pub verified_sha256: Option<[u8; 32]>,
+    pub verified_elf: bool,
 }
 struct SourceResult {
     file: Option<Arc<File>>,
     observed: Option<v2::SourceObserved>,
+    verified_sha256: Option<[u8; 32]>,
+    verified_elf: bool,
 }
 impl SourceCell {
     /// Await only the original source-open worker if it was registered. The
@@ -120,6 +203,8 @@ impl SourceCell {
                 return SourceResult {
                     file: None,
                     observed: None,
+                    verified_sha256: None,
+                    verified_elf: false,
                 };
             }
             open_source(spec, plan)
@@ -132,6 +217,8 @@ fn open_source(spec: SourceOpenSpec, plan: v2::SourcePlan) -> SourceResult {
     let mut result = SourceResult {
         file: None,
         observed: None,
+        verified_sha256: None,
+        verified_elf: false,
     };
     // No source path is opened unless the exact current domain is observed in
     // this original, registered native job. Domain equality is not restart proof.
@@ -139,6 +226,15 @@ fn open_source(spec: SourceOpenSpec, plan: v2::SourcePlan) -> SourceResult {
         matches!(plan.filesystem_domain.mount_namespace,
             v2::NativeValue::Known { value } if value == m.ino())
     }) {
+        return result;
+    }
+    if !digest_binding_matches(
+        &plan.source_association.recipe_source_binding,
+        spec.expected_sha256,
+    ) {
+        return result;
+    }
+    if spec.expected_sha256.is_some() && !(1..=512 * 1024 * 1024).contains(&spec.scanner_size) {
         return result;
     }
     let Ok(file) = crate::fs_secure::open_read_nofollow_blocking(&spec.path) else {
@@ -157,6 +253,36 @@ fn open_source(spec: SourceOpenSpec, plan: v2::SourcePlan) -> SourceResult {
             != plan.source_association.object_version
     {
         return result;
+    }
+    if let Some(expected) = spec.expected_sha256 {
+        if !is_native_elf(file, metadata.len()) {
+            return result;
+        }
+        let before = SourceIdentity::from_metadata(&metadata);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut offset = 0u64;
+        while offset < metadata.len() {
+            let wanted = ((metadata.len() - offset).min(buffer.len() as u64)) as usize;
+            let Ok(read) = file.read_at(&mut buffer[..wanted], offset) else {
+                return result;
+            };
+            if read == 0 {
+                return result;
+            }
+            hasher.update(&buffer[..read]);
+            offset += read as u64;
+        }
+        let Ok(after_metadata) = file.metadata() else {
+            return result;
+        };
+        let after = SourceIdentity::from_metadata(&after_metadata);
+        let digest: [u8; 32] = hasher.finalize().into();
+        if before != after || digest != expected {
+            return result;
+        }
+        result.verified_sha256 = Some(digest);
+        result.verified_elf = true;
     }
     result.observed = Some(v2::SourceObserved {
         version: 1,
@@ -201,6 +327,8 @@ impl NodeResourceRuntime {
             || spec.scanner_size < 0
             || !spec.path.is_absolute()
             || spec.path.as_os_str().len() > 4096
+            || (spec.expected_sha256.is_some()
+                && !(1..=512 * 1024 * 1024).contains(&spec.scanner_size))
         {
             return Err(OperationError::State);
         }
@@ -233,6 +361,10 @@ impl NodeResourceRuntime {
             || source.filesystem_domain.daemon_owner_id.uuid() != self.owner.owner_id
             || source.filesystem_domain.os_boot != self.owner.os_boot
             || !matches!(self.owner.os_boot, BootIdentity::Known { .. })
+            || !digest_binding_matches(
+                &source.source_association.recipe_source_binding,
+                spec.expected_sha256,
+            )
         {
             return Err(OperationError::State);
         }
@@ -499,6 +631,8 @@ impl SourceCell {
                 observed: Some(v2::Observed::SourceV1 { source: observed }),
             },
             acknowledged: self.root_observed_committed,
+            verified_sha256: result.verified_sha256,
+            verified_elf: result.verified_elf,
         })
     }
 
@@ -601,6 +735,105 @@ impl SourceCell {
 
     pub(super) fn parent_close_operation_id(&self) -> Uuid {
         self.parent_close_operation_id
+    }
+
+    /// Derive the source-member close audit only after this cell's original
+    /// descriptor close and the graph's exact finite-process closure succeed.
+    /// This records those facts; it does not grant a transfer or refund.
+    pub(in crate::adaptive_resources::runtime) fn finite_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodProcessClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        if !self.parent_closed()
+            || self.pending.is_some()
+            || self.spec.is_some()
+            || self.failed_join
+            || self.lease_issued
+            || !self.observed_committed
+            || !self.root_observed_committed
+            || self.selected_root_member != Some(closure.root_member())
+            || self.pending_root.is_some()
+        {
+            return Err(OperationError::State);
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        if result.file.is_some() {
+            return Err(OperationError::State);
+        }
+        let observed = result.observed.as_ref().ok_or(OperationError::State)?;
+        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        let planned_graph = match &plan.recovery {
+            v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
+        };
+        if closure.generation() != planned_graph.uuid()
+            || observed.version != 1
+            || observed.holder_id != plan.holder_id
+            || observed.member_id != plan.member_id
+            || observed.source_association != plan.source_association
+            || observed.access != v2::SourceAccess::ReadOnlyRegular
+            || plan.planned_copies.len() != 2
+            || observed.copies != plan.planned_copies
+        {
+            return Err(OperationError::State);
+        }
+
+        let mut source_copies = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner,
+                v2::CopyOwner::DaemonSourceCell { owner_id, graph_id, member_id }
+                    if owner_id == plan.filesystem_domain.daemon_owner_id
+                        && graph_id == planned_graph
+                        && member_id == plan.member_id)
+        });
+        let source_copy = source_copies.next().ok_or(OperationError::State)?;
+        if source_copies.next().is_some()
+            || source_copy.parent_copy_id.is_some()
+            || source_copy.acquisition_operation_id != self.acquisition_id
+        {
+            return Err(OperationError::State);
+        }
+
+        let mut root_copies = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner,
+                v2::CopyOwner::OwnedRoot { graph_id, root_member_id }
+                    if graph_id == planned_graph
+                        && root_member_id.uuid() == closure.root_member())
+        });
+        let root_copy = root_copies.next().ok_or(OperationError::State)?;
+        if root_copies.next().is_some()
+            || root_copy.parent_copy_id != Some(source_copy.copy_id)
+            || root_copy.acquisition_operation_id.uuid() != closure.acquisition_id()
+        {
+            return Err(OperationError::State);
+        }
+
+        let source_close = v2::Id::new(self.parent_close_operation_id)?;
+        let root_close = v2::Id::new(closure.close_operation_id())?;
+        if source_close == root_close {
+            return Err(OperationError::State);
+        }
+        let copies = plan
+            .planned_copies
+            .iter()
+            .map(|copy| {
+                let operation_id = if copy == source_copy {
+                    source_close
+                } else if copy == root_copy {
+                    root_close
+                } else {
+                    return Err(OperationError::State);
+                };
+                Ok(v2::CopyClosed::ActualOwnedClose {
+                    copy: copy.clone(),
+                    operation_id,
+                })
+            })
+            .collect::<Result<Vec<_>, OperationError>>()?;
+        Ok(v2::ClosedFact::SourceV1 {
+            holder_id: plan.holder_id,
+            copies,
+        })
     }
 }
 

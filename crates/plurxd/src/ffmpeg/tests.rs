@@ -1,3 +1,54 @@
+#[cfg(unix)]
+#[test]
+fn cached_executable_identity_becomes_a_finite_planning_value() {
+    use super::*;
+
+    let executable = EncodedExecutable {
+        path: std::path::PathBuf::from("/usr/bin/ffmpeg"),
+        digest: "ab".repeat(32),
+        object_version: "1:2:4096:10:11:12:13".to_owned(),
+        linux_binding: None,
+    };
+
+    let plan = executable.finite_software_plan().unwrap();
+    assert_eq!(plan.path(), std::path::Path::new("/usr/bin/ffmpeg"));
+    assert_eq!(
+        plan.source_identity(),
+        plurx_core::source_identity::SourceIdentity::from_fields(1, 2, 4096, 10, 11, 12, 13)
+    );
+    assert_eq!(plan.sha256(), [0xab; 32]);
+}
+
+#[cfg(unix)]
+#[test]
+fn malformed_cached_executable_identity_is_refused() {
+    use super::*;
+
+    let executable = EncodedExecutable {
+        path: std::path::PathBuf::from("/usr/bin/ffmpeg"),
+        digest: "ab".repeat(32),
+        object_version: "1:2:4096:10:11:12:13:extra".to_owned(),
+        linux_binding: None,
+    };
+
+    assert!(executable.finite_software_plan().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn finite_loader_environment_is_optional_and_bounded() {
+    use super::*;
+
+    assert!(finite_loader_environment(None).unwrap().is_empty());
+    assert_eq!(
+        finite_loader_environment(Some(std::ffi::OsString::from("/opt/ffmpeg/lib"))).unwrap(),
+        vec![("LD_LIBRARY_PATH".to_owned(), "/opt/ffmpeg/lib".to_owned())]
+    );
+    let too_long = Some(std::ffi::OsString::from("x".repeat(4097)));
+    assert!(finite_loader_environment(too_long).is_err());
+    assert!(finite_loader_environment(Some(std::ffi::OsString::from("/opt/lib\0/bad"))).is_err());
+}
+
 #[test]
 fn dovi_reshape_pairing_proof_uses_a_delivery_raster_every_encoder_accepts() {
     use super::*;

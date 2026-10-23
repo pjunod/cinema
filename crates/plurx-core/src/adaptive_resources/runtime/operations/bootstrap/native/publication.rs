@@ -31,6 +31,20 @@ impl Publication {
     pub(super) fn acknowledged(&self) -> bool {
         self.acknowledged
     }
+    pub(in crate::adaptive_resources::runtime::operations::bootstrap) fn ready_for_transfer(
+        &self,
+    ) -> bool {
+        self.acknowledged
+            && self.pending.is_none()
+            && !self.failed_join
+            && self.result.as_ref().is_some_and(|result| {
+                result.result.is_ok()
+                    && result.native.entered()
+                    && result.native.published()
+                    && !result.native.has_unresolved_object()
+                    && !result.native.has_held_directory()
+            })
+    }
     /// Await only this cell's original registered worker. Preserve both the
     /// native object and its I/O result for the ordinary Observe path.
     pub(in crate::adaptive_resources::runtime::operations::bootstrap) async fn join_registered(

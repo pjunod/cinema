@@ -19,6 +19,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 mod bootstrap;
 #[cfg(unix)]
+pub(super) mod finite_retirement;
+#[cfg(unix)]
 mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
@@ -81,6 +83,8 @@ struct OwnedRole {
     sources: BTreeMap<Uuid, source_files::SourceCell>,
     #[cfg(unix)]
     finite_vod: Option<finite_vod::FiniteLaunch>,
+    #[cfg(unix)]
+    retirement: Option<finite_retirement::FiniteRetirement>,
     armed: BTreeSet<Uuid>,
     invoked: BTreeSet<Uuid>,
     roots: BTreeMap<Uuid, GraphRoot>,
@@ -486,6 +490,8 @@ impl NodeResourceRuntime {
                 sources: BTreeMap::new(),
                 #[cfg(unix)]
                 finite_vod: None,
+                #[cfg(unix)]
+                retirement: None,
                 armed: BTreeSet::new(),
                 invoked: BTreeSet::new(),
                 roots: BTreeMap::new(),

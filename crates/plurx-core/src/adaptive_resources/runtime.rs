@@ -23,6 +23,8 @@ use crate::resource_custody::{
 pub mod finite_vod;
 mod operations;
 #[cfg(unix)]
+pub(super) use operations::finite_retirement::FiniteRetirementClosure;
+#[cfg(unix)]
 pub use operations::source_files::RetainedSourceLease;
 
 /// Nonclone, nonserde, same-live-operation acquisition capability. Only the

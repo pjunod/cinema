@@ -425,6 +425,86 @@ static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<Executab
     std::sync::OnceLock::new();
 
 impl EncodedExecutable {
+    /// Convert cached executable metadata into a finite-VOD planning value.
+    /// This does not open or attest the path; the prearmed source cell later
+    /// verifies the exact held file against this identity and digest.
+    #[cfg(unix)]
+    pub(crate) fn finite_software_plan(
+        &self,
+    ) -> Result<plurx_core::adaptive_resources::runtime::finite_vod::SoftwareAvcExecutable, String>
+    {
+        use plurx_core::source_identity::SourceIdentity;
+
+        // Seven bounded decimal fields fit in at most 146 bytes, including
+        // separators and the sign on the two signed timestamps.
+        if self.object_version.len() > 146 {
+            return Err("invalid cached executable object version".to_owned());
+        }
+        let mut fields = self.object_version.split(':');
+        let dev = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<u64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        let ino = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<u64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        let size = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<u64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        let mtime = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<i64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        let mtime_nsec = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<i64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        let ctime = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<i64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        let ctime_nsec = fields
+            .next()
+            .ok_or("invalid cached executable object version")?
+            .parse::<i64>()
+            .map_err(|_| "invalid cached executable object version")?;
+        if fields.next().is_some() {
+            return Err("invalid cached executable object version".to_owned());
+        }
+
+        let identity =
+            SourceIdentity::from_fields(dev, ino, size, mtime, mtime_nsec, ctime, ctime_nsec);
+        plurx_core::adaptive_resources::runtime::finite_vod::SoftwareAvcExecutable::new(
+            self.path.clone(),
+            identity,
+            &self.digest,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Capture only the loader path needed by the selected software binary.
+    /// The finite child starts from an empty environment, so callers must add
+    /// this bounded planning value explicitly instead of inheriting process
+    /// state at spawn time.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_software_loader_env(&self) -> std::io::Result<Vec<(String, String)>> {
+        if !self.path.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "selected FFmpeg path is not absolute",
+            ));
+        }
+        finite_loader_environment(std::env::var_os("LD_LIBRARY_PATH"))
+    }
+
     /// A selected Mac graph belongs to the implementation frozen in its plan.
     /// Ordinary plans retain their existing executable-selection behavior.
     pub(crate) fn matches_macos_plan(
@@ -597,6 +677,28 @@ impl EncodedExecutable {
     pub fn attestation_object(&self) -> (std::path::PathBuf, String) {
         (self.path.clone(), self.object_version.clone())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn finite_loader_environment(
+    value: Option<std::ffi::OsString>,
+) -> std::io::Result<Vec<(String, String)>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.into_string().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "LD_LIBRARY_PATH is not valid UTF-8",
+        )
+    })?;
+    if value.len() > 4096 || value.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "LD_LIBRARY_PATH exceeds its bound",
+        ));
+    }
+    Ok(vec![("LD_LIBRARY_PATH".to_owned(), value)])
 }
 
 /// The executable and first line it reports from `-version`.
