@@ -10,47 +10,52 @@ execution instructions. No benchmark savings are established.
 
 ## Current work — frozen comparative study continuation
 
-Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`.
-Its final fast lane passed and the merge tree matched the qualified candidate;
-the earlier pre-publication evidence below is retained as historical scope.
-The current agent-owned branch is `codex/knowledge-efficiency-study`.
-The study itself retains source `168fe74fb` and all twelve sealed cases.
+Pilot PR #1256 landed as `92b259b257cc9abd7d764e78c7b4fff9dd7a0445`. The
+source-only implementation checkpoint is
+`de7ce78ef671338eb8744cf4e20035a2ce963542`, tree
+`bf962c9dfba269637badd5d0c8338b547031bdd8`. The new source is not
+independently reviewed, environment-admitted or CI-qualified.
 
-The generic paired Python/Rust runtime and common Ripwire implementation are
-complete. Actual Astra R5 approved the exact 46 execution inputs at
-`9afea577e`; the focused profile check and required CI passed, including Rust
-and Main promotion. The first private qualification measured a 4 GiB compiler
-OOM before any model calls; common Rust debug-symbol defaults now preserve
-explicit frozen overrides and await fresh qualification. The two affected
-OCI controls then refused because the pinned images were absent, before any
-container execution. A newly identified environment has been recreated from
-recorded public inputs and the unchanged verified crate cache; its admission
-pin and environment now have actual Astra R6 approval and two passing actual
-OCI controls. Current CI retained all 2,111 Python passes, then refused before
-compilation at a runner disk guard. A bounded online disk increase preserved
-all cache/work state and restored headroom; a fresh required run is next.
-The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md#pre-answer-environment-recreation--explicit-new-identity)
-records exact replacement identities and the limit of historical provenance.
-Fresh CI preserves valid authenticated per-test successes; job reruns are
-refused by policy.
+Published PR #1262 remains at B8, b8df5282d435b687a708230c7e58d7e62e319cde.
+Required CI 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
+(2,147 retained plus 26 new retirement checks), two expected opt-in OCI skips
+and zero fixture errors. Do not apply those results to the new local head.
+Astra R10 approved only the prior exact 46 production execution buffers;
+the B8 fixture-prefix correction has a separate narrow Luna review. Neither
+review approves the integrated native filesystem source.
 
-Sol 6.1 owns runtime repairs and focused CI diagnosis; custodian C owns private
-staging/scoring. The integrator owns publication and the live ledger. Private qualification has not completed; no model study or token-count
-call has run.
-Gold stays outside builder, reviewer and record-author contexts.
+The new route contains six production and five test files with 14 new cases:
+13 in new test files and one host-checkpoint regression in the existing
+retirement module. Two existing actual OCI controls and one compatibility
+selector are affected. No changed check has run on this head. The integrator
+verified 37 modules, 11 assets and 48 host buffers; independent review and
+exact environment admission remain pending. The guest pack is limited to its
+seven-module helper closure and excludes provider/launcher modules and
+credentials. Outer entry/provider bytes are unchanged; runtime.native_store
+adds metadata only.
 
-The [study companion](ENGINEERING-KNOWLEDGE-EFFICIENCY-STUDY.md) records the
-pre-answer descriptive documentation metric. Independent audit/sealing,
-completed-source adversarial review, one affected check batch and runtime
-qualification precede calibration and 108 solver/216 blind scorer contexts.
-No savings claim follows from prerequisite implementation alone.
+Separate host- and guest-origin unlink contrasts left a visible Apple
+Virtualization descriptor holding the deleted 4 MiB inode while the VM ran.
+Guest unlink reached link count zero. After VM stop, before unmount, each
+trial had recovered 4,194,304 bytes versus its during-write sample and
+4,177,920 bytes versus its last pre-stop sample. Unattributed baseline
+residuals were 16,384 and 4,096 bytes respectively. This does not establish
+an exclusive retainer or full-study capacity fit.
+The original fixed 36 GiB APFS volume is physically reserved and the prior thin
+backing remains offline. The distinct native-guest disk/configuration
+operation is prepared but normal review rejected it before execution; exact
+human consent is pending. Astra R12's private review payload and destination
+consent is separately pending; no R12 card was dispatched. No alternate route
+was used.
 
-The secondary documentation reference packet and policy now have independent
-approval: twelve cases, 32 role units, two undefined empty denominators and
-zero open audit findings. All 626 locked dependencies have verified archive
-checksums and a dependency-only immutable image. Operational source review,
-runtime acceptance, calibrated budget and comparison execution remain open;
-no count or study inference calls have run.
+The earlier Rust qualification's exact cause remains unknown because its
+streams were discarded. A separate 4 GiB diagnostic confirmed OOM with debug
+symbols disabled and one Cargo job; it does not attribute the prior failure.
+Full-study fit and runtime acceptance remain unproven. The frozen 3,000,000-
+token ceiling, 108 solver contexts, 216 blind-scorer contexts, cases and
+scoring rules are unchanged. Calibration/count/inference/solver/scorer calls
+remain zero; no comparison result exists. The ten-eligible-PR/14-day process
+observation remains open.
 
 ## Previous pilot qualification snapshot — retained historical evidence
 
@@ -116,7 +121,7 @@ or OS isolation. No model study or token-saving claim follows.
 | M2 | Snapshot isolation, rebuildable SQLite index and separate evidence dimensions implemented | R4 warm-cache correction approved. Canonical proof closure remains independent of retrieval scope; check evidence is recorded in the owning PR. |
 | M3 | Bounded traversal, continuation binding and CLI implemented | R4 source approved; corrected cold/warm local timings meet pilot targets. Public boundary checks are recorded in the owning PR. |
 | M4 | Advisory capture, preflight body wiring and repository skill implemented | R4 source approved; capture remains advisory. Maintained personal-skill installation remains unknown; amendment supplied. |
-| M5 | Harness/provider, visibility projection, OCI executor and concrete trusted driver source prepared; clean corpus export independently approved | Capability-only refusal observed (1/4 supported); no provider, scored run or savings result. Full comparison is inconclusive while three families and runtime containment remain unavailable. |
+| M5 | Harness/provider, visibility projection, OCI executor and native guest-stage source are integrated locally; clean corpus export independently approved | New source is complete but awaits independent review and environment admission. B8 CI remains historical and does not qualify this head. Fourteen new cases plus two actual OCI controls and one compatibility selector are unexecuted here. Full-study fit, runtime acceptance and comparison remain open; provider/count calls are zero. |
 | M5b | Observation not started | Ten real eligible PRs and 14 days after advisory capture reaches main; does not block tooling landing. |
 
 Timing is recorded as shared agent-session wall intervals, including waits,

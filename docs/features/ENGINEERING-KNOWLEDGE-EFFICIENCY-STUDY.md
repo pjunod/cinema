@@ -367,12 +367,71 @@ boot identity and partition identities were unchanged, and no cache,
 worktree, image, volume or evidence was deleted. The capacity receipt SHA-256
 is `0a92bbd3aafb60277603624af0106c95fca5650f9a765baac052730ae5715758`.
 
-A fresh PR synchronization run must now establish current required CI;
-repository policy forbids job reruns. This factual evidence update changes
-no execution input from R6. Valid prior passes remain eligible for normal
-CI adoption. Fresh full study qualification and calibration remain pending;
-no study count, inference, answer or scorer call has run. Legacy cache
-maintenance remains explicit follow-up, rather than a claimed repair.
+The subsequent required run 5796/internal 5825 on `229671fc5` passed,
+including Rust and Main promotion, retaining all 2,111 Python passes. That
+was the R6 candidate; later retirement repairs below have separate source
+review and affected-check evidence. Legacy cache maintenance remains a
+follow-up, rather than a claimed repair.
+
+## Current admission — native source built; independent review pending
+
+The source-only implementation checkpoint is commit
+`de7ce78ef671338eb8744cf4e20035a2ce963542`, tree
+`bf962c9dfba269637badd5d0c8338b547031bdd8`. It is committed but
+has not received independent source/environment review or new-head CI. The
+published PR #1262 remains at b8df5282d435b687a708230c7e58d7e62e319cde; its
+required CI run 5848/UI 5819 passed Rust and Main promotion with 2,173 passes
+(2,147 retained plus 26 new retirement checks), two expected opt-in OCI skips
+and zero fixture errors. Those results apply to B8, not the integrated source.
+No new-head CI is claimed.
+
+Astra R10 approval remains historical and limited to its exact prior 46
+production execution buffers at 885dd5d7e, map
+923682bc4eab4b851fd20199dcfa9d1cdeb99df8727b3b4b61667e237a40a286. The B8
+fixture-prefix correction has a separate narrow Luna review. Neither review
+approves the new source. The integrated native route changes six production and
+five test files with 14 new cases: 13 in new test files and one host
+checkpoint regression in the existing retirement module. Two existing actual
+OCI controls and one compatibility selector are also affected. None has run
+against this new head.
+
+The integrator verified the static closure of 37 modules, 11 assets and
+48 host buffers: 42 R10 keys are unchanged, four changed and two are new.
+The closure-file digest is
+`f060d3b5e2eea57d25087f7ecdbee2510c1094fff49dbe1774e2b5a263518254`;
+independent source review and exact environment admission remain pending. The guest pack
+is limited to seven modules, including knowledge.model, and excludes provider
+and launcher modules and credentials. The outer entry/provider bytes remain
+unchanged; the added runtime.native_store value is metadata-only. These
+implementation boundaries are ready for independent review and environment
+admission, not runtime acceptance or production qualification.
+
+Two separate public contrasts observed the live Apple Virtualization process
+holding the exact deleted 4 MiB inode. Guest-origin unlink reached link count
+zero and closed its file descriptor; lookup in both namespaces still found no
+file while the virtualization descriptor remained. In each trial, post-stop
+free space was 4,194,304 bytes above the during-write sample, but only
+4,177,920 bytes above the last pre-stop sample: 16,384 bytes had already
+returned. The remaining baseline deficits were 16,384 bytes for host unlink
+and 4,096 bytes for guest unlink, both unattributed. VM stop occurred before
+unmount. This observes a retainer and recovery contrast, not an exclusive
+cause or full-study fit proof.
+The original fixed 36 GiB APFS execution volume is physically reserved; the
+prior thin backing is preserved offline. The distinct native-guest disk and
+configuration operation is fully prepared but normal tool review rejected
+this topology before execution. Its exact human-consent question remains
+pending; no native disk/configuration operation ran. Astra R12's separate
+private design/review payload and destination also await specific human
+consent; no R12 card was dispatched.
+
+The exact Rust failure cause in the earlier qualification remains unknown
+because its original streams were discarded. A separate 4 GiB diagnostic
+confirmed an OOM with debug symbols disabled and one Cargo job; it does not
+attribute the earlier failure. Full-study resource fit and runtime admission
+remain unproven. The frozen 3,000,000-token ceiling, 108 solver contexts,
+216 blind-scorer contexts, cases, commands, model settings and assertions are
+unchanged. Calibration, count, inference, solver and scorer calls remain zero.
+No savings or reliability result exists.
 
 ## Results and interpretation
 
