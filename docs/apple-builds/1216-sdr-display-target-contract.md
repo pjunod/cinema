@@ -1,5 +1,7 @@
 # SDR display target contract follow-up
 
+**Status:** built; source-bound focused client checks pass; physical-device acceptance remains open.
+
 Build: 273
 Issue: #1216
 
