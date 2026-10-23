@@ -26,10 +26,7 @@ static inline pl_tex dv_trim_render(struct dv_trim_gpu *state, pl_log log,
   }
   require(state->dispatch && state->output, "candidate shader context");
   float values[4] = {sop[0], sop[1], sop[2], target};
-  require(isfinite(values[0]) && values[0] >= 0.5f && values[0] <= 1.5f &&
-      isfinite(values[1]) && values[1] >= -0.5f && values[1] <= 0.5f &&
-      isfinite(values[2]) && values[2] >= 0.5f && values[2] <= 1.5f &&
-      isfinite(target) && target > 0 && target <= 10000, "candidate B.3 parameters");
+  require(dv_trim_b3_parameters_valid(sop, target), "candidate B.3 parameters");
   pl_shader sh = pl_dispatch_begin(state->dispatch);
   struct pl_shader_desc input = {
     .desc = {.name = "mapped", .type = PL_DESC_SAMPLED_TEX},
@@ -45,7 +42,9 @@ static inline pl_tex dv_trim_render(struct dv_trim_gpu *state, pl_log log,
       "color=texelFetch(mapped,ivec2(gl_FragCoord.xy),0);" :
       "vec3 pq=texelFetch(mapped,ivec2(gl_FragCoord.xy),0).rgb;\n"
       "vec3 e=decode_pq(pq)/sop_target.w;\n"
-      "vec3 f=pow(clamp(e*sop_target.x+sop_target.y,0.0,1.0),vec3(sop_target.z));\n"
+      "vec3 base=clamp(e*sop_target.x+sop_target.y,0.0,1.0);\n"
+      "vec3 f;\n"
+      "if(sop_target.z==0.0) f=vec3(1.0); else f=pow(base,vec3(sop_target.z));\n"
       "color=vec4(encode_pq(f*sop_target.w),1.0);";
   require(pl_shader_custom(sh, &(struct pl_custom_shader){
       .description = DV_TRIM_METHOD, .header = dv_trim_transfer, .body = body,

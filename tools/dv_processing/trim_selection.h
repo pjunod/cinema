@@ -9,7 +9,11 @@
 #include <math.h>
 #include <libdovi/rpu_parser.h>
 
-#define DV_TRIM_METHOD "candidate-b3-rgb-sop-inferred-raw-v1"
+#define DV_TRIM_METHOD "candidate-b3-linear-rgb-sop-v2"
+#define DV_TRIM_BRIDGE_METHOD "public-us20210076042-sop-v1"
+#define DV_TRIM_DIRECT_METHOD "direct-b3-parameters-v1"
+#define DV_TRIM_B3_METHOD "st2094-10-2021-b3-eq8-linear-rgb-v1"
+#define DV_TRIM_BOUNDARY_METHOD "b3-unit-clamp-zero-power-one-v1"
 #define DV_TRIM_ID_WORDS 36
 struct dv_trim_selection {
   // Fixed scalar layout: no pointers, padding, parser ownership or hidden state
@@ -25,7 +29,7 @@ enum {
 };
 static inline void dv_trim_neutral(struct dv_trim_selection *out) {
   memset(out, 0, sizeof(*out));
-  out->word[DT_VERSION] = 1;
+  out->word[DT_VERSION] = 2;
   for (int i = DT_SLOPE; i <= DT_CLIP; i++) out->word[i] = 2048;
   for (int i = DT_SAT0; i < DT_HUE0 + 6; i++) out->word[i] = 128;
 }
@@ -154,18 +158,36 @@ static inline bool dv_trim_sop_neutral(const struct dv_trim_selection *x) {
   return x->word[DT_SLOPE] == 2048 && x->word[DT_OFFSET] == 2048 &&
          x->word[DT_POWER] == 2048;
 }
-// This bridge is an INFERENCE, awaiting matched reference: patent §A4.2
-// encodes centred deltas, while ST2094-10 §6.2 defaults gain/gamma to one.
-// It is not a claim that Dolby's DM uses the B.3 illustrative RGB algorithm.
-static inline void dv_trim_inferred_sop(const struct dv_trim_selection *x,
-                                        float sop[3]) {
-  sop[0] = 1.0f + ((int)x->word[DT_SLOPE] - 2048) / 4096.0f;
-  sop[1] = ((int)x->word[DT_OFFSET] - 2048) / 4096.0f;
-  sop[2] = 1.0f + ((int)x->word[DT_POWER] - 2048) / 4096.0f;
+// Public embodiment: US20210076042A1, SOP rescaling following eq(4).
+// Centered raw deltas use the /4096 encoding described in US10701399B2 A4.2.
+// L2 uses (1+s,o,1+p); L8 uses (1+2s,2o,1+2p). This parameter bridge does
+// not establish that the separate B.3 linear-RGB candidate implements Dolby DM.
+static inline bool dv_trim_public_sop(const struct dv_trim_selection *x,
+                                      float sop[3]) {
+  unsigned level = x->word[DT_LEVEL];
+  if (x->word[DT_VERSION] != 2 || !dv_trim_common_valid(x) ||
+      (level != 2 && level != 8 && (level != 0 || !dv_trim_sop_neutral(x))))
+    return false;
+  float scale = level == 8 ? 2.0f : 1.0f;
+  sop[0] = 1.0f + scale * ((int)x->word[DT_SLOPE] - 2048) / 4096.0f;
+  sop[1] = scale * ((int)x->word[DT_OFFSET] - 2048) / 4096.0f;
+  sop[2] = 1.0f + scale * ((int)x->word[DT_POWER] - 2048) / 4096.0f;
+  return true;
+}
+// Full encoded L8 envelope; direct controls may use finite fractional values
+// within it. Parameters are rejected, never silently narrowed or clamped.
+static inline bool dv_trim_b3_parameters_valid(const float sop[3], float target) {
+  return isfinite(sop[0]) && sop[0] >= 0 && sop[0] < 2 &&
+      isfinite(sop[1]) && sop[1] >= -1 && sop[1] < 1 &&
+      isfinite(sop[2]) && sop[2] >= 0 && sop[2] < 2 &&
+      isfinite(target) && target > 0 && target <= 10000;
 }
 // Directly parameterized ST2094-10 B.3 eq(8), target-normalized linear cd/m².
+// Local boundary policy: exponent zero produces one even at clipped base zero.
+// Both CPU and shader branch explicitly, avoiding undefined GLSL pow(0,0).
 static inline double dv_trim_b3_component(double mapped, double target,
                                            double gain, double offset, double gamma) {
+  if (gamma == 0) return target;
   return target * pow(fmin(1.0, fmax(0.0, mapped / target * gain + offset)), gamma);
 }
 #endif

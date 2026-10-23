@@ -44,8 +44,8 @@ int main(int argc, char **argv) {
       width >= 16 && width <= 4096 && height >= 16 && height <= 2160,
       "bounded native raster");
   float direct[3]; char tail;
-  bool inferred = !strcmp(argv[6], "inferred-raw-sop-v1");
-  require(inferred || sscanf(argv[6], "direct-b3=%f,%f,%f%c", &direct[0],
+  bool public_bridge = !strcmp(argv[6], DV_TRIM_BRIDGE_METHOD);
+  require(public_bridge || sscanf(argv[6], "direct-b3=%f,%f,%f%c", &direct[0],
       &direct[1], &direct[2], &tail) == 3, "explicit parameter provenance");
   require(mkdir(argv[7], 0700) == 0, "fresh output directory");
   size_t count = (size_t)width * height * 4;
@@ -73,10 +73,10 @@ int main(int argc, char **argv) {
     require(error == NULL, error ? error : "trim selection");
     dv_target_metadata(dm);
     float sop[3];
-    if (inferred) dv_trim_inferred_sop(&trim, sop);
+    if (public_bridge) require(dv_trim_public_sop(&trim, sop), "public SOP level/encoding");
     else memcpy(sop, direct, sizeof(sop));
     char key[65];
-    dv_trim_identity(&trim, dm->dm_data.level1, sop, width, height, inferred, key);
+    dv_trim_identity(&trim, dm->dm_data.level1, sop, width, height, public_bridge, key);
     read_exact(argv[arg+1], pixels, count * sizeof(float));
     for (size_t i = 0; i < count; i++)
       require(isfinite(pixels[i]) && pixels[i] >= 0 && pixels[i] <= 1,
@@ -97,9 +97,13 @@ int main(int argc, char **argv) {
            "\"acceptance\":\"unaccepted\",\"creative_trims_applied\":false,"
            "\"scope\":\"rgb-sop-only\",\"chroma_compensation_applied\":false,"
            "\"saturation_gain_applied\":false,\"other_trim_fields_applied\":false,"
-           "\"raw_bridge_inferred\":%s,\"identity_sha256\":\"%s\","
+           "\"l3_applied\":false,\"detail_applied\":false,"
+           "\"parameter_source\":\"%s\",\"b3_method\":\"%s\","
+           "\"numerical_policy\":\"%s\",\"selected_metadata_level\":%u,"
+           "\"identity_sha256\":\"%s\","
            "\"gain\":%.9g,\"offset\":%.9g,\"gamma\":%.9g,\"trim_words\":[",
-           frame, DV_TRIM_METHOD, inferred ? "true" : "false", key,
+           frame, DV_TRIM_METHOD, public_bridge ? DV_TRIM_BRIDGE_METHOD : DV_TRIM_DIRECT_METHOD,
+           DV_TRIM_B3_METHOD, DV_TRIM_BOUNDARY_METHOD, trim.word[DT_LEVEL], key,
            sop[0], sop[1], sop[2]);
     for (unsigned i = 0; i < DV_TRIM_ID_WORDS; i++)
       printf("%s%u", i ? "," : "", trim.word[i]);

@@ -193,7 +193,7 @@ def observe(args):
     native_input.write_bytes(b''.join(struct.pack('<ffff', *p, 1) for p in pixels))
     conversions, references, association = [], [], []
     argv = [binaries['candidate'], 'bt2020-pq-target-1000', '50', '4000',
-            str(width), str(height), 'inferred-raw-sop-v1', output / 'candidate']
+            str(width), str(height), 'public-us20210076042-sop-v1', output / 'candidate']
     for case, (xml, image, contract) in zip(cases, frozen, strict=True):
         name = case['name']; converted = output / (name + '-rpu')
         record, _ = command([binaries['converter'], converted, 'xml-reference', xml,
