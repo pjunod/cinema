@@ -5,7 +5,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
@@ -29,12 +29,21 @@ pub struct PublicationIo {
     logical_end: u64,
     directory: Option<File>,
     file: Option<File>,
+    file_close: FileCloseState,
     entered: bool,
     acquired_ready: bool,
     publication_started: bool,
     acquired: Option<FileObservation>,
     published: bool,
     payload_released: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileCloseState {
+    NotAttempted,
+    Closed,
+    Failed(i32),
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +153,7 @@ impl PublicationIo {
             logical_end: request.logical_end,
             directory,
             file: None,
+            file_close: FileCloseState::NotAttempted,
             entered: false,
             acquired_ready: false,
             publication_started: false,
@@ -173,6 +183,10 @@ impl PublicationIo {
     }
     pub fn has_unresolved_object(&self) -> bool {
         self.file.is_some()
+            || matches!(
+                self.file_close,
+                FileCloseState::Failed(_) | FileCloseState::Unknown
+            )
     }
     pub fn temporary_name(&self) -> &CStr {
         &self.temporary_name
@@ -187,7 +201,12 @@ impl PublicationIo {
     /// Return the SAME descriptor only after actual success. Errors/cancellation
     /// retain it here. This counted ownership move is NOT a close/refund fact.
     pub fn take_held_directory(&mut self) -> io::Result<File> {
-        if self.path.is_some() || !self.entered || !self.published || self.file.is_some() {
+        if self.path.is_some()
+            || !self.entered
+            || !self.published
+            || self.file.is_some()
+            || self.file_close != FileCloseState::Closed
+        {
             return Err(io::Error::other(
                 "held publication directory is not transferable",
             ));
@@ -206,6 +225,7 @@ impl PublicationIo {
             || !self.publication_started
             || !self.published
             || self.file.is_some()
+            || self.file_close != FileCloseState::Closed
             || self.directory.is_some()
             || self.payload_released
         {
@@ -243,12 +263,40 @@ impl PublicationIo {
         let observation = self.observe();
         result?;
         observation?;
-        // No writable descriptor escapes successful native completion. Keep
-        // payload bytes until the finite runtime has returned this directory
-        // and durably acknowledged its observation; this is not a close/refund
-        // receipt.
-        self.file = None;
-        Ok(())
+        // Close the exact acquired descriptor once. A failed/ambiguous close
+        // cannot be retried because the numeric fd may already have been reused.
+        // Keep payload and directory custody on every nonzero/unknown result.
+        self.close_published_file()
+    }
+
+    fn close_published_file(&mut self) -> io::Result<()> {
+        if self.file_close != FileCloseState::NotAttempted {
+            return Err(io::Error::other(
+                "publication file close was already attempted",
+            ));
+        }
+        let Some(file) = self.file.take() else {
+            self.file_close = FileCloseState::Unknown;
+            return Err(io::Error::other("published file descriptor is unavailable"));
+        };
+        let fd = file.into_raw_fd();
+        // SAFETY: this worker owns the original File, has converted it to a raw
+        // descriptor, and performs exactly one close without retrying EINTR.
+        let result = unsafe { libc::close(fd) };
+        if result == 0 {
+            self.file_close = FileCloseState::Closed;
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if let Some(errno) = error.raw_os_error() {
+            self.file_close = FileCloseState::Failed(errno);
+            Err(error)
+        } else {
+            self.file_close = FileCloseState::Unknown;
+            Err(io::Error::other(
+                "publication file close outcome is unknown",
+            ))
+        }
     }
 
     fn acquire_native(&mut self) -> io::Result<()> {

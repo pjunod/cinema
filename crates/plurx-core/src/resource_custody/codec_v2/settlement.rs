@@ -105,6 +105,10 @@ pub(crate) enum TransferIdentity {
     ScratchAssetsV1 {
         scratch: ScratchAssets,
     },
+    ScratchAssetsV3 {
+        plan: scratch::bootstrap::ScratchPlanV3,
+        snapshot: scratch::bootstrap::FrozenScratchRefV1,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -336,6 +340,19 @@ fn validate_transfer_identity(
             Some(Observed::ScratchAssetsV1 { scratch: observed }),
             TransferIdentity::ScratchAssetsV1 { scratch },
         ) if scratch == observed => Ok(()),
+        (
+            MemberPlan::ScratchAssetsV3 {
+                plan: source_plan, ..
+            },
+            Some(Observed::ScratchAssetsV3 { state }),
+            TransferIdentity::ScratchAssetsV3 { plan, snapshot },
+        ) if plan == source_plan
+            && snapshot.state == *state
+            && snapshot.member_id == transfer.source_member_id
+            && snapshot.version == 1 =>
+        {
+            scratch::bootstrap::validate_frozen_snapshot_ref_shape(plan, snapshot)
+        }
         _ => Err(codec::invalid()),
     }
 }

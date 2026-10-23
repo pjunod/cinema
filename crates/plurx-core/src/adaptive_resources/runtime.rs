@@ -269,8 +269,8 @@ fn restore_accounting(
         if !ids.contains(&asset.obligation_id)
             || referenced.contains(&asset.obligation_id)
             || !asset_ids.insert(asset.obligation_id)
-            || !assets.insert(asset.custody.asset_id)
-            || asset.custody.target_obligation_id.uuid() != asset.obligation_id
+            || !assets.insert(asset.custody.asset_id())
+            || asset.custody.target_obligation_id().uuid() != asset.obligation_id
         {
             return Err(invalid);
         }
@@ -284,10 +284,18 @@ fn restore_accounting(
         else {
             return Err(invalid);
         };
-        crate::resource_custody::codec_v2::validate_retained_assets(manifest, &asset.custody)
-            .map_err(|_| invalid)?;
-        crate::resource_custody::codec_v2::validate_retained_resources(manifest, record.resources)
-            .map_err(|_| invalid)?;
+        use crate::resource_custody::codec_v2::{self as v2, RetainedAssetsDocument};
+        match &asset.custody {
+            RetainedAssetsDocument::V1(custody) => {
+                v2::validate_retained_assets(manifest, custody).map_err(|_| invalid)?;
+                v2::validate_retained_resources(manifest, record.resources).map_err(|_| invalid)?;
+            }
+            RetainedAssetsDocument::V2(custody) => {
+                // CustodyJournal::open already replayed the original producer
+                // fold and matched the full inventory to this compact ref.
+                v2::validate_retained_assets_v2(manifest, custody).map_err(|_| invalid)?;
+            }
+        }
     }
     referenced.extend(asset_ids);
     if referenced != ids {

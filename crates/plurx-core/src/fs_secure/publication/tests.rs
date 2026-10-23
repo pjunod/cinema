@@ -88,6 +88,7 @@ fn native_publication_preserves_the_original_payload_allocation() {
 fn completed_payload_releases_only_after_the_held_directory_returns() {
     let root = tempfile::tempdir().unwrap();
     let directory = open_directory_nofollow_blocking(root.path()).unwrap();
+    let original_directory_fd = directory.as_raw_fd();
     let mut payload = Vec::with_capacity(4096);
     payload.extend_from_slice(b"payload");
     let capacity = payload.capacity();
@@ -96,11 +97,14 @@ fn completed_payload_releases_only_after_the_held_directory_returns() {
     let mut native = PublicationIo::from_held_directory(request, directory);
 
     native.run().unwrap();
+    assert_eq!(native.file_close, FileCloseState::Closed);
+    assert!(!native.has_unresolved_object());
     assert_eq!(native.payload_capacity(), capacity);
     assert!(native.release_completed_payload().is_none());
     assert!(!native.payload_released);
 
     let returned = native.take_held_directory().unwrap();
+    assert_eq!(returned.as_raw_fd(), original_directory_fd);
     assert!(returned.metadata().unwrap().is_dir());
     assert_eq!(native.release_completed_payload(), Some(capacity));
     assert!(native.payload_released);
@@ -108,6 +112,29 @@ fn completed_payload_releases_only_after_the_held_directory_returns() {
     assert_eq!(native.logical_end(), 7);
     assert!(native.observation().is_some());
     assert!(native.release_completed_payload().is_none());
+}
+
+#[test]
+fn failed_or_unknown_file_close_keeps_directory_and_payload_unreleasable() {
+    for close_state in [FileCloseState::Failed(libc::EIO), FileCloseState::Unknown] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = open_directory_nofollow_blocking(root.path()).unwrap();
+        let request =
+            PublicationRequest::for_operation(INIT_NAME, b"payload".to_vec(), uuid::Uuid::new_v4())
+                .unwrap();
+        let mut native = PublicationIo::from_held_directory(request, directory);
+        native.entered = true;
+        native.publication_started = true;
+        native.published = true;
+        native.file_close = close_state;
+
+        assert!(native.file.is_none());
+        assert!(native.has_unresolved_object());
+        assert!(native.take_held_directory().is_err());
+        assert!(native.release_completed_payload().is_none());
+        assert!(native.directory.is_some());
+        assert!(native.payload_capacity() > 0);
+    }
 }
 
 #[test]

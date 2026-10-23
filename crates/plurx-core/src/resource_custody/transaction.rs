@@ -1,6 +1,7 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
 mod inventory;
+mod retirement;
 mod scratch;
 mod typed;
 use super::*;
@@ -372,11 +373,27 @@ pub(super) fn snapshot(
                     return Err(codec::invalid());
                 }
                 let custody_json: String = connection.query_row("SELECT custody_json FROM retained_asset_owners WHERE obligation_id=?1 AND asset_id=?2", params![ack.target_obligation_id.uuid().as_bytes(), ack.asset_id.uuid().as_bytes()], |r| r.get(0))?;
-                let custody: codec_v2::RetainedAssets = codec::decode(&custody_json)?;
-                if custody.transfer_operation_id != ack.operation_id
-                    || custody.producer_obligation_id != ack.source_obligation_id
-                    || custody.producer_graph_id != ack.source_graph_id
-                    || custody.target_graph_id != ack.target_graph_id
+                let custody = codec_v2::decode_retained_assets(&custody_json)?;
+                let (operation, producer, producer_graph, target_graph) = match &custody {
+                    codec_v2::RetainedAssetsDocument::V1(custody) => (
+                        custody.transfer_operation_id,
+                        custody.producer_obligation_id,
+                        custody.producer_graph_id,
+                        custody.target_graph_id,
+                    ),
+                    codec_v2::RetainedAssetsDocument::V2(custody) => (
+                        custody.transfer_operation_id,
+                        custody.producer_obligation_id,
+                        custody.producer_graph_id,
+                        custody.target_graph_id,
+                    ),
+                };
+                if operation != ack.operation_id
+                    || producer != ack.source_obligation_id
+                    || producer_graph != ack.source_graph_id
+                    || target_graph != ack.target_graph_id
+                    || custody.target_obligation_id() != ack.target_obligation_id
+                    || custody.asset_id() != ack.asset_id
                 {
                     return Err(codec::invalid());
                 }
@@ -487,19 +504,6 @@ enum DiskResult {
     RetiredWithAssets(RetirementAck),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RetirementAck {
-    version: u32,
-    operation_id: codec_v2::Id,
-    sequence: i64,
-    source_obligation_id: codec_v2::Id,
-    source_graph_id: codec_v2::Id,
-    target_obligation_id: codec_v2::Id,
-    target_graph_id: codec_v2::Id,
-    asset_id: codec_v2::Id,
-}
-
 pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
     // Explicit canonical payload excludes ephemeral deadline and receipt object.
     // Receipt identity is checked independently against its core runtime binding.
@@ -575,6 +579,13 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
                 Mutation::Hold { reason } => serde_json::json!({"hold":reason}),
                 Mutation::CancelPrepared => serde_json::json!("cancel_prepared"),
                 Mutation::Settle(proof) => serde_json::json!({"settle":proof.facts}),
+                Mutation::RetireWithAssets(proof) => serde_json::json!({
+                    "retire_with_assets_v2": {
+                        "settlement":proof.settlement,"retained":proof.retained,
+                        "target_manifest":proof.target_manifest,"target_resources":proof.target_resources,
+                        "target_id":proof.target.obligation_id,"target_graph":proof.target.graph_id,
+                    }
+                }),
             };
             serde_json::json!({"id":key.handle.obligation_id,"graph":key.handle.graph_id,"owner":key.handle.owner_id,"sequence":key.expected_sequence,"action":action})
         }
@@ -755,6 +766,25 @@ pub(super) fn execute(
                 sequence,
                 trial_group_id: *trial,
             }))
+        }
+        (
+            Command::Change {
+                key,
+                mutation: Mutation::RetireWithAssets(proof),
+            },
+            DiskResult::RetiredWithAssets(ack),
+        ) if ack.version == 2
+            && ack.operation_id.uuid() == operation.id
+            && ack.source_obligation_id.uuid() == key.handle.obligation_id
+            && ack.source_graph_id.uuid() == key.handle.graph_id
+            && ack.target_obligation_id.uuid() == proof.target.obligation_id
+            && ack.target_graph_id.uuid() == proof.target.graph_id
+            && ack.asset_id == proof.retained.asset_id =>
+        {
+            Ok(OperationResult::RetiredWithAssets {
+                ack,
+                target: proof.target.clone(),
+            })
         }
         (Command::Change { key, .. }, DiskResult::Changed(ack))
             if ack.operation_id == operation.id
@@ -991,6 +1021,9 @@ fn change(
         ));
     }
     if let codec_v2::ManifestDocument::V2(manifest) = codec_v2::decode_manifest(&manifest)? {
+        if let Mutation::RetireWithAssets(proof) = mutation {
+            return retirement::change(tx, journal, owner, key, prior, &manifest, proof);
+        }
         return typed::change(tx, owner, key, mutation, prior, &manifest);
     }
     let manifest: Manifest = codec::decode(&manifest)?;
@@ -1003,6 +1036,7 @@ fn change(
     let mut settlement = None;
     match mutation {
         Mutation::RecordTypedAcquired { .. }
+        | Mutation::RetireWithAssets(_)
         | Mutation::AssetChangeV2 { .. }
         | Mutation::AssetChangeV3 { .. } => return Err(codec::invalid()),
         Mutation::Arm { members } => {

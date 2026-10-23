@@ -62,6 +62,10 @@ fn obligations(command: &Command) -> Vec<Uuid> {
         Command::Prepare { handles, .. } | Command::PrepareTyped { handles, .. } => {
             handles.iter().map(|h| h.obligation_id).collect()
         }
+        Command::Change {
+            key,
+            mutation: Mutation::RetireWithAssets(retirement),
+        } => vec![key.handle.obligation_id, retirement.target.obligation_id],
         Command::Change { key, .. } => vec![key.handle.obligation_id],
     }
 }
@@ -121,6 +125,28 @@ impl CustodyJournal {
             journal_id: self.journal_id,
             family_id: Uuid::new_v4(),
         }
+    }
+
+    /// Mint the selected target handle in this same journal/owner namespace.
+    /// This creates no journal command and carries no physical-transfer proof.
+    pub(crate) fn retirement_target(
+        &self,
+        graph_id: Uuid,
+        runtime_binding: ReservationBinding,
+    ) -> Result<ObligationHandle, CustodyError> {
+        if graph_id.is_nil() {
+            return Err(CustodyError::new(
+                ErrorKind::InvalidCommand,
+                "invalid retirement target graph",
+            ));
+        }
+        Ok(ObligationHandle {
+            journal_id: self.journal_id,
+            owner_id: self.owner_id,
+            obligation_id: Uuid::new_v4(),
+            graph_id,
+            runtime_binding,
+        })
     }
     /// Create once and retain operation_id in the runtime before submission.
     /// Exact retry uses retry(), not this constructor (which mints obligations).
@@ -362,7 +388,7 @@ impl CustodyJournal {
             || matches!(
                 operation.operation.command,
                 Command::Change {
-                    mutation: Mutation::Settle(_),
+                    mutation: Mutation::Settle(_) | Mutation::RetireWithAssets(_),
                     ..
                 }
             )
@@ -451,6 +477,89 @@ impl CustodyJournal {
                 mutation: Mutation::Settle(proof),
                 ..
             } => Ok(proof.receipt),
+            _ => Err(unavailable()),
+        }
+    }
+
+    /// Take the original transfer receipt only after the exact durable
+    /// retirement result and both nonclone runtime bindings have been matched.
+    pub(crate) fn take_retirement_receipt(
+        &self,
+        id: Uuid,
+        source: &ObligationHandle,
+        target: &ObligationHandle,
+    ) -> Result<CommittedRetirementReceipt, CustodyError> {
+        if source.journal_id != self.journal_id
+            || source.owner_id != self.owner_id
+            || target.journal_id != self.journal_id
+            || target.owner_id != self.owner_id
+            || source.obligation_id == target.obligation_id
+        {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "custody retirement handles do not belong to this owner",
+            ));
+        }
+        let mut book = self.book.lock().map_err(|_| unavailable())?;
+        let owned = book.operations.get(&id).ok_or_else(unavailable)?;
+        let operation = owned.lock().map_err(|_| unavailable())?;
+        if !matches!(
+            &operation.result,
+            Some(Ok(OperationResult::RetiredWithAssets { ack, target: ack_target }))
+                if ack.operation_id.uuid() == id
+                    && ack.source_obligation_id.uuid() == source.obligation_id
+                    && ack.source_graph_id.uuid() == source.graph_id
+                    && ack.target_obligation_id.uuid() == target.obligation_id
+                    && ack.target_graph_id.uuid() == target.graph_id
+                    && ack_target.obligation_id == target.obligation_id
+                    && ack_target.graph_id == target.graph_id
+                    && ack_target.journal_id == target.journal_id
+                    && ack_target.owner_id == target.owner_id
+                    && ack_target.runtime_binding == target.runtime_binding
+        ) {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "custody retirement is not durably acknowledged",
+            ));
+        }
+        if !matches!(
+            &operation.operation.command,
+            Command::Change {
+                key,
+                mutation: Mutation::RetireWithAssets(retirement),
+            } if key.handle.journal_id == source.journal_id
+                && key.handle.owner_id == source.owner_id
+                && key.handle.obligation_id == source.obligation_id
+                && key.handle.graph_id == source.graph_id
+                && key.handle.runtime_binding == source.runtime_binding
+                && retirement.target.journal_id == target.journal_id
+                && retirement.target.owner_id == target.owner_id
+                && retirement.target.obligation_id == target.obligation_id
+                && retirement.target.graph_id == target.graph_id
+                && retirement.target.runtime_binding == target.runtime_binding
+                && retirement.receipt.source_binding() == source.runtime_binding
+                && retirement.receipt.target_binding() == target.runtime_binding
+                && matches!(
+                    &operation.result,
+                    Some(Ok(OperationResult::RetiredWithAssets { ack, .. }))
+                        if ack.asset_id == retirement.retained.asset_id
+                )
+        ) {
+            return Err(CustodyError::new(
+                ErrorKind::Conflict,
+                "custody retirement receipt does not match runtime",
+            ));
+        }
+        drop(operation);
+        let owned = book.operations.remove(&id).ok_or_else(unavailable)?;
+        let mut operation = owned.lock().map_err(|_| unavailable())?;
+        match std::mem::replace(&mut operation.operation.command, empty_command()) {
+            Command::Change {
+                mutation: Mutation::RetireWithAssets(retirement),
+                ..
+            } => Ok(CommittedRetirementReceipt {
+                receipt: retirement.receipt,
+            }),
             _ => Err(unavailable()),
         }
     }

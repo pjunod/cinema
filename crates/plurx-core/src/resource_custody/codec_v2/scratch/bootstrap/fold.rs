@@ -35,6 +35,12 @@ impl BootstrapFold {
             uncertain_copies: BTreeSet::new(),
         })
     }
+    pub(crate) fn obligation_id(&self) -> Id {
+        self.obligation
+    }
+    pub(crate) fn member_id(&self) -> Id {
+        self.member
+    }
     pub(crate) fn state(&self) -> ScratchStateV3 {
         ScratchStateV3 {
             version: 3,
@@ -44,6 +50,168 @@ impl BootstrapFold {
     }
     pub(crate) fn files(&self) -> &[FileObservedV1] {
         &self.output.files
+    }
+    pub(crate) fn frozen_snapshot(
+        &self,
+        plan: &ScratchPlanV3,
+    ) -> Result<FrozenScratchV3, CustodyError> {
+        if self.output.state.lifecycle != ScratchLifecycleV1::Frozen
+            || self.pending.is_some()
+            || self.output.has_pending()
+            || self.possible_copy.is_some()
+            || self.bootstrap.possible_child.is_some()
+            || !self.uncertain_copies.is_empty()
+            || !matches!(
+                self.bootstrap.phase,
+                BootstrapPhase::SinkReady | BootstrapPhase::Closed
+            )
+        {
+            return Err(codec::invalid());
+        }
+        let snapshot = FrozenScratchV3 {
+            version: 1,
+            obligation_id: self.obligation,
+            member_id: self.member,
+            state: self.state(),
+            files: self.output.files.clone(),
+            readers: self.output.readers().to_vec(),
+        };
+        Self::validate_frozen_snapshot(plan, &snapshot)?;
+        Ok(snapshot)
+    }
+    /// Data-only rebinding after the journal writer has proved the exact R→S
+    /// transfer. The original native copy IDs and event head remain unchanged.
+    pub(crate) fn adopt_frozen(
+        &self,
+        plan: &ScratchPlanV3,
+        reference: &FrozenScratchRefV1,
+        target_obligation: Id,
+        target_member: Id,
+    ) -> Result<Self, CustodyError> {
+        if target_obligation == self.obligation || target_member == self.member {
+            return Err(codec::invalid());
+        }
+        let full = self.frozen_snapshot(plan)?;
+        validate_frozen_snapshot_ref(plan, reference, &full)?;
+        let mut adopted = full.state.asset;
+        adopted.lifecycle = ScratchLifecycleV1::RetainedReadOnly;
+        Ok(Self {
+            output: ScratchFold::from_frozen_inventory(adopted, full.files, full.readers),
+            bootstrap: full.state.bootstrap,
+            obligation: target_obligation,
+            member: target_member,
+            pending: None,
+            possible_copy: None,
+            uncertain_copies: BTreeSet::new(),
+        })
+    }
+    pub(super) fn validate_frozen_snapshot(
+        plan: &ScratchPlanV3,
+        snapshot: &FrozenScratchV3,
+    ) -> Result<(), CustodyError> {
+        validate_plan(plan)?;
+        if snapshot.version != 1
+            || snapshot.state.version != 3
+            || snapshot.state.asset.asset_id != plan.asset_id
+            || snapshot.state.asset.lifecycle != ScratchLifecycleV1::Frozen
+            || snapshot.state.bootstrap.possible_child.is_some()
+            || snapshot.state.bootstrap.current.is_some()
+            || usize::from(snapshot.state.bootstrap.next_component)
+                != plan.bootstrap().components.len()
+            || snapshot.state.asset.directory.is_none()
+            || snapshot.state.asset.totals.pending_jobs != 0
+            || !matches!(
+                snapshot.state.bootstrap.phase,
+                BootstrapPhase::SinkReady | BootstrapPhase::Closed
+            )
+        {
+            return Err(codec::invalid());
+        }
+        match snapshot.state.bootstrap.phase {
+            BootstrapPhase::SinkReady => {
+                let parent = snapshot
+                    .state
+                    .bootstrap
+                    .parent
+                    .as_ref()
+                    .ok_or_else(codec::invalid)?;
+                if parent.kind != BootstrapDirectoryKind::ConfiguredParentV1
+                    || parent.observed.held_copy_ids.is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+            }
+            BootstrapPhase::Closed if snapshot.state.bootstrap.parent.is_none() => {}
+            _ => return Err(codec::invalid()),
+        }
+        let original_state = snapshot.state.clone();
+        let mut fold = Self {
+            output: ScratchFold::from_frozen_inventory(
+                original_state.asset.clone(),
+                snapshot.files.clone(),
+                snapshot.readers.clone(),
+            ),
+            bootstrap: original_state.bootstrap.clone(),
+            obligation: snapshot.obligation_id,
+            member: snapshot.member_id,
+            pending: None,
+            possible_copy: None,
+            uncertain_copies: BTreeSet::new(),
+        };
+        fold.recount(plan)?;
+        if fold.state() != original_state {
+            return Err(codec::invalid());
+        }
+        validate_projection(plan, &original_state)?;
+        let mut file_ids = BTreeSet::new();
+        let mut slots = BTreeSet::new();
+        let mut outputs = BTreeSet::new();
+        let mut copies = BTreeSet::new();
+        for file in &snapshot.files {
+            if !file_ids.insert(file.file_id)
+                || !slots.insert(file.slot_id)
+                || file.published.is_none()
+                || file.temporary
+                || file.logical_len == 0
+                || file.charged_bytes == 0
+                || file
+                    .published
+                    .is_some_and(|key| !plan.outputs.contains(&key))
+                || !outputs.insert(file.published)
+                || file.native_object.file_type != FileType::Regular
+                || file.native_object.filesystem_domain != plan.filesystem_domain
+                || file.held_copy_ids.iter().any(|id| !copies.insert(*id))
+            {
+                return Err(codec::invalid());
+            }
+            file.native_object.validate()?;
+            codec::encode(file)?;
+        }
+        let mut leases = BTreeSet::new();
+        let mut reader_copies = BTreeSet::new();
+        for reader in &snapshot.readers {
+            let file = snapshot
+                .files
+                .iter()
+                .find(|f| f.file_id == reader.file_id)
+                .ok_or_else(codec::invalid)?;
+            if !leases.insert(reader.lease_id)
+                || !reader_copies.insert(reader.copy_id)
+                || reader.asset_id != plan.asset_id
+                || reader.memory_cap == 0
+                || reader.read_range.start > reader.cursor
+                || reader.cursor > reader.read_range.end_exclusive
+                || reader.read_range.end_exclusive > file.logical_len
+                || !file.held_copy_ids.contains(&reader.copy_id)
+            {
+                return Err(codec::invalid());
+            }
+            codec::encode(reader)?;
+        }
+        if copies != reader_copies {
+            return Err(codec::invalid());
+        }
+        Ok(())
     }
     fn matches_ref(
         &self,
@@ -105,8 +273,12 @@ impl BootstrapFold {
             AssetEventV3::OutputV2 { event } => {
                 // Fence records all already-possible native effects, even while
                 // bootstrap is unfinished. No fresh output in that state.
+                let retained_child_ready = self.bootstrap.phase == BootstrapPhase::Closed
+                    && self.output.state.lifecycle == ScratchLifecycleV1::RetainedReadOnly;
                 if !matches!(event, AssetEventV1::Fence { .. })
-                    && (self.bootstrap.phase != BootstrapPhase::SinkReady || self.pending.is_some())
+                    && ((!retained_child_ready
+                        && self.bootstrap.phase != BootstrapPhase::SinkReady)
+                        || self.pending.is_some())
                 {
                     return Err(codec::invalid());
                 }

@@ -1,5 +1,5 @@
 //! Real SQLite transitions with typed fixture data; no physical receipts minted.
-mod bootstrap;
+pub(in crate::resource_custody) mod bootstrap;
 mod scratch;
 use super::*;
 use crate::adaptive_resources::ResourceReservation;
@@ -13,7 +13,10 @@ struct Fixture {
     _reservation: ResourceReservation,
 }
 fn fixture(trial: bool) -> Fixture {
-    let root = tempfile::tempdir().unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("plurx-typed-fixture-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
     let manifest = v2::tests::fixture();
     let mut identity = owner();
     identity.owner_id = manifest.owner_id.uuid();

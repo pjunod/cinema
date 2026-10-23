@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::process::observation::{Metric, UnknownReason};
 
 pub mod physical_graph;
+mod retained;
 pub mod runtime;
 
 static NEXT_LEDGER: AtomicU64 = AtomicU64::new(1);
@@ -239,6 +240,29 @@ impl PhysicalCloseReceipt {
     /// The binding is not a close proof, mint, wire token or refund authority.
     pub(crate) fn custody_binding(&self) -> ReservationBinding {
         self.binding
+    }
+}
+
+/// Nonclone live retirement capability. Minting requires actual producer
+/// closure AND transfer of every retained native owner to the selected target.
+/// Journal audit records and successful waits alone cannot construct this.
+/// There is no production constructor until the concrete backend proves both.
+#[derive(Debug)]
+pub(crate) struct PhysicalRetirementReceipt {
+    source: ReservationBinding,
+    target: ReservationBinding,
+}
+impl PhysicalRetirementReceipt {
+    /// Accounting/journal fixtures only, never native acceptance evidence.
+    #[cfg(test)]
+    pub(crate) fn adapter_fixture(source: ReservationBinding, target: ReservationBinding) -> Self {
+        Self { source, target }
+    }
+    pub(crate) fn source_binding(&self) -> ReservationBinding {
+        self.source
+    }
+    pub(crate) fn target_binding(&self) -> ReservationBinding {
+        self.target
     }
 }
 

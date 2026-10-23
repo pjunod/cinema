@@ -301,7 +301,9 @@ pub(super) fn change(
         }
         // A legacy all-closed receipt cannot retire typed assets or pretend a
         // transferred source/file was closed. No scalar/JSON-only refund seam.
-        Mutation::RecordAcquired { .. } | Mutation::Settle(_) => return Err(codec::invalid()),
+        Mutation::RecordAcquired { .. } | Mutation::Settle(_) | Mutation::RetireWithAssets(_) => {
+            return Err(codec::invalid())
+        }
     }
     if let Some(record) = &settlement {
         tx.execute(
@@ -321,4 +323,4 @@ pub(super) fn change(
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::resource_custody) mod tests;

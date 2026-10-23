@@ -12,7 +12,9 @@ mod tests;
 mod transaction;
 mod worker;
 
-use crate::adaptive_resources::{PhysicalCloseReceipt, ReservationBinding, ResourceVector};
+use crate::adaptive_resources::{
+    PhysicalCloseReceipt, PhysicalRetirementReceipt, ReservationBinding, ResourceVector,
+};
 pub use codec::{
     Adapter, BootIdentity, ClosedMemberFact, Manifest, MemberKind, ObservedIdentity, PlannedMember,
     PlatformDomain, ProcessIdentity, RecoveryMethod,
@@ -196,7 +198,7 @@ pub(crate) enum ObligationInventory {
 #[derive(Clone, Debug)]
 pub(crate) struct RetainedAssetOwner {
     pub obligation_id: Uuid,
-    pub custody: codec_v2::RetainedAssets,
+    pub custody: codec_v2::RetainedAssetsDocument,
 }
 #[derive(Clone, Debug)]
 pub struct ObligationRecord {
@@ -316,6 +318,39 @@ pub(crate) struct PhysicalSettlement {
     pub facts: Vec<ClosedMemberFact>,
 }
 
+/// Actual physical transfer proof and its complete target obligation. This is
+/// retained in the original journal command until the runtime takes it after
+/// the exact durable retirement acknowledgment.
+/// Original physical retirement capability returned only after its exact
+/// durable journal acknowledgement. A pre-COMMIT receipt cannot reach the
+/// conserving ledger swap through this type.
+#[derive(Debug)]
+pub(crate) struct CommittedRetirementReceipt {
+    receipt: PhysicalRetirementReceipt,
+}
+impl CommittedRetirementReceipt {
+    pub(crate) fn source_binding(&self) -> ReservationBinding {
+        self.receipt.source_binding()
+    }
+    pub(crate) fn target_binding(&self) -> ReservationBinding {
+        self.receipt.target_binding()
+    }
+    #[cfg(test)]
+    pub(crate) fn adapter_fixture(receipt: PhysicalRetirementReceipt) -> Self {
+        Self { receipt }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PhysicalAssetRetirement {
+    pub receipt: PhysicalRetirementReceipt,
+    pub settlement: codec_v2::Settlement,
+    pub retained: codec_v2::RetainedAssetsV2,
+    pub target_manifest: codec_v2::Manifest,
+    pub target_resources: ResourceVector,
+    pub target: ObligationHandle,
+}
+
 #[derive(Debug)]
 pub(crate) enum Mutation {
     Arm {
@@ -339,6 +374,7 @@ pub(crate) enum Mutation {
     },
     CancelPrepared,
     Settle(PhysicalSettlement),
+    RetireWithAssets(Box<PhysicalAssetRetirement>),
 }
 /// Queue/deadline refusal returns actual proof to the existing cleanup owner.
 #[derive(Debug)]
@@ -355,6 +391,19 @@ pub(crate) struct CommitAck {
     pub graph_id: Uuid,
     pub sequence: i64,
     pub phase: Phase,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetirementAck {
+    pub(crate) version: u32,
+    pub(crate) operation_id: codec_v2::Id,
+    pub(crate) sequence: i64,
+    pub(crate) source_obligation_id: codec_v2::Id,
+    pub(crate) source_graph_id: codec_v2::Id,
+    pub(crate) target_obligation_id: codec_v2::Id,
+    pub(crate) target_graph_id: codec_v2::Id,
+    pub(crate) asset_id: codec_v2::Id,
 }
 
 struct QueuedOperation {
@@ -382,4 +431,8 @@ enum Command {
 pub(crate) enum OperationResult {
     Prepared(PreparedBatch),
     Changed(CommitAck),
+    RetiredWithAssets {
+        ack: RetirementAck,
+        target: ObligationHandle,
+    },
 }

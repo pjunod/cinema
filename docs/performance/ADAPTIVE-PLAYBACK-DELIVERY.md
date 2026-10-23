@@ -1,6 +1,6 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `86309a2abe4ee784139d3cdbe2e72edef5025e12`.
+**Status:** open · implementation incomplete · updated 2026-10-22 at committed checkpoint `765179517fd559d2220f4fcff2704b0821fafb55`.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -12,7 +12,7 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 
 ## Authoritative first ordinary VOD source checklist
 
-All five items are **OPEN** at `86309a2abe4e`. The immediate target is one ordinary
+All five items are **OPEN** at `765179517fd5`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
@@ -21,7 +21,7 @@ the existing configured root. Source-complete is not behavior-verified.
 | V1 — admission/source — OPEN | `vod/shared.rs::build_rendition_with_storage` must enter the same finite preparation before any source/directory/init/marker acquisition and carry its actual held source to generation. No selected-path legacy pre-acquisition remains. |
 | V2 — held output/durability — OPEN | `7b783effa` and `735387e96` retain the held child and selected-ID publisher. The concrete finite request carries an immutable `SoftwareAvcCommand` and pump plan in the same reserved bundle before I/O, checks source identity/path/scanner values, prearms source cells without a lease, and uses the predeclared root acquisition ID. The same retained `File` crosses spawn; after known launch, source-copy observation is enriched, then the retained pump task is observed and acknowledged. The bounded Segmenter prefix/merge/finish split/published batch now flows through `GenerationMemoryLimits`/`Generation`; init parsing has a four-copy bound, parser/read/inventory allocations and plan-boundary vectors are fallible, and canonical grid/producer-clock alignment is compiled. These components do not establish an end-to-end quota: parser metadata, native process, launcher and runtime-journal memory remain unresolved. Known durable Observe ends pending-I/O payload accounting; actual payload is cleared and the same directory returned under the original bundle lock before another queue operation can enter. The whole role reservation remains held until retirement. Ordinary `build_rendition_with_storage` still uses legacy admission. |
 | V3 — producer/stop — OPEN | Core now joins the same retained writer/root outside the publication bundle lock and quiesces already-registered native jobs. Stop aborts the original task through its retained handle, including late registration; result summaries do not move the graph-owned diagnostics. Observed parent source descriptors close once, but inherited-copy/fixed-process/partial-start closure and all charges remain held. Ordinary generation must carry the same source, original FFmpeg and writer jobs through one retained normal/cancel terminal owner. Actual joins/drains/closure precede settlement; ambiguous owners remain held. |
-| V4 — retained output — OPEN | Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
+| V4 — retained output — OPEN | Compact V3 frozen references, a proof-bearing atomic SQLite R→S mutation/recovery and a post-COMMIT same-ledger swap primitive are authored; production native retirement/S ownership is not connected. Ordinary HLS bodies hold actual accounted file/buffer leases. Known producer retirement conserves all retained parent/child/files/readers through ONE journal R→S transaction and same-ledger swap; output remains usable/charged while producer capacity returns. |
 | V5 — terminal/reuse — OPEN | Ordinary completion/cancel/error cleanup consumes exact known settlement once; the next ordinary admission can use returned capacity. Unknown commit retains original operation/custody; eviction waits actual readers. |
 
 Current sequence: wire this finite runtime composition into ordinary
@@ -86,7 +86,7 @@ conserving retirement and exact settlement/capacity reuse still lack their
 production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
 records the limits. The latest committed base is
-`86309a2abe4ee784139d3cdbe2e72edef5025e12`. The frozen sixth-checkpoint source
+`765179517fd559d2220f4fcff2704b0821fafb55`. The frozen sixth-checkpoint source
 passed pinned Rust 1.97.1 host core+daemon all-target compilation in 132.333s
 with stable hashes; the source ledger records the exact receipt and the existing
 root-constructor field fixed before this pass. This is warning-level compilation.

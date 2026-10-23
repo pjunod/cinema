@@ -2,6 +2,8 @@
 //! not caller-supplied totals. A fold never constructs a native receipt.
 use super::*;
 mod readers;
+#[cfg(test)]
+mod retained_reader_tests;
 
 pub(crate) struct ScratchFold {
     pub(crate) state: ScratchStateV2,
@@ -12,6 +14,21 @@ pub(crate) struct ScratchFold {
 impl ScratchFold {
     pub(super) fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+    pub(super) fn readers(&self) -> &[ReaderLeaseV1] {
+        &self.readers
+    }
+    pub(super) fn from_frozen_inventory(
+        state: ScratchStateV2,
+        files: Vec<FileObservedV1>,
+        readers: Vec<ReaderLeaseV1>,
+    ) -> Self {
+        Self {
+            state,
+            files,
+            readers,
+            pending: None,
+        }
     }
     pub(crate) fn empty(plan: &ScratchPlanV2) -> Result<Self, CustodyError> {
         validate_plan(plan)?;
@@ -77,7 +94,8 @@ impl ScratchFold {
                 let read_only = matches!(
                     operation,
                     AssetIoV1::ReadRange { .. } | AssetIoV1::CloseReader { .. }
-                );
+                ) || (self.state.lifecycle == ScratchLifecycleV1::RetainedReadOnly
+                    && matches!(operation, AssetIoV1::OpenReader { .. }));
                 if (self.state.lifecycle != ScratchLifecycleV1::Open && !read_only)
                     || self.pending.is_some()
                     || *io_id != operation_id

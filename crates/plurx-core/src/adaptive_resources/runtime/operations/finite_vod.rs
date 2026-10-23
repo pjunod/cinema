@@ -18,7 +18,8 @@ pub(super) struct FiniteLaunch {
     task: Option<GraphFiniteVodTask>,
     task_observation: Uuid,
     task_observed_committed: bool,
-    retiring: bool,
+    pub(super) retiring: bool,
+    pub(super) producer_joined: bool,
 }
 
 impl NodeResourceRuntime {
@@ -60,6 +61,7 @@ impl NodeResourceRuntime {
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
             retiring: false,
+            producer_joined: false,
         });
         Ok(())
     }
@@ -374,6 +376,10 @@ impl NodeResourceRuntime {
         };
         let mut bundle = owner.state.lock().await;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        role.finite_vod
+            .as_mut()
+            .ok_or(OperationError::State)?
+            .producer_joined = task.is_some() && root.is_some();
         // Once the writer has joined, fence later native entry through the SAME
         // ledger. Existing native workers are joined without new Arm/Observe.
         self.close_retained_entry(role.binding)?;

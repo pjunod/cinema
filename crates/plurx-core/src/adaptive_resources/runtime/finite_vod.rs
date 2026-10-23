@@ -429,6 +429,20 @@ impl SoftwareVodOwner {
             .map_err(Into::into)
     }
 
+    /// Freeze the exact admitted output only after original producer/native
+    /// joins and parent closure. This preserves R and every output owner; it
+    /// does not establish or perform the conserving retained-output transfer.
+    pub async fn freeze_output(
+        &self,
+        deadline: Instant,
+    ) -> Result<FiniteProducerCompletion, FiniteVodError> {
+        let completion = self.join_producer().await?;
+        self.runtime
+            .freeze_finite_output(&self.preparation, 0, self.scratch_member, deadline)
+            .await?;
+        Ok(completion)
+    }
+
     pub async fn stop_producer(&self) -> Result<FiniteProducerCompletion, FiniteVodError> {
         self.request_stop()?;
         self.join_producer().await

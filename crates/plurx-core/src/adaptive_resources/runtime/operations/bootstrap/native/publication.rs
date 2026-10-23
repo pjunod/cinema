@@ -560,7 +560,7 @@ impl NodeResourceRuntime {
     }
 }
 
-pub(super) fn queue_output_change(
+pub(in crate::adaptive_resources::runtime::operations) fn queue_output_change(
     journal: &CustodyJournal,
     role: &mut OwnedRole,
     member: Uuid,

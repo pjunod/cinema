@@ -4,6 +4,8 @@
 use super::*;
 use v2::scratch::bootstrap::*;
 #[cfg(unix)]
+use v2::scratch::{AssetEventV1, ScratchLifecycleV1};
+#[cfg(unix)]
 pub(super) mod native;
 
 pub(super) struct BootstrapMember {
@@ -174,6 +176,135 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         Ok(())
+    }
+
+    /// Advance only the admitted output's existing durable fence/freeze fold.
+    /// This requires the original finite producer to be joined and retirement
+    /// to have begun; it creates no native IO or close/refund authority.
+    #[cfg(unix)]
+    pub(in crate::adaptive_resources::runtime) async fn freeze_finite_output(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle.installed {
+            return Err(OperationError::State);
+        }
+        let id = bundle.id;
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+        if role.refunded || !finite.producer_joined || !finite.retiring {
+            return Err(OperationError::State);
+        }
+        let planned = role.typed_members.as_ref().is_some_and(|members| {
+            members.iter().any(|planned| {
+                matches!(planned,
+                    v2::MemberPlan::ScratchAssetsV3 { slot, plan }
+                        if slot.member_id.uuid() == member
+                            && role.bootstrap.get(&member)
+                                .is_some_and(|bootstrap| bootstrap.plan == *plan))
+            })
+        });
+        if !planned {
+            return Err(OperationError::State);
+        }
+
+        // A prior operation belongs to this exact bootstrap member or this
+        // retirement cannot advance it. Resume the retained operation ID and
+        // journal transition; never synthesize an acknowledgement.
+        if role.transition.is_some() {
+            if role
+                .transition
+                .as_ref()
+                .is_none_or(|transition| transition.effect != Effect::Bootstrap(member))
+            {
+                return Err(OperationError::State);
+            }
+            self.finish_transition(id, role).await?;
+        } else if role
+            .bootstrap
+            .get(&member)
+            .ok_or(OperationError::State)?
+            .change
+            .is_some()
+        {
+            resume_change(&self.journal, role, member, deadline)?;
+            self.finish_transition(id, role).await?;
+        }
+
+        // Each successful acknowledgment is followed by a fresh fold read.
+        // At most Fence and Freeze can be newly queued in this call.
+        for _ in 0..2 {
+            let (lifecycle, exact_head, terminal_epoch, can_fence) = {
+                let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+                if bootstrap.change.is_some() || role.transition.is_some() {
+                    return Err(OperationError::State);
+                }
+                let state = bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .state();
+                (
+                    state.asset.lifecycle,
+                    state.asset.head,
+                    bootstrap.plan.generation_epoch,
+                    state.asset.totals.pending_jobs == 0
+                        && state.bootstrap.phase == BootstrapPhase::SinkReady
+                        && state.bootstrap.possible_child.is_none(),
+                )
+            };
+            match lifecycle {
+                ScratchLifecycleV1::Open => {
+                    if !can_fence {
+                        return Err(OperationError::State);
+                    }
+                    native::publication::queue_output_change(
+                        &self.journal,
+                        role,
+                        member,
+                        Uuid::new_v4(),
+                        AssetEventV1::Fence { terminal_epoch },
+                        deadline,
+                    )?;
+                    self.finish_transition(id, role).await?;
+                }
+                ScratchLifecycleV1::Freezing => {
+                    let exact_head_before_freeze = exact_head.ok_or(OperationError::State)?;
+                    native::publication::queue_output_change(
+                        &self.journal,
+                        role,
+                        member,
+                        Uuid::new_v4(),
+                        AssetEventV1::Freeze {
+                            exact_head_before_freeze,
+                        },
+                        deadline,
+                    )?;
+                    self.finish_transition(id, role).await?;
+                }
+                ScratchLifecycleV1::Frozen => return Ok(()),
+                _ => return Err(OperationError::State),
+            }
+        }
+        let bootstrap = role.bootstrap.get(&member).ok_or(OperationError::State)?;
+        if bootstrap
+            .fold
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .state()
+            .asset
+            .lifecycle
+            == ScratchLifecycleV1::Frozen
+        {
+            Ok(())
+        } else {
+            Err(OperationError::State)
+        }
     }
 }
 

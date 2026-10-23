@@ -1,6 +1,7 @@
 //! Strict v2 audit data for the concrete finite-VOD ownership path.
 //! None of these disk types constructs a physical receipt or a launch permit.
 mod cost;
+mod retained_v2;
 pub(crate) mod scratch;
 mod settlement;
 #[cfg(test)]
@@ -8,6 +9,7 @@ pub(in crate::resource_custody) mod tests;
 use super::{codec, CustodyError, Role};
 use codec::{BootIdentity, MemberEnvelope, MemberKind, PlannedMember};
 pub(crate) use cost::{retained_minimum_resources, validate_retained_resources};
+pub(crate) use retained_v2::*;
 use serde::{Deserialize, Serialize};
 pub(crate) use settlement::*;
 use std::collections::BTreeSet;
