@@ -331,6 +331,7 @@ fn restore_accounting(
                     // No single live family is allowed to adopt old custody.
                     family_role: None,
                     resources: record.resources,
+                    memory_claim: record.memory_claim,
                     state: ReservationState::UnknownHeld,
                     custody: None,
                     durable: Some(record.obligation_id),
@@ -342,6 +343,11 @@ fn restore_accounting(
             }
         }
         state.used = total;
+        // Conflicting restored producer claims keep complete custody and
+        // accounting, while refusing every new expansion until reconciled.
+        if state.memory_claims_fit(&[]).is_err() {
+            state.invalid = true;
+        }
         state.trial = (!trial_members.is_empty()).then_some(trial_members);
     }
     Ok((ledger, bindings))

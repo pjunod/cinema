@@ -6,7 +6,7 @@ use crate::adaptive_resources::physical_graph::{
     GraphRoot, OwnedPhysicalGraph, SealedPhysicalGraph,
 };
 use crate::adaptive_resources::{
-    CleanupAuthority, FamilyDemand, FamilyIdentity, FamilyRole, PhysicalCloseReceipt,
+    CleanupAuthority, FamilyDemand, FamilyIdentity, FamilyRole, MemoryClaim, PhysicalCloseReceipt,
 };
 use crate::resource_custody::{codec_v2 as v2, TypedNewObligation, TypedPrepareBatch};
 use crate::resource_custody::{
@@ -324,6 +324,7 @@ impl NodeResourceRuntime {
                 })
                 .collect(),
             false,
+            None,
             deadline,
         )
     }
@@ -332,6 +333,15 @@ impl NodeResourceRuntime {
         &self,
         families: &[FamilyDemand<'_>],
         plans: Vec<TypedGraphPlan>,
+        deadline: Instant,
+    ) -> Result<OwnedPreparation, OperationError> {
+        self.prepare_typed_families_claiming(families, plans, None, deadline)
+    }
+    pub(in crate::adaptive_resources::runtime) fn prepare_typed_families_claiming(
+        &self,
+        families: &[FamilyDemand<'_>],
+        plans: Vec<TypedGraphPlan>,
+        claims: Option<&[MemoryClaim]>,
         deadline: Instant,
     ) -> Result<OwnedPreparation, OperationError> {
         self.prepare_plan_families(
@@ -349,6 +359,7 @@ impl NodeResourceRuntime {
                 })
                 .collect(),
             true,
+            claims,
             deadline,
         )
     }
@@ -359,6 +370,7 @@ impl NodeResourceRuntime {
         families: &[FamilyDemand<'_>],
         plans: Vec<PreparationPlan>,
         typed: bool,
+        claims: Option<&[MemoryClaim]>,
         deadline: Instant,
     ) -> Result<OwnedPreparation, OperationError> {
         if families.is_empty()
@@ -423,7 +435,7 @@ impl NodeResourceRuntime {
         if plans.len() != missing || missing == 0 {
             return Err(AdmissionRefusal::InvalidBundle.into());
         }
-        let owned = self.ledger.reserve_families(families)?;
+        let owned = self.ledger.reserve_families_claiming(families, claims)?;
         let id = Uuid::new_v4();
         let mut obligations = Vec::new();
         let mut typed_obligations = Vec::new();
@@ -453,20 +465,24 @@ impl NodeResourceRuntime {
                     )
                 })
                 .transpose()?;
-            let resources = self
-                .ledger
-                .inner
-                .lock()
-                .map_err(|_| OperationError::State)?
-                .entries
-                .get(&binding.reservation)
-                .ok_or(OperationError::State)?
-                .resources;
+            let (resources, memory_claim) = {
+                let state = self
+                    .ledger
+                    .inner
+                    .lock()
+                    .map_err(|_| OperationError::State)?;
+                let entry = state
+                    .entries
+                    .get(&binding.reservation)
+                    .ok_or(OperationError::State)?;
+                (entry.resources, entry.memory_claim)
+            };
             if let Some(members) = &typed_members {
                 typed_obligations.push(TypedNewObligation {
                     runtime_binding: binding,
                     allocation_epoch: binding.allocation_epoch,
                     resources,
+                    memory_claim,
                     manifest: v2::Manifest {
                         version: 2,
                         owner_id: v2::Id::new(identity.process_instance)?,

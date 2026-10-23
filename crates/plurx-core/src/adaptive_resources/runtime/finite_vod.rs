@@ -898,7 +898,7 @@ impl NodeResourceRuntime {
             retained: None,
         }];
         let family = self.new_family()?;
-        let preparation = match self.prepare_typed_families(
+        let preparation = match self.prepare_typed_families_claiming(
             &[FamilyDemand {
                 identity: family,
                 roles: &roles,
@@ -907,6 +907,7 @@ impl NodeResourceRuntime {
                 attempt_id: None,
                 members: plans,
             }],
+            Some(&[super::super::MemoryClaim::UnknownProducerPeak]),
             deadline,
         ) {
             Ok(preparation) => preparation,

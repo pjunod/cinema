@@ -1,8 +1,13 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete · published native Linux core+daemon
-all-targets compile passed on Rust 1.97.1; current in-role response-buffer
-changes pass host compilation, with native compilation pending; behavioral tests not run.
+**Status:** open · implementation incomplete · published checkpoint
+`35e7cff19940` passed exact native Linux core+daemon compilation on Rust 1.97.1
+(192.956 seconds; `../evidence/direct-linux-35e7cff19940-RESULT.json`). Current
+uncommitted memory-accounting work passes the host all-target check on Rust
+1.97.1 (EXIT 0, 26.445 seconds; `../evidence/direct-check-20261022-225025.json`,
+log SHA-256 `bc119c421216a71c553169bfd2404a2ecff2188784d673b41a622f43505a3577`);
+native Linux compilation is pending. Behavioral tests, final Fable review and
+qualification have not run.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -15,21 +20,19 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 ## Authoritative first ordinary VOD source checklist
 
 All five items are **OPEN** at published checkpoint
-`4993339f81d7045950c13cb9ec42977c5a62ce50`. The immediate target is one ordinary
+`35e7cff19940`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
-The published checkpoint passed native Linux core+daemon all-targets compilation
-with Rust 1.97.1 (EXIT 0, 201.134 seconds); behavioral tests did not run. Current
-uncommitted work adds in-role counted response partitioning and opaque
-`ReadyBytes` buffer/body ownership. The host daemon all-target check passes
-on Rust 1.97.1 (123.394 seconds, stable source hashes); native checking of this
-new snapshot is pending. Finite buffers reserve before allocation, stay charged
-through body/inspection ownership, and block every terminal refund while live.
-Buffered ranges share their original allocation. Parser inspection copies remain
-outside that narrow payload partition; parser/framework/runtime-index
-overheads, unknown-peak cold policy, per-dimension capacity and partial-start
-ownership remain unresolved. No V1–V5 or M0–M7 item is closed.
+The published checkpoint passed exact native Linux core+daemon compilation with
+Rust 1.97.1 (EXIT 0, 192.956 seconds); behavioral tests did not run. Current
+uncommitted work adds explicit unknown FFmpeg peak accounting: it excludes every
+other active producer in the same ledger while validated retained residents may
+coexist. It also adds strict schema-v3 persistence/migration, a transactional
+admission guard, independent per-dimension capacities and full recovery holds.
+Host all-target compilation for this phase passes; native Linux compilation is
+pending. All V1–V5 and M0–M7 remain OPEN; no behavioral tests, final Fable review
+or qualification has run.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
@@ -73,9 +76,10 @@ obligation identity. S cleanup execution, typed settlement and dormant eviction
 are connected; HTTP counted-range selection and native-error causality are in
 the published source. Image verification now reuses only prior successful
 full-S1/digest/ELF attestations on the same rechecked held file. The published
-checkpoint passed native Linux core+daemon all-targets compilation; current
-in-role response-buffer changes await compilation. Behavioral tests are NOT RUN
-and no V item closes from this checkpoint.
+checkpoint `35e7cff19940` passed exact native Linux core+daemon all-targets
+compilation (192.956 seconds). Current memory-accounting changes pass host
+all-target compilation, with native Linux compilation pending. Behavioral tests
+are NOT RUN and no V item closes from this checkpoint.
 
 The current source binds a hashed native ELF held in the same source custodian
 to fd-based fixed launch. A process-only graph witness now requires original
@@ -84,9 +88,9 @@ Source-copy audits and staged same-owner frozen-bootstrap transfer are authored;
 the private retirement adapter now installs the same native output in provisional
 S before its receipt/command, preserves full R over unknown results, then performs
 one post-COMMIT ledger swap and role rebinding. S retains the whole R nonproducer
-allowance. Published native Linux core+daemon all-targets compilation passed on
-Rust 1.97.1 in 201.134 seconds; current in-role response-buffer edits await
-compilation. Actual serving,
+allowance. Published checkpoint `35e7cff19940` passed native Linux core+daemon
+all-targets compilation in 192.956 seconds; current memory-accounting changes
+pass host compilation while native compilation is pending. Actual serving,
 complete quotas, S cleanup and ordinary wiring remain open. No behavioral tests
 have run. This does not close any V item.
 
@@ -126,10 +130,10 @@ connection, full memory profile, serving leases, retained-output transfer,
 conserving retirement and exact settlement/capacity reuse still lack their
 production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
-records the limits. The latest published checkpoint is
-`4993339f81d7045950c13cb9ec42977c5a62ce50`. Its native Linux core+daemon
-all-target Rust 1.97.1 compile passed in 201.134 seconds (EXIT 0). Current
-in-role response-buffer changes are outside that receipt and await compilation.
+records the limits. The latest published checkpoint is `35e7cff19940`; its
+native Linux core+daemon all-target Rust 1.97.1 compile passed in 192.956
+seconds (EXIT 0). Current memory-accounting changes pass host compilation and
+await native Linux compilation.
 This is warning-level compilation.
 Host-eligible authored cases compiled; Linux-only bodies and Windows remain
 outside that evidence. No behavioral tests or review ran for this slice.

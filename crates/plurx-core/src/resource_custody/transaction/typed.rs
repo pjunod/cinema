@@ -13,7 +13,7 @@ pub(super) fn prepare(
     trial: Option<Uuid>,
 ) -> Result<DiskResult, CustodyError> {
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version != 2
+    if version != 3
         || batch.obligations.is_empty()
         || batch.obligations.len() > 6
         || batch.obligations.len() != handles.len()
@@ -75,7 +75,16 @@ pub(super) fn prepare(
     }
     for (new, handle) in batch.obligations.iter().zip(handles) {
         v2::validate_manifest(&new.manifest)?;
-        if handle.journal_id != journal
+        if matches!(
+            new.memory_claim,
+            crate::adaptive_resources::MemoryClaim::KnownBounded {
+                active_producer: false
+            }
+        ) || (matches!(
+            new.memory_claim,
+            crate::adaptive_resources::MemoryClaim::UnknownProducerPeak
+        ) && (new.resources.processes == 0 || new.resources.cpu_ns_per_second == 0))
+            || handle.journal_id != journal
             || handle.owner_id != owner
             || handle.graph_id != new.manifest.graph_id.uuid()
             || new.manifest.owner_id.uuid() != owner
@@ -127,10 +136,11 @@ pub(super) fn prepare(
             .checked_add(new.resources)
             .ok_or_else(codec::invalid)?;
     }
+    check_memory_claim_combination(tx, batch.obligations.iter().map(|new| new.memory_claim))?;
     let sequence = next_sequence(tx)?;
     for (new, handle) in batch.obligations.iter().zip(handles) {
         tx.execute(
-            "INSERT INTO obligations VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?8,?9,NULL,NULL)",
+            "INSERT INTO obligations (obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,memory_claim) VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?8,?9,NULL,NULL,?10)",
             params![
                 handle.obligation_id.as_bytes(),
                 owner.as_bytes(),
@@ -140,7 +150,8 @@ pub(super) fn prepare(
                 trial.map(|t| t.as_bytes().to_vec()),
                 sequence,
                 operation.as_bytes(),
-                codec::encode(&new.manifest)?
+                codec::encode(&new.manifest)?,
+                new.memory_claim.sql_key(),
             ],
         )?;
         for member in &new.manifest.members {

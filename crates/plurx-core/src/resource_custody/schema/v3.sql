@@ -1,0 +1,68 @@
+CREATE TABLE journal_meta (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ format_version INTEGER NOT NULL CHECK(format_version=3),
+ journal_id BLOB NOT NULL CHECK(length(journal_id)=16),
+ installation_id BLOB NOT NULL CHECK(length(installation_id)=16),
+ node_id TEXT NOT NULL CHECK(length(CAST(node_id AS BLOB)) BETWEEN 1 AND 256),
+ cluster_id TEXT NOT NULL CHECK(length(CAST(cluster_id AS BLOB)) BETWEEN 1 AND 256),
+ next_sequence INTEGER NOT NULL CHECK(next_sequence>=0),
+ current_owner_id BLOB REFERENCES owners(owner_id) CHECK(current_owner_id IS NULL OR length(current_owner_id)=16)
+) STRICT;
+CREATE TABLE owners (
+ owner_id BLOB PRIMARY KEY NOT NULL CHECK(length(owner_id)=16),
+ node_id TEXT NOT NULL, cluster_id TEXT NOT NULL,
+ os_boot_json TEXT NOT NULL CHECK(length(CAST(os_boot_json AS BLOB))<=65536),
+ daemon_process_json TEXT NOT NULL CHECK(length(CAST(daemon_process_json AS BLOB))<=65536),
+ platform_domain_json TEXT NOT NULL CHECK(length(CAST(platform_domain_json AS BLOB))<=65536),
+ state TEXT NOT NULL CHECK(state IN ('current','retired'))
+) STRICT;
+CREATE UNIQUE INDEX one_current_owner ON owners(state) WHERE state='current';
+CREATE TABLE obligations (
+ obligation_id BLOB PRIMARY KEY NOT NULL CHECK(length(obligation_id)=16),
+ owner_id BLOB NOT NULL REFERENCES owners(owner_id),
+ graph_id BLOB UNIQUE NOT NULL CHECK(length(graph_id)=16),
+ allocation_epoch BLOB NOT NULL CHECK(length(allocation_epoch)=8),
+ resources BLOB NOT NULL CHECK(length(resources)=56),
+ trial_group_id BLOB CHECK(trial_group_id IS NULL OR length(trial_group_id)=16),
+ phase TEXT NOT NULL CHECK(phase IN ('prepared','acquisition_possible','sealed','unknown_held','settled')),
+ sequence INTEGER NOT NULL CHECK(sequence>=0),
+ last_operation_id BLOB NOT NULL CHECK(length(last_operation_id)=16),
+ manifest_json TEXT NOT NULL CHECK(length(CAST(manifest_json AS BLOB))<=65536),
+ hold_reason TEXT,
+ settlement_json TEXT CHECK(settlement_json IS NULL OR length(CAST(settlement_json AS BLOB))<=65536),
+ CHECK((phase='settled')=(settlement_json IS NOT NULL)),
+ CHECK((phase='unknown_held')=(hold_reason IS NOT NULL))
+) STRICT;
+CREATE TABLE family_roles (
+ family_id BLOB NOT NULL CHECK(length(family_id)=16),
+ role TEXT NOT NULL CHECK(role IN ('video','audio','companion')),
+ obligation_id BLOB NOT NULL REFERENCES obligations(obligation_id),
+ PRIMARY KEY(family_id,role)
+) STRICT;
+CREATE TABLE members (
+ obligation_id BLOB NOT NULL REFERENCES obligations(obligation_id),
+ member_id BLOB NOT NULL CHECK(length(member_id)=16),
+ kind TEXT NOT NULL CHECK(kind IN ('containment','root','task','typed_resource')),
+ adapter TEXT NOT NULL CHECK(adapter IN ('linux_cgroup_v2','windows_job','process_root','root_pipe_task','scratch','tuner_session','remote_attempt','source_file','vod_output_task')),
+ adapter_version INTEGER NOT NULL CHECK(adapter_version=1),
+ phase TEXT NOT NULL CHECK(phase IN ('planned','acquisition_possible','acquired','closed')),
+ identity_json TEXT NOT NULL CHECK(length(CAST(identity_json AS BLOB))<=65536),
+ proof_json TEXT CHECK(proof_json IS NULL OR length(CAST(proof_json AS BLOB))<=65536),
+ PRIMARY KEY(obligation_id,member_id),
+ CHECK((phase='closed')=(proof_json IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX unique_member_identity ON members(member_id);
+CREATE TABLE operations (
+ operation_id BLOB PRIMARY KEY NOT NULL CHECK(length(operation_id)=16),
+ request_json TEXT NOT NULL CHECK(length(CAST(request_json AS BLOB))<=65536),
+ result_json TEXT NOT NULL CHECK(length(CAST(result_json AS BLOB))<=65536)
+) STRICT;
+CREATE TABLE retained_asset_owners (
+ obligation_id BLOB PRIMARY KEY NOT NULL REFERENCES obligations(obligation_id) CHECK(length(obligation_id)=16),
+ asset_id BLOB NOT NULL UNIQUE CHECK(length(asset_id)=16),
+ rendition_id TEXT NOT NULL CHECK(length(CAST(rendition_id AS BLOB)) BETWEEN 1 AND 4096),
+ generation_epoch BLOB NOT NULL CHECK(length(generation_epoch)=8),
+ custody_json TEXT NOT NULL CHECK(length(CAST(custody_json AS BLOB))<=65536)
+) STRICT;
+ALTER TABLE obligations ADD COLUMN memory_claim TEXT NOT NULL DEFAULT 'bounded_active' CHECK(memory_claim IN ('bounded_active','bounded_resident','unknown_producer'));
+PRAGMA user_version=3;

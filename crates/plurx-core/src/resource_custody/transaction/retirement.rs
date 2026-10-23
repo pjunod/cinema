@@ -154,7 +154,7 @@ pub(super) fn change(
     let target_identity_json = codec::encode(&target_envelope)?;
     let sequence = next_sequence(tx)?;
     tx.execute(
-        "INSERT INTO obligations VALUES(?1,?2,?3,?4,?5,?6,'sealed',?7,?8,?9,NULL,NULL)",
+        "INSERT INTO obligations (obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,memory_claim) VALUES(?1,?2,?3,?4,?5,?6,'sealed',?7,?8,?9,NULL,NULL,'bounded_resident')",
         params![
             target.obligation_id.as_bytes(),
             owner.as_bytes(),

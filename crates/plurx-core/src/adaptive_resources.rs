@@ -1,5 +1,6 @@
-//! Node-local atomic resource accounting. These are physical resource bounds,
-//! NOT the legacy software thread-service budget (whose idle-pool exception is
+//! Node-local atomic resource accounting with explicit unknown producer peaks.
+//! Numeric memory is only the known allocation component for an unknown claim.
+//! This is separate from the legacy software thread-service budget (whose idle-pool exception is
 //! preserved separately). Unknown evidence never grants an expansion.
 //!
 //! Assessment is advisory; reservation rechecks the epoch and every dimension
@@ -12,6 +13,11 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::process::observation::{Metric, UnknownReason};
+
+mod capacity;
+pub use capacity::ResourceCapacity;
+mod memory_claim;
+pub(crate) use memory_claim::MemoryClaim;
 
 pub mod physical_graph;
 mod retained;
@@ -293,6 +299,7 @@ struct Entry {
     binding: ReservationBinding,
     family_role: Option<(FamilyIdentity, FamilyRole)>,
     resources: ResourceVector,
+    memory_claim: MemoryClaim,
     state: ReservationState,
     custody: Option<Arc<physical_graph::GraphCustody>>,
     // Private operation identity, never a disk/wire refund capability. Present
@@ -308,7 +315,7 @@ struct NativeOverageObservation {
 
 struct State {
     epoch: u64,
-    cap: Metric<ResourceVector>,
+    cap: ResourceCapacity,
     used: ResourceVector,
     next_reservation: u64,
     next_family: u64,
@@ -346,6 +353,12 @@ pub struct CleanupAuthority {
 #[derive(Debug, serde::Serialize)]
 pub struct LedgerSnapshot {
     pub limit_epoch: u64,
+    pub capacity: ResourceCapacity,
+    pub unknown_peak_producers: usize,
+    /// Complete managed peak is unknown while any producer has an unknown
+    /// additional peak. `used` still includes every known reserved component.
+    pub managed_memory_peak_bytes: Metric<u64>,
+    pub active_bounded_producers: usize,
     pub used: ResourceVector,
     pub held: usize,
     pub unknown_held: usize,
@@ -368,8 +381,32 @@ impl State {
         }
     }
 
+    fn memory_claims_fit(&self, additional: &[MemoryClaim]) -> Result<(), AdmissionRefusal> {
+        let mut active = 0usize;
+        let mut unknown = false;
+        for claim in self
+            .entries
+            .values()
+            .map(|entry| entry.memory_claim)
+            .chain(additional.iter().copied())
+        {
+            active += usize::from(claim.is_active_producer());
+            unknown |= claim == MemoryClaim::UnknownProducerPeak;
+        }
+        if unknown && active > 1 {
+            return Err(AdmissionRefusal::InsufficientEvidence);
+        }
+        Ok(())
+    }
     fn assess(&self, demand: WorkloadDemand) -> Result<ResourceVector, AdmissionRefusal> {
-        if self.invalid {
+        self.assess_claim(demand, MemoryClaim::default())
+    }
+    fn assess_claim(
+        &self,
+        demand: WorkloadDemand,
+        claim: MemoryClaim,
+    ) -> Result<ResourceVector, AdmissionRefusal> {
+        if self.invalid || self.draining {
             return Err(AdmissionRefusal::Unavailable);
         }
         if self.native_overage_fenced {
@@ -378,12 +415,13 @@ impl State {
         if demand.limit_epoch != self.epoch {
             return Err(AdmissionRefusal::StaleEpoch);
         }
-        let (Metric::Known(resources), Metric::Known(cap)) = (demand.resources, self.cap) else {
+        let Metric::Known(resources) = demand.resources else {
             return Err(AdmissionRefusal::InsufficientEvidence);
         };
         if resources == ResourceVector::default() {
             return Err(AdmissionRefusal::InsufficientEvidence);
         }
+        self.memory_claims_fit(&[claim])?;
         if demand.trial && self.trial.is_some() {
             return Err(AdmissionRefusal::TrialAlreadyHeld);
         }
@@ -394,9 +432,8 @@ impl State {
             .used
             .checked_add(resources)
             .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
-        if let Some(dimension) = total.exceeded(cap) {
-            return Err(AdmissionRefusal::HardLimit(dimension));
-        }
+        self.cap
+            .check(total, resources, claim == MemoryClaim::UnknownProducerPeak)?;
         Ok(resources)
     }
 
@@ -430,6 +467,12 @@ impl ResourceLedger {
     pub fn new(
         limit_epoch: u64,
         hard_cap: Metric<ResourceVector>,
+    ) -> Result<Self, AdmissionRefusal> {
+        Self::with_capacity(limit_epoch, hard_cap.into())
+    }
+    pub fn with_capacity(
+        limit_epoch: u64,
+        hard_cap: ResourceCapacity,
     ) -> Result<Self, AdmissionRefusal> {
         let id = NEXT_LEDGER
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -500,6 +543,13 @@ impl ResourceLedger {
         &self,
         families: &[FamilyDemand<'_>],
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+        self.reserve_families_claiming(families, None)
+    }
+    pub(crate) fn reserve_families_claiming(
+        &self,
+        families: &[FamilyDemand<'_>],
+        claims: Option<&[MemoryClaim]>,
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         if families.is_empty()
             || families.len() > MAX_OVERLAP_FAMILIES
             || families.iter().any(|family| {
@@ -528,7 +578,7 @@ impl ResourceLedger {
                 ));
             }
         }
-        self.reserve_roles(&roles)
+        self.reserve_roles_claiming(&roles, claims)
     }
 
     #[allow(clippy::type_complexity)]
@@ -539,6 +589,18 @@ impl ResourceLedger {
             WorkloadDemand,
             Option<RetainedRole<'_>>,
         )],
+    ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+        self.reserve_roles_claiming(roles, None)
+    }
+    #[allow(clippy::type_complexity)]
+    fn reserve_roles_claiming(
+        &self,
+        roles: &[(
+            Option<(FamilyIdentity, FamilyRole)>,
+            WorkloadDemand,
+            Option<RetainedRole<'_>>,
+        )],
+        claims: Option<&[MemoryClaim]>,
     ) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
         let mut state = self
             .inner
@@ -589,9 +651,21 @@ impl ResourceLedger {
                 missing.push((*family_role, *demand));
             }
         }
+        if claims.is_some_and(|claims| claims.len() != missing.len()) {
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
         if missing.is_empty() {
             return Ok(Vec::new());
         }
+        let defaults = vec![MemoryClaim::default(); missing.len()];
+        let claims = claims.unwrap_or(&defaults);
+        if claims.iter().any(|claim| !claim.is_active_producer()) {
+            // Residency is earned only by the original proof-bearing R→S swap.
+            return Err(AdmissionRefusal::InvalidBundle);
+        }
+        // All candidate producer claims and every old hold share this ledger's
+        // one node-RAM domain. No caller-selected domain can evade serialization.
+        state.memory_claims_fit(claims)?;
         let trial = missing
             .first()
             .ok_or(AdmissionRefusal::InvalidBundle)?
@@ -610,7 +684,8 @@ impl ResourceLedger {
         }
         let resources: Vec<_> = missing
             .iter()
-            .map(|(_, demand)| state.assess(*demand))
+            .zip(claims)
+            .map(|((_, demand), claim)| state.assess_claim(*demand, *claim))
             .collect::<Result<_, _>>()?;
         let total = resources
             .iter()
@@ -622,12 +697,11 @@ impl ResourceLedger {
             .used
             .checked_add(total)
             .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
-        let Metric::Known(cap) = state.cap else {
-            return Err(AdmissionRefusal::InsufficientEvidence);
-        };
-        if let Some(dimension) = used.exceeded(cap) {
-            return Err(AdmissionRefusal::HardLimit(dimension));
-        }
+        state.cap.check(
+            used,
+            total,
+            claims.contains(&MemoryClaim::UnknownProducerPeak),
+        )?;
         let first_id = state.next_reservation;
         let count =
             u64::try_from(resources.len()).map_err(|_| AdmissionRefusal::ArithmeticOverflow)?;
@@ -638,7 +712,11 @@ impl ResourceLedger {
         let mut trial_members = BTreeSet::new();
         // All fallible validation precedes the single accounting commit; at
         // most six plain-u64 map entries, and no external code under this lock.
-        for ((id, resources), (family_role, _)) in (first_id..next).zip(resources).zip(missing) {
+        for (((id, resources), (family_role, _)), memory_claim) in (first_id..next)
+            .zip(resources)
+            .zip(missing)
+            .zip(claims.iter().copied())
+        {
             let binding = ReservationBinding {
                 ledger: self.id,
                 reservation: id,
@@ -650,6 +728,7 @@ impl ResourceLedger {
                     binding,
                     family_role,
                     resources,
+                    memory_claim,
                     state: ReservationState::Reserved,
                     custody: None,
                     durable: None,
@@ -682,6 +761,13 @@ impl ResourceLedger {
         &self,
         epoch: u64,
         cap: Metric<ResourceVector>,
+    ) -> Result<(), AdmissionRefusal> {
+        self.update_capacity(epoch, cap.into())
+    }
+    pub fn update_capacity(
+        &self,
+        epoch: u64,
+        cap: ResourceCapacity,
     ) -> Result<(), AdmissionRefusal> {
         let mut state = self
             .inner
@@ -782,6 +868,26 @@ impl ResourceLedger {
             .map_err(|_| AdmissionRefusal::Unavailable)?;
         Ok(LedgerSnapshot {
             limit_epoch: state.epoch,
+            capacity: state.cap,
+            managed_memory_peak_bytes: if state
+                .entries
+                .values()
+                .any(|entry| entry.memory_claim == MemoryClaim::UnknownProducerPeak)
+            {
+                Metric::Unknown(UnknownReason::InsufficientEvidence)
+            } else {
+                Metric::Known(state.used.peak_memory_bytes)
+            },
+            unknown_peak_producers: state
+                .entries
+                .values()
+                .filter(|entry| entry.memory_claim == MemoryClaim::UnknownProducerPeak)
+                .count(),
+            active_bounded_producers: state
+                .entries
+                .values()
+                .filter(|entry| entry.memory_claim == MemoryClaim::default())
+                .count(),
             used: state.used,
             held: state.entries.len(),
             unknown_held: state
@@ -1415,3 +1521,7 @@ mod tests {
         assert_eq!(ledger.snapshot().expect("unchanged zero cap").held, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "adaptive_resources/claim_tests.rs"]
+mod claim_tests;

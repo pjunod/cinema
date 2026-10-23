@@ -6,6 +6,7 @@ mod retirement;
 mod scratch;
 mod typed;
 use super::*;
+use crate::adaptive_resources::MemoryClaim;
 use codec::{MemberEnvelope, SettlementRecord};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
@@ -117,7 +118,13 @@ pub(super) fn snapshot(
     let mut total = ResourceVector::default();
     let mut trials = BTreeSet::new();
     let mut protected = BTreeSet::new();
-    let mut stmt = connection.prepare("SELECT obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json FROM obligations ORDER BY obligation_id")?;
+    let schema_version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let obligation_query = if schema_version >= 3 {
+        "SELECT obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,memory_claim FROM obligations ORDER BY obligation_id"
+    } else {
+        "SELECT obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json,'bounded_active' FROM obligations ORDER BY obligation_id"
+    };
+    let mut stmt = connection.prepare(obligation_query)?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
@@ -135,6 +142,40 @@ pub(super) fn snapshot(
         let manifest_json: String = row.get(9)?;
         let reason: Option<String> = row.get(10)?;
         let settlement: Option<String> = row.get(11)?;
+        let claim_key: String = row.get(12)?;
+        let memory_claim = MemoryClaim::from_sql_key(&claim_key).ok_or_else(codec::invalid)?;
+        if matches!(memory_claim, MemoryClaim::UnknownProducerPeak)
+            && (resources.processes == 0 || resources.cpu_ns_per_second == 0)
+        {
+            return Err(codec::invalid());
+        }
+        if matches!(
+            memory_claim,
+            MemoryClaim::KnownBounded {
+                active_producer: false
+            }
+        ) {
+            let retained: Option<String> = connection
+                .query_row(
+                    "SELECT custody_json FROM retained_asset_owners WHERE obligation_id=?1",
+                    [id.as_bytes()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(retained) = retained else {
+                return Err(codec::invalid());
+            };
+            if !matches!(
+                codec_v2::decode_retained_assets(&retained)?,
+                codec_v2::RetainedAssetsDocument::V2(_)
+            ) || resources.cpu_ns_per_second != 0
+                || resources.processes != 0
+                || resources.hardware_slots != 0
+                || resources.tuner_slots != 0
+            {
+                return Err(codec::invalid());
+            }
+        }
         if !owners.contains(&owner)
             || sequence < 1
             || sequence > next
@@ -183,6 +224,7 @@ pub(super) fn snapshot(
                 owner_id: owner,
                 allocation_epoch: epoch,
                 resources,
+                memory_claim,
                 trial_group_id: trial,
                 phase,
                 sequence,
@@ -347,7 +389,7 @@ pub(super) fn snapshot(
             }
             DiskResult::RetiredWithAssets(ack) => {
                 let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-                if version != 2
+                if version < 2
                     || ack.version != 2
                     || ack.operation_id.uuid() != operation_id
                     || ack.sequence < 1
@@ -514,7 +556,14 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
             handles,
             trial,
         } => {
-            let obligations: Vec<_> = batch.obligations.iter().zip(handles).map(|(n,h)| serde_json::json!({"id":h.obligation_id,"graph":h.graph_id,"owner":h.owner_id,"epoch":n.allocation_epoch,"resources":codec::vector_bytes(n.resources),"manifest":n.manifest})).collect();
+            let obligations: Vec<_> = batch.obligations.iter().zip(handles).map(|(n,h)| {
+                let mut value = serde_json::json!({"id":h.obligation_id,"graph":h.graph_id,"owner":h.owner_id,"epoch":n.allocation_epoch,"resources":codec::vector_bytes(n.resources),"manifest":n.manifest});
+                if !n.memory_claim.is_default() {
+                    value.as_object_mut().expect("typed obligation JSON object")
+                        .insert("memory_claim".into(), serde_json::json!(n.memory_claim));
+                }
+                value
+            }).collect();
             let families: Vec<_> = batch
                 .families
                 .iter()
@@ -802,6 +851,104 @@ pub(super) fn execute(
     }
 }
 
+/// A numeric memory vector covers known allocations only. One unknown
+/// producer peak occupies the node's producer slot until it settles; an
+/// actually retained resident row carries no active producer claim.
+fn check_memory_claim_combination(
+    tx: &Transaction<'_>,
+    incoming: impl IntoIterator<Item = MemoryClaim>,
+) -> Result<(), CustodyError> {
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let query = if version >= 3 {
+        "SELECT obligation_id,memory_claim,resources FROM obligations WHERE phase!='settled'"
+    } else {
+        "SELECT obligation_id,'bounded_active',resources FROM obligations WHERE phase!='settled'"
+    };
+    let mut active = false;
+    let mut unknown = false;
+    let mut statement = tx.prepare(query)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id = codec::uuid_from_bytes(&row.get::<_, Vec<u8>>(0)?)?;
+        let key: String = row.get(1)?;
+        let resources = codec::vector_from_bytes(&row.get::<_, Vec<u8>>(2)?)?;
+        let claim = MemoryClaim::from_sql_key(&key).ok_or_else(codec::invalid)?;
+        if matches!(claim, MemoryClaim::UnknownProducerPeak)
+            && (resources.processes == 0 || resources.cpu_ns_per_second == 0)
+        {
+            return Err(codec::invalid());
+        }
+        if matches!(
+            claim,
+            MemoryClaim::KnownBounded {
+                active_producer: false
+            }
+        ) {
+            if resources.cpu_ns_per_second != 0
+                || resources.processes != 0
+                || resources.hardware_slots != 0
+                || resources.tuner_slots != 0
+            {
+                return Err(codec::invalid());
+            }
+            let custody: Option<String> = tx
+                .query_row(
+                    "SELECT custody_json FROM retained_asset_owners WHERE obligation_id=?1",
+                    [id.as_bytes()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(custody) = custody else {
+                return Err(codec::invalid());
+            };
+            if !matches!(
+                codec_v2::decode_retained_assets(&custody)?,
+                codec_v2::RetainedAssetsDocument::V2(_)
+            ) {
+                return Err(codec::invalid());
+            }
+        }
+        include_memory_claim(claim, &mut active, &mut unknown)?;
+    }
+    for claim in incoming {
+        include_memory_claim(claim, &mut active, &mut unknown)?;
+    }
+    Ok(())
+}
+
+fn include_memory_claim(
+    claim: MemoryClaim,
+    active: &mut bool,
+    unknown: &mut bool,
+) -> Result<(), CustodyError> {
+    let conflict = || {
+        CustodyError::new(
+            ErrorKind::Conflict,
+            "unknown producer peak conflicts with an active producer",
+        )
+    };
+    match claim {
+        MemoryClaim::KnownBounded {
+            active_producer: false,
+        } => {}
+        MemoryClaim::KnownBounded {
+            active_producer: true,
+        } => {
+            if *unknown {
+                return Err(conflict());
+            }
+            *active = true;
+        }
+        MemoryClaim::UnknownProducerPeak => {
+            if *active || *unknown {
+                return Err(conflict());
+            }
+            *unknown = true;
+        }
+    }
+    Ok(())
+}
+
 fn prepare(
     tx: &Transaction<'_>,
     journal: Uuid,
@@ -862,10 +1009,14 @@ fn prepare(
             .checked_add(new.resources)
             .ok_or_else(codec::invalid)?;
     }
+    check_memory_claim_combination(
+        tx,
+        std::iter::repeat_n(MemoryClaim::default(), batch.obligations.len()),
+    )?;
     let sequence = next_sequence(tx)?;
     for (new, h) in batch.obligations.iter().zip(handles) {
         tx.execute(
-            "INSERT INTO obligations VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?8,?9,NULL,NULL)",
+            "INSERT INTO obligations (obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json) VALUES(?1,?2,?3,?4,?5,?6,'prepared',?7,?8,?9,NULL,NULL)",
             params![
                 h.obligation_id.as_bytes(),
                 owner.as_bytes(),

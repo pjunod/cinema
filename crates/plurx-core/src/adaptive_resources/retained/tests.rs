@@ -11,6 +11,19 @@ fn source_fixture(
     Uuid,
     ResourceVector,
 ) {
+    source_fixture_with_claim(trial, None)
+}
+
+fn source_fixture_with_claim(
+    trial: bool,
+    claim: Option<MemoryClaim>,
+) -> (
+    ResourceLedger,
+    ResourceReservation,
+    ReservationBinding,
+    Uuid,
+    ResourceVector,
+) {
     let resources = ResourceVector {
         cpu_ns_per_second: 90,
         peak_memory_bytes: 512,
@@ -33,13 +46,22 @@ fn source_fixture(
         }),
     )
     .expect("ledger fixture");
-    let (reservation, _) = ledger
-        .reserve(crate::adaptive_resources::WorkloadDemand {
-            resources: Metric::Known(resources),
-            limit_epoch: 7,
-            trial,
-        })
-        .expect("source reservation");
+    let demand = crate::adaptive_resources::WorkloadDemand {
+        resources: Metric::Known(resources),
+        limit_epoch: 7,
+        trial,
+    };
+    let roles = [(None, demand, None)];
+    let (reservation, _) = match claim {
+        Some(claim) => ledger
+            .reserve_roles_claiming(&roles, Some(&[claim]))
+            .expect("claimed source reservation"),
+        None => ledger
+            .reserve_roles_claiming(&roles, None)
+            .expect("source reservation"),
+    }
+    .pop()
+    .expect("single source reservation");
     let binding = reservation.custody_binding();
     let durable = Uuid::new_v4();
     {
@@ -52,6 +74,113 @@ fn source_fixture(
         entry.state = ReservationState::Reaping;
     }
     (ledger, reservation, binding, durable, resources)
+}
+
+#[test]
+fn known_commit_swap_releases_unknown_claim_but_preserves_resident_memory() {
+    let (ledger, reservation, source, durable, resources) =
+        source_fixture_with_claim(false, Some(MemoryClaim::UnknownProducerPeak));
+    let before_swap = reserve_roles_for_claim(
+        &ledger,
+        MemoryClaim::UnknownProducerPeak,
+        ResourceVector {
+            cpu_ns_per_second: 10,
+            peak_memory_bytes: 128,
+            handles: 2,
+            processes: 1,
+            scratch_bytes: 100,
+            ..ResourceVector::default()
+        },
+    );
+    assert!(matches!(
+        before_swap,
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    let snapshot = ledger.snapshot().expect("unknown source charge");
+    assert_eq!(snapshot.used, resources);
+    assert_eq!(snapshot.unknown_peak_producers, 1);
+
+    let target_durable = Uuid::new_v4();
+    let retained = ResourceVector {
+        cpu_ns_per_second: 0,
+        peak_memory_bytes: resources.peak_memory_bytes,
+        handles: resources.handles,
+        processes: 0,
+        hardware_slots: 0,
+        tuner_slots: 0,
+        scratch_bytes: resources.scratch_bytes,
+    };
+    let mut swap = ledger
+        .prepare_retained_swap(source, durable, target_durable, retained)
+        .expect("prepare exact resident charge");
+    // Accounting-only adapter fixture: this exercises claim transfer after a
+    // known journal result, not physical retirement acceptance.
+    let proof = receipt(source, swap.target_binding());
+    let _authority = ledger
+        .commit_retained_swap(&mut swap, &proof)
+        .expect("accounting fixture known commit");
+    drop(reservation);
+
+    let snapshot = ledger.snapshot().expect("retained S charge");
+    assert_eq!(
+        snapshot.used,
+        ResourceVector {
+            peak_memory_bytes: resources.peak_memory_bytes,
+            handles: resources.handles,
+            scratch_bytes: resources.scratch_bytes,
+            ..ResourceVector::default()
+        }
+    );
+    assert_eq!(snapshot.held, 1);
+    assert_eq!(snapshot.unknown_peak_producers, 0);
+    {
+        let state = ledger.inner.lock().expect("ledger state");
+        let target = state
+            .entries
+            .get(&swap.target_binding().reservation)
+            .expect("original S resident entry");
+        assert_eq!(target.resources, retained);
+        assert_eq!(
+            target.memory_claim,
+            MemoryClaim::KnownBounded {
+                active_producer: false
+            }
+        );
+    }
+    let added = reserve_roles_for_claim(
+        &ledger,
+        MemoryClaim::UnknownProducerPeak,
+        ResourceVector {
+            cpu_ns_per_second: 10,
+            peak_memory_bytes: 128,
+            handles: 2,
+            processes: 1,
+            scratch_bytes: 100,
+            ..ResourceVector::default()
+        },
+    )
+    .expect("unknown producer fits beside resident S");
+    let after = ledger.snapshot().expect("S and new producer");
+    assert_eq!(
+        after.used.peak_memory_bytes,
+        resources.peak_memory_bytes + 128
+    );
+    assert_eq!(after.held, 2);
+    assert_eq!(after.unknown_peak_producers, 1);
+    drop(added);
+}
+
+fn reserve_roles_for_claim(
+    ledger: &ResourceLedger,
+    claim: MemoryClaim,
+    resources: ResourceVector,
+) -> Result<Vec<(ResourceReservation, CleanupAuthority)>, AdmissionRefusal> {
+    let demand = crate::adaptive_resources::WorkloadDemand {
+        resources: Metric::Known(resources),
+        limit_epoch: 7,
+        trial: false,
+    };
+    ledger.reserve_roles_claiming(&[(None, demand, None)], Some(&[claim]))
 }
 
 fn retained_from(source: ResourceVector) -> ResourceVector {

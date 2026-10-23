@@ -5,7 +5,7 @@ use super::PhysicalRetirementReceipt;
 #[cfg(test)]
 use super::ResourceReservation;
 use super::{
-    AdmissionRefusal, CleanupAuthority, Entry, ReservationBinding, ReservationState,
+    AdmissionRefusal, CleanupAuthority, Entry, MemoryClaim, ReservationBinding, ReservationState,
     ResourceLedger, ResourceVector,
 };
 use crate::resource_custody::CommittedRetirementReceipt;
@@ -19,6 +19,7 @@ pub(in crate::adaptive_resources) struct RetainedSwap {
     source: ReservationBinding,
     source_durable: Uuid,
     source_resources: ResourceVector,
+    source_memory_claim: MemoryClaim,
     target: ReservationBinding,
     target_durable: Uuid,
     retained: ResourceVector,
@@ -82,6 +83,7 @@ impl ResourceLedger {
             return Err(AdmissionRefusal::ReceiptMismatch);
         }
         let source_resources = entry.resources;
+        let source_memory_claim = entry.memory_claim;
         if !componentwise_le(retained, source_resources) {
             return Err(AdmissionRefusal::InvalidTransition);
         }
@@ -104,6 +106,7 @@ impl ResourceLedger {
             source,
             source_durable,
             source_resources,
+            source_memory_claim,
             target,
             target_durable,
             retained,
@@ -138,6 +141,10 @@ impl ResourceLedger {
             if target.binding != swap.target
                 || target.durable != Some(swap.target_durable)
                 || target.resources != swap.retained
+                || target.memory_claim
+                    != (MemoryClaim::KnownBounded {
+                        active_producer: false,
+                    })
                 || target.state != ReservationState::Reaping
                 || state.entries.contains_key(&swap.source.reservation)
             {
@@ -156,6 +163,7 @@ impl ResourceLedger {
         if source.binding != swap.source
             || source.durable != Some(swap.source_durable)
             || source.resources != swap.source_resources
+            || source.memory_claim != swap.source_memory_claim
             || state.entries.contains_key(&swap.target.reservation)
         {
             return Err(AdmissionRefusal::ReceiptMismatch);
@@ -189,6 +197,9 @@ impl ResourceLedger {
                 binding: swap.target,
                 family_role: None,
                 resources: swap.retained,
+                memory_claim: MemoryClaim::KnownBounded {
+                    active_producer: false,
+                },
                 state: ReservationState::Reaping,
                 custody: None,
                 durable: Some(swap.target_durable),

@@ -1,11 +1,15 @@
 # Adaptive playback resources — implementation and evidence ledger
 
-**Status:** open · implementation incomplete; published native Linux core+daemon
-all-targets compile passed on Rust 1.97.1; current in-role response-buffer
-changes pass host compilation, with native compilation pending; behavioral tests not run.
-**Updated:** 2026-10-22 at published checkpoint
-`4993339f81d7045950c13cb9ec42977c5a62ce50`; current uncommitted work described
-below.
+**Status:** open · implementation incomplete; published checkpoint
+`35e7cff19940` passed exact native Linux core+daemon compilation on Rust 1.97.1
+(192.956 seconds; `../evidence/direct-linux-35e7cff19940-RESULT.json`). Current
+uncommitted memory-accounting work passes the host all-target check on Rust
+1.97.1 (EXIT 0, 26.445 seconds; `../evidence/direct-check-20261022-225025.json`,
+log SHA-256 `bc119c421216a71c553169bfd2404a2ecff2188784d673b41a622f43505a3577`);
+native Linux compilation is pending. Behavioral tests, final Fable review and
+qualification have not run.
+**Updated:** 2026-10-22 at published checkpoint `35e7cff19940`; current
+uncommitted work described below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -31,22 +35,18 @@ acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
 
-Published checkpoint `4993339f81d7045950c13cb9ec42977c5a62ce50` passed native
-Linux core+daemon all-targets compilation with pinned Rust 1.97.1 (EXIT 0,
-201.134 seconds). Stable source archive SHA-256:
-`22c564c22efaa24b79afd0d880ebeda9c3b3dcb75260be9228a6a444162efb85`; log
-SHA-256: `97d38b39c566cd0b98dc8602052f48f662bcacd17c2b0f33e9cdda1f48fe1672`.
-No behavioral tests ran. Current uncommitted work adds in-role counted response
-partitioning and opaque `ReadyBytes` buffer/body ownership. The host daemon
-all-target check passes on Rust 1.97.1 (123.394 seconds, stable source hashes;
-`direct-check-20261022-222315.json`); native checking of this new snapshot is
-pending. Finite allocation reserves its slot before allocating and keeps it
-through actual byte-owner drop, including sliced HTTP bodies. S cleanup and
-every generic refund refuse live buffers. Three focused budget regressions are
-authored and not run. All V1–V5 and R1/M0–M7 remain open.
-Ordinary VOD still uses legacy admission. Parser inspection copies remain outside the response payload partition; parser/framework/runtime-index overhead remains incomplete.
-Unknown-peak cold policy, per-dimension capacity and partial-start ownership
-remain unresolved.
+Published checkpoint `35e7cff19940` passed exact native Linux core+daemon
+all-targets compilation with pinned Rust 1.97.1 (EXIT 0, 192.956 seconds;
+`../evidence/direct-linux-35e7cff19940-RESULT.json`). Current uncommitted work
+adds explicit unknown FFmpeg peak accounting: it excludes every other active
+producer in the same ledger while validated retained residents may coexist. It
+also adds strict schema-v3 persistence/migration, a transactional admission
+guard, independent per-dimension capacities and full recovery holds. Host
+all-target compilation for this phase passes; native Linux compilation is
+pending. All V1–V5 and R1/M0–M7 remain OPEN. No behavioral tests, final Fable
+review or qualification have run.
+Ordinary VOD still uses legacy admission, and parser/framework/runtime-index
+overheads remain incomplete.
 
 The selected executable now uses a fixed eight-entry verification cache keyed by
 all seven S1 identity fields and digest. Only a prior successful held-file native
@@ -133,15 +133,18 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `4993339f81d7045950c13cb9ec42977c5a62ce50`. Its
-native Linux core+daemon all-target Rust 1.97.1 compile passed in 201.134 seconds.
-No behavioral tests ran. Current uncommitted in-role response partitioning and
-opaque `ReadyBytes` buffer-body ownership are outside that receipt and await
-compilation. No strict Clippy, final independent review,
-qualification/fast lane, merge or deployment is claimed. Ordinary admission and
-terminal integration remain open. Initialization inspection/copy is outside the
-ledger; peak-memory bounds, per-dimension capacity and partial-start ownership
-remain unresolved.
+The latest published base is `35e7cff19940`. Its native Linux core+daemon
+all-target Rust 1.97.1 compile passed in 192.956 seconds. Current uncommitted
+memory-accounting work passes host all-target compilation (EXIT 0, 26.445
+seconds; `../evidence/direct-check-20261022-225025.json`) and awaits native Linux
+compilation. Unknown FFmpeg peak is serialized against every other active
+producer in the same ledger; validated retained residents may coexist. Strict
+schema-v3 persistence/migration, transactional admission guard, independent
+per-dimension capacities and full recovery holds are included in this phase.
+No behavioral tests, strict Clippy, final independent review, qualification/fast
+lane, merge or deployment are claimed. Ordinary admission and terminal
+integration remain open; parser/framework/runtime-index overhead and partial-
+start ownership remain unresolved.
 
 ## Current source and compiler receipt
 

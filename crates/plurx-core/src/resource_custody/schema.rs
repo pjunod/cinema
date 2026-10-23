@@ -70,7 +70,8 @@ CREATE TABLE operations (
 PRAGMA user_version=1;
 "#;
 
-pub(super) const DDL: &str = include_str!("schema/v2.sql");
+pub(super) const DDL_V2: &str = include_str!("schema/v2.sql");
+pub(super) const DDL: &str = include_str!("schema/v3.sql");
 
 fn shape(connection: &Connection) -> Result<Vec<(String, String, String)>, CustodyError> {
     let mut statement = connection.prepare(
@@ -84,7 +85,8 @@ pub(super) fn validate(connection: &Connection) -> Result<(), CustodyError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let ddl = match version {
         1 => DDL_V1,
-        2 => DDL,
+        2 => DDL_V2,
+        3 => DDL,
         _ => {
             return Err(CustodyError::new(
                 ErrorKind::UnreadableAuthority,

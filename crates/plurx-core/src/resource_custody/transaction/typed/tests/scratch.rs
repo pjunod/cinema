@@ -240,7 +240,7 @@ fn scratch_v2_old_reader_rejects_new_operation_and_sql_shape_is_unchanged() {
         .connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     let adapter: (String, i64) = f
         .storage
         .connection

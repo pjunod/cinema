@@ -207,6 +207,7 @@ pub struct ObligationRecord {
     pub owner_id: Uuid,
     pub allocation_epoch: u64,
     pub resources: ResourceVector,
+    pub(crate) memory_claim: crate::adaptive_resources::MemoryClaim,
     pub trial_group_id: Option<Uuid>,
     pub phase: Phase,
     pub sequence: i64,
@@ -291,6 +292,7 @@ pub(crate) struct TypedNewObligation {
     pub runtime_binding: ReservationBinding,
     pub allocation_epoch: u64,
     pub resources: ResourceVector,
+    pub memory_claim: crate::adaptive_resources::MemoryClaim,
     pub manifest: codec_v2::Manifest,
 }
 #[derive(Clone, Debug)]

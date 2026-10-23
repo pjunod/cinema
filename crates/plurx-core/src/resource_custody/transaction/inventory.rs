@@ -77,7 +77,7 @@ pub(super) fn load(
         }
         ManifestDocument::V2(manifest) => {
             let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            if version != 2 {
+            if version < 2 {
                 return Err(codec::invalid());
             }
             if manifest.owner_id.uuid() != owner || manifest.graph_id.uuid() != graph {

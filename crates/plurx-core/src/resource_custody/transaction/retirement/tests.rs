@@ -185,6 +185,12 @@ fn retained_retirement_is_atomic_and_exact_retry_recovers_lost_ack() {
     assert_eq!(snapshot.total, f.target_resources);
     assert_eq!(snapshot.obligations.len(), 1);
     assert_eq!(
+        snapshot.obligations[0].memory_claim,
+        crate::adaptive_resources::MemoryClaim::KnownBounded {
+            active_producer: false
+        }
+    );
+    assert_eq!(
         snapshot.obligations[0].obligation_id,
         target.obligation_id()
     );
@@ -200,6 +206,15 @@ fn retained_retirement_is_atomic_and_exact_retry_recovers_lost_ack() {
         .unwrap();
     assert_eq!(source_phase, "settled");
     assert_eq!(snapshot.retained_assets.len(), 1);
+    // This real transferred V2 resident carries no producer peak. A later
+    // cold unknown producer can be admitted beside its still-held S charge.
+    let tx = f.source.storage.connection.transaction().unwrap();
+    super::super::check_memory_claim_combination(
+        &tx,
+        [crate::adaptive_resources::MemoryClaim::UnknownProducerPeak],
+    )
+    .unwrap();
+    drop(tx);
     let operation_count: i64 = f
         .source
         .storage

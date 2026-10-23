@@ -684,6 +684,6 @@ fn scratch_v3_old_decoder_rejects_new_results_without_sql_schema_change() {
         .connection
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
     snapshot(&f.storage.connection, &f.storage.witness).unwrap();
 }

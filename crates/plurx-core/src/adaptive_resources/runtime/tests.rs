@@ -58,6 +58,7 @@ fn snapshot(phases: &[Phase], trial: bool) -> RecoverySnapshot {
                 owner_id: owner.owner_id,
                 allocation_epoch: u64::MAX,
                 resources: vector(2),
+                memory_claim: crate::adaptive_resources::MemoryClaim::default(),
                 trial_group_id: trial_id,
                 phase: *phase,
                 sequence: 1,
@@ -345,4 +346,60 @@ async fn actual_journal_reopen_retains_prepared_trial_cost_paths_and_owner_data(
         .path()
         .join("resource-custody/obligations.sqlite3")
         .exists());
+}
+
+#[test]
+fn recovered_unknown_peak_keeps_full_charge_and_excludes_new_producers() {
+    let mut recovered = snapshot(&[Phase::Sealed], false);
+    recovered.obligations[0].memory_claim =
+        crate::adaptive_resources::MemoryClaim::UnknownProducerPeak;
+    let (ledger, _) = restore_accounting(2, Metric::Known(vector(100)), &recovered)
+        .expect("restore the original complete hold");
+    let current = ledger.snapshot().expect("restored accounting");
+    assert_eq!(current.used, vector(2));
+    assert_eq!(current.unknown_held, 1);
+    assert_eq!(current.unknown_peak_producers, 1);
+    assert!(matches!(
+        current.managed_memory_peak_bytes,
+        Metric::Unknown(_)
+    ));
+    assert!(matches!(
+        ledger.reserve(WorkloadDemand {
+            resources: Metric::Known(vector(1)),
+            limit_epoch: 2,
+            trial: false,
+        }),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    assert_eq!(
+        ledger.snapshot().expect("held after refusal").used,
+        vector(2)
+    );
+}
+
+#[test]
+fn conflicting_recovered_claims_keep_every_hold_and_fence_new_work() {
+    let mut recovered = snapshot(&[Phase::Sealed, Phase::Prepared], false);
+    recovered.obligations[0].memory_claim =
+        crate::adaptive_resources::MemoryClaim::UnknownProducerPeak;
+    let (ledger, _) = restore_accounting(2, Metric::Known(vector(100)), &recovered)
+        .expect("preserve inconsistent accounting without empty authority");
+    let current = ledger
+        .snapshot()
+        .expect("all restored holds remain visible");
+    assert_eq!(current.used, vector(4));
+    assert_eq!(current.held, 2);
+    assert_eq!(current.unknown_held, 2);
+    assert!(matches!(
+        ledger.reserve(WorkloadDemand {
+            resources: Metric::Known(vector(1)),
+            limit_epoch: 2,
+            trial: false,
+        }),
+        Err(AdmissionRefusal::Unavailable)
+    ));
+    assert_eq!(
+        ledger.snapshot().expect("conservative holds").used,
+        vector(4)
+    );
 }

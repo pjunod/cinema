@@ -22,10 +22,10 @@ fn legacy(connection: &Connection, witness: &storage::Witness) {
         .unwrap();
 }
 fn logical_rows(db: &Connection, table: &str) -> Vec<Vec<Value>> {
-    let projection = if table == "journal_meta" {
-        "singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id"
-    } else {
-        "*"
+    let projection = match table {
+        "journal_meta" => "singleton,journal_id,installation_id,node_id,cluster_id,next_sequence,current_owner_id",
+        "obligations" => "obligation_id,owner_id,graph_id,allocation_epoch,resources,trial_group_id,phase,sequence,last_operation_id,manifest_json,hold_reason,settlement_json",
+        _ => "*",
     };
     let mut stmt = db
         .prepare(&format!("SELECT {projection} FROM {table} ORDER BY 1,2"))
@@ -182,7 +182,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     for (table, old) in tables.iter().zip(before) {
         assert_eq!(logical_rows(&db, table), old, "{table}");
@@ -193,7 +193,7 @@ fn v1_upgrade_preserves_active_settled_history_trial_and_full_width_values() {
     assert_eq!(snapshot.obligations[0].allocation_epoch, u64::MAX);
     assert_eq!(snapshot.trial_groups.len(), 1);
     assert!(snapshot.retained_assets.is_empty());
-    // Exact-v2 reopen is a no-op; old shape recognition cannot accept the new DB.
+    // Exact-v3 reopen is a no-op; old shape recognition cannot accept the new DB.
     let rows = logical_rows(&db, "operations");
     upgrade(&mut db, &store.witness).unwrap();
     assert_eq!(rows, logical_rows(&db, "operations"));
@@ -290,7 +290,7 @@ fn ready_v1_open_upgrades_same_inode_without_replacing_witness() {
     );
 }
 #[test]
-fn v2_schema_is_exact_and_rejects_extra_shape() {
+fn v3_schema_is_exact_and_rejects_extra_shape() {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(DDL).unwrap();
     validate(&db).unwrap();
@@ -326,5 +326,51 @@ fn v1_upgrade_disk_full_rolls_back_persistent_ddl_and_history() {
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recognized_v2_history_upgrades_to_v3_with_conservative_claim_and_unchanged_bytes() {
+    let root = tempfile::Builder::new()
+        .prefix("plurx-custody-migration-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
+    let store = storage::Storage::open(&options(
+        root.path(),
+        owner(),
+        InstallationContext::FirstInstallation,
+    ))
+    .unwrap();
+    let mut db = Connection::open_in_memory().unwrap();
+    populated_v1(&mut db, &store.witness);
+    migration::upgrade_v1_to_v2(&mut db, &store.witness).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let before_obligations = logical_rows(&db, "obligations");
+    let before_operations = logical_rows(&db, "operations");
+    upgrade(&mut db, &store.witness).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(logical_rows(&db, "obligations"), before_obligations);
+    assert_eq!(logical_rows(&db, "operations"), before_operations);
+    let claim: String = db
+        .query_row(
+            "SELECT memory_claim FROM obligations WHERE phase='prepared'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(claim, "bounded_active");
+    let recovered = transaction::snapshot(&db, &store.witness).unwrap();
+    assert_eq!(
+        recovered.obligations[0].memory_claim,
+        crate::adaptive_resources::MemoryClaim::default()
     );
 }

@@ -40,6 +40,7 @@ fn fixture(trial: bool) -> Fixture {
             runtime_binding: legacy.runtime_binding,
             allocation_epoch: u64::MAX,
             resources: vector(10),
+            memory_claim: crate::adaptive_resources::MemoryClaim::default(),
             manifest,
         }],
         families: vec![FamilyRequest {
@@ -374,4 +375,155 @@ fn typed_late_source_copy_enrichment_is_monotonic_and_cannot_forget_a_held_copy(
         unreachable!()
     };
     assert!(members.iter().any(|m| m.envelope == full));
+}
+
+#[test]
+fn unknown_producer_claim_is_durable_and_changes_exact_prepare_replay() {
+    let mut f = fixture(false);
+    let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
+        unreachable!()
+    };
+    batch.obligations[0].memory_claim = crate::adaptive_resources::MemoryClaim::UnknownProducerPeak;
+    prepare(&mut f);
+    let snapshot = snapshot(&f.storage.connection, &f.storage.witness).unwrap();
+    assert_eq!(
+        snapshot.obligations[0].memory_claim,
+        crate::adaptive_resources::MemoryClaim::UnknownProducerPeak
+    );
+    let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
+        unreachable!()
+    };
+    batch.obligations[0].memory_claim = crate::adaptive_resources::MemoryClaim::default();
+    assert_eq!(
+        execute(&mut f.storage, &f.command, f.owner)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Conflict
+    );
+}
+
+#[test]
+fn typed_prepare_cannot_claim_resident_without_retirement() {
+    let mut f = fixture(false);
+    let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
+        unreachable!()
+    };
+    batch.obligations[0].memory_claim = crate::adaptive_resources::MemoryClaim::KnownBounded {
+        active_producer: false,
+    };
+    assert!(execute(&mut f.storage, &f.command, f.owner).is_err());
+    let rows: i64 = f
+        .storage
+        .connection
+        .query_row("SELECT count(*) FROM obligations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+fn legacy_prepare_command(f: &Fixture) -> (QueuedOperation, ResourceReservation) {
+    let (new, reservation) = new_obligation(f.owner, vector(10));
+    let handle = ObligationHandle {
+        journal_id: f.storage.witness.journal_id,
+        owner_id: f.owner,
+        obligation_id: Uuid::new_v4(),
+        graph_id: new.manifest.graph_id,
+        runtime_binding: new.runtime_binding,
+    };
+    let command = QueuedOperation {
+        id: Uuid::new_v4(),
+        deadline: deadline(),
+        command: Command::Prepare {
+            batch: PrepareBatch {
+                obligations: vec![new],
+                families: vec![FamilyRequest {
+                    family: FamilyHandle {
+                        journal_id: f.storage.witness.journal_id,
+                        family_id: Uuid::new_v4(),
+                    },
+                    roles: vec![(Role::Audio, RoleTarget::New(0))],
+                }],
+                trial: false,
+            },
+            handles: vec![handle],
+            trial: None,
+        },
+    };
+    (command, reservation)
+}
+
+#[test]
+fn legacy_prepare_cannot_join_an_active_unknown_producer() {
+    let mut f = fixture(false);
+    let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
+        unreachable!()
+    };
+    batch.obligations[0].memory_claim = crate::adaptive_resources::MemoryClaim::UnknownProducerPeak;
+    prepare(&mut f);
+    let (legacy, _reservation) = legacy_prepare_command(&f);
+    let sequence_before: i64 = f
+        .storage
+        .connection
+        .query_row("SELECT next_sequence FROM journal_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        execute(&mut f.storage, &legacy, f.owner).unwrap_err().kind,
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        f.storage
+            .connection
+            .query_row("SELECT next_sequence FROM journal_meta", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        sequence_before
+    );
+    assert_eq!(
+        f.storage
+            .connection
+            .query_row("SELECT count(*) FROM obligations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn typed_unknown_producer_cannot_join_an_active_legacy_prepare() {
+    let mut f = fixture(false);
+    let (legacy, _reservation) = legacy_prepare_command(&f);
+    assert!(matches!(
+        execute(&mut f.storage, &legacy, f.owner).unwrap(),
+        OperationResult::Prepared(_)
+    ));
+    let Command::PrepareTyped { batch, .. } = &mut f.command.command else {
+        unreachable!()
+    };
+    batch.obligations[0].memory_claim = crate::adaptive_resources::MemoryClaim::UnknownProducerPeak;
+    let sequence_before: i64 = f
+        .storage
+        .connection
+        .query_row("SELECT next_sequence FROM journal_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        execute(&mut f.storage, &f.command, f.owner)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        f.storage
+            .connection
+            .query_row("SELECT next_sequence FROM journal_meta", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        sequence_before
+    );
+    assert_eq!(
+        f.storage
+            .connection
+            .query_row("SELECT count(*) FROM obligations", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }
