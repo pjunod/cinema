@@ -546,10 +546,10 @@ static void render_pairs(void) {
          "fresh decoder-attached RPU required; cached metadata insufficient");
     uint8_t nalu[4098] = {0x7c, 0x01};
     memcpy(nalu + 2, raw->data, raw->size);
-    struct base_mapping base_mapped;
+    struct base_mapping base_mapped = {0};
     if (base_only)
       base_metadata(bl, nalu, raw->size + 2, source_profile, &base_mapped);
-    struct pl_dovi_metadata fel_mapped;
+    struct pl_dovi_metadata fel_mapped = {0};
     if (!base_only)
       map_fel_rpu(bl, nalu, raw->size + 2, &fel_mapped,
                   !window_mode || compare_window(bl->pts, window_start) >= 0,
