@@ -62,12 +62,15 @@ def probe(config):
         result = subprocess.run(
             config["probe_command"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=config["probe_timeout_seconds"],
             check=False,
         )
-        return result.returncode == 0
+        return (
+            result.returncode == 0
+            and result.stdout == config["probe_expected_stdout"].encode("utf-8")
+        )
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -80,6 +83,9 @@ def load_config(path):
             isinstance(arg, str) and arg for arg in command
         ):
             raise ValueError("%s must be a nonempty argv array" % key)
+    expected_stdout = config.get("probe_expected_stdout")
+    if not isinstance(expected_stdout, str) or not expected_stdout:
+        raise ValueError("probe_expected_stdout must be a nonempty string")
     for key in ("interval_seconds", "probe_timeout_seconds", "failure_checks", "recovery_checks"):
         if not isinstance(config[key], int) or isinstance(config[key], bool) or config[key] <= 0:
             raise ValueError("%s must be a positive integer" % key)

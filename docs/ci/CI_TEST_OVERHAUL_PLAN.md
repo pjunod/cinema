@@ -307,10 +307,12 @@ broad command's `--list` output. One assertion should produce one set of
 runner-minutes.
 
 For Apple changes, T1 begins on the private-repository lab runner selected by
-`[self-hosted, macOS, ARM64, lab, apple, xcode-27]`. The M4 MacBook Air is
-primary and the M3 Max MacBook Pro is standby, as described in
-[APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md).
-It verifies Xcode 27.0 build 27A266a, the iOS and tvOS 27.0 SDKs, iOS 26.5
+`[self-hosted, macOS, ARM64, lab, apple, xcode-27.1]`. The M4 MacBook Air is
+the primary role and the M3 Max MacBook Pro is the verified 27.1 backup, as
+recorded in [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md). The primary
+is unverified and excluded from the new version label until its installation
+and health-command deployment are qualified.
+It verifies Xcode 27.1 build 27A9275, the iOS 27.1 and tvOS 27.0 SDKs, iOS 26.5
 runtime build 23F77, tvOS 26.5 runtime build 23L470, and XcodeGen 2.46.0
 before restoring DerivedData or booting a simulator. That makes
 toolchain drift fail in seconds instead of paying for a partial build. The

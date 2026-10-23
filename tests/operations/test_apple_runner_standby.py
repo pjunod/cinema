@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "deploy/apple-runner/plurx-apple-standby"
+EXPECTED_HEALTH = "Xcode 27.1\nBuild version 27A9275\n"
 loader = importlib.machinery.SourceFileLoader("apple_standby", str(SOURCE))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 standby = importlib.util.module_from_spec(spec)
@@ -95,11 +97,75 @@ class AppleRunnerStandbyTests(unittest.TestCase):
         self.controller.step(True)
         self.assertIsNone(self.controller.child)
 
+    def probe_config(self, stdout, returncode=0):
+        return dict(
+            self.config,
+            probe_command=[
+                sys.executable, "-c",
+                f"import sys; sys.stdout.write({stdout!r}); sys.exit({returncode})",
+            ],
+            probe_expected_stdout=EXPECTED_HEALTH,
+            probe_timeout_seconds=1,
+        )
+
+    def test_exact_health_output_and_zero_exit_are_available(self):
+        self.assertTrue(standby.probe(self.probe_config(EXPECTED_HEALTH)))
+
+    def test_silent_or_mismatched_health_output_is_unavailable(self):
+        for output in (
+            "",
+            "Xcode 27.0\nBuild version 27A9275\n",
+            "Xcode 27.1\nBuild version 27A266a\n",
+            EXPECTED_HEALTH.rstrip("\n"),
+            EXPECTED_HEALTH + "\n",
+            EXPECTED_HEALTH.replace("\n", "\r\n"),
+        ):
+            with self.subTest(output=output):
+                self.assertFalse(standby.probe(self.probe_config(output)))
+
+    def test_matching_health_output_with_nonzero_exit_is_unavailable(self):
+        self.assertFalse(standby.probe(self.probe_config(EXPECTED_HEALTH, 1)))
+
+    def test_old_silent_health_cannot_drain_backup_but_exact_recovery_drains_once(self):
+        self.outage()
+        child = self.started[0]
+        for _ in range(4):
+            self.controller.step(standby.probe(self.probe_config("")))
+        self.assertEqual(child.signals, 0)
+        self.assertEqual(len(self.started), 1)
+        self.controller.step(standby.probe(self.probe_config(EXPECTED_HEALTH)))
+        self.assertEqual(child.signals, 0)
+        self.controller.step(standby.probe(self.probe_config(EXPECTED_HEALTH)))
+        self.assertEqual(child.signals, 1)
+        self.controller.step(standby.probe(self.probe_config(EXPECTED_HEALTH)))
+        self.assertEqual(child.signals, 1)
+        self.assertEqual(len(self.started), 1)
+
+    def test_config_requires_nonempty_string_health_output(self):
+        config = json.loads((ROOT / "deploy/apple-runner/standby.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            config["runner_directory"] = directory
+            path = Path(directory) / "standby.json"
+            path.write_text(json.dumps(config))
+            self.assertEqual(standby.load_config(path)["probe_expected_stdout"], EXPECTED_HEALTH)
+            missing = object()
+            for value in (missing, "", None, 1, True, [], {}):
+                with self.subTest(value=value):
+                    invalid = dict(config)
+                    if value is missing:
+                        invalid.pop("probe_expected_stdout")
+                    else:
+                        invalid["probe_expected_stdout"] = value
+                    path.write_text(json.dumps(invalid))
+                    with self.assertRaisesRegex(ValueError, "probe_expected_stdout"):
+                        standby.load_config(path)
+
     def test_timeout_is_an_unavailable_primary(self):
-        config = {
-            "probe_command": [sys.executable, "-c", "import time; time.sleep(5)"],
-            "probe_timeout_seconds": 0.05,
-        }
+        config = dict(
+            self.probe_config(EXPECTED_HEALTH),
+            probe_command=[sys.executable, "-c", "import time; time.sleep(5)"],
+            probe_timeout_seconds=0.05,
+        )
         self.assertFalse(standby.probe(config))
 
     @unittest.skipUnless(Path("/usr/bin/pgrep").is_file(), "native pgrep is required")

@@ -1636,9 +1636,20 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("/Applications/Xcode.app/Contents/Developer", workflow)
         self.assertNotIn("/Applications/Xcode_27.app/Contents/Developer", workflow)
         self.assertNotIn("brew install xcodegen", workflow)
-        self.assertIn('grep -Fxq "Xcode 27.0"', workflow)
-        self.assertIn('grep -Fxq "Build version 27A266a"', workflow)
-        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.0"', workflow)
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/main-fast-lane.yml",
+            ".github/workflows/effort-ci.yml",
+        ):
+            with self.subTest(toolchain_workflow=path):
+                apple_workflow = read(path)
+                self.assertIn('grep -Fxq "Xcode 27.1"', apple_workflow)
+                self.assertIn('grep -Fxq "Build version 27A9275"', apple_workflow)
+                self.assertIn(
+                    "runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]",
+                    apple_workflow,
+                )
+        self.assertIn('test "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.1"', workflow)
         self.assertIn('test "$(xcrun --sdk appletvos --show-sdk-version)" = "27.0"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
         self.assertIn('iOS 26.5 (26.5 - 23F77)', workflow)
@@ -4142,7 +4153,7 @@ assert.equal(context.ACT_TIMER, null);
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
         android = local("Linux", "X64", "lab", "android-kvm")
-        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27")
+        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.1")
         ci_store = local("Linux", "X64", "lab", "ci-store")
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
         release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"

@@ -5,6 +5,7 @@
     "-o", "ServerAliveCountMax=1", "pjunod@192.168.5.115",
     "/usr/local/bin/plurx-apple-primary-health"
   ],
+  "probe_expected_stdout": "Xcode 27.1\nBuild version 27A9275\n",
   "probe_timeout_seconds": 12,
   "interval_seconds": 20,
   "failure_checks": 3,
