@@ -126,6 +126,20 @@ class ArchiveSafety(OwnedScratch):
 
 
 class ReuseIdentities(OwnedScratch):
+    def test_local_guard_case_binds_exact_driver_graph_input(self):
+        name = 'store-actual_ordinary_local_guard_and_response_conformance'
+        sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool'}
+        sources.update({path:'actual-settlement source fixture' for path in runner.ACTUAL_SETTLEMENT_SOURCE_PATHS})
+        sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
+        output = self.directory/'local-guard-input'; output.mkdir()
+        graph = output/'driver-graph.json'; graph.write_text('{"states":[] }\n')
+        baseline = runner.case_sources(name,sources,out=output)
+        graph.write_text('{"states":[1]}\n')
+        self.assertNotEqual(baseline,runner.case_sources(name,sources,out=output))
+        graph.unlink()
+        with self.assertRaises(runner.c.Invalid):
+            runner.case_sources(name,sources,out=output)
+
     def test_external_input_formal_cases_use_one_exact_ignored_selection(self):
         selected = {
           'graph-product':runner.STORE_TESTS['product_test'],
@@ -359,14 +373,24 @@ class ReuseIdentities(OwnedScratch):
                 negatives.append(('broken-driver-chain',bad,driver))
                 bad = json.loads(json.dumps(marker)); bad['prefix'][0]['request'] = None
                 negatives.append(('malformed-pre-driver-claim',bad,driver))
-                bad = json.loads(json.dumps(marker)); bad['fixture_identity']['jobs'][0]['raw_job_id'] = raw_ids[1]
+                bad = json.loads(json.dumps(marker)); bad['fixture_identity']['jobs'][0]['raw_job_id'] = marker['fixture_identity']['jobs'][1]['raw_job_id']
                 negatives.append(('claim-fixture-raw-id-mismatch',bad,driver))
-                bad = json.loads(json.dumps(marker)); bad['prefix'][0]['claim_snapshot']['token_capture']['job_id'] = raw_ids[1]
+                bad = json.loads(json.dumps(marker)); bad['prefix'][0]['claim_snapshot']['token_capture']['job_id'] = marker['fixture_identity']['jobs'][1]['raw_job_id']
                 negatives.append(('forged-claim-token-identity',bad,driver))
-                bad = json.loads(json.dumps(marker)); bad['prefix'][2]['adapter_reply']['retry_delay_ms'] = 1
-                negatives.append(('forged-release-payload',bad,driver))
-                bad = json.loads(json.dumps(marker)); bad['prefix'][3]['primitive']['request_now_ms'] = -1
-                negatives.append(('negative-settlement-request-time',bad,driver))
+                if control == 'C9':
+                    release_rows = [index for index,row in enumerate(marker['prefix'])
+                      if row['request'] == 'ReleaseInterrupted' and row['reply'] == 'ReleaseReturned']
+                    settle_rows = [index for index,row in enumerate(marker['prefix'])
+                      if isinstance(row['primitive'],dict) and row['primitive'].get('op') == 'ordinary_settle']
+                    self.assertEqual(len(release_rows),1)
+                    self.assertEqual(len(settle_rows),1)
+                    release_index,settle_index = release_rows[0],settle_rows[0]
+                    self.assertEqual(marker['prefix'][release_index]['adapter_reply']['tag'],'ReleaseReturned')
+                    self.assertEqual(marker['prefix'][settle_index]['request'],'SettleYield')
+                    bad = json.loads(json.dumps(marker)); bad['prefix'][release_index]['adapter_reply']['retry_delay_ms'] = 1
+                    negatives.append(('forged-release-payload',bad,driver))
+                    bad = json.loads(json.dumps(marker)); bad['prefix'][settle_index]['primitive']['request_now_ms'] = -1
+                    negatives.append(('negative-settlement-request-time',bad,driver))
                 bad = json.loads(json.dumps(marker)); bad['prefix'][1]['request'] = 'Bind'
                 negatives.append(('consumed-versus-target-request',bad,driver))
                 bad = json.loads(json.dumps(marker)); bad['identities']['mutated_predecessor'] = '{broken'

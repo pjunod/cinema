@@ -1108,17 +1108,17 @@ fn enumerate_candidates(
         }
     }
     if let Some(now) = next_neighbour(&value.wall_anchors, oracle.states[value.sql].episode.now) {
-        if !context.stable || stable_wall(value, now, driver, oracle) {
-            result.push(DemandSpec {
-                oracle_from: value.sql,
-                family: "WallAdvance",
-                worker: None,
-                role: "apply",
-                input: Some(Action::ClockAdvance { now }),
-                capture: None,
-                sample: None,
-            });
-        }
+        // Inventory the structural clock input even when a stable authority
+        // window blocks it; classification certifies that exclusion explicitly.
+        result.push(DemandSpec {
+            oracle_from: value.sql,
+            family: "WallAdvance",
+            worker: None,
+            role: "apply",
+            input: Some(Action::ClockAdvance { now }),
+            capture: None,
+            sample: None,
+        });
     }
     if !context.stable {
         for input in oracle.domain_inputs(value.sql) {
@@ -1138,6 +1138,8 @@ fn enumerate_candidates(
     Ok(result)
 }
 fn classify_demand(
+    context: &Context,
+    driver: &Driver,
     value: &Valuation,
     spec: &DemandSpec,
     oracle: &Oracle,
@@ -1187,7 +1189,10 @@ fn classify_demand(
                 && Some(*now) == next_neighbour(&value.wall_anchors, episode.now),
             "ContextualWallInputAgreement",
         )?;
-        return Ok(None);
+        return Ok(
+            (context.stable && !stable_wall(value, *now, driver, oracle))
+                .then(|| json!({"kind":"domain","reason":"stable_wall_window"})),
+        );
     }
     let latest = |job: usize, token: usize| {
         !episode.tokens[job][token + 1..]
@@ -1915,7 +1920,9 @@ fn successors(
                 }
                 if !context.stable {
                     for tag in ["QueueLoss", "DomainLoss", "Pressure", "WorkFailed"] {
-                        if w.queue_lost && tag != "QueueLoss" {
+                        // QueueLoss observes the separately latched signal;
+                        // once ready it outranks every other work outcome.
+                        if (tag == "QueueLoss") != w.queue_lost {
                             continue;
                         }
                         if let Some(mut next) = local_reply(value, n, tag, driver) {
@@ -2674,7 +2681,7 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
             let classified = candidates
                 .into_iter()
                 .map(|spec| {
-                    let exclusion = classify_demand(&value, &spec, &oracle)?;
+                    let exclusion = classify_demand(context, driver, &value, &spec, &oracle)?;
                     Ok((spec, exclusion))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -2765,7 +2772,7 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     capture: None,
                     sample: None,
                 };
-                let exclusion = classify_demand(&value, &spec, &oracle)?;
+                let exclusion = classify_demand(context, driver, &value, &spec, &oracle)?;
                 require(exclusion.is_none(), "MissingRenewalResolutionInput")?;
                 let id = match oracle.apply(oracle_from, &input).await {
                     Ok(id) => id,
@@ -2834,7 +2841,7 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     capture: None,
                     sample: None,
                 };
-                let exclusion = classify_demand(&value, &spec, &oracle)?;
+                let exclusion = classify_demand(context, driver, &value, &spec, &oracle)?;
                 require(exclusion.is_none(), "MissingInitialRecoveryDependentInput")?;
                 let id = match oracle.apply(oracle_from, &input).await {
                     Ok(id) => id,
@@ -3573,6 +3580,213 @@ async fn actual_ordinary_settlement_payload_and_time_conformance() {
 #[tokio::test]
 #[ignore = "requires source-bound driver input; run scripts/check-async-driver-refinement"]
 async fn actual_ordinary_local_guard_and_response_conformance() {
+    // Exercise the real successor relation, concrete Driver and competing
+    // actual completion edge. This is a focused component witness, not BFS.
+    {
+        let (driver, _) = driver_input().expect("source-bound queue selector driver");
+        let context = contexts()
+            .into_iter()
+            .find(|c| c.id == "base")
+            .expect("base context");
+        let mut oracle = Oracle::new(None).await.expect("actual selector fixture");
+        let claim = oracle
+            .apply(0, &Action::Claim { job: 0, node: 0 })
+            .await
+            .expect("actual claim");
+        let claim = oracle.edges[claim].clone();
+        assert_eq!(claim.result, "claimed");
+        let snapshot = claim
+            .claim_snapshot
+            .clone()
+            .expect("actual committed snapshot");
+        let acquire = oracle
+            .apply(claim.to, &Action::AcquireDomain { node: 0 })
+            .await
+            .expect("actual domain claim");
+        assert_eq!(oracle.edges[acquire].result, "acquired");
+        let bind = oracle
+            .apply(
+                oracle.edges[acquire].to,
+                &Action::Bind {
+                    job: 0,
+                    token: 0,
+                    lease: 0,
+                },
+            )
+            .await
+            .expect("actual source bind");
+        assert_eq!(oracle.edges[bind].result, "accepted");
+        let handle = oracle.edges[bind].to;
+        let mut real = RealDriver::new();
+        let mut ctrl = driver.initial;
+        for (tag, reply) in [
+            (
+                "DomainAcquired",
+                RealReply::Domain {
+                    acquired: true,
+                    now_ms: 0,
+                },
+            ),
+            ("BindAccepted", RealReply::Bound { accepted: true }),
+        ] {
+            real.drive(reply).expect("actual driver reaches PollWork");
+            ctrl = *driver
+                .replies
+                .get(&(ctrl, tag.into()))
+                .expect("source-bound control edge");
+            verify_control(real, &driver.states[ctrl]).expect("actual complete control");
+        }
+        let mut poll = Valuation {
+            sql: handle,
+            w: [Worker::idle(), Worker::idle()],
+            available: [true, true],
+            completed: vec![],
+            mono_now_ms: 0,
+            wall_anchors: vec![],
+            mono_anchors: vec![],
+            claim_loss_keys: vec![],
+            real_drivers: [Some(real), None],
+        };
+        let w = &mut poll.w[0];
+        w.stage = "driver".into();
+        w.job = 0;
+        w.token = 0;
+        w.lease = 0;
+        w.attempt = snapshot.claim_id.clone();
+        w.ctrl = ctrl as i64;
+        w.call = "sent".into();
+        w.local_token = true;
+        w.started = true;
+        w.work_started = true;
+        w.admission = true;
+        w.read_lock = true;
+        w.claim_snapshot = Some(snapshot);
+        w.claim_request = claim.claim_request.clone();
+        w.claim_issued_mono_ms = Some(0);
+        w.claim_request_now_ms = Some(1000);
+        w.local_deadline_mono_ms = Some(JOB_LEASE_MS);
+        assert_eq!(driver.pending(w), "PollWork");
+        retain_anchors(&mut poll, &oracle);
+        let input = Action::Complete {
+            job: 0,
+            token: 0,
+            lease: 0,
+        };
+        let completion = oracle
+            .apply(handle, &input)
+            .await
+            .expect("actual competing success");
+        assert_eq!(oracle.edges[completion].result, "accepted");
+        let demands = vec![Demand {
+            spec: DemandSpec {
+                oracle_from: handle,
+                family: "WorkSuccess",
+                worker: Some(0),
+                role: "apply",
+                input: Some(input),
+                capture: None,
+                sample: None,
+            },
+            edge: Some(completion),
+        }];
+        let unsignaled =
+            successors(&context, &poll, &driver, &oracle, &demands).expect("unsignaled successors");
+        let other_tags = |steps: &[Step]| {
+            steps
+                .iter()
+                .filter(|s| s.branch.family == "WorkOther" && s.branch.worker == Some(0))
+                .map(|s| s.value.w[0].reply.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            other_tags(&unsignaled),
+            ["DomainLoss", "Pressure", "WorkFailed"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        let success = unsignaled
+            .iter()
+            .find(|s| s.branch.family == "WorkSuccess" && s.branch.worker == Some(0))
+            .expect("unsignaled actual completion remains available");
+        assert_eq!(success.edge, Some(completion));
+        assert_eq!(success.value.sql, oracle.edges[completion].to);
+        let signal = unsignaled
+            .iter()
+            .find(|s| s.branch.family == "QueueLossSignal" && s.branch.worker == Some(0))
+            .expect("loss signaling remains separate");
+        assert!(signal.value.w[0].queue_lost);
+        assert_eq!(signal.value.sql, poll.sql);
+        assert_eq!(signal.value.w[0].call, "sent");
+        assert_eq!(signal.value.w[0].ctrl, poll.w[0].ctrl);
+        assert_eq!(signal.value.w[0].reply, poll.w[0].reply);
+        assert_eq!(signal.value.w[0].read_lock, poll.w[0].read_lock);
+        assert_eq!(signal.value.w[0].token, poll.w[0].token);
+        assert_eq!(signal.value.w[0].local_token, poll.w[0].local_token);
+        assert!(signal.edge.is_none());
+        assert!(memberships(signal, &poll, &context, &oracle).is_empty());
+        let signaled = successors(&context, &signal.value, &driver, &oracle, &demands)
+            .expect("signaled successors");
+        assert_eq!(other_tags(&signaled), BTreeSet::from(["QueueLoss".into()]));
+        assert!(!signaled.iter().any(|s| s.branch.worker == Some(0)
+            && matches!(s.branch.family.as_str(), "WorkSuccess" | "QueueLossSignal")));
+        // A reachable stable expiry boundary still has a structural demand;
+        // its explicit exclusion must prevent lookup, not erase the input.
+        let expiry = oracle.states[handle].episode.tokens[0][0].lease_expires_ms;
+        let boundary = oracle
+            .apply(handle, &Action::ClockAdvance { now: expiry - 1 })
+            .await
+            .expect("actual live expiry neighbour");
+        let mut stable = poll.clone();
+        stable.sql = oracle.edges[boundary].to;
+        retain_anchors(&mut stable, &oracle);
+        let stable_context = contexts()
+            .into_iter()
+            .find(|c| c.id == "stable")
+            .expect("stable context");
+        let clock = enumerate_candidates(&stable_context, &stable, &driver, &oracle)
+            .expect("complete structural candidates")
+            .into_iter()
+            .find(|d| d.family == "WallAdvance")
+            .expect("blocked clock remains inventoried");
+        assert_eq!(clock.input, Some(Action::ClockAdvance { now: expiry }));
+        assert_eq!(
+            classify_demand(&stable_context, &driver, &stable, &clock, &oracle)
+                .expect("stable window classification"),
+            Some(json!({"kind":"domain","reason":"stable_wall_window"}))
+        );
+        for (before, steps) in [(&poll, &unsignaled), (&signal.value, &signaled)] {
+            for work in steps
+                .iter()
+                .filter(|s| s.branch.family == "WorkOther" && s.branch.worker == Some(0))
+            {
+                assert_eq!(
+                    work.value.sql, handle,
+                    "local work return has no SQL effect"
+                );
+                assert_eq!(work.value.w[0].call, "applied");
+                assert_eq!(work.value.w[0].queue_lost, before.w[0].queue_lost);
+                assert!(memberships(work, before, &context, &oracle)
+                    .contains(&"ExternalReturn/0".into()));
+                let observed = successors(&context, &work.value, &driver, &oracle, &[])
+                    .expect("work reply service")
+                    .into_iter()
+                    .find(|s| s.branch.family == "Reply" && s.branch.worker == Some(0))
+                    .expect("reply observed");
+                let returned = successors(&context, &observed.value, &driver, &oracle, &[])
+                    .expect("actual Driver return")
+                    .into_iter()
+                    .find(|s| s.branch.family == "DriverReturn" && s.branch.worker == Some(0))
+                    .expect("actual reply driven");
+                assert_eq!(
+                    returned.value.w[0].ctrl as usize,
+                    driver.replies[&(ctrl, work.value.w[0].reply.clone())]
+                );
+                verify_real(&returned.value, &driver)
+                    .expect("real Driver matches returned control");
+            }
+        }
+    }
     let (mut oracle, handle, payload, snapshot) = actual_payload_setup("interrupted")
         .await
         .expect("actual source payload");

@@ -227,6 +227,62 @@ class ProductCoverageContracts(unittest.TestCase):
         p['w'][0]['call'] = 'ready'
         self.assertIn('renew',{a['op'] for a in checker.environment_inputs(p,s)})
 
+    def test_poll_work_preserves_separate_queue_loss_signal_and_latched_priority(self):
+        """Independent transition fixture, not real Driver/SQL qualification evidence."""
+        p = product_predecessor('base');s = product_domain_fixture()
+        token = dict(job_id='J0',node_id='node-a',boot_id='B',claim_id='C',fence=1,
+                     revision=1,lease_expires_ms=30000)
+        lease = dict(resource='R',owner_node_id='node-a',fence=1,revision=1,expires_at_unix_ms=30000)
+        s['captured_tokens'][0] = [token];s['captured_leases'] = [lease]
+        s['jobs'][0].update(state='running',owner='node-a',expiry=30000)
+        p['w'][0].update(stage='driver',call='sent',ctrl=0,job=0,token=0,lease=0,
+            attempt='C',localToken=True,started=True,readLock=True,local_deadline_mono_ms=30000)
+        # A permitted completion is available in both phases, so suppressing
+        # WorkSuccess after a signal cannot pass merely because SQL refused.
+        done = copy.deepcopy(s);done['jobs'][0].update(state='succeeded',owner=None,expiry=None,request_done=True)
+        complete = {'from':0,'to':1,'action':{'op':'complete','job':0,'token':0,'lease':0},'result':'accepted'}
+        store = {'states':[s,done],'edges':[complete]}
+        driver = {'states':[{'pending':'PollWork','terminal':False},{'pending':None,'terminal':True}],
+            'edges':[{'from':0,'to':1,'reply':tag} for tag in
+                     ('QueueLoss','DomainLoss','Pressure','WorkFailed','WorkSucceeded')]}
+
+        def successors(state):
+            # Keep the local fixture orthogonal to environmental primitives;
+            # retain any independently enabled contextual wall demand.
+            local = copy.deepcopy(store);target = checker.next_landmark(s['now'],state['wall_anchors'])
+            if target is not None:
+                advanced = copy.deepcopy(s);advanced['now'] = target
+                local['states'].append(advanced)
+                local['edges'].append({'from':0,'to':2,'action':{'op':'clock_advance','now':target},'result':'advanced'})
+            oracle = {(edge['from'],checker.canonical(edge['action'])):i for i,edge in enumerate(local['edges'])}
+            with mock.patch.object(checker,'environment_inputs',return_value=[]):
+                return checker.expected_product_successors(state,driver,local,oracle)
+
+        before = successors(p)
+        unsignaled = [row for row in before if row[0]['family'] == 'WorkOther' and row[0]['worker'] == 0]
+        self.assertEqual({row[0]['choice']['reply'] for row in unsignaled},{'DomainLoss','Pressure','WorkFailed'})
+        self.assertTrue(any(row[0]['family'] == 'WorkSuccess' for row in before))
+        for row in unsignaled:
+            self.assertFalse(row[1]['w'][0]['queue_lost'])
+            self.assertEqual(row[1]['w'][0]['call'],'applied')
+            self.assertIn('ExternalReturn/0',row[3])
+
+        signals = [row for row in before if row[0]['family'] == 'QueueLossSignal' and row[0]['worker'] == 0]
+        self.assertEqual(len(signals),1);signal = signals[0]
+        self.assertEqual(signal[1]['sql'],p['sql'])
+        self.assertTrue(signal[1]['w'][0]['queue_lost'])
+        for field in ('ctrl','call','reply','readLock','localToken'):
+            self.assertEqual(signal[1]['w'][0][field],p['w'][0][field])
+        self.assertNotIn('ExternalReturn/0',signal[3])
+
+        after = successors({'id':0,**signal[1]})
+        signaled = [row for row in after if row[0]['family'] == 'WorkOther' and row[0]['worker'] == 0]
+        self.assertEqual([row[0]['choice']['reply'] for row in signaled],['QueueLoss'])
+        self.assertTrue(signaled[0][1]['w'][0]['queue_lost'])
+        self.assertEqual(signaled[0][1]['w'][0]['call'],'applied')
+        self.assertIn('ExternalReturn/0',signaled[0][3])
+        self.assertFalse(any(row[0]['family'] in {'WorkSuccess','QueueLossSignal'} and row[0]['worker'] == 0 for row in after))
+
     def test_coverage_obligations_precede_expected_negative_invariants(self):
         for name,config in checker.CONFIGS.items():
             if config.get('model') == 'BoundaryControls': continue

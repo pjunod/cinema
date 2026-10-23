@@ -83,6 +83,8 @@ IGNORED_INPUT_CASES = {'graph-product','control-C4','control-C9'} | {
   'actual_ordinary_settlement_payload_and_time_conformance',
   'actual_ordinary_local_guard_and_response_conformance',
   'actual_queued_eligibility_progress_witness'}}
+DRIVER_INPUT_CASES = {'graph-product','control-C4','control-C9',
+ 'store-actual_ordinary_local_guard_and_response_conformance'}
 CASES = {
  'control-selector': CARGO+['test','--offline','--manifest-path','@SELECTOR_MANIFEST@','--test','library_driver','selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
  'graph-driver': CARGO+['run','--locked','--offline','--quiet','-p','plurx-worker-control','--example','library_driver_graph'],
@@ -551,7 +553,7 @@ def case_sources(name, sources, root=ROOT, out=None):
       or path.startswith('vendor/')
       or path.startswith(path_roots)
       or path in async_resume.INVOCATION_PATHS}
-    if name in {'graph-product','control-C4','control-C9'}:
+    if name in DRIVER_INPUT_CASES:
         c.require(out is not None and (out/'driver-graph.json').is_file(),
                   f'{name} requires the exact raw driver graph input')
         selected['generated-input:driver-graph.json'] = c.sha(out/'driver-graph.json')
@@ -706,7 +708,7 @@ def build_inputs(args):
         environment.pop('PLURX_ASYNC_DRIVER_GRAPH',None)
         mutation = stage_selector(out) if name == 'control-selector' else None
         if mutation is not None: environment['CARGO_TARGET_DIR'] = str(ROOT/'target/async-driver-selector-target')
-        if name in {'graph-product','control-C4','control-C9'}:
+        if name in DRIVER_INPUT_CASES:
             environment['PLURX_ASYNC_DRIVER_GRAPH'] = str(out/'driver-graph.json')
         if name == 'graph-product':
             graph.unlink(missing_ok=True)
