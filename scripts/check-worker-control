@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "verification/worker-control"
 CRATE = "crates/plurx-worker-control"
 CORE = f"{CRATE}/src/library_lifecycle.rs"
-STAGED_RUST_SOURCES = ("lib.rs", "library_driver.rs", "library_lifecycle.rs", "proofs.rs")
+STAGED_RUST_SOURCES = ("lib.rs", "library_driver.rs", "library_lifecycle.rs", "proofs.rs", "retry_policy.rs")
 HARNESS_NAMES = (
     "t1_all_typed_inputs_total_deterministic",
     "t2_every_reachable_prefix_gates_process",

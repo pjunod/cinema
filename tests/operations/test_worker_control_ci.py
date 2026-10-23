@@ -342,24 +342,27 @@ class WorkerControlResumeFixtures(unittest.TestCase):
             archive.writestr("source/Cargo.toml", b"[package]\n")
             archive.writestr("source/src/lib.rs", b"pub fn safe() {}\n")
             archive.writestr("source/src/library_driver.rs", b"pub fn driver() {}\n")
+            archive.writestr("source/src/retry_policy.rs", b"pub fn retry() {}\n")
             archive.writestr("build/ignored.bin", b"not needed")
         with tempfile.TemporaryDirectory(dir=self.fixture_scratch) as scratch:
             destination = Path(scratch) / "prior"
             destination.mkdir()
             count, byte_count = resume.extract_evidence(buffer.getvalue(), destination)
-            self.assertEqual(count, 5)
+            self.assertEqual(count, 6)
             self.assertEqual(byte_count, sum(len(value) for value in
                                              (b"{}", b"VERIFICATION: SUCCESSFUL\n",
                                               b"[package]\n", b"pub fn safe() {}\n",
-                                              b"pub fn driver() {}\n")))
+                                              b"pub fn driver() {}\n", b"pub fn retry() {}\n")))
             self.assertTrue((destination / "source/src/lib.rs").is_file())
             self.assertTrue((destination / "source/src/library_driver.rs").is_file())
+            self.assertTrue((destination / "source/src/retry_policy.rs").is_file())
             self.assertFalse((destination / "build/ignored.bin").exists())
 
     def test_resume_source_allowlist_accepts_exact_driver_and_rejects_neighbor_paths(self) -> None:
         from validation import worker_control_resume as resume
 
         self.assertTrue(resume.selected_path(("source", "src", "library_driver.rs"), False))
+        self.assertTrue(resume.selected_path(("source", "src", "retry_policy.rs"), False))
         for path in (("source", "src", "nested", "library_driver.rs"),
                      ("source", "src", "library_driver.rs.bak"),
                      ("source", "src", "build.rs")):

@@ -607,6 +607,7 @@ const DOMAIN_OWNERS: [&str; 3] = ["node-a", "node-b", "foreign-holder"];
 pub(super) struct Episode {
     pub(super) now: i64,
     pub(super) claims: [u8; 2],
+    pub(super) claim_snapshots: Vec<ClaimSnapshot>,
     pub(super) tokens: [Vec<JobToken>; 2],
     pub(super) renewed_claims: Vec<String>,
     pub(super) leases: Vec<Lease>,
@@ -619,6 +620,7 @@ impl Episode {
         Self {
             now: NOW,
             claims: [0; 2],
+            claim_snapshots: vec![],
             tokens: [vec![], vec![]],
             renewed_claims: vec![],
             leases: vec![],
@@ -628,12 +630,52 @@ impl Episode {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClaimSnapshot {
+    pub(super) job: usize,
+    pub(super) raw_job_id: String,
+    pub(super) failed_attempts: i64,
+    pub(super) claim_id: String,
+    pub(super) token_capture: JobToken,
+}
+
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+// Exact logical initial-claim query. Keep its original dispatch identity even
+// when the selected wall sample advances; this is not renewal resolution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InitialClaimResolution {
+    pub(super) job_id: String,
+    pub(super) node_id: String,
+    pub(super) boot_id: String,
+    pub(super) claim_id: String,
+    #[serde(deserialize_with = "required_nullable")]
+    pub(super) fence: Option<i64>,
+    pub(super) dispatched_at_ms: i64,
+    pub(super) now_ms: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Action {
     Claim {
         job: usize,
         node: usize,
+    },
+    ResolveInitialClaim {
+        job: usize,
+        request: InitialClaimResolution,
+    },
+    ReadClaimJob {
+        job: usize,
     },
     Renew {
         job: usize,
@@ -643,6 +685,17 @@ pub(super) enum Action {
         job: usize,
         token: usize,
         disposition: usize,
+    },
+    OrdinarySettle {
+        job: usize,
+        token: usize,
+        kind: String,
+        not_before_ms: i64,
+        request_now_ms: i64,
+        #[serde(deserialize_with = "required_nullable")]
+        error_code: Option<String>,
+        #[serde(deserialize_with = "required_nullable")]
+        checkpoint: Option<Value>,
     },
     Resolve {
         job: usize,
@@ -738,6 +791,11 @@ async fn actions(fixture: &Fixture, episode: &Episode) -> Vec<Action> {
                 disposition: 3,
             });
             result.push(Action::Resolve { job, token });
+            result.push(Action::Settle {
+                job,
+                token,
+                disposition: 2,
+            });
             if episode.tokens[job][token + 1..]
                 .iter()
                 .any(|later| later.claim_id == captured.claim_id)
@@ -746,13 +804,6 @@ async fn actions(fixture: &Fixture, episode: &Episode) -> Vec<Action> {
             }
             if !episode.renewed_claims.contains(&captured.claim_id) {
                 result.push(Action::Renew { job, token });
-            }
-            for disposition in 0..3 {
-                result.push(Action::Settle {
-                    job,
-                    token,
-                    disposition,
-                });
             }
             for (lease, domain) in episode.leases.iter().enumerate() {
                 // The driver dispatches its acquired node-local lease;
@@ -810,7 +861,16 @@ async fn apply_graph(
     episode: &mut Episode,
     action: &Action,
 ) -> Result<(String, Option<usize>), String> {
-    apply(fixture, episode, action, false).await
+    let applied = apply(fixture, episode, action, false).await?;
+    Ok((applied.result, applied.resolved_token))
+}
+
+#[derive(Debug)]
+struct Applied {
+    result: String,
+    resolved_token: Option<usize>,
+    claim_request: Option<Value>,
+    job_read: Option<Value>,
 }
 
 async fn apply(
@@ -818,23 +878,27 @@ async fn apply(
     episode: &mut Episode,
     action: &Action,
     observe_refusals: bool,
-) -> Result<(String, Option<usize>), String> {
+) -> Result<Applied, String> {
     let now = episode.now;
     // The extracted oracle enables durable observation here and additionally
     // compares full canonical state on refusals before memoization. Direct
     // conformance can enable this observer; resolve always observes its reads.
-    let before_rows = if matches!(action, Action::Resolve { .. })
-        || (observe_refusals
-            && !matches!(
-                action,
-                Action::RemoveOwner { .. } | Action::ClockAdvance { .. }
-            )) {
+    let before_rows = if matches!(
+        action,
+        Action::Resolve { .. } | Action::ResolveInitialClaim { .. } | Action::ReadClaimJob { .. }
+    ) || (observe_refusals
+        && !matches!(
+            action,
+            Action::RemoveOwner { .. } | Action::ClockAdvance { .. }
+        )) {
         Some(snapshot(&fixture.store).await)
     } else {
         None
     };
     let mut resolved_token = None;
-    let result = match *action {
+    let mut claim_request = None;
+    let mut job_read = None;
+    let result = match action.clone() {
         Action::Claim { job, node } => {
             let before = fixture
                 .store
@@ -845,6 +909,7 @@ async fn apply(
             let mut request = fixture.claim(job, before.revision, now, episode.claims[job]);
             request.node_id = NODES[node].into();
             request.boot_id = BOOTS[node].into();
+            claim_request = Some(serde_json::to_value(&request).expect("exact actual ClaimJob"));
             match fixture
                 .store
                 .claim_job(request)
@@ -855,10 +920,15 @@ async fn apply(
                     if claimed.fence <= before.fence {
                         return Err("MonotoneFence: fresh claim did not advance fence".into());
                     }
-                    remember(
-                        &mut episode.tokens[job],
-                        claimed.token.expect("claimed token"),
-                    );
+                    let returned = claimed.token.clone().expect("claimed token");
+                    episode.claim_snapshots.push(ClaimSnapshot {
+                        job,
+                        raw_job_id: claimed.id.clone(),
+                        failed_attempts: claimed.failed_attempts,
+                        claim_id: returned.claim_id.clone(),
+                        token_capture: returned.clone(),
+                    });
+                    remember(&mut episode.tokens[job], returned);
                     episode.claims[job] += 1;
                     "claimed"
                 }
@@ -866,6 +936,70 @@ async fn apply(
                 ClaimOutcome::Cancelled => "cancelled",
                 ClaimOutcome::ExpiredOrPruned => "expired_or_pruned",
                 other => return Err(format!("UnexpectedClaimOutcome: {other:?}")),
+            }
+        }
+        Action::ResolveInitialClaim { job, request } => {
+            if request.job_id != fixture.jobs[job]
+                || request.fence.is_some()
+                || request.now_ms != now
+            {
+                return Err(
+                    "InitialClaimResolutionInput: exact original identity/current wall required"
+                        .into(),
+                );
+            }
+            let outcome = fixture
+                .store
+                .resolve_claim(ResolveClaim {
+                    job_id: request.job_id.clone(),
+                    node_id: request.node_id.clone(),
+                    boot_id: request.boot_id.clone(),
+                    claim_id: request.claim_id.clone(),
+                    fence: None,
+                    dispatched_at_ms: request.dispatched_at_ms,
+                    now_ms: request.now_ms,
+                })
+                .await
+                .map_err(|error| format!("InitialClaimResolution: {error}"))?;
+            let running = matches!(&outcome, ClaimResolution::Running { .. });
+            match outcome {
+                ClaimResolution::Running { token }
+                | ClaimResolution::CancelRequested {
+                    cleanup_token: token,
+                } => {
+                    if token.job_id != request.job_id
+                        || token.node_id != request.node_id
+                        || token.boot_id != request.boot_id
+                        || token.claim_id != request.claim_id
+                    {
+                        return Err(
+                            "ExactInitialIdentityResolution: resolver adopted another attempt"
+                                .into(),
+                        );
+                    }
+                    resolved_token = Some(remember(&mut episode.tokens[job], token));
+                    if running {
+                        "running"
+                    } else {
+                        "cancel_requested"
+                    }
+                }
+                ClaimResolution::Settled { .. } => "settled",
+                ClaimResolution::LostOwnership => "lost_ownership",
+                ClaimResolution::ExpiredOrPruned => "expired_or_pruned",
+            }
+        }
+        Action::ReadClaimJob { job } => {
+            let row = fixture
+                .store
+                .background_job(&fixture.jobs[job])
+                .await
+                .map_err(|error| format!("InitialClaimRead: {error}"))?;
+            job_read = row.map(|row| serde_json::to_value(row).expect("actual full BackgroundJob"));
+            if job_read.is_some() {
+                "present"
+            } else {
+                "missing"
             }
         }
         Action::Renew { job, token } => {
@@ -904,6 +1038,75 @@ async fn apply(
                 _ => return Err("RenewalCardinality: one input must have one verdict".into()),
             }
         }
+        Action::OrdinarySettle {
+            job,
+            token,
+            kind,
+            not_before_ms,
+            request_now_ms,
+            error_code,
+            checkpoint,
+        } => {
+            let captured = episode.tokens[job][token].clone();
+            let preimage = fixture
+                .store
+                .background_job(&fixture.jobs[job])
+                .await
+                .map_err(|error| format!("OrdinaryPreimage: {error}"))?
+                .ok_or("OrdinaryPreimage: missing selected job")?;
+            let settlement = match kind.as_str() {
+                "yield" if error_code.is_none() && checkpoint.is_none() => JobSettlement::Yield {
+                    error_code,
+                    checkpoint,
+                    not_before_ms,
+                },
+                "retry"
+                    if error_code.as_deref() == Some("library_execution_failed")
+                        && checkpoint.is_none() =>
+                {
+                    JobSettlement::Retry {
+                        error_code: error_code.expect("checked error"),
+                        not_before_ms,
+                    }
+                }
+                _ => return Err("OrdinaryInput: unsupported adapter payload".into()),
+            };
+            match fixture
+                .store
+                .settle_job(SettleJob {
+                    token: captured.clone(),
+                    settlement,
+                    now_ms: request_now_ms,
+                })
+                .await
+            {
+                Ok(true) => {
+                    if preimage.token.as_ref() != Some(&captured)
+                        || captured.lease_expires_ms <= request_now_ms
+                        || NODES
+                            .iter()
+                            .position(|node| *node == captured.node_id)
+                            .is_some_and(|node| episode.removed[node])
+                    {
+                        return Err("NoStaleCommit: ordinary settlement accepted an invalid captured request-time fence".into());
+                    }
+                    "accepted"
+                }
+                Ok(false) => "refused",
+                Err(StoreError::Task(message))
+                    if kind == "yield"
+                        && message == "invalid background checkpoint or yield time" =>
+                {
+                    "validation_error_yield_time"
+                }
+                Err(StoreError::Task(message))
+                    if kind == "retry" && message == "invalid background failure retry" =>
+                {
+                    "validation_error_retry_time"
+                }
+                Err(error) => return Err(format!("OrdinaryUnexpectedStoreError: {error}")),
+            }
+        }
         Action::Settle {
             job,
             token,
@@ -916,10 +1119,9 @@ async fn apply(
                 .await
                 .expect("settle preimage")
                 .expect("job");
-            // Dispositions 0/1 are representative protocol inputs: immediate Yield
-            // (no error/checkpoint) and immediate Retry (transient). They do not
-            // assert correspondence to adapter-captured deadlines or error text;
-            // OrdinarySettlementPayloadTransfer remains unclosed.
+            // Dispositions 0/1 remain only for legacy primitive conformance.
+            // The selected product has no route to them: ordinary service uses
+            // the full captured OrdinarySettle request above.
             let settlement = match disposition {
                 0 => JobSettlement::Yield {
                     error_code: None,
@@ -1131,10 +1333,18 @@ async fn apply(
     // Observe durable no-apply behavior here, not merely when BFS discovers
     // a new state or reaches its cap. Resolution may append a local capture,
     // but every actual API read must leave all durable snapshot rows equal.
-    let read_only = matches!(action, Action::Resolve { .. });
+    let read_only = matches!(
+        action,
+        Action::Resolve { .. } | Action::ResolveInitialClaim { .. } | Action::ReadClaimJob { .. }
+    );
     let refused = matches!(
         result,
-        "refused" | "cancelled" | "expired_or_pruned" | "held"
+        "refused"
+            | "cancelled"
+            | "expired_or_pruned"
+            | "held"
+            | "validation_error_yield_time"
+            | "validation_error_retry_time"
     );
     if read_only || (observe_refusals && refused) {
         let before = before_rows.as_ref().expect("guarded primitive preimage");
@@ -1146,7 +1356,12 @@ async fn apply(
             });
         }
     }
-    Ok((result.into(), resolved_token))
+    Ok(Applied {
+        result: result.into(),
+        resolved_token,
+        claim_request,
+        job_read,
+    })
 }
 
 async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> {
@@ -1221,15 +1436,9 @@ async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> 
 }
 
 async fn canonical(fixture: &Fixture, episode: &Episode) -> String {
-    let mut key =
-        serde_json::to_string(&json!({"rows": snapshot(&fixture.store).await, "episode": episode}))
-            .expect("canonical JSON");
-    // UUIDs are opaque equality-only identifiers in D; no numeric fence,
-    // revision, expiry, timestamp, order, or gap is renamed.
-    for (index, job) in fixture.jobs.iter().enumerate() {
-        key = key.replace(job, &format!("J{index}"));
-    }
-    key
+    // Raw production UUID bytes remain part of identity: retry jitter reads them.
+    serde_json::to_string(&json!({"rows": snapshot(&fixture.store).await, "episode": episode}))
+        .expect("canonical JSON")
 }
 
 async fn projection(fixture: &Fixture, episode: &Episode, id: usize, key: &str) -> Value {
@@ -1253,7 +1462,7 @@ async fn projection(fixture: &Fixture, episode: &Episode, id: usize, key: &str) 
             .expect("projection requests");
         jobs.push(json!({"state": row.state, "owner": row.token.as_ref().map(|token| &token.node_id),
             "fence": row.fence, "revision": row.revision, "expiry": row.token.as_ref().map(|token| token.lease_expires_ms),
-            "failed_attempts": row.failed_attempts, "active": row.token.as_ref().is_some_and(|token| row.state == JobState::Running && token.lease_expires_ms > episode.now),
+            "failed_attempts": row.failed_attempts, "not_before_ms": row.not_before_ms, "active": row.token.as_ref().is_some_and(|token| row.state == JobState::Running && token.lease_expires_ms > episode.now),
             "request_done": requests[0].result.is_some(), "request_state": requests[0].state,
             "reservation_count": reservations(&fixture.store, &fixture.jobs[job]).await.as_array().expect("array in typed JSON projection").len()}));
         if episode.claims[job] == ATTEMPTS_PER_JOB {
@@ -1272,7 +1481,7 @@ async fn projection(fixture: &Fixture, episode: &Episode, id: usize, key: &str) 
         cutoffs.push(format!("renewal_budget_{claim}"));
     }
     if next_boundary(fixture, episode).await.is_none() {
-        cutoffs.push("no_future_boundary".into());
+        cutoffs.push("no_intrinsic_expiry_boundary".into());
     }
     json!({"id": id, "now": episode.now, "jobs": jobs, "domain": domain_row(fixture).await,
         "captured_tokens": episode.tokens, "captured_leases": episode.leases,
@@ -1462,25 +1671,27 @@ fn state_cap_diagnostic(input: &CapDiagnostic<'_>) -> String {
 pub(super) fn domain_metadata() -> Value {
     let mut domain = json!({"jobs": 2, "nodes": NODES, "physical_capacity_per_node": 1,
             "attempts_per_job": ATTEMPTS_PER_JOB, "renewals_per_attempt": 1, "rearrival": false,
-            "ordinary_token_inputs": "latest captured revision per claim; queue-token Mutex adapter contract; historical revisions remain captured and conformance-tested",
+            "ordinary_token_inputs": "latest captured revision per claim for intrinsic renew/bind/complete; ordinary saved settlement captures are contextual and may be historical",
             "binding_completion_inputs": "captured domain lease owner equals captured queue-token node; wrong-owner inputs are separate conformance",
-            "settlement_dispositions": ["yield", "retry", "cancel", "retirement_yield"],
+            "settlement_dispositions": ["cancel", "retirement_yield"],
             "node_domain_acquisition_inputs": "node has selected running durable queue ownership, including expired retained ownership for dispatch/application races; foreign holder is independent",
             "domain_acquisitions_per_owner": 1, "domain_owners": DOMAIN_OWNERS,
             "selected_attempt_ids": 4, "reserved_boundary_ids": 2,
             "allocator_exhaustion": "outside D: the attempt budget is exhausted before the six-ID namespace",
-            "numeric_quotient": "none: every i64/u64 and captured token remains exact; opaque job UUIDs alone are renamed",
-            "clock": "next concrete captured/current authority expiry minus one/equality/plus one; no horizon clipping",
+            "numeric_quotient": "none: every i64/u64 and raw production job ID remains exact",
+            "clock": "wall and mono independently advance to the smallest strict greater nonnegative representable neighbour of retained exact authority/payload/queued-eligibility or source local-deadline anchors; no horizon clipping",
             "publication": "opaque conformance boundary; no item-insertion SQL or retry proof in this relation",
             "reply_faults": "split application/reply/reconciliation in temporal composition; separate bridge-boundary conformance histories",
             "cap": STATE_CAP,
             "premises": ["completion opportunity before attempt/domain/fault budget exhaustion", "two fixed selected requests; no infinite fresh-progress conclusion"],
             "savepoints": "same production writer connection, sequential harness; transaction/commit visibility and SQLite internals remain assumptions; any SQL/ABORT/ROLLBACK error aborts closure"});
     let boundary_metadata = json!({
-        "OrdinarySettlementPayloadTransfer": "unclosed: ordinary Yield/Retry use declared representative payloads (Yield error_code=None and checkpoint=None; Retry error_code=transient; not_before_ms=application now); production capture-time deadlines, retry delay and failed-attempt snapshot, error text, local dispatch/loss/deadline guards and future claim eligibility correspondence are not closed; no payload noninterference lemma or true transfer assumption is claimed",
-        "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; ordinary dispositions 0/1/2 retain latest-revision inputs",
+        "renewal_resolution_boundary": "selected zero-delay renewal plus actual logical resolve has no inner interleaving; both actual outcomes and capture references are certified; resolution errors consume the remaining per-attempt fault allowance",
+        "ordinary_settlement_payload_transfer": "selected actual ordinary settlement payload/capture/request/local-service correspondence; evidence pending qualification; normal wall/mono input domain only",
+        "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; cancellation uses disposition 2; ordinary service uses contextual ordinary_settle payloads",
+        "initial_claim_recovery_boundary": "lost initial claims use actual fence-None resolution with original dispatch identity, conditional actual row reread or Cancel, and no inner query interleaving; at most eight persistent job/node/claim loss keys; inconclusive outcomes service exact 250ms source wakes until the fixed 30000ms local deadline; the separate Store request window is 120000ms",
         "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
-        "primitive_clock_boundary": "each generated primitive request uses current episode.now; the daemon's three retirement wall samples and dispatch/application races are reviewed adapter/conformance boundaries, not source-derived clock-race coverage",
+        "primitive_clock_boundary": "intrinsic primitives use current episode.now; ordinary_settle preserves its separately captured request_now_ms; retirement wall samples/internal dispatch races and zero-delay claim/renew-resolution envelopes remain named source/conformance boundaries",
         "reservation_conservation_boundary": "conservation is checked for unexpired queue authority only; expired Running rows and residue remain represented, with no independent complete-residue conservation guarantee until reclaim/prune",
         "domain_reacquisition_boundary": "each owner can acquire at most once; release or expiry does not reset its budget, so same-owner release-to-reacquire cycles are excluded",
         "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
@@ -1514,6 +1725,10 @@ pub(super) struct OracleEdge {
     pub(super) action: Action,
     pub(super) result: String,
     pub(super) resolved_token: Option<usize>,
+    pub(super) claim_snapshot: Option<ClaimSnapshot>,
+    pub(super) error: Option<String>,
+    pub(super) claim_request: Option<Value>,
+    pub(super) job_read: Option<Value>,
 }
 
 pub(super) struct OracleState {
@@ -1569,6 +1784,23 @@ impl Oracle {
         })
     }
 
+    pub(super) async fn begin_paired_mutation(
+        &mut self,
+        mutation: TriggerMutation,
+    ) -> Result<(), String> {
+        if canonical(&self.fixture, &Episode::initial()).await != self.states[0].canonical {
+            return Err("PairedFixture: baseline did not restore seeded identity".into());
+        }
+        self.mutation = install_mutation(&self.fixture, mutation).await;
+        self.schema = schema_bindings(&self.fixture).await;
+        self.states.truncate(1);
+        self.edges.clear();
+        self.cache.clear();
+        self.index = HashMap::from([(self.states[0].canonical.clone(), 0)]);
+        self.failure = None;
+        Ok(())
+    }
+
     pub(super) fn initial(&self) -> StoreHandle {
         0
     }
@@ -1578,11 +1810,12 @@ impl Oracle {
     }
 
     pub(super) fn normalize(&self, value: &Value) -> Value {
-        let mut encoded = serde_json::to_string(value).expect("oracle JSON");
-        for (index, job) in self.fixture.jobs.iter().enumerate() {
-            encoded = encoded.replace(job, &format!("J{index}"));
-        }
-        serde_json::from_str(&encoded).expect("normalized oracle JSON")
+        // No recursive UUID replacement: raw identity is a semantic retry input.
+        value.clone()
+    }
+
+    pub(super) fn fixture_identity(&self) -> Value {
+        json!({"jobs": self.fixture.jobs.iter().enumerate().map(|(job,id)|json!({"job":job,"raw_job_id":id})).collect::<Vec<_>>()})
     }
 
     pub(super) fn export_state(&self, handle: StoreHandle) -> Value {
@@ -1622,6 +1855,60 @@ impl Oracle {
             "store/mod.rs",
             format!("{:x}", Sha256::digest(include_str!("mod.rs").as_bytes())),
         );
+        for (path, bytes) in [
+            ("Cargo.toml", include_str!("../../../../Cargo.toml")),
+            ("Cargo.lock", include_str!("../../../../Cargo.lock")),
+            (
+                "rust-toolchain.toml",
+                include_str!("../../../../rust-toolchain.toml"),
+            ),
+            (
+                "crates/plurx-core/Cargo.toml",
+                include_str!("../../Cargo.toml"),
+            ),
+            (
+                "crates/plurx-worker-control/Cargo.toml",
+                include_str!("../../../plurx-worker-control/Cargo.toml"),
+            ),
+            (
+                "crates/plurxd/Cargo.toml",
+                include_str!("../../../plurxd/Cargo.toml"),
+            ),
+            (
+                "crates/plurx-worker-control/src/lib.rs",
+                include_str!("../../../plurx-worker-control/src/lib.rs"),
+            ),
+            (
+                "crates/plurx-worker-control/src/library_driver.rs",
+                include_str!("../../../plurx-worker-control/src/library_driver.rs"),
+            ),
+            (
+                "crates/plurx-worker-control/src/library_lifecycle.rs",
+                include_str!("../../../plurx-worker-control/src/library_lifecycle.rs"),
+            ),
+            (
+                "crates/plurx-worker-control/src/retry_policy.rs",
+                include_str!("../../../plurx-worker-control/src/retry_policy.rs"),
+            ),
+            (
+                "crates/plurxd/src/background_jobs.rs",
+                include_str!("../../../plurxd/src/background_jobs.rs"),
+            ),
+            (
+                "crates/plurxd/src/library_work.rs",
+                include_str!("../../../plurxd/src/library_work.rs"),
+            ),
+            (
+                "crates/plurxd/src/library_work/env.rs",
+                include_str!("../../../plurxd/src/library_work/env.rs"),
+            ),
+            (
+                "crates/plurxd/src/state.rs",
+                include_str!("../../../plurxd/src/state.rs"),
+            ),
+        ] {
+            sources.insert(path, format!("{:x}", Sha256::digest(bytes.as_bytes())));
+        }
         sources
     }
 
@@ -1630,7 +1917,41 @@ impl Oracle {
         handle: StoreHandle,
         input: &Action,
     ) -> Result<usize, String> {
-        if !self.domain_inputs(handle).contains(input) {
+        let contextual = match input {
+            Action::OrdinarySettle {
+                job,
+                token,
+                kind,
+                not_before_ms,
+                request_now_ms,
+                error_code,
+                checkpoint,
+            } => {
+                *job < 2
+                    && *token < self.states[handle].episode.tokens[*job].len()
+                    && *not_before_ms >= 0
+                    && *request_now_ms >= 0
+                    && checkpoint.is_none()
+                    && ((kind == "yield" && error_code.is_none())
+                        || (kind == "retry"
+                            && error_code.as_deref() == Some("library_execution_failed")))
+            }
+            Action::ResolveInitialClaim { job, request } => {
+                *job < 2
+                    && request.job_id == self.fixture.jobs[*job]
+                    && request.fence.is_none()
+                    && request.now_ms == self.states[handle].episode.now
+                    && request.dispatched_at_ms >= 0
+                    && request.now_ms >= request.dispatched_at_ms
+                    && NODES.contains(&request.node_id.as_str())
+                    && uuid::Uuid::parse_str(&request.boot_id).is_ok()
+                    && uuid::Uuid::parse_str(&request.claim_id).is_ok()
+            }
+            Action::ReadClaimJob { job } => *job < 2,
+            Action::ClockAdvance { now } => *now > self.states[handle].episode.now,
+            _ => false,
+        };
+        if !contextual && !self.domain_inputs(handle).contains(input) {
             return Err("OracleInputDomain: demanded input is outside exact D".into());
         }
         if let Some(edge) = self.cache.get(&(handle, input.clone())) {
@@ -1648,11 +1969,16 @@ impl Oracle {
         let evaluated: Result<_, String> = async {
             for action in &trace {
                 let before = canonical(fixture, &episode).await;
-                let (result, _) = apply(fixture, &mut episode, action, true).await?;
+                let result = apply(fixture, &mut episode, action, true).await?.result;
                 let after = canonical(fixture, &episode).await;
                 if matches!(
                     result.as_str(),
-                    "refused" | "cancelled" | "expired_or_pruned" | "held"
+                    "refused"
+                        | "cancelled"
+                        | "expired_or_pruned"
+                        | "held"
+                        | "validation_error_yield_time"
+                        | "validation_error_retry_time"
                 ) && before != after
                 {
                     return Err(
@@ -1671,11 +1997,17 @@ impl Oracle {
                 return Err("OracleInputDomain: materialized D differs from stored D".into());
             }
             let before = parent.canonical.clone();
-            let (result, resolved_token) = apply(fixture, &mut episode, input, true).await?;
+            let applied = apply(fixture, &mut episode, input, true).await?;
+            let result = applied.result;
             let next = canonical(fixture, &episode).await;
             if matches!(
                 result.as_str(),
-                "refused" | "cancelled" | "expired_or_pruned" | "held"
+                "refused"
+                    | "cancelled"
+                    | "expired_or_pruned"
+                    | "held"
+                    | "validation_error_yield_time"
+                    | "validation_error_retry_time"
             ) && before != next
             {
                 return Err(
@@ -1692,7 +2024,9 @@ impl Oracle {
                 view,
                 inputs,
                 result,
-                resolved_token,
+                applied.resolved_token,
+                applied.claim_request,
+                applied.job_read,
                 invariant,
             ))
         }
@@ -1709,7 +2043,17 @@ impl Oracle {
         if canonical(fixture, &Episode::initial()).await != self.states[0].canonical {
             return Err("RollbackRoundTrip: materialization rollback changed Init".into());
         }
-        let (next, successor, mut view, inputs, result, resolved_token, invariant) = evaluated?;
+        let (
+            next,
+            successor,
+            mut view,
+            inputs,
+            result,
+            resolved_token,
+            claim_request,
+            job_read,
+            invariant,
+        ) = evaluated?;
         if invariant.is_err() || (!self.index.contains_key(&next) && self.states.len() >= STATE_CAP)
         {
             self.failure = Some(self.normalize(&json!({
@@ -1737,6 +2081,11 @@ impl Oracle {
         {
             return Err("MonotoneFence: oracle edge decreased domain fence".into());
         }
+        let claim_snapshot = if matches!(input, Action::Claim { .. }) && result == "claimed" {
+            successor.claim_snapshots.last().cloned()
+        } else {
+            None
+        };
         let to = if let Some(to) = self.index.get(&next) {
             *to
         } else {
@@ -1760,8 +2109,18 @@ impl Oracle {
             from: handle,
             to,
             action: input.clone(),
-            result,
+            result: result.clone(),
             resolved_token,
+            claim_snapshot,
+            claim_request,
+            job_read,
+            error: match result.as_str() {
+                "validation_error_yield_time" => {
+                    Some("invalid background checkpoint or yield time".into())
+                }
+                "validation_error_retry_time" => Some("invalid background failure retry".into()),
+                _ => None,
+            },
         });
         self.cache.insert((handle, input.clone()), id);
         self.failure = None;
@@ -2349,6 +2708,128 @@ async fn refusal_snapshot_guard_detects_mutation_in_apply() {
     eprintln!(
         "async_store_refusal_guard={}",
         json!({"named_failure": failure, "detected_in": "apply"})
+    );
+}
+
+// Focused actual API definition, deliberately independent of external formal
+// inputs and of the product traversal. The 120s query-window boundary below is
+// conformance only; it does not introduce a contextual product clock step.
+#[tokio::test]
+async fn actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows() {
+    let mut oracle = Oracle::new(None).await.expect("migrated actual fixture");
+    let claim = oracle
+        .apply(0, &Action::Claim { job: 0, node: 0 })
+        .await
+        .expect("actual claim");
+    let claimed = oracle.edges[claim].clone();
+    assert_eq!(claimed.result, "claimed");
+    let actual: ClaimJob =
+        serde_json::from_value(claimed.claim_request.clone().expect("exact passed request"))
+            .expect("actual ClaimJob");
+    let query = |now_ms, dispatched_at_ms| Action::ResolveInitialClaim {
+        job: 0,
+        request: InitialClaimResolution {
+            job_id: actual.job_id.clone(),
+            node_id: actual.node_id.clone(),
+            boot_id: actual.boot_id.clone(),
+            claim_id: actual.claim_id.clone(),
+            fence: None,
+            dispatched_at_ms,
+            now_ms,
+        },
+    };
+    let resolve = oracle
+        .apply(claimed.to, &query(NOW, actual.dispatched_at_ms))
+        .await
+        .expect("actual fence-None query");
+    let running = oracle.edges[resolve].clone();
+    assert_eq!(running.result, "running");
+    let token = oracle.states[running.to].episode.tokens[0]
+        [running.resolved_token.expect("actual capture")]
+    .clone();
+    assert_eq!(
+        &token,
+        &claimed
+            .claim_snapshot
+            .as_ref()
+            .expect("committed returned snapshot")
+            .token_capture
+    );
+    assert_eq!(
+        oracle.states[claimed.to].canonical,
+        oracle.states[running.to].canonical
+    );
+    let read = oracle
+        .apply(running.to, &Action::ReadClaimJob { job: 0 })
+        .await
+        .expect("actual committed reread");
+    let edge = oracle.edges[read].clone();
+    assert_eq!(edge.result, "present");
+    let row: super::background_jobs::BackgroundJob =
+        serde_json::from_value(edge.job_read.clone().expect("full actual row"))
+            .expect("BackgroundJob wire");
+    assert_eq!(row.id, actual.job_id);
+    assert_eq!(row.token.as_ref(), Some(&token));
+    assert!(row
+        .supported_payload()
+        .is_ok_and(|payload| payload.kind() == actual.kind));
+    assert_eq!(
+        oracle.states[edge.from].canonical,
+        oracle.states[edge.to].canonical
+    );
+    assert_eq!(
+        oracle
+            .apply(edge.to, &Action::ReadClaimJob { job: 0 })
+            .await
+            .expect("stable repeated read"),
+        read
+    );
+    assert_eq!(
+        oracle.states[edge.to].episode.claim_snapshots.len(),
+        1,
+        "a read never fabricates ClaimOutcome history"
+    );
+    let yield_edge = oracle
+        .apply(
+            edge.to,
+            &Action::Settle {
+                job: 0,
+                token: 0,
+                disposition: 3,
+            },
+        )
+        .await
+        .expect("actual retirement yield");
+    assert_eq!(oracle.edges[yield_edge].result, "accepted");
+    let later = NOW + super::background_jobs::CLAIM_RESOLUTION_WINDOW_MS;
+    let clock = oracle
+        .apply(
+            oracle.edges[yield_edge].to,
+            &Action::ClockAdvance { now: later },
+        )
+        .await
+        .expect("conformance request-window clock");
+    let from = oracle.edges[clock].to;
+    let old = oracle
+        .apply(from, &query(later, actual.dispatched_at_ms))
+        .await
+        .expect("original dispatch window");
+    assert_eq!(oracle.edges[old].result, "expired_or_pruned");
+    let fresh = oracle
+        .apply(from, &query(later, later))
+        .await
+        .expect("distinct query input");
+    assert_eq!(
+        oracle.edges[fresh].result, "settled",
+        "initial resolution must not replace its original dispatch sample"
+    );
+    assert_eq!(
+        oracle.states[from].canonical,
+        oracle.states[oracle.edges[old].to].canonical
+    );
+    assert_eq!(
+        oracle.states[from].canonical,
+        oracle.states[oracle.edges[fresh].to].canonical
     );
 }
 

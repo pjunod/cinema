@@ -1,14 +1,17 @@
 # Async driver refinement — a selected two-worker product
 
-**Status: implemented, unqualified.** The product design and wire contract are
+**Status: implementation integrated, unqualified.** The product design and wire contract are
 defined, but this candidate has no new Rust, control, or model-checker results.
 The earlier arbitrary Store-D closure hit its historical state cap; that
-failed harness is retained as history and is not an acceptance result. The
+failed run is retained as receipt history and is not an acceptance result. The
 replacement claim is a complete finite product for two selected workers
-over the declared input domain, using a source-bound Store oracle. Production
-ordinary Yield/Retry payload and deadline transfer remains explicitly
-`unclosed`; the bounded representative protocol is not full adapter
-refinement.
+over the declared input domain, using a source-bound Store oracle. Ordinary
+settlement transfer is modeled from the selected production adapter and Store
+path, including payload, captured and request times, local guards, validation
+outcomes, and queued eligibility. The bundle and inventory mark this boundary
+`pending`; only a complete accepted receipt may report `closed_bounded` for
+the selected normal-clock product. This is not a full Rust/Tokio/cluster trace
+theorem.
 
 Companion to [CONTRACT.md](CONTRACT.md), which defines the claim, independent
 coverage checks, fairness, controls, and limits. The source schema is
@@ -37,6 +40,13 @@ python3 scripts/check-async-driver-refinement qualify \
   --output-dir target/async-driver-refinement/tlc \
   --cache-dir target/formal-toolchain
 ```
+
+The six current external-input qualification tests are explicitly ignored by
+ordinary unit runs. This runner supplies their required inputs and selects
+each once with `--ignored --exact`, requiring one executed test and zero
+ignored tests in that selected invocation. Missing inputs fail; an ordinary
+unit run's ignored count is never proof evidence. Self-contained units remain
+ordinary tests. No obsolete raw-closure copy is retained.
 
 The product test is
 `store::async_driver_product::actual_sql_two_worker_product_is_closed`; it
@@ -74,21 +84,27 @@ artifact by 512 MiB; exceeding a bound leaves the result incomplete.
 `tlc/receipt.json` separates complete positive configurations from named
 counterexamples. It binds generated tables, models, configurations, commands,
 tools, and input provenance. `inventory.json` and `tlc/receipt.json` carry
-`ordinary_settlement_payload_transfer: "unclosed"` alongside the shared named
-claim-boundary map. Missing demands or successors, incomplete
+`inventory.json` carries `ordinary_settlement_payload_transfer: "pending"`.
+A partial TLC receipt also remains pending. A complete accepted receipt records
+`closed_bounded` only after the source-bound actual-settlement cases, causal
+controls, product validation, and all eleven configurations pass. The receipt
+binds source, provenance, graph, model, configuration, and tool identities.
+Missing demands or successors, incomplete
 frontiers, timeouts, resource failures, and unrelated invariant failures are
 not acceptance or control evidence. Seven main contexts feed nine main
 configurations; two sparse boundary controls bring the total to eleven.
 
-Production Yield uses captured-release deadlines of +5000 ms for refusal and
-+1000 ms for pressure/domain-loss interruption. Retry uses release time plus
-jitter from raw job-ID bytes and the adapter's failed-attempt snapshot, with
-`library_execution_failed`; the selected
-representative uses application time and `transient`. Store validation can
-reject a captured deadline older than application time, and claim
-availability depends on the stored deadline. The retained T4 Kani policy proof
-does not prove this daemon-to-Store payload/time transfer. C9 is therefore a
-causal trigger-mutation witness only for the declared representative product.
+The source-bound ordinary path retains captured Yield deadlines (+5000 ms for
+refusal and +1000 ms for interruption), Retry delay from raw job-ID bytes and
+the immutable failed-attempt snapshot, and `library_execution_failed`. The
+adapter samples request time after local lost/deadline/token guards; Store
+validation distinguishes invalid Yield/Retry times from a refused CAS, and
+claim eligibility follows the stored deadline. The model also records local
+no-call exits, clock/transport errors, lost responses, and observed results.
+Stable-success time movement is constrained by live lease windows, with a
+separate eligibility-advance relation for future-dated work. These obligations
+are defined but have no execution result in this candidate. C4/C9 remain named
+paired causal controls; they do not replace the ordinary-settlement cases.
 
 The selected model remains a finite abstraction. NoTwoSourceReaders counts durable records with state running and queue expiry after the sampled time; it does not bound physical readers while expired work awaits cancellation or join.
 `GuardBeforeRevoke` is structural and does not independently prove lock

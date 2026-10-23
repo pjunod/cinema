@@ -6,6 +6,7 @@
 
 pub mod library_driver;
 pub mod library_lifecycle;
+pub mod retry_policy;
 
 #[cfg(kani)]
 mod proofs {

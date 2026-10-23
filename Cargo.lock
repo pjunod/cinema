@@ -3838,6 +3838,7 @@ dependencies = [
  "kamadak-exif",
  "libc",
  "openraft",
+ "plurx-worker-control",
  "quick-xml",
  "rcgen",
  "regex",

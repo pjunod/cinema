@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "scope": "selected_two_worker_product",
   "kind": "closed_wire_vocabulary_not_acceptance",
   "root_fields": [
@@ -9,6 +9,7 @@
     "domain",
     "driver_graph_sha256",
     "enabledness",
+    "fixture_identity",
     "product_edges",
     "product_states",
     "schema_bindings",
@@ -83,7 +84,13 @@
     "RetireDrain",
     "MakeAvailable",
     "Admission",
-    "ClaimWin"
+    "ClaimWin",
+    "AdapterSample",
+    "OrdinaryLock",
+    "OrdinaryLocal",
+    "OrdinaryCallReturn",
+    "OrdinaryObserve",
+    "ClaimRecover"
   ],
   "worker_fields": [
     "stage",
@@ -111,7 +118,18 @@
     "workStarted",
     "faultUsed",
     "admission",
-    "readLock"
+    "readLock",
+    "claim_snapshot",
+    "claim_issued_mono_ms",
+    "claim_request_now_ms",
+    "local_deadline_mono_ms",
+    "queue_lost",
+    "cancelling",
+    "driver_settlement",
+    "adapter_reply",
+    "ordinary",
+    "claim_request",
+    "claim_recovery"
   ],
   "product_state_fields": [
     "id",
@@ -120,6 +138,10 @@
     "w",
     "available",
     "completed",
+    "mono_now_ms",
+    "wall_anchors",
+    "mono_anchors",
+    "claim_loss_keys",
     "canonical_sha256"
   ],
   "product_edge_fields": [
@@ -127,11 +149,15 @@
     "to",
     "branch",
     "oracle_edge",
+    "resolution_edge",
+    "read_edge",
+    "cleanup_edge",
     "fair_actions"
   ],
   "demand_fields": [
     "context",
     "from",
+    "oracle_from",
     "branch",
     "role",
     "input",
@@ -154,6 +180,13 @@
     "artifact_max_bytes": 536870912
   },
   "source_boundaries": {
-    "OrdinarySettlementPayloadTransfer": "unclosed"
-  }
+    "ordinary_settlement_payload_transfer": {
+      "status": "pending",
+      "domain": "selected_two_worker_normal_clock"
+    }
+  },
+  "global_fair_actions": [
+    "EligibilityAdvance/global",
+    "ClaimRecoveryWake/global"
+  ]
 }

@@ -446,6 +446,12 @@ impl Driver {
         })
     }
 
+    /// The concrete lifecycle settlement retained until its source lifetime ends.
+    /// This read-only view does not alter control or manufacture driver state.
+    pub fn settlement(&self) -> Option<Settlement> {
+        self.payload.settlement
+    }
+
     pub fn control(&self) -> Control {
         self.control
     }

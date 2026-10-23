@@ -214,18 +214,7 @@ impl IdlePoll {
     }
 }
 
-pub(crate) fn retry_delay_ms(id: &str, failed_attempts: i64) -> i64 {
-    let base = match failed_attempts {
-        0 => 5_000,
-        1 => 30_000,
-        2 => 120_000,
-        _ => 600_000,
-    };
-    let jitter = id.bytes().fold(failed_attempts as u64, |seed, byte| {
-        seed.wrapping_mul(31).wrapping_add(u64::from(byte))
-    }) % (base as u64 / 5);
-    base + jitter as i64
-}
+pub(crate) use plurx_worker_control::retry_policy::retry_delay_ms;
 
 fn unix_ms() -> Result<i64, StoreError> {
     let elapsed = std::time::SystemTime::now()
@@ -3240,6 +3229,68 @@ mod tests {
             result.is_some(),
             "the compatible peer can still execute the original request"
         );
+    }
+
+    #[tokio::test]
+    async fn ordinary_settlement_local_guards_and_validation_preserve_owner() {
+        for guard in ["lost", "expired", "no_token", "validation"] {
+            let (store, id, mut active) = active().await;
+            active.stop.cancel();
+            if let Some(heartbeat) = active.heartbeat.take() {
+                heartbeat.await.expect("drained test heartbeat");
+            }
+            let fence = active.fence();
+            let before = store
+                .background_job(&id)
+                .await
+                .expect("preimage")
+                .expect("job");
+            let attempts = serde_json::to_value(store.job_attempts(&id).await.expect("attempts"))
+                .expect("attempt JSON");
+            match guard {
+                "lost" => fence.0.lost.cancel(),
+                "expired" => {
+                    assert!(!fence.0.lost.is_cancelled());
+                    fence.0.deadline.send_replace(fence.0.started);
+                }
+                "no_token" => fence.0.state.lock().await.token = None,
+                _ => {}
+            }
+            let expected_token = fence.0.state.lock().await.token.clone();
+            let result = fence
+                .settle(JobSettlement::Retry {
+                    error_code: "library_execution_failed".into(),
+                    not_before_ms: 0,
+                })
+                .await;
+            if guard == "validation" {
+                assert!(
+                    matches!(result,Err(StoreError::Task(ref message)) if message=="invalid background failure retry")
+                );
+            } else {
+                assert!(matches!(result, Ok(false)));
+            }
+            assert_eq!(
+                fence.0.state.lock().await.token,
+                expected_token,
+                "only observed true clears the local token"
+            );
+            let after = store
+                .background_job(&id)
+                .await
+                .expect("postimage")
+                .expect("job");
+            assert_eq!(
+                serde_json::to_value(after).expect("after"),
+                serde_json::to_value(before).expect("before")
+            );
+            assert_eq!(
+                serde_json::to_value(store.job_attempts(&id).await.expect("attempts"))
+                    .expect("after attempts"),
+                attempts
+            );
+            active.finish().await;
+        }
     }
 
     #[tokio::test]

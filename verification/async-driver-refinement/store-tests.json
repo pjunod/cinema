@@ -14,7 +14,11 @@
     "store::async_driver_refinement::snapshot_table_registry_matches_producer",
     "store::async_driver_refinement::retirement_settle_and_resolution_primitives_preserve_identity_and_rows",
     "store::async_driver_refinement::refusal_snapshot_guard_detects_mutation_in_apply",
-    "store::async_driver_refinement::state_cap_diagnostic_is_bounded_and_marks_partial_trace"
+    "store::async_driver_refinement::state_cap_diagnostic_is_bounded_and_marks_partial_trace",
+    "store::async_driver_product::actual_ordinary_settlement_payload_and_time_conformance",
+    "store::async_driver_product::actual_ordinary_local_guard_and_response_conformance",
+    "store::async_driver_product::actual_queued_eligibility_progress_witness",
+    "store::async_driver_refinement::actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows"
   ],
   "product_test": "store::async_driver_product::actual_sql_two_worker_product_is_closed",
   "product_env": "PLURX_ASYNC_PRODUCT_BUNDLE",

@@ -1,26 +1,21 @@
 {
-  "status": "schema registry and source boundaries only; not an executed graph or qualification receipt",
-  "schema_version": 1,
-  "export_env": "PLURX_ASYNC_STORE_GRAPH",
-  "positive_test": "store::async_driver_refinement::actual_sql_bounded_episode_graph_is_closed",
+  "status": "source vocabulary for embedded actual oracle; no executed product or qualification result",
+  "schema_version": 3,
+  "scope": "embedded_actual_store_oracle_for_selected_two_worker_product",
+  "export_env": "PLURX_ASYNC_PRODUCT_BUNDLE",
+  "positive_test": "store::async_driver_product::actual_sql_two_worker_product_is_closed",
   "control_tests": {
     "C4": {
-      "test": "store::async_driver_refinement::closure_completion_trigger_mutation_fails_last_request_atomic_retirement",
+      "test": "store::async_driver_product::product_prefix_completion_mutation_fails_last_request_atomic_retirement",
       "named_failure": "LastRequestAtomicRetirement"
     },
     "C9": {
-      "test": "store::async_driver_refinement::closure_reservation_release_mutation_fails_reservation_conservation",
+      "test": "store::async_driver_product::product_prefix_reservation_mutation_fails_reservation_conservation",
       "named_failure": "ReservationConservation"
     }
   },
-  "root_fields": [
-    "schema_version",
-    "scope",
+  "embedded_fields": [
     "initial",
-    "source_bindings",
-    "schema_bindings",
-    "domain",
-    "coverage",
     "states",
     "edges"
   ],
@@ -33,7 +28,9 @@
     "captured_leases",
     "budgets",
     "cutoffs",
-    "canonical_sha256"
+    "canonical_sha256",
+    "raw",
+    "canonical_json"
   ],
   "job_fields": [
     "state",
@@ -45,7 +42,8 @@
     "active",
     "request_done",
     "request_state",
-    "reservation_count"
+    "reservation_count",
+    "not_before_ms"
   ],
   "token_fields": [
     "job_id",
@@ -63,206 +61,215 @@
     "revision",
     "expires_at_unix_ms"
   ],
-  "domain_fields": [
-    "resource",
-    "owner",
-    "fence",
-    "revision",
-    "expiry"
-  ],
-  "budgets_fields": [
+  "episode_fields": [
+    "now",
     "claims",
+    "tokens",
     "renewed_claims",
+    "leases",
     "domain_acquired",
-    "removed"
+    "removed",
+    "claim_snapshots"
   ],
   "edge_fields": [
     "from",
     "to",
     "action",
     "result",
-    "resolved_token"
+    "resolved_token",
+    "claim_snapshot",
+    "error",
+    "claim_request",
+    "job_read"
   ],
   "action_registry": {
     "claim": [
       "job",
-      "node"
+      "node",
+      "op"
     ],
     "renew": [
       "job",
+      "op",
       "token"
     ],
     "settle": [
+      "disposition",
       "job",
-      "token",
-      "disposition"
+      "op",
+      "token"
     ],
     "bind": [
       "job",
-      "token",
-      "lease"
+      "lease",
+      "op",
+      "token"
     ],
     "complete": [
       "job",
-      "token",
-      "lease"
+      "lease",
+      "op",
+      "token"
     ],
     "acquire_domain": [
-      "node"
+      "node",
+      "op"
     ],
     "release_domain": [
-      "lease"
+      "lease",
+      "op"
     ],
     "remove_owner": [
-      "node"
+      "node",
+      "op"
     ],
     "clock_advance": [
-      "now"
+      "now",
+      "op"
     ],
     "resolve": [
       "job",
+      "op",
+      "token"
+    ],
+    "resolve_initial_claim": [
+      "job",
+      "op",
+      "request"
+    ],
+    "read_claim_job": [
+      "job",
+      "op"
+    ],
+    "ordinary_settle": [
+      "checkpoint",
+      "error_code",
+      "job",
+      "kind",
+      "not_before_ms",
+      "op",
+      "request_now_ms",
       "token"
     ]
   },
-  "settlement_dispositions": {
-    "0": "yield",
-    "1": "retry",
-    "2": "cancel",
-    "3": "retirement_yield"
-  },
-  "result_registry": [
-    "claimed",
-    "refused",
-    "cancelled",
-    "expired_or_pruned",
-    "renewed",
-    "accepted",
-    "acquired",
-    "held",
-    "removed",
-    "advanced",
-    "running",
-    "cancel_requested",
-    "settled",
-    "lost_ownership"
-  ],
-  "cutoff_registry": [
-    "attempt_budget_j0",
-    "attempt_budget_j1",
-    "renewal_budget_<claim_id>",
-    "domain_acquire_budget",
-    "no_future_boundary",
-    "domain_acquire_budget_node-a",
-    "domain_acquire_budget_node-b",
-    "domain_acquire_budget_foreign-holder"
-  ],
-  "cutoff_semantics": "input-domain exclusions, not whole-state terminal flags; no cutoff edge is silently discarded",
-  "coverage_fields": [
-    "closed",
-    "no_skipped_edges",
-    "state_count",
-    "edge_count",
-    "by_op",
-    "by_result",
-    "cutoff_counts"
-  ],
-  "closure": "only emitted if BFS empties without cap, SQL, materialization, rollback, coverage or independent invariant failures",
-  "canonical": "SHA256 of serde_json UTF8 serialization of {rows:one authoritative full-column snapshot,episode:exact captured identities/numeric values/budgets}; replace opaque generated job UUID strings with J0/J1 only",
-  "numeric_quotient": "none",
-  "state_cap": 20000,
-  "restrictions": {
-    "jobs": 2,
-    "nodes": 2,
-    "physical_capacity_per_node": 1,
-    "attempts_per_job": 2,
-    "renewals_per_attempt": 1,
-    "domain_acquisitions_per_owner": 1,
-    "domain_owners": [
-      "node-a",
-      "node-b",
-      "foreign-holder"
+  "result_registry": {
+    "claim": [
+      "cancelled",
+      "claimed",
+      "expired_or_pruned",
+      "refused"
     ],
-    "selected_attempt_ids": 4,
-    "reserved_boundary_ids": 2,
-    "rearrival": false,
-    "ordinary_token_inputs": "latest captured revision perclaim; old revisions retained in state and tested as conformance",
-    "binding_completion_inputs": "captured lease owner matches captured queue-token node",
-    "node_domain_acquisition_inputs": "node owns selected durable runningclaim; expiry races retained; foreignholder independent",
-    "library_settlement_inputs": [
-      "yield",
-      "retry",
-      "cancel"
+    "renew": [
+      "refused",
+      "renewed"
     ],
-    "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; ordinary dispositions 0/1/2 retain latest-revision inputs",
-    "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
-    "primitive_clock_boundary": "each generated primitive request uses current episode.now; the daemon's three retirement wall samples and dispatch/application races are reviewed adapter/conformance boundaries, not source-derived clock-race coverage",
-    "reservation_conservation_boundary": "conservation is checked for unexpired queue authority only; expired Running rows and residue remain represented, with no independent complete-residue conservation guarantee until reclaim/prune",
-    "domain_reacquisition_boundary": "each owner can acquire at most once; release or expiry does not reset its budget, so same-owner release-to-reacquire cycles are excluded",
-    "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
-    "retirement_sequence_boundary": "the graph supplies separate actual settle and logical resolve primitives; daemon drain/local-token/first-settle/resolve/optional-second-settle sequencing is a reviewed source and daemon-conformance boundary composed by the temporal model",
-    "cleanup_boundary": "local cleanup needs bounded retirement calls to return, not eventual successful acknowledgement; errors are logged and finish returns while durable authority may remain",
-    "retirement_settlement_inputs": "disposition3 for every captured original token; ordinary0/1/2 still latest revision per claim",
-    "resolve_inputs": "all captured original identities; fence is Some(original.fence); request samples episode.now; no combined first-settle/resolve/second-settle operation",
-    "selected_cancellation": "no queue cancellation environment transition; CancelRequested and successful Cancel are conformance outside selected D",
-    "dispatch_time_noninterference": "for retirement fence Some(F), resolve_claim reads dispatched_at_ms only in its skipped fence-is-none window branch; neither SQL query nor later classification reads it, so a representative dispatch sample preserves results at fixed now/read outcomes; this is a reviewed source lemma, not a machine proof",
-    "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
-    "schema_snapshot_boundary": "canonical durable rows cover exactly the nine snapshot_tables; all installed schema objects are hash-bound for identity, not complete row snapshots or proofs of unrelated tables",
-    "savepoint_boundary": "no closure transition invokes queue_transaction or nested explicit transactions; test savepoints bracket sequential primitives on the production writer and any savepoint/SQL failure aborts closure",
-    "refusal_observation": "the existing BFS full-canonical equality guard already rejects every refused edge mutation; direct non-graph conformance can additionally enable apply's durable snapshot observer; no pre-existing closure gap is claimed",
-    "settlement_dispositions": [
-      "yield",
-      "retry",
-      "cancel",
-      "retirement_yield"
+    "settle": [
+      "accepted",
+      "refused"
+    ],
+    "bind": [
+      "accepted",
+      "refused"
+    ],
+    "complete": [
+      "accepted",
+      "refused"
+    ],
+    "acquire_domain": [
+      "acquired",
+      "held"
+    ],
+    "release_domain": [
+      "accepted",
+      "refused"
+    ],
+    "remove_owner": [
+      "removed"
+    ],
+    "clock_advance": [
+      "advanced"
+    ],
+    "resolve": [
+      "cancel_requested",
+      "expired_or_pruned",
+      "lost_ownership",
+      "running",
+      "settled"
+    ],
+    "ordinary_settle": [
+      "accepted",
+      "refused",
+      "validation_error_retry_time",
+      "validation_error_yield_time"
+    ],
+    "resolve_initial_claim": [
+      "cancel_requested",
+      "expired_or_pruned",
+      "lost_ownership",
+      "running",
+      "settled"
+    ],
+    "read_claim_job": [
+      "missing",
+      "present"
     ]
   },
-  "premises": [
-    "completion opportunity before explicit attempt/domain/fault budgets exhaust",
-    "no unbounded fair-source transfer",
-    "no infinite fresh-progress conclusion from two fixed selected requests"
-  ],
-  "schema_bindings_fields": [
-    "compiled_sqlite_migrations",
-    "installed_sqlite_schema_sha256",
-    "schema_inventory"
-  ],
-  "schema_bindings_hashes": "SHA256 of compiled migration SQL UTF8 per1based version; SHA256 of ordered sqlite_schema JSON UTF8",
-  "savepoints": "same production writer connection; all errors abort closure; actual commit-observation/durability and engine internals are boundary assumptions, separately conformance sampled",
-  "cost_bounds_by_definition": {
-    "max_action_submissions_per_state": 42,
-    "max_captured_queue_tokens": 8,
-    "max_captured_domain_leases": 3,
-    "max_clock_advances_per_trace": 36,
-    "max_state_changing_trace_length_conservative": 61,
-    "max_edges_at_cap": 840000,
-    "roundtrip_upper_bound_conservative_approx": 13000000,
-    "measured": false,
-    "note": "unmeasured conservative bound; normal BFS reuses its existing full-canonical refusal guard; only logical resolution always adds direct durable pre/post read checks; direct non-graph tests enable optional CAS observation"
-  },
-  "resolved_token_contract": {
-    "field": "resolved_token",
-    "non_resolve": null,
-    "resolve_running_or_cancel_requested": "exact actual returned token interned by full equality at a stable per-job captured index; earlier indices never change",
-    "other_resolve_results": null,
-    "identity": "job_id,node_id,boot_id,claim_id,fence must equal the original input identity; revision and expiry may advance",
-    "settled_payload": "state/result_ref unused by retirement control; no returned retry token",
-    "api_errors": "separate reply/return fault boundary; actual SQLite API errors abort graph generation"
+  "validation_error_strings": {
+    "validation_error_yield_time": "invalid background checkpoint or yield time",
+    "validation_error_retry_time": "invalid background failure retry"
   },
   "snapshot_tables": [
-    "background_jobs",
-    "background_job_waiters",
     "background_job_attempts",
-    "background_job_reservations",
-    "background_job_domain_leases",
-    "background_library_requests",
     "background_job_commands",
+    "background_job_domain_leases",
+    "background_job_reservations",
+    "background_job_waiters",
+    "background_jobs",
+    "background_library_requests",
     "job_leases",
     "settings"
   ],
-  "boundaries": {
-    "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; ordinary dispositions 0/1/2 retain latest-revision inputs",
+  "source_bindings": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "cluster/coordination.rs",
+    "crates/plurx-core/Cargo.toml",
+    "crates/plurx-worker-control/Cargo.toml",
+    "crates/plurx-worker-control/src/lib.rs",
+    "crates/plurx-worker-control/src/library_driver.rs",
+    "crates/plurx-worker-control/src/library_lifecycle.rs",
+    "crates/plurx-worker-control/src/retry_policy.rs",
+    "crates/plurxd/Cargo.toml",
+    "crates/plurxd/src/background_jobs.rs",
+    "crates/plurxd/src/library_work.rs",
+    "crates/plurxd/src/library_work/env.rs",
+    "crates/plurxd/src/state.rs",
+    "rust-toolchain.toml",
+    "store/async_driver_product.rs",
+    "store/async_driver_refinement.rs",
+    "store/background_jobs.rs",
+    "store/background_jobs_domain.rs",
+    "store/background_jobs_domain.sql",
+    "store/background_jobs_library.rs",
+    "store/background_jobs_library.sql",
+    "store/background_jobs_resources.sql",
+    "store/background_jobs_schema.sql",
+    "store/mod.rs",
+    "store/sqlite/background_jobs.rs",
+    "store/sqlite/coordination.rs",
+    "store/sqlite/mod.rs",
+    "store/subtitle_managed_schema.sql"
+  ],
+  "source_boundaries": {
+    "ordinary_settlement_payload_transfer": {
+      "status": "pending",
+      "domain": "selected_two_worker_normal_clock"
+    }
+  },
+  "domain_boundaries": {
+    "retirement_inputs": "disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; cancellation uses disposition 2; ordinary service uses contextual ordinary_settle payloads",
     "resolution_read_boundary": "resolve_claim is one logical actual-API pure-read action; its two authoritative QueueSql awaits and internal interleavings are a named conformance boundary, not closed read-interleaving coverage",
-    "primitive_clock_boundary": "each generated primitive request uses current episode.now; the daemon's three retirement wall samples and dispatch/application races are reviewed adapter/conformance boundaries, not source-derived clock-race coverage",
+    "primitive_clock_boundary": "intrinsic primitives use current episode.now; ordinary_settle preserves its separately captured request_now_ms; retirement wall samples/internal dispatch races and zero-delay claim/renew-resolution envelopes remain named source/conformance boundaries",
     "reservation_conservation_boundary": "conservation is checked for unexpired queue authority only; expired Running rows and residue remain represented, with no independent complete-residue conservation guarantee until reclaim/prune",
     "domain_reacquisition_boundary": "each owner can acquire at most once; release or expiry does not reset its budget, so same-owner release-to-reacquire cycles are excluded",
     "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
@@ -272,10 +279,29 @@
     "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
     "schema_snapshot_boundary": "canonical durable rows cover exactly the nine snapshot_tables; all installed schema objects are hash-bound for identity, not complete row snapshots or proofs of unrelated tables",
     "savepoint_boundary": "no closure transition invokes queue_transaction or nested explicit transactions; test savepoints bracket sequential primitives on the production writer and any savepoint/SQL failure aborts closure",
-    "refusal_observation": "the existing BFS full-canonical equality guard already rejects every refused edge mutation; direct non-graph conformance can additionally enable apply's durable snapshot observer; no pre-existing closure gap is claimed"
+    "refusal_observation": "the extracted oracle retains the original full-canonical refused-edge equality guard before memoization; logical resolve retains durable read-only observation; no pre-existing closure gap is claimed",
+    "ordinary_settlement_payload_transfer": "selected actual ordinary settlement payload/capture/request/local-service correspondence; evidence pending qualification; normal wall/mono input domain only",
+    "clock": "wall and mono independently advance to the smallest strict greater nonnegative representable neighbour of retained exact authority/payload/queued-eligibility or source local-deadline anchors; no horizon clipping",
+    "renewal_resolution_boundary": "selected zero-delay renewal plus actual logical resolve has no inner interleaving; both actual outcomes and capture references are certified; resolution errors consume the remaining per-attempt fault allowance",
+    "initial_claim_recovery_boundary": "lost initial claims use actual fence-None resolution with original dispatch identity, conditional actual row reread or Cancel, and no inner query interleaving; at most eight persistent job/node/claim loss keys; inconclusive outcomes service exact 250ms source wakes until the fixed 30000ms local deadline; the separate Store request window is 120000ms"
   },
-  "review_corrections": {
-    "S2": "original BFS and checker already checked full-canonical refused self-edges; the direct observer serves non-graph conformance and no pre-existing closure gap is claimed",
-    "R1-C2": "Some(fence) dispatch-time noninterference is reviewed from actual resolve_claim source; first retirement sample may differ from resolve sample, while request.now_ms/application-time scope remains explicitly bounded"
+  "membership": "intrinsic cancel/retirement settle2/3 and resolve use every captured token; renew/bind/complete use latest-per-claim; ordinary saved request and wall target membership are independently contextual",
+  "identity": "raw production fixture UUIDs and all full canonical nine-table rows/Episode/action bytes are retained; hash equality never replaces full equality in oracle replay/cache",
+  "coverage": "selected product demands only; no arbitrary Store-D closure or all-result-class coverage claim",
+  "limits": {
+    "distinct_store_states": 20000,
+    "product_node_cap": null,
+    "bundle_max_bytes": 268435456,
+    "artifact_max_bytes": 536870912,
+    "feasibility": "unmeasured; resource cutoff remains incomplete"
+  },
+  "execution_use": "documentation-only registry; checker/TLA do not consume this file; no acceptance gate or executed statistics",
+  "cutoff_boundary": "no_intrinsic_expiry_boundary describes only absent authority-expiry neighbours; it never excludes contextual payload/queued/monotonic clock movement",
+  "initial_claim_recovery": {
+    "source_request": "actual ClaimJob on every primitive, including refusal",
+    "oracle_read": "full actual BackgroundJob; no Episode read-snapshot append",
+    "fault_domain": "persistent unique job/node/claim_id loss keys, at most eight; no nonlost RPC count budget",
+    "source_timer": "wake min(mono+250,issued+30000); separate Store resolution window 120000",
+    "primitive_summary": "actual initial resolve then conditional read or Cancel; no inner interleaving"
   }
 }

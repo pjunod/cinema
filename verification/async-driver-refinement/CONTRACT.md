@@ -1,15 +1,16 @@
 # Contract — what the selected product can establish
 
 Companion to [README.md](README.md), which gives commands and receipt paths.
-**Status: implemented, unqualified.** The candidate has no new Rust test,
+**Status: implementation integrated, unqualified.** The candidate has no new Rust test,
 control, or model-checker result. The earlier unrestricted Store-D closure
 hit its historical state cap; it remains a failed historical run, not an
 acceptance result. This claim replaces that traversal with a complete finite
 product for the selected two-worker protocol. The narrowing is part of the
-claim, not a performance optimization. `OrdinarySettlementPayloadTransfer`
-is explicitly `unclosed`; the finite protocol does not establish that
-production Yield/Retry requests carry the represented deadlines, errors, or
-application-time behavior.
+claim, not a performance optimization. Ordinary settlement payload and time
+transfer is represented from the selected production adapter and Store path.
+Its bundle boundary remains `pending`; a completed accepted receipt may mark
+it `closed_bounded` only for the selected normal-clock product. No full
+Rust/Tokio/cluster trace theorem is claimed.
 
 ## D is a concrete bounded input protocol
 
@@ -26,17 +27,22 @@ product-node cap; the product bundle is bounded by 256 MiB and the total
 artifact by 512 MiB. A byte/state resource failure cannot emit a complete
 relation.
 
-All signed and unsigned integer values remain concrete. Only opaque generated
-job UUID strings are replaced by J0/J1. Clock steps use the next concrete
-current/captured authority-expiry neighbour (-1, equality, +1), respecting
-signed limits. There is no timestamp quotient, clipping or fixed horizon.
-MAX arithmetic and excluded API-input partitions require separate named
-conformance evidence.
+All source integer values and raw generated job IDs remain concrete. Clock
+steps use exact retained wall/monotonic authority, payload, eligibility and
+recovery-wake neighbours (-1, equality, +1). There is no timestamp quotient,
+clipping or fixed horizon. The pinned TLC evaluator uses signed 32-bit
+integers. Independent arbitrary-precision Python must certify every consumed
+number and candidate arithmetic intermediate, including disabled candidates,
+and equality to source checked/saturating arithmetic before TLC runs.
+`UnsupportedTlcNumericDomain` fails qualification globally; it never removes
+a D input or makes capacity false. All-i64/MAX policy and excluded-input
+obligations retain their separate source/tool applicability.
 
-The reduced ordinary input protocol uses the latest captured revision of
-each claim, while preserving historical revisions in the state. Bind and
-complete use leases owned by the queue-token node. Ordinary settlement inputs are
-Yield, Retry and Cancel. Retirement Yield uses the distinct disposition 3
+The `ordinary_settle` input uses a saved captured claim token, including a
+historical revision actually copied under the local mutex; SQL determines
+whether the token is refused. Its payload is Yield or Retry. Bind and complete
+use leases owned by the queue-token node. Cancel remains a separate driver
+retirement input. Retirement Yield uses the distinct disposition 3
 with `Some("worker_retired")`; it and exact-identity `resolve_claim` are
 offered for every captured original token, including historical revisions. A node acquires the domain only while it has selected
 durable running ownership, including expired retained ownership; the foreign
@@ -47,7 +53,7 @@ Fail and Stop are separate conformance partitions, not closed graph inputs.
 
 The Rust test `store::async_driver_product::actual_sql_two_worker_product_is_closed`
 builds `scope="selected_two_worker_product"` from the source-bound driver
-graph and actual SQL Store oracle. Rust certifies the finite product frontier;
+graph and actual SQL Store oracle. Rust emits the finite product frontier certificate;
 it does not claim closure of every Store-D input independently of that
 product. The previous raw Store-closure test and its closure-driven C4/C9
 wrappers are retired, not skipped or used as gates. Existing primitive,
@@ -60,7 +66,7 @@ candidate choices, D/sample eligibility, apply and capacity demands before
 looking up oracle edges. Every demanded eligible input must have exactly one
 actual outcome; a missing edge is fatal and cannot make capacity false.
 Python independently checks full successor equality and reachability. TLA
-preserves the original `Next` and fairness formulas while checking
+amends `Next` and fairness for ordinary settlement and clock service while checking
 `DemandCovered`, `CapacityAgrees`, `CertifiedReachable`,
 `CertificateNextAgreement`, `FairPairAgreement`, and
 `FairEnablednessAgreement`. Fair memberships are the unions for each complete
@@ -69,12 +75,12 @@ is never a valid negative control.
 
 The completeness argument rules out a first omitted step. The exact initial
 valuation is certified. At each certified predecessor, complete structural
-choices and eligible primitive outcomes supply every original next step;
+choices and eligible primitive outcomes supply every declared next step;
 exact successor equality certifies its target. Conversely, each certificate
 transition must satisfy the original action and actual primitive result.
 Equality of every fair action's state-pair relation preserves its
-nonstuttering enabledness and occurrences, so the original WF/SF formulas
-retain their meaning. This argument remains conditional on the three
+nonstuttering enabledness and occurrences, so the declared WF/SF formulas
+apply to those independently checked relations. This argument remains conditional on the three
 implementations and their source correspondence being correct; source hashes
 alone do not prove those obligations.
 
@@ -105,47 +111,91 @@ and canonical full state identities preserve the Rust replay boundary. The
 256 MiB bundle and 512 MiB artifact bounds are the existing limits; there is
 no inferred product-state ceiling from the 20,000 Store-state cap.
 
-## Ordinary settlement payload transfer remains unclosed
+## Initial claim recovery and timer service
 
-The model closes the ordinary Yield/Retry representatives declared in D. It
-does not claim they are the requests the production adapter sends. Its ordinary
-Yield uses `not_before_ms=application episode.now`, no error code and no
-checkpoint; Retry uses that same application time with error code `transient`.
-These values define the bounded product input, not a source-backed transfer
-theorem.
+A lost claim reply retains its actual original request and dispatch sample.
+Recovery uses real fence=None resolution, a real committed job reread for
+Running, and real Cancel settlement for CancelRequested. LostOwnership and
+Settled can return None; inconclusive outcomes retry after the source 250 ms
+sleep until the original 30,000 ms monotonic deadline. The Store resolution
+window is separately 120,000 ms. Internal queries in each iteration form an
+explicit zero-delay summary; their inner interleavings remain outside scope.
+No second stochastic failure is available after the lost reply used its fault.
 
-The production lifecycle creates Yield deadlines from captured release time:
-domain and bind refusals use saturating `+5000 ms`, while pressure/domain-loss
-interruption uses `+1000 ms`. Retry stores the release sample plus a jittered
-delay computed from raw job-ID bytes and the adapter's failed-attempt snapshot,
-and sends `library_execution_failed`. The settlement method later
-takes a fresh `unix_ms()` for Store application. These capture, payload, and
-application times are distinct.
+Persistent `(job,node,selected claim_id)` loss keys survive Idle/recycle.
+Four selected identities and two nodes permit at most eight recovery episodes
+in this finite input domain. Refused RPCs can repeat without a count cutoff,
+but create a retained deadline anchor only when a previously unused loss key
+is consumed. Source retry wakes become exact clock anchors. `ClaimRecover`
+service and `ClaimRecoveryWake/global` timer progress are explicit fairness
+premises. This bounds the experiment's fault histories; production has no
+corresponding failure limit.
 
-This difference affects durable rows and later behavior. SQL stores
-`not_before_ms`, `last_error_code`, and error history; claim eligibility
-requires `not_before_ms <= now_ms`. Store validation rejects an ordinary
-Yield/Retry whose captured deadline is earlier than its application `now_ms`.
-The nine-table state identity preserves these fields, so the difference cannot
-be erased as a harmless tag or string normalization. `OrdinarySettlementPayloadTransfer`
-therefore remains a source-bound `unclosed` boundary covering deadline/delay
-construction, error text, capture timing, local dispatch, and Store
-application timing. No noninterference premise is asserted.
+## Ordinary settlement transfer and its bounded evidence
 
-The retained production T4 Kani target proves lifecycle `+5000`, `+1000`, and
-retry-delay policy for its inputs. It does not prove daemon capture/mutex
-scheduling, retry-delay construction for this adapter fixture, the selected
-Store time transfer, or cross-layer simulation. The bounded product can close
-its declared representative protocol while this source-transfer obligation
-remains unclosed.
+The product carries the actual adapter payload and its separate time samples.
+Domain-refusal Yield uses the wall sample taken after the refusal; bind-refusal
+Yield uses the release sample. Both add saturating 5000 ms. Interrupted Yield
+uses captured release time plus saturating 1000 ms. Retry
+uses captured release time plus the source retry delay, computed from raw job
+ID bytes and the immutable failed-attempt snapshot, with error code
+`library_execution_failed`. The driver forwards the settlement unchanged.
+The ordinary adapter then takes the token mutex, checks queue-loss, monotonic
+deadline, and token presence in that order, samples request `unix_ms()`, and
+calls Store while holding the mutex. Only observed `Ok(true)` clears the local
+token. Store validates the saved deadline against request time, distinguishes
+invalid Yield/Retry times from a refused CAS, and claim eligibility follows
+the durable `not_before_ms`. The later wall clock does not rewrite the saved
+SQL predicate.
 
-C9 replays the legal `Pressure → RevokeDomain/CancelWork → JoinFailed →
-DropPublisher → ReleaseInterrupted → SettleYield` control order and its
-trigger mutation under the declared representative product. Its deadline is
-not payload-faithful to production's captured `+1000 ms` Yield. The C9 marker
-must carry `scope="declared_representative_product"` and
-`ordinary_settlement_payload_transfer="unclosed"`; this witness is not
-actual-adapter payload evidence.
+The model records pre-call local exits, clock and transport errors, actual API
+application/refusal/validation outcomes, possible lost replies, and observed
+results. Historical tokens remain eligible after capture; the actual Store
+outcome decides whether they are accepted. All exact integer and raw identity
+fields remain in product identity. Three source-bound Rust cases cover
+payload/time conformance, local guard/response outcomes, and queued eligibility
+progress. They are requirements, not results in this candidate:
+
+- `actual_ordinary_settlement_payload_and_time_conformance`
+- `actual_ordinary_local_guard_and_response_conformance`
+- `actual_queued_eligibility_progress_witness`
+
+The temporal relation includes ordinary adapter service and wall and monotonic
+time movement. In stable-success contexts, steps stay within live lease and
+deadline windows. `EligibilityAdvance` is weakly fair when a safe next-boundary
+step toward queued eligibility is enabled. This is an explicit timely-service
+premise, not a claim that a real scheduler can freeze time. Seven main
+contexts, two sparse boundary contexts, and eleven configurations remain; so
+do the 20,000 exact Store-state cap and existing 256 MiB bundle/512 MiB artifact
+limits. No product-node cap is added.
+
+The clean stable contexts may never reach delayed incomplete queued work, so
+`EligibilityAdvance` there can be unreachable. A separately reported
+`eligibility_mechanics_witness` must independently follow the complete base
+certificate from an actual accepted ordinary Yield/Retry to the same incomplete
+queued job becoming eligible, preserving its deadline and remaining claim
+attempt. Every wall step in its suffix must satisfy the exact next-boundary
+and all-worker stable safe-window checks. This existential witness establishes
+eligibility mechanics; it does not establish stable fairness nonvacuity or
+universal recovery from failed attempts.
+
+Qualification inventories and partial receipts retain
+`ordinary_settlement_payload_transfer="pending"`. A complete accepted
+receipt may derive `closed_bounded` only after product validation, every
+source-bound actual-settlement and causal-control case, and all eleven
+configurations pass. It binds the product bundle, raw driver graph, source
+registry, commands, logs, toolchain, models, and configurations. This boundary
+is not a full Rust/Tokio/cluster trace theorem; the separate T4 Kani policy
+obligation remains distinct. Existing source/tool guards determine whether
+its earlier results remain applicable.
+
+C4/C9 are paired source-trigger controls with an unmutated prefix replay and
+the named mutation failure. C9's ordinary Yield carries its captured +1000 ms
+deadline and independently sampled request time. These controls do not replace
+the positive payload, guard, and eligibility cases. Renewal uses a zero-delay
+logical matching renewal plus actual resolution summary with both demanded
+outcomes. Inner renewal-resolution interleavings remain an explicit source
+boundary, and no full resolution loop is claimed.
 
 The product frontier retains exact finite choices and actual Store outcomes.
 Rust records demands and branches; Python independently derives structural
@@ -212,21 +262,21 @@ inside the fixed driver.
 **Both selected completions.** The stable-success configuration fixes the
 local candidate pairing node-a→J0 and node-b→J1. It retains every real SQL
 refusal but permits domain/bind application only when the actual success edge
-is available. There is no clock advance, owner removal or foreign acquisition;
-external supported work succeeds by actually completing its paired request.
+is available. Wall and monotonic advances are permitted within the explicit
+live lease and deadline windows; eligibility progress has its own fair
+relation. Owner removal and foreign acquisition remain excluded from this
+selected-success scenario; external supported work succeeds by actually
+completing its paired request.
 Claims and domain release have reliable application; a completion
 acknowledgement may be lost after application, and cleanup retains that
 committed result.
 
 The stable-success model permits a lost post-commit completion acknowledgement
-to turn `WorkSucceeded` into `WorkFailed`. The driver can then request
-`SettleRetry` after the paired request is already durably done. The actual
-Store input enumerator retains the latest captured token for each claim after
-COMPLETE, so this Retry still has a refused self-edge. Both `StoreApply` and
-`WithinEpisodeCapacity` admit that matching input without requiring an
-accepted settlement result. The reply flip therefore does not make cleanup
-vacuous because of a missing Retry edge; all other capacity and return
-premises still apply.
+to turn `WorkSucceeded` into `WorkFailed`, after which the driver can request
+Retry for a paired request that is already durably done. The product carries
+the captured token and exact Retry payload into the actual Store oracle; the
+source-derived Store result, not a synthetic successful response, determines
+the successor. Demand and capacity checks require the matching outcome edge.
 
 Physical availability recurs (weak fairness of making a denied
 permit available), and local admission is strongly fair because that
@@ -247,8 +297,8 @@ The driver graph enumerates actual production `drive` over every reply tag
 at every reachable control, including explicit rejection without mutation.
 `next_control` takes no numeric payload. The universal numeric tag-independence
 composition lemma is reviewed source reasoning, not a new all-i64 proof.
-Representative integer regressions do not replace the unchanged lifecycle
-arithmetic proof or its source gate. The graph exporter renders `Work` through Rust `Debug`. The importer validates
+Representative integer regressions do not replace the retained lifecycle
+arithmetic policy proof or its source gate. The graph exporter renders `Work` through Rust `Debug`. The importer validates
 an exact six-string registry and maps it to stable model tags (`idle`,
 `running`, `completed_failed`, `completed_succeeded`, `joined_failed`,
 `joined_succeeded`). `JoinReturn` uses those tags. A formatting change outside
@@ -269,9 +319,10 @@ Supported work is an opaque operation ending at the actual paired COMPLETE
 transaction; its publication read guard spans that modeled operation and
 must be returned before revoke. Token-mutex exclusion and current-token
 replacement across renewal are modeled adapter contracts. The selected
-heartbeat envelope permits acknowledged renewal or ambiguous retention of
-the old token before/drain; it does not close every renewal-resolution
-classifier branch that can clear the local token. Inner publication
+heartbeat envelope includes a zero-delay logical matching renewal followed by
+an actual resolution summary dependent on the renewed-or-retained result; both
+actual queries and their outcomes are demanded. This omits interleavings
+inside renewal and resolution and is not a full resolution loop. Inner publication
 lock granularity, cancellation and child spawn/join behavior, catalogue item
 inserts, retry classifiers, selection outside the fixed stable pairing,
 SQLite atomicity/visibility, Raft/Hiqlite execution and Tokio/runtime internals

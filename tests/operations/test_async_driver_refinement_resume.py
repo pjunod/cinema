@@ -126,9 +126,80 @@ class ArchiveSafety(OwnedScratch):
 
 
 class ReuseIdentities(OwnedScratch):
+    def test_external_input_formal_cases_use_one_exact_ignored_selection(self):
+        selected = {
+          'graph-product':runner.STORE_TESTS['product_test'],
+          'control-C4':runner.STORE_TESTS['product_controls']['C4'],
+          'control-C9':runner.STORE_TESTS['product_controls']['C9'],
+        }
+        selected.update({'store-'+case.rsplit('::',1)[-1]:case
+          for case in runner.STORE_TESTS['core_tests']
+          if case.rsplit('::',1)[-1] in {
+            'actual_ordinary_settlement_payload_and_time_conformance',
+            'actual_ordinary_local_guard_and_response_conformance',
+            'actual_queued_eligibility_progress_witness'}})
+        self.assertEqual(set(selected),runner.IGNORED_INPUT_CASES)
+        for name,test_name in selected.items():
+            with self.subTest(name=name):
+                argv = runner.CASES[name]
+                separator = argv.index('--')
+                self.assertEqual(argv[separator+1:separator+4],['--ignored','--exact','--nocapture'])
+                self.assertNotIn('--include-ignored',argv)
+                self.assertEqual(sum(test_name in command for command in runner.CASES.values()),1)
+                marker = ''
+                if name in {'control-C4','control-C9'}:
+                    control = name.removeprefix('control-')
+                    failure = 'LastRequestAtomicRetirement' if control == 'C4' else 'ReservationConservation'
+                    marker = f'async_store_control={{"control":"{control}","named_failure":"{failure}"}}\n'
+                summary = 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1476 filtered out; finished in 0.00s\n'
+                output = f'test {test_name} ... ok\n'+marker+summary
+                runner.case_evidence(name,output,0)
+        core_name = 'store-actual_ordinary_settlement_payload_and_time_conformance'
+        core_test = 'store::async_driver_refinement::actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows'
+        core_command = runner.CASES['store-actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows']
+        self.assertNotIn('--ignored',core_command)
+        self.assertIn('--exact',core_command)
+        self.assertEqual(sum(core_test in command for command in runner.CASES.values()),1)
+        runner.case_evidence('store-actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows',
+          f'test {core_test} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1476 filtered out; finished in 0.00s\n',0)
+        with self.assertRaises(runner.c.Invalid):
+            runner.case_evidence(core_name,
+              'test store::async_driver_refinement::actual_ordinary_settlement_payload_and_time_conformance ... ok\n'
+              'test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 1476 filtered out; finished in 0.00s\n',0)
+
+    def test_retry_policy_leaf_units_are_scheduled_once_with_exact_attribution(self):
+        expected = {
+          'driver-retry-policy-bases':'retry_policy::tests::retry_bases_preserve_attempt_thresholds',
+          'driver-retry-policy-jitter':'retry_policy::tests::raw_id_bytes_and_wrapping_signed_seed_preserve_jitter',
+          'daemon-ordinary_settlement_local_guards_and_validation_preserve_owner':
+            'background_jobs::tests::ordinary_settlement_local_guards_and_validation_preserve_owner',
+        }
+        for name,test_name in expected.items():
+            with self.subTest(name=name):
+                argv = runner.CASES[name]
+                self.assertEqual(sum(test_name in command for command in runner.CASES.values()),1)
+                self.assertEqual(argv[-4:], [test_name,'--','--exact','--nocapture'])
+                output = f'test {test_name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
+                evidence = runner.case_evidence(name,output,0)
+                self.assertEqual(evidence,{'test_count':1,'result_class':test_name})
+
+    def test_ordinary_settlement_boundary_closes_only_in_complete_receipt(self):
+        partial = runner.settlement_receipt_boundary(False)
+        complete = runner.settlement_receipt_boundary(True)
+        self.assertEqual(partial[1],runner.PRODUCT_SOURCE_BOUNDARIES)
+        self.assertEqual(partial[2],'pending')
+        self.assertIn('Pending',partial[0]['ordinary_settlement_payload_transfer'])
+        self.assertIn('pending',partial[3])
+        self.assertEqual(complete[1],{'ordinary_settlement_payload_transfer':{
+          'status':'closed_bounded','domain':'selected_two_worker_normal_clock'}})
+        self.assertEqual(complete[2],'closed_bounded')
+        self.assertIn('closed_bounded',complete[0]['ordinary_settlement_payload_transfer'])
+        self.assertIn('not a full Rust/Tokio/cluster trace theorem',complete[3])
+
     def test_semantic_invocation_changes_invalidate_persistent_case_rows(self):
         sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool',
           'crates/plurx-core/src/store/async_driver_product.rs':'product'}
+        sources.update({path:'settlement source fixture' for path in runner.ACTUAL_SETTLEMENT_SOURCE_PATHS})
         sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
         product_input = self.directory/'product-input'; product_input.mkdir()
         raw_driver = product_input/'driver-graph.json'; raw_driver.write_text('{"states":[] }\n')
@@ -136,7 +207,8 @@ class ReuseIdentities(OwnedScratch):
         for path in ('verification/async-driver-refinement/checker.py',
                      'verification/async-driver-refinement/product-schema.json',
                      'validation/async_refinement_resume.py',
-                     'validation/worker_control_resume.py'):
+                     'validation/worker_control_resume.py',
+                     *runner.ACTUAL_SETTLEMENT_SOURCE_PATHS):
             changed = dict(sources); changed[path] = 'changed invocation bytes'
             with self.subTest(path=path):
                 self.assertNotEqual(baseline,runner.case_sources('graph-product',changed,out=product_input))
@@ -165,6 +237,10 @@ class ReuseIdentities(OwnedScratch):
         sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
         changed = dict(sources); changed['crates/plurx-core/src/store/mod.rs'] = 'changed'
         self.assertEqual(runner.case_sources('graph-driver',sources),runner.case_sources('graph-driver',changed))
+        policy_changed = dict(sources)
+        policy_changed['crates/plurx-worker-control/src/retry_policy.rs'] = 'changed'
+        self.assertNotEqual(runner.case_sources('store-actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows',sources),
+                            runner.case_sources('store-actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows',policy_changed))
         product_input = self.directory/'store-edit-product-input'; product_input.mkdir()
         (product_input/'driver-graph.json').write_text('{}\n')
         self.assertNotEqual(runner.case_sources('graph-product',sources,out=product_input),
@@ -181,28 +257,77 @@ class ReuseIdentities(OwnedScratch):
                 'reservation_release','background_job_settlement_effects')}[control]
             source_sha = runner.c.sha(ROOT/'crates/plurx-core/src'/source_path)
             bindings = {source_path:source_sha}
+            raw_ids = ['00000000-0000-4000-8000-000000000001',
+                       '00000000-0000-4000-8000-000000000002']
+            snapshot = {'job':0,'raw_job_id':raw_ids[0],'failed_attempts':0,
+              'claim_id':'00000000-0000-4000-8000-000000000010',
+              'token_capture':{'job_id':raw_ids[0],'node_id':'node-a',
+                'boot_id':'00000000-0000-4000-8000-000000000011',
+                'claim_id':'00000000-0000-4000-8000-000000000010','fence':1,
+                'revision':1,'lease_expires_ms':31000}}
             before = runner.c.canonical({'durable':'before'})
             normal_after = runner.c.canonical({'durable':'normal'})
             mutant_after = runner.c.canonical({'durable':'mutated'})
             before_sha = hashlib.sha256(before.encode()).hexdigest()
             intermediate_sha = '1'*64
             mutant_sha = hashlib.sha256(mutant_after.encode()).hexdigest()
-            driver = {'initial':0,
-              'states':[{'id':0,'pending':'AcquireDomain'},{'id':1,'pending':'Bind'}],
-              'edges':[{'from':0,'to':1,'request':'Bind','reply':'DomainAcquired'}]}
+            if control == 'C4':
+                steps = [
+                  ('AcquireDomain','DomainAcquired',{'op':'acquire_domain','node':0},'acquired',
+                    {'tag':'DomainAcquired','now_ms':0,'retry_delay_ms':0},None),
+                  ('Bind','BindAccepted',{'op':'bind','job':0,'token':0,'lease':0},'bound',
+                    {'tag':'BindAccepted','now_ms':None,'retry_delay_ms':None},None),
+                  ('PollWork','WorkSucceeded',{'op':'complete','job':0,'token':0,'lease':0},'completed',
+                    {'tag':'WorkSucceeded','now_ms':None,'retry_delay_ms':None},None),
+                ]
+            else:
+                steps = [
+                  ('AcquireDomain','DomainAcquired',{'op':'acquire_domain','node':0},'acquired',
+                    {'tag':'DomainAcquired','now_ms':0,'retry_delay_ms':0},None),
+                  ('Bind','BindAccepted',{'op':'bind','job':0,'token':0,'lease':0},'bound',
+                    {'tag':'BindAccepted','now_ms':None,'retry_delay_ms':None},None),
+                  ('PollWork','Pressure',None,'pressure',
+                    {'tag':'Pressure','now_ms':None,'retry_delay_ms':None},None),
+                  ('RevokeDomain','Done',None,'revoked',
+                    {'tag':'Done','now_ms':None,'retry_delay_ms':None},None),
+                  ('CancelWork','Done',None,'cancelled',
+                    {'tag':'Done','now_ms':None,'retry_delay_ms':None},None),
+                  ('JoinWork','JoinedFailed',None,'joined',
+                    {'tag':'JoinedFailed','now_ms':None,'retry_delay_ms':None},None),
+                  ('DropPublisher','Done',None,'dropped',
+                    {'tag':'Done','now_ms':None,'retry_delay_ms':None},None),
+                  ('ReleaseInterrupted','ReleaseReturned',{'op':'release','lease':0},'released',
+                    {'tag':'ReleaseReturned','now_ms':1000,'retry_delay_ms':0},
+                    {'kind':'yield','not_before_ms':2000}),
+                  ('SettleYield','Done',{'op':'ordinary_settle','job':0,'token':0,'kind':'yield',
+                    'not_before_ms':2000,'request_now_ms':1000,'error_code':None,'checkpoint':None},'settled',
+                    {'tag':'Done','now_ms':None,'retry_delay_ms':None},
+                    {'kind':'yield','not_before_ms':2000}),
+                ]
+            states = [{'id':0,'pending':steps[0][0]}]
+            states.extend({'id':index+1,'pending':steps[index+1][0] if index+1 < len(steps) else 'RetireQueue'}
+                          for index in range(len(steps)))
+            driver = {'initial':0,'states':states,
+              'edges':[{'from':index,'to':index+1,'request':states[index+1]['pending'],'reply':step[1]}
+                       for index,step in enumerate(steps)]}
+            prefix = [{'driver_from':None,'request':'Claim','reply':'Claimed','driver_to':None,
+              'primitive':{'op':'claim','job':0,'node':0},'normal_result':'claimed',
+              'adapter_reply':None,'driver_settlement':None,'claim_snapshot':snapshot}]
+            prefix.extend({'driver_from':index,'request':step[0],'reply':step[1],'driver_to':index+1,
+              'primitive':step[2],'normal_result':step[3],'adapter_reply':step[4],
+              'driver_settlement':step[5],'claim_snapshot':None}
+              for index,step in enumerate(steps))
             marker = {
               'schema_version':1,'control':control,'named_failure':named,
-              'scope':'declared_representative_product','ordinary_settlement_payload_transfer':'unclosed',
+              'scope':'bounded_actual_settlement_product','ordinary_settlement_payload_transfer':'pending',
               'driver_graph_sha256':'d'*64,'source_bindings':bindings,
               'schema_bindings':{'unmutated':'a'*64,'mutated':'b'*64},
               'mutation':{'kind':kind,'trigger':trigger,'source_sha256':source_sha,
                 'mutated_trigger_sha256':'c'*64},
               'unmutated_prefix_replay':True,
-              'prefix':[
-                {'driver_from':None,'request':'Claim','reply':'Claimed','driver_to':None,
-                  'primitive':{'op':'claim','job':0,'node':0},'normal_result':'claimed'},
-                {'driver_from':0,'request':'AcquireDomain','reply':'DomainAcquired','driver_to':1,
-                  'primitive':{'op':'acquire_domain','node':0},'normal_result':'acquired'}],
+              'fixture_identity':{'jobs':[{'job':0,'raw_job_id':raw_ids[0]},
+                {'job':1,'raw_job_id':raw_ids[1]}]},
+              'prefix':prefix,
               'mutated_prefix':[
                 {'primitive':{'op':'claim','job':0,'node':0},'result':'claimed','from_sha256':before_sha,
                   'to_sha256':intermediate_sha,'invariant':None},
@@ -216,7 +341,11 @@ class ReuseIdentities(OwnedScratch):
         for control in ('C4','C9'):
             marker,driver,bindings,named = fixture(control)
             output = 'async_store_causal_prefix='+json.dumps(marker,separators=(',',':'),sort_keys=True)
-            with self.subTest(control=control),patch.object(runner.c,'product_source_bindings',return_value=bindings,create=True):
+            def settlement_after(previous,pending,reply):
+                if pending == 'ReleaseInterrupted': return {'kind':'yield','not_before_ms':reply['now_ms']+1000}
+                return previous
+            with self.subTest(control=control),patch.object(runner.c,'product_source_bindings',return_value=bindings,create=True), \
+                    patch.object(runner.c,'settlement_after_reply',side_effect=settlement_after,create=True):
                 facts = runner.causal_prefix_evidence('control-'+control,output,driver,'d'*64)
                 self.assertEqual(facts['causal_prefix_steps'],2)
                 negatives = []
@@ -230,6 +359,14 @@ class ReuseIdentities(OwnedScratch):
                 negatives.append(('broken-driver-chain',bad,driver))
                 bad = json.loads(json.dumps(marker)); bad['prefix'][0]['request'] = None
                 negatives.append(('malformed-pre-driver-claim',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['fixture_identity']['jobs'][0]['raw_job_id'] = raw_ids[1]
+                negatives.append(('claim-fixture-raw-id-mismatch',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['prefix'][0]['claim_snapshot']['token_capture']['job_id'] = raw_ids[1]
+                negatives.append(('forged-claim-token-identity',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['prefix'][2]['adapter_reply']['retry_delay_ms'] = 1
+                negatives.append(('forged-release-payload',bad,driver))
+                bad = json.loads(json.dumps(marker)); bad['prefix'][3]['primitive']['request_now_ms'] = -1
+                negatives.append(('negative-settlement-request-time',bad,driver))
                 bad = json.loads(json.dumps(marker)); bad['prefix'][1]['request'] = 'Bind'
                 negatives.append(('consumed-versus-target-request',bad,driver))
                 bad = json.loads(json.dumps(marker)); bad['identities']['mutated_predecessor'] = '{broken'

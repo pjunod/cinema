@@ -192,6 +192,7 @@ class WorkerControlInventoryTests(unittest.TestCase):
         declared = set(re.findall(r"^\s*(?:pub\s+)?mod\s+(\w+)\s*;", (ROOT / f"{runner.CRATE}/src/lib.rs").read_text(), re.MULTILINE))
         declared.add("proofs")  # lib.rs includes this cfg-gated module by filename.
         self.assertEqual(set(runner.STAGED_RUST_SOURCES), {"lib.rs", *(name + ".rs" for name in declared)})
+        self.assertIn(f"{runner.CRATE}/src/retry_policy.rs", runner.PROOF_INPUTS)
         source_paths = {f"{runner.CRATE}/src/{name}" for name in runner.STAGED_RUST_SOURCES}
         self.assertTrue(source_paths <= set(runner.GOVERNED))
         scratch = ROOT / "target/worker-control-runner-fixtures"

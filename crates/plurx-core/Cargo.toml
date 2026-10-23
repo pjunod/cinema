@@ -107,6 +107,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+plurx-worker-control = { path = "../plurx-worker-control" }
 # Parse actual cfg(test) module ownership in source census fixtures.
 syn = { version = "2", features = ["full", "visit"] }
 axum = { workspace = true }

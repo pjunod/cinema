@@ -30,11 +30,12 @@ CLAIM_BOUNDARIES = {
 }
 
 CLAIM_BOUNDARIES.update(c.STORE_BOUNDARIES)
-CLAIM_BOUNDARIES['OrdinarySettlementPayloadTransfer'] = (
- 'Unclosed: the finite ordinary Yield/Retry representatives do not establish '
- 'production payload, captured-deadline, retry-delay or application-time transfer.')
-ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER = 'unclosed'
-PRODUCT_SOURCE_BOUNDARIES = {'OrdinarySettlementPayloadTransfer':ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER}
+CLAIM_BOUNDARIES['ordinary_settlement_payload_transfer'] = (
+ 'Pending: actual ordinary settlement transfer is defined for the '
+ 'selected_two_worker_normal_clock domain but has not passed reviewed execution.')
+ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER = 'pending'
+PRODUCT_SOURCE_BOUNDARIES = {'ordinary_settlement_payload_transfer':{
+ 'status':'pending','domain':'selected_two_worker_normal_clock'}}
 
 PREFIXES = ('crates/plurx-core/src/store/', 'crates/plurx-worker-control/',
  'crates/plurxd/src/library_work/', 'crates/plurxd/src/background_jobs/',
@@ -52,6 +53,36 @@ CORE = CARGO+['test','--locked','--offline','-p','plurx-core','--lib','--feature
 LEAF = CARGO+['test','--locked','--offline','-p','plurx-worker-control','--test','library_driver']
 DAEMON = CARGO+['test','--locked','--offline','-p','plurxd','--bin','plurxd']
 STORE_TESTS = c.read_json(PACKAGE/'store-tests.json')
+ACTUAL_SETTLEMENT_TESTS = {
+ 'actual_ordinary_settlement_payload_and_time_conformance',
+ 'actual_ordinary_local_guard_and_response_conformance',
+ 'actual_queued_eligibility_progress_witness',
+ 'actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows',
+ 'ordinary_settlement_local_guards_and_validation_preserve_owner',
+}
+ACTUAL_SETTLEMENT_SOURCE_PATHS = (
+ 'Cargo.toml','Cargo.lock','rust-toolchain.toml',
+ 'crates/plurx-core/Cargo.toml',
+ 'crates/plurx-worker-control/Cargo.toml',
+ 'crates/plurx-worker-control/src/lib.rs',
+ 'crates/plurx-worker-control/src/library_driver.rs',
+ 'crates/plurx-worker-control/src/library_lifecycle.rs',
+ 'crates/plurx-worker-control/src/retry_policy.rs',
+ 'crates/plurxd/Cargo.toml',
+ 'crates/plurxd/src/background_jobs.rs',
+ 'crates/plurxd/src/library_work.rs',
+ 'crates/plurxd/src/library_work/env.rs',
+ 'crates/plurxd/src/state.rs',
+)
+ACTUAL_SETTLEMENT_CASES = {'graph-product','control-C4','control-C9'} | {
+ 'store-'+case.rsplit('::',1)[-1] for case in STORE_TESTS['core_tests']
+ if case.rsplit('::',1)[-1] in ACTUAL_SETTLEMENT_TESTS}
+IGNORED_INPUT_CASES = {'graph-product','control-C4','control-C9'} | {
+ 'store-'+case.rsplit('::',1)[-1] for case in STORE_TESTS['core_tests']
+ if case.rsplit('::',1)[-1] in {
+  'actual_ordinary_settlement_payload_and_time_conformance',
+  'actual_ordinary_local_guard_and_response_conformance',
+  'actual_queued_eligibility_progress_witness'}}
 CASES = {
  'control-selector': CARGO+['test','--offline','--manifest-path','@SELECTOR_MANIFEST@','--test','library_driver','selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
  'graph-driver': CARGO+['run','--locked','--offline','--quiet','-p','plurx-worker-control','--example','library_driver_graph'],
@@ -63,6 +94,11 @@ CASES = {
  'control-C4': CORE+[STORE_TESTS['product_controls']['C4'],'--','--exact','--nocapture'],
  'control-C9': CORE+[STORE_TESTS['product_controls']['C9'],'--','--exact','--nocapture'],
 }
+WORKER_LIB = CARGO+['test','--locked','--offline','-p','plurx-worker-control','--lib']
+CASES['driver-retry-policy-bases'] = WORKER_LIB+[
+ 'retry_policy::tests::retry_bases_preserve_attempt_thresholds','--','--exact','--nocapture']
+CASES['driver-retry-policy-jitter'] = WORKER_LIB+[
+ 'retry_policy::tests::raw_id_bytes_and_wrapping_signed_seed_preserve_jitter','--','--exact','--nocapture']
 for short in ('ready_work_precedes_burst_pressure_ticks',
  'selector_preserves_loss_precedence_and_pending_work_pressure',
  'two_jobs_contend_at_the_durable_queue_and_both_complete',
@@ -75,10 +111,16 @@ for short in ('acknowledged_settlement_leaves_retirement_durably_unchanged',
  'retirement_resolves_unobserved_renewal_revision',
  'retirement_resolves_cancellation_revision_after_child_join'):
     CASES['daemon-'+short] = DAEMON+['background_jobs::tests::'+short,'--','--exact','--nocapture']
+CASES['daemon-ordinary_settlement_local_guards_and_validation_preserve_owner'] = DAEMON+[
+ 'background_jobs::tests::ordinary_settlement_local_guards_and_validation_preserve_owner',
+ '--','--exact','--nocapture']
 
 for case in STORE_TESTS['core_tests']:
     if not any(case in argv for argv in CASES.values()):
         CASES['store-'+case.rsplit('::',1)[-1]] = CORE+[case,'--','--exact','--nocapture']
+for name in IGNORED_INPUT_CASES:
+    command = CASES[name]
+    command.insert(command.index('--')+1,'--ignored')
 CASES['sampled-backends'] = CARGO+['test','--locked','--offline','-p','plurx-core',
  '--test','store_contract','--features','hiqlite-contract-tests',STORE_TESTS['sampled_backend_test'],
  '--','--exact','--nocapture']
@@ -92,10 +134,39 @@ def case_evidence(name, output, code):
         return {'test_count':1,'result_class':'actual_source_selector_mutation'}
     c.require(code == 0,f'{name}: nonzero command exit')
     if name == 'graph-driver': return {'test_count':0,'result_class':'production_control_inventory'}
-    c.require(re.findall(r'test result: ok\. (\d+) passed; 0 failed;',output) == ['1'],
-              f'{name}: requires exactly one selected Rust test')
+    if name in IGNORED_INPUT_CASES:
+        selected = re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; '
+          r'(\d+) measured; (\d+) filtered out; finished in [^\n]+',output)
+        selected_name = CASES[name][CASES[name].index('--')-1]
+        named_pass = re.findall(r'^test '+re.escape(selected_name)+r' \.\.\. ok$',output,re.MULTILINE)
+        c.require(len(selected) == 1 and selected[0][:4] == ('1','0','0','0')
+          and selected[0][4].isdigit() and len(named_pass) == 1,
+                  f'{name}: ignored qualification selector must execute exactly one test and ignore none')
+    else:
+        c.require(re.findall(r'test result: ok\. (\d+) passed; 0 failed;',output) == ['1'],
+                  f'{name}: requires exactly one selected Rust test')
     facts = {'test_count':1,'result_class':'focused_rust_regression'}
     if name == 'graph-product': facts['result_class'] = 'actual_sql_two_worker_product'
+    retry_policy_results = {
+      'driver-retry-policy-bases':'retry_policy::tests::retry_bases_preserve_attempt_thresholds',
+      'driver-retry-policy-jitter':'retry_policy::tests::raw_id_bytes_and_wrapping_signed_seed_preserve_jitter',
+    }
+    if name in retry_policy_results:
+        facts['result_class'] = retry_policy_results[name]
+    actual_settlement_results = {
+      'store-actual_ordinary_settlement_payload_and_time_conformance':
+        'actual_ordinary_settlement_payload_and_time_conformance',
+      'store-actual_ordinary_local_guard_and_response_conformance':
+        'actual_ordinary_local_guard_and_response_conformance',
+      'store-actual_queued_eligibility_progress_witness':
+        'actual_queued_eligibility_progress_witness',
+      'daemon-ordinary_settlement_local_guards_and_validation_preserve_owner':
+        'ordinary_settlement_local_guards_and_validation_preserve_owner',
+      'store-actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows':
+        'actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows',
+    }
+    if name in actual_settlement_results:
+        facts['result_class'] = actual_settlement_results[name]
     if name in {'control-C4','control-C9'}:
         control = name.removeprefix('control-')
         named = 'LastRequestAtomicRetirement' if control == 'C4' else 'ReservationConservation'
@@ -138,7 +209,7 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
     marker = json.loads(lines[0],object_pairs_hook=unique)
     c.exact_keys(marker,{'schema_version','control','named_failure','scope','ordinary_settlement_payload_transfer',
       'driver_graph_sha256','source_bindings',
-      'schema_bindings','mutation','unmutated_prefix_replay','prefix','mutated_prefix','identities',
+      'schema_bindings','mutation','unmutated_prefix_replay','fixture_identity','prefix','mutated_prefix','identities',
       'first_causal_violation'},f'{name} causal prefix')
     control = name.removeprefix('control-')
     named = 'LastRequestAtomicRetirement' if control == 'C4' else 'ReservationConservation'
@@ -147,7 +218,7 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
       'C9':('reservation_release','background_job_settlement_effects','store/background_jobs_schema.sql'),
     }[control]
     c.require(marker['schema_version'] == 1 and marker['control'] == control
-      and marker['named_failure'] == named and marker['scope'] == 'declared_representative_product'
+      and marker['named_failure'] == named and marker['scope'] == 'bounded_actual_settlement_product'
       and marker['ordinary_settlement_payload_transfer'] == ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER
       and marker['driver_graph_sha256'] == driver_sha256,
       f'{name}: causal prefix identity mismatch')
@@ -170,14 +241,23 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
       f'{name}: causal mutation source identity mismatch')
     c.require(marker['unmutated_prefix_replay'] is True,
               f'{name}: normal prefix replay was not established')
+    raw_job_ids = c.fixture_jobs(marker['fixture_identity'])
+    c.require(len(raw_job_ids) == 2 and len(set(raw_job_ids)) == 2,
+              f'{name}: causal fixture must bind two distinct raw job IDs')
     c.require(isinstance(marker['prefix'],list) and 0 < len(marker['prefix']) <= 32,
               f'{name}: normal prefix is empty or exceeds bound')
     states = {state['id']:state for state in driver['states']}
     edges = driver['edges']
     previous_to = None
     seen_edge = False
+    previous_settlement = None
+    snapshots = {}
+    saw_completion = False
+    saw_ordinary_settle = False
+    numeric_replies = {'DomainAcquired','DomainRefused','ReleaseReturned'}
     for index,row in enumerate(marker['prefix']):
-        c.exact_keys(row,{'driver_from','request','reply','driver_to','primitive','normal_result'},
+        c.exact_keys(row,{'driver_from','request','reply','driver_to','primitive','normal_result',
+          'adapter_reply','driver_settlement','claim_snapshot'},
                      f'{name} normal prefix row {index}')
         source,target = row['driver_from'],row['driver_to']
         c.require((source is None and target is None and index == 0) or
@@ -192,7 +272,17 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
               and row['reply'] == 'Claimed' and row['primitive'] == {'op':'claim','job':0,'node':0}
               and row['normal_result'] == 'claimed',
               f'{name}: first prefix row is not the producer-shaped pre-driver Claim')
+            c.require(row['adapter_reply'] is None and row['driver_settlement'] is None,
+                      f'{name}: Claim cannot carry a consumed adapter reply or post-drive settlement')
+            snapshot = row['claim_snapshot']
+            c.require(isinstance(snapshot,dict) and snapshot.get('job') == row['primitive']['job']
+              and snapshot.get('raw_job_id') == raw_job_ids[row['primitive']['job']],
+              f'{name}: Claim snapshot is not bound to the claimed fixture job')
+            c.validate_claim_snapshot_identity(snapshot,raw_job_ids)
+            snapshots[row['primitive']['job']] = snapshot
         else:
+            c.require(row['claim_snapshot'] is None,
+                      f'{name}: committed claim snapshot is only emitted on pre-driver Claim')
             c.require(source is not None and target is not None,
                       f'{name}: post-claim prefix row needs actual driver endpoints')
             c.require(not seen_edge or previous_to == source,f'{name}: broken driver prefix chain')
@@ -206,12 +296,85 @@ def causal_prefix_evidence(name, output, driver, driver_sha256):
               and edge['reply'] == row['reply'] and edge['request'] == target_state['pending']]
             c.require(len(matching) == 1 and matching[0]['request'] is not None,
                       f'{name}: prefix edge/target pending request is absent or ambiguous')
+            reply = row['adapter_reply']
+            c.require(isinstance(reply,dict) and set(reply) == {'tag','now_ms','retry_delay_ms'}
+              and reply['tag'] == row['reply'] and reply['tag'] in c.REPLIES,
+              f'{name}: consumed adapter reply differs from declared driver reply')
+            if reply['tag'] in numeric_replies:
+                c.require(type(reply['now_ms']) is int and type(reply['retry_delay_ms']) is int
+                  and 0 <= reply['now_ms'] <= (1<<63)-1
+                  and 0 <= reply['retry_delay_ms'] <= (1<<63)-1,
+                  f'{name}: numeric adapter reply fields are not bounded i64 values')
+            else:
+                c.require(reply['now_ms'] is None and reply['retry_delay_ms'] is None,
+                          f'{name}: nonnumeric adapter reply carries numeric payload')
+            if row['request'] == 'AcquireDomain' and reply['tag'] == 'DomainAcquired':
+                c.require(reply['now_ms'] == 0 and reply['retry_delay_ms'] == 0,
+                          f'{name}: domain acquisition payload drift')
+            elif row['request'] == 'AcquireDomain' and reply['tag'] == 'DomainRefused':
+                c.require(reply['now_ms'] >= 1000 and reply['retry_delay_ms'] == 0,
+                          f'{name}: domain refusal must carry sampled wall time and no retry delay')
+            elif row['request'] in {'ReleaseRefused','ReleaseRetry','ReleaseNone','ReleaseInterrupted'}:
+                c.require(reply['tag'] == 'ReleaseReturned',
+                          f'{name}: release request did not return its declared driver reply')
+                if row['request'] == 'ReleaseNone':
+                    c.require(reply['now_ms'] == 0 and reply['retry_delay_ms'] == 0,
+                              f'{name}: ReleaseNone must carry the source zero payload')
+                elif row['request'] == 'ReleaseRetry':
+                    c.require(reply['now_ms'] >= 1000 and reply['retry_delay_ms'] >= 0,
+                              f'{name}: retry release must carry sampled wall time and bounded delay')
+                else:
+                    c.require(reply['now_ms'] >= 1000 and reply['retry_delay_ms'] == 0,
+                              f'{name}: non-retry release must carry sampled wall time and no delay')
+            else:
+                c.require(reply['tag'] not in numeric_replies,
+                          f'{name}: unrelated driver reply carries sampled numeric payload')
+            if row['request'] == 'ReleaseRetry':
+                claim = next(iter(snapshots.values())) if len(snapshots) == 1 else None
+                if isinstance(row['primitive'],dict) and 'job' in row['primitive']:
+                    c.require(row['primitive']['job'] == claim['job'] if claim is not None else False,
+                              f'{name}: retry primitive is detached from its committed claim snapshot')
+                c.require(claim is not None and reply['retry_delay_ms'] == c.retry_delay_ms(
+                  claim['raw_job_id'],claim['failed_attempts']),
+                  f'{name}: retry delay is not derived from the committed raw claim snapshot')
+            expected_settlement = c.settlement_after_reply(previous_settlement,row['request'],reply)
+            c.require(row['driver_settlement'] == expected_settlement,
+                      f'{name}: post-drive getter differs from independently derived lifecycle payload')
+            if isinstance(row['primitive'],dict) and row['primitive'].get('op') == 'ordinary_settle':
+                saw_ordinary_settle = True
+                primitive = row['primitive']
+                c.exact_keys(primitive,{'op','job','token','kind','not_before_ms','request_now_ms',
+                  'error_code','checkpoint'},f'{name} ordinary settlement primitive')
+                c.require(isinstance(previous_settlement,dict)
+                  and type(primitive['job']) is int and primitive['job'] in snapshots
+                  and type(primitive['token']) is int and primitive['token'] >= 0
+                  and type(primitive['not_before_ms']) is int
+                  and 0 <= primitive['not_before_ms'] <= (1<<63)-1
+                  and type(primitive['request_now_ms']) is int
+                  and 0 <= primitive['request_now_ms'] <= (1<<63)-1
+                  and primitive['not_before_ms'] == previous_settlement['not_before_ms']
+                  and primitive['kind'] == previous_settlement['kind']
+                  and ((primitive['kind'] == 'yield' and row['request'] == 'SettleYield'
+                        and primitive['error_code'] is None and primitive['checkpoint'] is None)
+                    or (primitive['kind'] == 'retry' and row['request'] == 'SettleRetry'
+                        and primitive['error_code'] == 'library_execution_failed'
+                        and primitive['checkpoint'] is None)),
+                  f'{name}: ordinary settlement input differs from captured driver payload/claim')
+            if isinstance(row['primitive'],dict) and row['primitive'].get('op') == 'complete':
+                c.require(row['request'] == 'PollWork' and row['reply'] == 'WorkSucceeded'
+                  and type(row['primitive'].get('job')) is int
+                  and type(row['primitive'].get('token')) is int,
+                  f'{name}: completion SQL action is not tied to the successful driver work reply')
+                saw_completion = True
             seen_edge = True; previous_to = target
+            previous_settlement = expected_settlement
         c.require(row['primitive'] is None or isinstance(row['primitive'],dict),
                   f'{name}: malformed normal primitive')
         c.require(row['normal_result'] is None or isinstance(row['normal_result'],str),
                   f'{name}: malformed normal result')
     c.require(seen_edge,f'{name}: normal prefix contains no actual source driver edge')
+    c.require(saw_completion if control == 'C4' else saw_ordinary_settle,
+              f'{name}: causal normal prefix omits its named SQL boundary')
     mutated = marker['mutated_prefix']
     c.require(isinstance(mutated,list) and 0 < len(mutated) <= 32,
               f'{name}: mutated prefix is empty or exceeds bound')
@@ -262,7 +425,7 @@ def write(path,value):
 
 SCOPE_CRATES = {
  'leaf': {'crates/plurx-worker-control'},
- 'store': {'crates/plurx-core'},
+ 'store': {'crates/plurx-core','crates/plurx-worker-control'},
  'daemon': {'crates/plurxd','crates/plurx-core','crates/plurx-worker-control',
    'crates/plurx-compat-plex','crates/plurx-compat-jellyfin','crates/plurx-pgs',
    'crates/plurx-desktop-control','crates/plurx-notification-broker'},
@@ -392,6 +555,10 @@ def case_sources(name, sources, root=ROOT, out=None):
         c.require(out is not None and (out/'driver-graph.json').is_file(),
                   f'{name} requires the exact raw driver graph input')
         selected['generated-input:driver-graph.json'] = c.sha(out/'driver-graph.json')
+    if name in ACTUAL_SETTLEMENT_CASES:
+        for path in ACTUAL_SETTLEMENT_SOURCE_PATHS:
+            c.require(path in sources,f'{name}: missing actual-settlement source identity: {path}')
+            selected[path] = sources[path]
     if name == 'graph-product':
         selected.update({'product-semantic:'+path:digest
           for path,digest in c.product_semantic_bindings().items()})
@@ -635,6 +802,17 @@ def tlc_identities(out,inventory,tools):
       'model_sha256':{name:c.sha(out/name) for name in ('AsyncDriverRefinement.tla','BoundaryControls.tla')},
       'config_sha256':{name:c.sha(out/f'{name}.cfg') for name in c.CONFIGS}}
 
+def settlement_receipt_boundary(complete):
+    status = 'closed_bounded' if complete else ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER
+    claim_boundaries = dict(CLAIM_BOUNDARIES)
+    claim_boundaries['ordinary_settlement_payload_transfer'] = (
+      'closed_bounded for the selected two-worker normal-clock product; not a full Rust/Tokio/cluster trace theorem'
+      if complete else CLAIM_BOUNDARIES['ordinary_settlement_payload_transfer'])
+    return (claim_boundaries, {'ordinary_settlement_payload_transfer':{'status':status,
+              'domain':'selected_two_worker_normal_clock'}}, status,
+            ('closed_bounded for the selected two-worker normal-clock product; not a full Rust/Tokio/cluster trace theorem'
+             if complete else 'ordinary settlement payload transfer is pending until all source-bound ordinary-settlement cases, causal controls, and eleven configured checks pass; this is not a full Rust/Tokio/cluster trace theorem'))
+
 def qualify(args):
     provenance = validate_provenance(args.provenance.resolve(),args.driver_graph,args.product_bundle)
     out,inventory = prepare(args)
@@ -652,7 +830,7 @@ def qualify(args):
        'source_boundaries':PRODUCT_SOURCE_BOUNDARIES,
        'ordinary_settlement_payload_transfer':ORDINARY_SETTLEMENT_PAYLOAD_TRANSFER,
        'product_coverage':'seven main contexts close exactly; boundary counterexamples are separate checks; no arbitrary raw Store-D closure',
-       'source_transfer':'ordinary settlement payload transfer remains unclosed; no full source-faithful ordinary settlement or fair Rust trace theorem'})
+       'source_transfer':'ordinary settlement payload transfer is pending until all source-bound ordinary-settlement cases, causal controls, and eleven configured checks pass; this is not a full Rust/Tokio/cluster trace theorem'})
     for name in ([args.config] if args.config else list(c.CONFIGS)):
         config = c.CONFIGS[name]; log = out/f'{name}.log'; cfg = out/f'{name}.cfg'
         model = config.get('model','AsyncDriverRefinement')
@@ -678,6 +856,14 @@ def qualify(args):
         print(json.dumps({'config':name,**result}),flush=True)
     receipt['complete'] = set(receipt['runs']) == set(c.CONFIGS) and all(v.get('accepted') is True for v in receipt['runs'].values())
     receipt['result_class'] = 'conditional_finite_episode_qualification' if receipt['complete'] else 'partial_config_results'
+    if receipt['complete']:
+        # validate_provenance has already required every registered Rust case,
+        # including the product graph and its actual-settlement controls. The
+        # product and controls were validated before TLC was started above.
+        c.require(ACTUAL_SETTLEMENT_CASES <= set(provenance['cases']),
+                  'complete qualification lacks source-bound ordinary-settlement cases')
+    (receipt['claim_boundaries'], receipt['source_boundaries'], receipt['ordinary_settlement_payload_transfer'],
+     receipt['source_transfer']) = settlement_receipt_boundary(receipt['complete'])
     receipt['rust_cases'] = list(provenance['cases'])
     write(receipt_path,receipt)
     print(json.dumps({'receipt':str(receipt_path),'complete':receipt['complete'],'result_class':receipt['result_class']}))
