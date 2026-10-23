@@ -170,7 +170,7 @@ class GuestStageFilesystemTests(unittest.TestCase):
             self.fs.outside_sentinel(digest_stage, digest_name, expected=digest_issued)
 
     def test_qualified_copy_refuses_a_late_guest_root_swap_and_poisons_stage(self):
-        baseline_id, _ = self.new_stage(runtime=b"qualified-runtime")
+        baseline_id, _ = self.new_stage(runtime=b"qualified-runtime", pinned=True)
         stage_id, published = self.new_stage(runtime=b"old-runtime")
         original = self.work / stage_id / "runtime"
         captured = self.work / stage_id / "runtime-captured-by-test"
@@ -192,6 +192,37 @@ class GuestStageFilesystemTests(unittest.TestCase):
         with self.assertRaises(helper.GuestStageError):
             self.fs.observe(stage_id, "candidate")
         self.assertEqual((self.work / baseline_id / "runtime" / "state").read_bytes(), b"qualified-runtime")
+
+    def test_closed_unpinned_stage_retirement_removes_only_owned_stage_and_keeps_receipts(self):
+        stage_id, published = self.new_stage()
+        sibling = self.work / "unrelated-sibling"
+        sibling.write_bytes(b"preserve")
+
+        closed = self.fs.close(stage_id)
+        authorization = {
+            "receipt_sha256": "a" * 64,
+            "checkpoint_sha256": "b" * 64,
+            "event": "acceptance_finished",
+        }
+        archive_sha256 = "c" * 64
+        retired = self.fs.retire(stage_id, authorization, expected_roots=published["roots"],
+                                 archive_sha256=archive_sha256)
+
+        session_receipts = self.control / ("a" * 32)
+        self.assertEqual(retired["retired"], True)
+        self.assertEqual(retired["authorization"], authorization)
+        self.assertEqual(retired["archive_sha256"], archive_sha256)
+        self.assertFalse((self.work / stage_id).exists())
+        self.assertEqual(sibling.read_bytes(), b"preserve")
+        self.assertTrue((session_receipts / (stage_id + "-closed.json")).is_file())
+        self.assertTrue((session_receipts / (stage_id + "-retirement-intent.json")).is_file())
+        self.assertTrue((session_receipts / (stage_id + "-retired.json")).is_file())
+        self.assertEqual(closed["stage"], stage_id)
+        with self.assertRaises(helper.GuestStageError):
+            self.fs.observe(stage_id, "candidate")
+        with self.assertRaises(helper.GuestStageError):
+            self.fs.retire(stage_id, authorization, expected_roots=published["roots"],
+                           archive_sha256=archive_sha256)
 
     def test_partial_paired_copy_failure_poisoned_before_roots_can_be_reused(self):
         baseline_id, _ = self.new_stage(paired=True, runtime=b"new-runtime", worker_runtime=b"new-worker", pinned=True)

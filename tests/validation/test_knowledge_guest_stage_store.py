@@ -22,7 +22,7 @@ def transport_spec(**overrides):
         "arguments": ("-F", "config", "{session}"),
         "environment": (("PATH", "/usr/bin"),),
         "expected_binding": binding,
-        "source_hashes": {"helper": "b" * 64},
+        "source_hashes": {name: "b" * 64 for name in store.GUEST_MODULES},
     }
     values.update(overrides)
     return store.GuestTransportSpec(**values)
@@ -143,11 +143,11 @@ class GuestOutsideChallengeBindingTests(unittest.TestCase):
 
         observed = binding.mounted_identities(config)
 
-        self.assertEqual(observed, {"/work": [23, 1], "/work/.runtime": [23, 3], "/grader": [23, 5]})
+        self.assertEqual(observed, {"/work": [23, 1], "/work/.runtime": [23, 2], "/grader": [23, 3]})
         self.assertEqual(fake.paths, [
-            ("/owned/candidate", True), ("/owned/candidate", True),
-            ("/owned/runtime", True), ("/owned/runtime", True),
-            ("/owned/grader", True), ("/owned/grader", True),
+            ("/owned/candidate", True),
+            ("/owned/runtime", True),
+            ("/owned/grader", True),
         ])
 
 
