@@ -698,7 +698,8 @@ pub(in crate::adaptive_resources::runtime) fn finite_retained_structural_bytes(
         .checked_add(2 * std::mem::size_of::<usize>())?
         .checked_add(bootstrap::readers::retained_reader_structural_bytes(
             max_readers,
-        )?)?;
+        )?)?
+        .checked_add(super::super::finite_lifetime::requested_heap_bytes()?)?;
     u64::try_from(fixed).ok()
 }
 

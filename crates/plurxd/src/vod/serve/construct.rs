@@ -468,7 +468,7 @@ impl VodServe {
                 rendition_builds: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 #[cfg(target_os = "linux")]
-                finite_closing: Mutex::new(HashMap::new()),
+                finite_closing: Mutex::new(std::collections::BTreeMap::new()),
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),

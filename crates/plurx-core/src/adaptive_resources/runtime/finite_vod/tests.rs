@@ -210,12 +210,14 @@ async fn finite_software_writer_waits_for_original_start_sender_before_reading()
     let output_path = runtime_dir.path().join("not-opened-before-start");
     let runtime = runtime(runtime_dir.path());
     let preparation = preparation(&runtime);
+    let app_state = super::super::finite_lifetime::FiniteAppState::new();
     let output = FiniteOutput {
         runtime: Arc::clone(&runtime),
         preparation,
         member: Uuid::new_v4(),
-        directory_path: output_path,
+        directory_path: Arc::new(output_path),
         encoded_process_marker: true,
+        app_guard: app_state.new_guard().expect("fixture selector guard"),
     };
     let (pump, mut events) = pump::SoftwarePump::new(output, pump_plan()).expect("real pump");
 

@@ -4,7 +4,7 @@ use super::*;
 use crate::resource_custody::PhysicalTypedSettlement;
 
 impl NodeResourceRuntime {
-    pub(in crate::adaptive_resources::runtime) async fn settle_retained_finite_output(
+    pub(in crate::adaptive_resources::runtime) async fn prepare_retained_finite_output_close(
         &self,
         owner: &OwnedPreparation,
         index: usize,
@@ -17,9 +17,11 @@ impl NodeResourceRuntime {
             if !bundle.installed {
                 return Err(OperationError::State);
             }
-            let bundle_id = bundle.id;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
             if role.refunded {
+                return Ok(());
+            }
+            if role.pending_finite_close.is_some() {
                 return Ok(());
             }
             if role
@@ -27,40 +29,31 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .is_some_and(|t| t.effect == Effect::Settle)
             {
-                let transition = role.transition.as_mut().expect("selected settlement");
-                if transition.operation.pending.is_none()
-                    && !matches!(transition.operation.result, Some(Ok(_)))
-                {
-                    transition.operation.retry(&self.journal, deadline)?;
-                }
-                return self.finish_transition(bundle_id, role).await;
+                return Ok(());
             }
             let member = retained_member(role, requested_member)?;
             self.close_retained_entry(role.binding)?;
+            if !role.finite_app.as_ref().is_some_and(|state| state.seal()) {
+                return Err(OperationError::State);
+            }
             member
         };
         self.close_retained_finite_native(owner, index, member, deadline)
             .await?;
         let mut bundle = owner.state.lock().await;
-        let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded {
             return Ok(());
         }
         // A concurrent eviction may already have retained the one original
         // proof. Continue its command rather than attempting another take.
-        if role
-            .transition
-            .as_ref()
-            .is_some_and(|t| t.effect == Effect::Settle)
+        if role.pending_finite_close.is_some()
+            || role
+                .transition
+                .as_ref()
+                .is_some_and(|t| t.effect == Effect::Settle)
         {
-            let transition = role.transition.as_mut().expect("selected settlement");
-            if transition.operation.pending.is_none()
-                && !matches!(transition.operation.result, Some(Ok(_)))
-            {
-                transition.operation.retry(&self.journal, deadline)?;
-            }
-            return self.finish_transition(bundle_id, role).await;
+            return Ok(());
         }
         if role.transition.is_some() || !matches!(role.phase, Phase::Sealed | Phase::UnknownHeld) {
             return Err(OperationError::State);
@@ -125,18 +118,15 @@ impl NodeResourceRuntime {
         role.typed_members = None;
         role.armed.clear();
         role.invoked.clear();
-        role.transition = Some(Transition {
-            operation: JournalOperation::transition(self.journal.change(
-                key,
-                Mutation::SettleTyped(Box::new(PhysicalTypedSettlement {
-                    receipt,
-                    settlement,
-                })),
-                deadline,
-            )),
+        role.pending_finite_close = Some(PendingFiniteClose {
+            key,
+            mutation: Mutation::SettleTyped(Box::new(PhysicalTypedSettlement {
+                receipt,
+                settlement,
+            })),
             effect: Effect::Settle,
         });
-        self.finish_transition(bundle_id, role).await
+        Ok(())
     }
 }
 

@@ -271,7 +271,7 @@ pub(super) fn compile(
         trial: false,
     };
 
-    Ok(SoftwareVodRequest {
+    let mut request = SoftwareVodRequest {
         rendition_id: key.to_owned(),
         generation_epoch: 0,
         recipe_source_binding: key.to_owned(),
@@ -282,7 +282,39 @@ pub(super) fn compile(
         encoded_process_marker: true,
         demand,
         output,
-    })
+    };
+    // Complete the SAME metadata profile before core admission. Runtime
+    // knows its configured root and the exact source/executable selections;
+    // construction later checks actual requested capacities against this
+    // projection. Reserving a larger daemon lease after prepare is too late.
+    let runtime = shared
+        .resource_runtime
+        .as_ref()
+        .ok_or("finite resource runtime unavailable for metadata projection")?;
+    let (owner_heap, output_heap) = runtime
+        .software_application_metadata_projection(&request)
+        .map_err(|error| format!("projecting finite application metadata: {error}"))?;
+    let additional =
+        super::finite_software::FiniteSoftwareProducer::projected_heap_bytes(owner_heap)
+            .and_then(|bytes| bytes.checked_add(output_heap))
+            .and_then(|bytes| {
+                bytes.checked_add(super::finite_metadata::closing_owner_heap_bytes(key.len())?)
+            })
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or("finite application metadata projection overflows")?;
+    request.output.retained_metadata_bytes = request
+        .output
+        .retained_metadata_bytes
+        .checked_add(additional)
+        .ok_or("finite metadata partition overflows")?;
+    let Metric::Known(resources) = &mut request.demand.resources else {
+        return Err("finite application metadata requires a known requested component".into());
+    };
+    resources.peak_memory_bytes = resources
+        .peak_memory_bytes
+        .checked_add(additional)
+        .ok_or("finite requested memory component overflows")?;
+    Ok(request)
 }
 
 #[cfg(target_os = "linux")]

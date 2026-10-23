@@ -1191,7 +1191,7 @@ struct Shared {
     /// Exact finite native owner after the rich rendition leaves the serving
     /// registry. A same-key build must observe this under its build gate.
     #[cfg(target_os = "linux")]
-    finite_closing: Mutex<HashMap<String, Arc<shared::FiniteClosingOwner>>>,
+    finite_closing: Mutex<std::collections::BTreeMap<String, Arc<shared::FiniteClosingOwner>>>,
     head_regeneration_slots: Arc<Semaphore>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.

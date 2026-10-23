@@ -24,6 +24,8 @@ use crate::resource_custody::{
 #[cfg(target_os = "linux")]
 pub mod direct_source;
 #[cfg(unix)]
+mod finite_lifetime;
+#[cfg(unix)]
 pub mod finite_vod;
 mod operations;
 #[cfg(target_os = "linux")]

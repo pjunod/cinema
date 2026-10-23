@@ -4,8 +4,9 @@ use super::*;
 pub(super) struct FiniteClosingOwner {
     /// Kept until the real producer driver has stopped reporting output.
     rich: Mutex<Option<Arc<Rendition>>>,
-    output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
-    producer: Option<Arc<super::finite_software::FiniteSoftwareProducer>>,
+    output: Mutex<Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput>>,
+    producer: Mutex<Option<Arc<super::finite_software::FiniteSoftwareProducer>>>,
+    ticket: Mutex<Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket>>,
     claimed_bytes: AtomicU64,
     known_closed: AtomicBool,
     running: AtomicBool,
@@ -1318,8 +1319,9 @@ impl Shared {
             };
             let closing = Arc::new(FiniteClosingOwner {
                 rich: Mutex::new(Some(Arc::clone(&rendition))),
-                output,
-                producer: rendition.dir.finite_producer(),
+                output: Mutex::new(Some(output)),
+                producer: Mutex::new(rendition.dir.finite_producer()),
+                ticket: Mutex::new(None),
                 claimed_bytes: AtomicU64::new(0),
                 known_closed: AtomicBool::new(false),
                 running: AtomicBool::new(false),
@@ -1530,15 +1532,16 @@ impl Shared {
     ) {
         let closing = Arc::new(FiniteClosingOwner {
             rich: Mutex::new(rich),
-            output,
-            producer: Some(producer),
+            output: Mutex::new(Some(output)),
+            producer: Mutex::new(Some(producer)),
+            ticket: Mutex::new(None),
             claimed_bytes: AtomicU64::new(0),
             known_closed: AtomicBool::new(false),
             running: AtomicBool::new(false),
         });
         {
             let mut closings = self.finite_closing.lock().await;
-            use std::collections::hash_map::Entry;
+            use std::collections::btree_map::Entry;
             match closings.entry(key.to_owned()) {
                 Entry::Vacant(entry) => {
                     entry.insert(Arc::clone(&closing));
@@ -1559,7 +1562,8 @@ impl Shared {
     ) {
         let rich = closing.rich.lock().await.as_ref().cloned();
         if let Some(rendition) = rich {
-            if let Some(producer) = closing.producer.as_ref() {
+            let producer = closing.producer.lock().await.as_ref().cloned();
+            if let Some(producer) = producer.as_ref() {
                 if let Err(error) = producer.request_stop() {
                     tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                         %error, "finite producer stop remains pending");
@@ -1589,51 +1593,83 @@ impl Shared {
             closing.claimed_bytes.store(claimed, Release);
             closing.rich.lock().await.take();
             drop(rendition);
+            drop(producer);
         }
 
         if !closing.known_closed.load(Acquire) {
-            if closing
-                .producer
-                .as_ref()
-                .is_some_and(|producer| producer.settled())
-            {
-                closing.known_closed.store(true, Release);
-            } else {
+            if closing.ticket.lock().await.is_none() {
                 let deadline = Instant::now() + Duration::from_secs(30);
-                if let Err(error) = closing.output.wait_allocations_release(deadline).await {
+                let output = closing.output.lock().await.as_ref().cloned();
+                let Some(output) = output else {
+                    return;
+                };
+                if let Err(error) = output.wait_allocations_release(deadline).await {
                     tracing::warn!(target: "plurxd::vodserve", rendition = %key,
                         %error, "finite metadata or response remains live; cleanup retained");
                     return;
                 }
-                if let Some(producer) = closing.producer.as_ref() {
-                    if let Err(error) = producer
-                        .perform(Step::Terminate {
-                            why: Termination::Idle,
-                        })
+                let producer = closing.producer.lock().await.as_ref().cloned();
+                let prepared = if let Some(producer) = producer.as_ref() {
+                    producer
+                        .prepare_terminate(deadline)
                         .await
-                    {
+                        .map_err(|error| error.to_string())
+                } else {
+                    output
+                        .prepare_eviction(deadline)
+                        .await
+                        .map_err(|error| error.to_string())
+                };
+                let ticket = match prepared {
+                    Ok(ticket) => ticket,
+                    Err(error) => {
                         tracing::warn!(target: "plurxd::vodserve", rendition = %key,
-                            %error, "original finite producer cleanup remains charged");
+                            %error, "original finite close remains charged for retry");
                         return;
                     }
-                }
-                if closing
-                    .producer
-                    .as_ref()
-                    .is_some_and(|producer| producer.settled())
-                {
-                    closing.known_closed.store(true, Release);
-                } else if let Err(error) = closing.output.evict(deadline).await {
-                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
-                        %error, "finite output cleanup remains charged for retry");
+                };
+                // Install the exact original close selector before discarding
+                // the last rich closing owner. Other selectors retain their
+                // own final-drop guard and will delay final refund.
+                *closing.ticket.lock().await = Some(ticket);
+                drop(producer);
+                drop(output);
+                closing.producer.lock().await.take();
+                closing.output.lock().await.take();
+            }
+            let deadline = Instant::now() + Duration::from_secs(30);
+            {
+                let mut held = closing.ticket.lock().await;
+                let Some(ticket) = held.as_mut() else {
                     return;
-                } else {
-                    closing.known_closed.store(true, Release);
+                };
+                if let Err(error) = ticket.wait_application_release(deadline).await {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                        %error, "finite application alias remains charged for retry");
+                    return;
                 }
             }
         }
 
+        // The rich metadata and every application selector have drained. The
+        // short key gate now spans the known journal commit and tombstone
+        // removal, so no uncharged closing-map allocation can wait behind a
+        // successor build after the role's final refund.
         let _build_guard = self.rendition_build_gate(key).lock_owned().await;
+        if !closing.known_closed.load(Acquire) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut held = closing.ticket.lock().await;
+            let Some(ticket) = held.as_mut() else {
+                return;
+            };
+            if let Err(error) = ticket.finish_retirement(deadline).await {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                    %error, "finite terminal close remains charged for retry");
+                return;
+            }
+            closing.known_closed.store(true, Release);
+            held.take();
+        }
         let removed = {
             let mut closings = self.finite_closing.lock().await;
             if closings
@@ -1641,6 +1677,11 @@ impl Shared {
                 .is_some_and(|current| Arc::ptr_eq(current, closing))
             {
                 closings.remove(key);
+                if closings.is_empty() {
+                    // BTreeMap can retain an empty root after removal. Drop
+                    // it so no historical registry capacity remains owned.
+                    closings.clear();
+                }
                 true
             } else {
                 false

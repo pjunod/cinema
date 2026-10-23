@@ -176,6 +176,7 @@ impl NodeResourceRuntime {
         command: SoftwareAvcCommand,
         pump: SoftwarePump,
         control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
+        app_state: Arc<crate::adaptive_resources::runtime::finite_lifetime::FiniteAppState>,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
@@ -215,6 +216,7 @@ impl NodeResourceRuntime {
             engine_check: None,
             engine_check_unknown: false,
         });
+        role.finite_app = Some(app_state);
         Ok(())
     }
 

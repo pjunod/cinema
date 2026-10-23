@@ -272,16 +272,20 @@ impl FiniteControl {
 /// Control for the same registered producer while its owner is joining or
 /// waiting for durable I/O. Signalling conveys no close or refund proof.
 #[derive(Clone)]
-pub struct SoftwareVodControl(Arc<FiniteControl>);
+pub struct SoftwareVodControl {
+    control: Arc<FiniteControl>,
+    // Last: the shared final-drop guard observes the control Arc gone.
+    _app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
+}
 impl SoftwareVodControl {
     pub fn request_stop(&self) -> std::io::Result<()> {
-        self.0.request()
+        self.control.request()
     }
     pub fn suspend(&self) -> std::io::Result<()> {
-        self.0.suspend(true)
+        self.control.suspend(true)
     }
     pub fn resume(&self) -> std::io::Result<()> {
-        self.0.suspend(false)
+        self.control.suspend(false)
     }
 }
 
@@ -296,6 +300,8 @@ pub struct SoftwareVodOwner {
     encoded_process_marker: bool,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
     control: Arc<FiniteControl>,
+    // Last: drop every rich field before announcing application release.
+    app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
 }
 
 /// A bounded selection of the same custodian, not an exported File/Arc<File>.
@@ -307,6 +313,50 @@ pub struct FiniteOutput {
     member: Uuid,
     directory_path: Arc<PathBuf>,
     encoded_process_marker: bool,
+    // Last: response selectors hold the same application lifetime as owner
+    // and control aliases, including when a ReadyFile outlives its rendition.
+    app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
+}
+
+/// Original finite close selection. The runtime book keeps the native proof,
+/// durable operation and complete charge if this selector or waiter drops.
+/// It is deliberately separate from an output or producer application alias.
+pub struct FiniteCloseTicket {
+    runtime: Arc<NodeResourceRuntime>,
+    preparation: Option<OwnedPreparation>,
+    app_state: Option<Arc<super::finite_lifetime::FiniteAppState>>,
+}
+
+impl FiniteCloseTicket {
+    /// Drain actual application aliases outside any daemon key gate. This is
+    /// only a heap fence; native and durable close still belong to the ticket.
+    pub async fn wait_application_release(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<(), FiniteVodError> {
+        if self.preparation.is_none() {
+            return Ok(());
+        }
+        if let Some(state) = self.app_state.as_ref() {
+            if !state.wait_released(deadline).await {
+                return Err(FiniteVodError(OperationError::Deadline));
+            }
+            // The core role retains this state until its rich bundle is
+            // destroyed; the compact selector retains no alias payload.
+            self.app_state = None;
+        }
+        Ok(())
+    }
+
+    /// Retry the original proof-bearing operation only after every application
+    /// owner really dropped. The exact same ticket survives unknown results.
+    pub async fn finish_retirement(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
+        self.wait_application_release(deadline).await?;
+        self.runtime
+            .finish_finite_close(&mut self.preparation, 0, deadline)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 /// Opaque identity of a payload already retained by the runtime. Dropping the
@@ -338,6 +388,43 @@ impl FiniteFile {
             Self::EncodedProcessMetadata => OutputKey::EncodedProcessMetadata,
         }
     }
+}
+
+fn software_owner_heap_bytes(
+    source_member_capacity: usize,
+    source_spec_capacity: usize,
+    source_path_capacities: impl IntoIterator<Item = usize>,
+) -> Option<usize> {
+    let mut bytes = source_member_capacity
+        .checked_mul(std::mem::size_of::<Uuid>())?
+        .checked_add(
+            source_spec_capacity.checked_mul(std::mem::size_of::<Option<SourceOpenSpec>>())?,
+        )?
+        .checked_add(std::mem::size_of::<FiniteControl>())?
+        .checked_add(2 * std::mem::size_of::<usize>())?;
+    for capacity in source_path_capacities {
+        bytes = bytes.checked_add(capacity)?;
+    }
+    Some(bytes)
+}
+
+fn finite_directory_path(
+    root: &str,
+    rendition_id: &str,
+) -> Result<(String, PathBuf), FiniteVodError> {
+    if root.len() > 4096
+        || !root.starts_with('/')
+        || root == "/"
+        || rendition_id.is_empty()
+        || rendition_id.len() > 255
+        || rendition_id.contains(['/', '\\', '\0'])
+        || matches!(rendition_id, "." | "..")
+    {
+        return Err(invalid());
+    }
+    let protected_child = format!("{root}/{rendition_id}");
+    let path = PathBuf::from(&protected_child);
+    Ok((protected_child, path))
 }
 
 impl FiniteOutput {
@@ -434,14 +521,19 @@ impl FiniteOutput {
     /// Evict the exact retained output through original native cleanup and a
     /// known durable settlement. Active bodies must finish before this closes.
     /// Cancellation retains the same native jobs and settlement operation.
-    pub async fn evict(&self, deadline: Instant) -> Result<(), FiniteVodError> {
+    pub async fn prepare_eviction(
+        &self,
+        deadline: Instant,
+    ) -> Result<FiniteCloseTicket, FiniteVodError> {
         self.runtime
-            .settle_retained_finite_output(&self.preparation, 0, self.member, deadline)
+            .prepare_retained_finite_output_close(&self.preparation, 0, self.member, deadline)
             .await?;
-        self.runtime
-            .forget_preparation(self.preparation.clone())
-            .await
-            .map_err(Into::into)
+        let app_state = self.runtime.finite_app_state(&self.preparation, 0)?;
+        Ok(FiniteCloseTicket {
+            runtime: Arc::clone(&self.runtime),
+            preparation: Some(self.preparation.clone()),
+            app_state: Some(app_state),
+        })
     }
 
     pub fn has_encoded_process_metadata(&self) -> bool {
@@ -580,12 +672,15 @@ impl NodeResourceRuntime {
             .await
             .map_err(|_| OperationError::State)?;
         Ok(selection.map(
-            |(preparation, member, directory_path, encoded_process_marker)| FiniteOutput {
-                runtime: self.clone(),
-                preparation,
-                member,
-                directory_path: Arc::new(directory_path),
-                encoded_process_marker,
+            |(preparation, member, directory_path, encoded_process_marker, app_guard)| {
+                FiniteOutput {
+                    runtime: self.clone(),
+                    preparation,
+                    member,
+                    directory_path: Arc::new(directory_path),
+                    encoded_process_marker,
+                    app_guard,
+                }
             },
         ))
     }
@@ -596,24 +691,20 @@ impl SoftwareVodOwner {
     /// are only taken from their slots, so this value cannot grow after
     /// construction. The directory Arc payload is counted once by the output.
     pub fn requested_heap_bytes(&self) -> Option<usize> {
-        let mut bytes = self
-            .source_members
-            .capacity()
-            .checked_mul(std::mem::size_of::<Uuid>())?
-            .checked_add(
-                self.source_specs
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<Option<SourceOpenSpec>>())?,
-            )?
-            .checked_add(std::mem::size_of::<FiniteControl>())?
-            .checked_add(2 * std::mem::size_of::<usize>())?;
-        for spec in self.source_specs.iter().flatten() {
-            bytes = bytes.checked_add(spec.path.capacity())?;
-        }
-        Some(bytes)
+        software_owner_heap_bytes(
+            self.source_members.capacity(),
+            self.source_specs.capacity(),
+            self.source_specs
+                .iter()
+                .flatten()
+                .map(|spec| spec.path.capacity()),
+        )
     }
     pub fn control(&self) -> SoftwareVodControl {
-        SoftwareVodControl(Arc::clone(&self.control))
+        SoftwareVodControl {
+            control: Arc::clone(&self.control),
+            _app_guard: Arc::clone(&self.app_guard),
+        }
     }
     /// Selector only: construction does not open the source or output root.
     pub fn output(&self) -> FiniteOutput {
@@ -623,6 +714,7 @@ impl SoftwareVodOwner {
             member: self.scratch_member,
             directory_path: self.directory_path.clone(),
             encoded_process_marker: self.encoded_process_marker,
+            app_guard: Arc::clone(&self.app_guard),
         }
     }
     /// Resolve prepare BEFORE queueing either source native open or output
@@ -672,6 +764,7 @@ impl SoftwareVodOwner {
             member: self.scratch_member,
             directory_path: self.directory_path.clone(),
             encoded_process_marker: self.encoded_process_marker,
+            app_guard: Arc::clone(&self.app_guard),
         })
     }
     /// Request stop through the original registration without waiting for a
@@ -740,6 +833,7 @@ impl SoftwareVodOwner {
             member,
             directory_path: self.directory_path.clone(),
             encoded_process_marker: self.encoded_process_marker,
+            app_guard: Arc::clone(&self.app_guard),
         })
     }
 
@@ -750,25 +844,23 @@ impl SoftwareVodOwner {
 
     /// Positive partial-start cancellation through original retained native
     /// owners. Unsupported earlier acquisition states keep their complete hold.
-    pub async fn cancel_failed(&self, deadline: Instant) -> Result<(), FiniteVodError> {
+    pub async fn prepare_cancel(
+        &self,
+        deadline: Instant,
+    ) -> Result<FiniteCloseTicket, FiniteVodError> {
         self.request_stop()?;
         self.runtime
-            .settle_failed_finite_vod(&self.preparation, 0, deadline)
+            .resolve_preparation(&self.preparation, deadline)
             .await?;
         self.runtime
-            .forget_preparation(self.preparation.clone())
-            .await
-            .map_err(Into::into)
-    }
-
-    pub async fn cancel(&self, deadline: Instant) -> Result<(), FiniteVodError> {
-        self.runtime
-            .cancel_preparation(&self.preparation, deadline)
+            .prepare_failed_finite_vod_close(&self.preparation, 0, deadline)
             .await?;
-        self.runtime
-            .forget_preparation(self.preparation.clone())
-            .await
-            .map_err(Into::into)
+        let app_state = self.runtime.finite_app_state(&self.preparation, 0)?;
+        Ok(FiniteCloseTicket {
+            runtime: Arc::clone(&self.runtime),
+            preparation: Some(self.preparation.clone()),
+            app_state: Some(app_state),
+        })
     }
 }
 
@@ -780,6 +872,44 @@ fn invalid() -> FiniteVodError {
 }
 
 impl NodeResourceRuntime {
+    /// Project only the application allocations this finite owner retains.
+    /// The caller adds these two values to its rendition/closing metadata
+    /// before the original role is reserved. No native file, ID, or proof is
+    /// acquired here; the actual arrays and path are checked before reserve.
+    pub fn software_application_metadata_projection(
+        &self,
+        request: &SoftwareVodRequest,
+    ) -> Result<(usize, usize), FiniteVodError> {
+        if request.sources.is_empty() || request.sources.len() > 2 {
+            return Err(invalid());
+        }
+        let root = self
+            .rendition_root
+            .as_ref()
+            .and_then(|path| path.to_str())
+            .ok_or_else(invalid)?;
+        let (_, directory_path) = finite_directory_path(root, &request.rendition_id)?;
+        let source_slots = request.sources.len().checked_add(1).ok_or_else(invalid)?;
+        // The original executable path is cloned into the final source spec.
+        // Measure that same owned clone, rather than its borrowed path length.
+        let executable_path = request.command.executable().path().to_owned();
+        let owner = software_owner_heap_bytes(
+            source_slots,
+            source_slots,
+            request
+                .sources
+                .iter()
+                .map(|source| source.path.capacity())
+                .chain(std::iter::once(executable_path.capacity())),
+        )
+        .ok_or_else(invalid)?;
+        let output = std::mem::size_of::<PathBuf>()
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .and_then(|bytes| bytes.checked_add(directory_path.capacity()))
+            .ok_or_else(invalid)?;
+        Ok((owner, output))
+    }
+
     /// Synchronous whole-role preparation before selected-path native IO. The
     /// daemon supplies real current demand/settings; unknown capacity refuses
     /// through the SAME ledger, with no legacy-admission fallback in this API.
@@ -818,6 +948,8 @@ impl NodeResourceRuntime {
         {
             return Err(invalid());
         }
+        let (projected_owner_heap, projected_output_heap) =
+            self.software_application_metadata_projection(&request)?;
         let root = self
             .rendition_root
             .as_ref()
@@ -912,8 +1044,16 @@ impl NodeResourceRuntime {
         let root_acquisition_id = id();
         let scratch_member = id();
         let asset = id();
-        let protected_child = format!("{root}/{}", request.rendition_id);
-        let directory_path = Arc::new(PathBuf::from(&protected_child));
+        let (protected_child, selected_directory_path) =
+            finite_directory_path(root, &request.rendition_id)?;
+        let actual_output_heap = std::mem::size_of::<PathBuf>()
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .and_then(|bytes| bytes.checked_add(selected_directory_path.capacity()))
+            .ok_or_else(invalid)?;
+        if actual_output_heap > projected_output_heap {
+            return Err(invalid());
+        }
+        let directory_path = Arc::new(selected_directory_path);
         let slot = |member_id, protected_paths| v2::MemberSlot {
             member_id,
             owned_by: None,
@@ -999,6 +1139,18 @@ impl NodeResourceRuntime {
                 scanner_mtime: source.scanner_mtime,
                 expected_sha256,
             }));
+        }
+        let actual_owner_heap = software_owner_heap_bytes(
+            source_members.capacity(),
+            source_specs.capacity(),
+            source_specs
+                .iter()
+                .flatten()
+                .map(|spec| spec.path.capacity()),
+        )
+        .ok_or_else(invalid)?;
+        if actual_owner_heap > projected_owner_heap {
+            return Err(invalid());
         }
         let bounds = request.output;
         let limits = ScratchLimitsV1 {
@@ -1166,12 +1318,15 @@ impl NodeResourceRuntime {
             }
         };
         self.install_finite_response_budget(&preparation, 0, response_budget)?;
+        let app_state = super::finite_lifetime::FiniteAppState::new();
+        let app_guard = app_state.new_guard().ok_or_else(invalid)?;
         let output = FiniteOutput {
             runtime: Arc::clone(self),
             preparation: preparation.clone(),
             member: scratch_member.uuid(),
             directory_path: directory_path.clone(),
             encoded_process_marker: request.encoded_process_marker,
+            app_guard: Arc::clone(&app_guard),
         };
         let (pump, events) = pump::SoftwarePump::new(output, request.producer)
             .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;
@@ -1194,6 +1349,7 @@ impl NodeResourceRuntime {
             request.command,
             pump,
             Arc::clone(&control),
+            app_state,
         )?;
         Ok(SoftwareVodOwner {
             runtime: Arc::clone(self),
@@ -1206,6 +1362,7 @@ impl NodeResourceRuntime {
             encoded_process_marker: request.encoded_process_marker,
             events: Some(events),
             control,
+            app_guard,
         })
     }
 }

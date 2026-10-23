@@ -74,6 +74,13 @@ impl NodeResourceRuntime {
             .and_then(|n| usize::try_from(n).ok())
             .filter(|n| *n > 0)
             .ok_or(OperationError::State)?;
+        let app_memory =
+            crate::adaptive_resources::runtime::finite_lifetime::requested_heap_bytes()
+                .ok_or(OperationError::State)?;
+        let metadata_memory = metadata_memory
+            .checked_sub(app_memory)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(OperationError::State)?;
         let response_budget = ResponseBudget::with_metadata(
             usize::try_from(response_memory).map_err(|_| OperationError::State)?,
             metadata_memory,
@@ -87,6 +94,9 @@ impl NodeResourceRuntime {
             bootstrap: BTreeMap::new(),
             sources: BTreeMap::new(),
             finite_vod: None,
+            finite_app: Some(
+                crate::adaptive_resources::runtime::finite_lifetime::FiniteAppState::new(),
+            ),
             retirement: None,
             response_budget: Some(response_budget),
             armed: BTreeSet::from([member]),
@@ -104,11 +114,13 @@ impl NodeResourceRuntime {
             sequence,
             phase: Phase::Sealed,
             transition: None,
+            pending_finite_close: None,
             receipt: None,
             refunded: false,
         };
         let bundle = Bundle {
             id,
+            typed_obligation_ids: vec![handle.obligation_id()],
             family_ids: Vec::new(),
             retained: BTreeSet::new(),
             // Recovery has a known adoption, not a fabricated prepare result.

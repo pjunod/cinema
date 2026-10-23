@@ -154,7 +154,7 @@ impl NodeResourceRuntime {
     /// Resolve an interrupted fixed producer, close its original output, and
     /// settle the same typed R after one known journal commit. Earlier source
     /// or bootstrap failures without this exact native proof stay fully held.
-    pub(in crate::adaptive_resources::runtime) async fn settle_failed_finite_vod(
+    pub(in crate::adaptive_resources::runtime) async fn prepare_failed_finite_vod_close(
         &self,
         owner: &OwnedPreparation,
         index: usize,
@@ -163,9 +163,11 @@ impl NodeResourceRuntime {
         self.validate_preparation(owner)?;
         {
             let mut bundle = owner.state.lock().await;
-            let bundle_id = bundle.id;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
             if role.refunded {
+                return Ok(());
+            }
+            if role.pending_finite_close.is_some() {
                 return Ok(());
             }
             if role
@@ -173,13 +175,10 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .is_some_and(|t| t.effect == Effect::Settle)
             {
-                let transition = role.transition.as_mut().expect("selected settlement");
-                if transition.operation.pending.is_none()
-                    && !matches!(transition.operation.result, Some(Ok(_)))
-                {
-                    transition.operation.retry(&self.journal, deadline)?;
-                }
-                return self.finish_transition(bundle_id, role).await;
+                return Ok(());
+            }
+            if !role.finite_app.as_ref().is_some_and(|state| state.seal()) {
+                return Err(OperationError::State);
             }
         }
         // Join a check abandoned by a cancelled prelaunch or publication
@@ -253,7 +252,6 @@ impl NodeResourceRuntime {
             self.seal_role(owner, index, deadline).await?;
         }
         let mut bundle = owner.state.lock().await;
-        let bundle_id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded {
             return Ok(());
@@ -540,17 +538,14 @@ impl NodeResourceRuntime {
         role.roots.clear();
         role.sealed = None;
         role.finite_vod = None;
-        role.transition = Some(Transition {
-            operation: JournalOperation::transition(self.journal.change(
-                key,
-                Mutation::SettleTyped(Box::new(PhysicalTypedSettlement {
-                    receipt,
-                    settlement,
-                })),
-                deadline,
-            )),
+        role.pending_finite_close = Some(PendingFiniteClose {
+            key,
+            mutation: Mutation::SettleTyped(Box::new(PhysicalTypedSettlement {
+                receipt,
+                settlement,
+            })),
             effect: Effect::Settle,
         });
-        self.finish_transition(bundle_id, role).await
+        Ok(())
     }
 }

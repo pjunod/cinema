@@ -310,6 +310,7 @@ impl NodeResourceRuntime {
             bootstrap: BTreeMap::new(),
             sources: BTreeMap::new(),
             finite_vod: None,
+            finite_app: None,
             retirement: None,
             response_budget: Some(budget),
             armed: BTreeSet::from([member]),
@@ -327,11 +328,13 @@ impl NodeResourceRuntime {
             sequence,
             phase: Phase::UnknownHeld,
             transition: None,
+            pending_finite_close: None,
             receipt: None,
             refunded: false,
         };
         let bundle = Bundle {
             id,
+            typed_obligation_ids: vec![handle.obligation_id()],
             family_ids: Vec::new(),
             retained: BTreeSet::new(),
             prepare: JournalOperation {

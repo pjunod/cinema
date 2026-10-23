@@ -452,24 +452,35 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
     )
     .await
     .expect("closed-before-entry driver returns without waiting on its own metadata");
-    assert!(!second_producer.settled());
     assert_eq!(runtime.accounting().unwrap().unknown_peak_producers, 1);
-    // Prepared cancellation must wait until its actual daemon metadata has
-    // dropped; the original core producer selector remains independently held.
+    // The detached closing owner keeps the exact fresh R while the test still
+    // holds its original producer selector and rendition metadata.
+    let second_output = second.dir.finite_output().expect("second finite output");
+    let escaped_selector = second_output.clone();
+    serve
+        .shared
+        .retain_unattached_finite(
+            &second_key,
+            Some(Arc::clone(&second)),
+            second_output,
+            Arc::clone(&second_producer),
+        )
+        .await;
+    assert_eq!(runtime.accounting().unwrap().unknown_peak_producers, 1);
     drop(second);
-    second_producer
-        .perform(Step::Terminate {
-            why: Termination::Idle,
-        })
-        .await
-        .expect("cancel unstarted second R through original owner");
+    drop(second_producer);
     assert_eq!(
-        runtime
-            .accounting()
-            .expect("second refund")
-            .unknown_peak_producers,
-        0
+        runtime.accounting().unwrap().unknown_peak_producers,
+        1,
+        "an escaped finite selector holds the original application heap fence"
     );
+    drop(escaped_selector);
+    wait_until(
+        "actual detached finite close returns second R only after aliases drain",
+        Duration::from_secs(5),
+        || async { runtime.accounting().unwrap().unknown_peak_producers == 0 },
+    )
+    .await;
     assert_eq!(runtime.accounting().expect("S retained").held, 1);
 
     serve.end("finite-software-client", Terminal::Deleted).await;

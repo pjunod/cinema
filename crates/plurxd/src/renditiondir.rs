@@ -418,22 +418,12 @@ impl RenditionDir {
             return Freed { bytes, error: None };
         }
         #[cfg(unix)]
-        if let Some(output) = self.finite_output() {
-            let bytes = manifest.materialized_bytes();
-            return match output
-                .evict(std::time::Instant::now() + std::time::Duration::from_secs(30))
-                .await
-            {
-                Ok(()) => {
-                    for index in 0..manifest.len() as u32 {
-                        manifest.forget(index);
-                    }
-                    Freed { bytes, error: None }
-                }
-                Err(error) => Freed {
-                    bytes: 0,
-                    error: Some(error.into_io_error()),
-                },
+        if self.finite_output().is_some() {
+            return Freed {
+                bytes: 0,
+                error: Some(io::Error::other(
+                    "finite output needs its counted closing owner",
+                )),
             };
         }
         let mut freed = Freed::default();

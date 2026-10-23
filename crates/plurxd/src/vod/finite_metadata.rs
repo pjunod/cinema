@@ -9,6 +9,26 @@ use crate::renditiondir::RenditionDir;
 use plurx_core::segplan::{FragmentIndex, SegmentPlan};
 use std::path::PathBuf;
 
+/// One terminal owner, its registry entry, and bounded key copies retained
+/// by the registered cleanup and the existing maintenance snapshot. The
+/// BTree envelope uses Rust 1.97.1's eleven reserved key/value slots plus
+/// parent/edge storage, with at most two nodes per live entry. Unlike a
+/// HashMap, removed historical entries cannot leave a large sparse table.
+#[cfg(target_os = "linux")]
+pub(super) fn closing_owner_heap_bytes(key_capacity: usize) -> Option<usize> {
+    let entry = std::mem::size_of::<String>().checked_add(std::mem::size_of::<
+        std::sync::Arc<super::shared::FiniteClosingOwner>,
+    >())?;
+    let nodes = entry
+        .checked_mul(11)?
+        .checked_add(16 * std::mem::size_of::<usize>())?
+        .checked_mul(2)?;
+    std::mem::size_of::<super::shared::FiniteClosingOwner>()
+        .checked_add(2 * std::mem::size_of::<usize>())?
+        .checked_add(nodes)?
+        .checked_add(key_capacity.checked_mul(3)?)
+}
+
 fn recipe_heap_bytes(recipe: &Recipe) -> Option<usize> {
     let mut bytes = recipe.file.requested_heap_bytes()?;
     if let Some(value) = &recipe.retained_logical {

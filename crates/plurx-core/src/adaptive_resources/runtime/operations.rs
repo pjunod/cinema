@@ -27,6 +27,8 @@ pub(super) mod finite_retirement;
 #[cfg(unix)]
 mod finite_settlement;
 #[cfg(unix)]
+mod finite_terminal;
+#[cfg(unix)]
 mod finite_vod;
 mod live_settlement;
 mod pipe_drains;
@@ -101,6 +103,8 @@ struct OwnedRole {
     #[cfg(unix)]
     finite_vod: Option<finite_vod::FiniteLaunch>,
     #[cfg(unix)]
+    finite_app: Option<Arc<super::finite_lifetime::FiniteAppState>>,
+    #[cfg(unix)]
     retirement: Option<finite_retirement::FiniteRetirement>,
     #[cfg(unix)]
     response_budget: Option<Arc<super::response_memory::ResponseBudget>>,
@@ -117,12 +121,20 @@ struct OwnedRole {
     sequence: i64,
     phase: Phase,
     transition: Option<Transition>,
+    #[cfg(unix)]
+    pending_finite_close: Option<PendingFiniteClose>,
     receipt: Option<PhysicalCloseReceipt>,
     refunded: bool,
 }
 
 struct Transition {
     operation: JournalOperation,
+    effect: Effect,
+}
+#[cfg(unix)]
+struct PendingFiniteClose {
+    key: TransitionKey,
+    mutation: Mutation,
     effect: Effect,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -240,6 +252,23 @@ impl JournalOperation {
 }
 
 impl NodeResourceRuntime {
+    #[cfg(unix)]
+    pub(in crate::adaptive_resources::runtime) fn finite_app_guard(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<Arc<super::finite_lifetime::FiniteAppGuard>, OperationError> {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+        if role.refunded || role.transition.is_some() {
+            return Err(OperationError::State);
+        }
+        role.finite_app
+            .as_ref()
+            .and_then(|state| state.new_guard())
+            .ok_or(OperationError::State)
+    }
     pub(in crate::adaptive_resources::runtime) fn prepared_typed_obligation_id(
         &self,
         owner: &OwnedPreparation,
@@ -545,6 +574,8 @@ impl NodeResourceRuntime {
                 #[cfg(unix)]
                 finite_vod: None,
                 #[cfg(unix)]
+                finite_app: None,
+                #[cfg(unix)]
                 retirement: None,
                 #[cfg(unix)]
                 response_budget: None,
@@ -560,6 +591,8 @@ impl NodeResourceRuntime {
                 sequence: 0,
                 phase: Phase::Prepared,
                 transition: None,
+                #[cfg(unix)]
+                pending_finite_close: None,
                 receipt: None,
                 refunded: false,
             });

@@ -606,8 +606,16 @@ impl NodeResourceRuntime {
         media_file_id: &str,
         object_version: &str,
         segment_count: u32,
-    ) -> Result<Option<(super::operations::OwnedPreparation, Uuid, PathBuf, bool)>, RuntimeOpenError>
-    {
+    ) -> Result<
+        Option<(
+            super::operations::OwnedPreparation,
+            Uuid,
+            PathBuf,
+            bool,
+            Arc<super::finite_lifetime::FiniteAppGuard>,
+        )>,
+        RuntimeOpenError,
+    > {
         let ids: Vec<_> = self
             .recovered
             .retained_assets
@@ -688,7 +696,37 @@ impl NodeResourceRuntime {
             return Err(unavailable());
         }
         let preparation = operation.preparation.clone().ok_or_else(unavailable)?;
-        Ok(Some((preparation, member, path, marker)))
+        let guard = self
+            .finite_app_guard(&preparation, 0)
+            .map_err(|_| unavailable())?;
+        Ok(Some((preparation, member, path, marker, guard)))
+    }
+
+    /// The known terminal close has no remaining use for its one internal
+    /// adoption selector. Drop its native/import metadata and preparation
+    /// alias before the finite terminal consumes the original bundle.
+    pub(super) fn release_settled_recovered_preparation(
+        &self,
+        obligation: Uuid,
+    ) -> Result<(), super::operations::OperationError> {
+        let mut adoptions = self
+            .recovered_adoptions
+            .lock()
+            .map_err(|_| super::operations::OperationError::State)?;
+        let Some(adoption) = adoptions.get(&obligation) else {
+            return Ok(());
+        };
+        {
+            let mut adoption = adoption
+                .try_lock()
+                .map_err(|_| super::operations::OperationError::State)?;
+            if !adoption.acknowledged || adoption.pending.is_some() || adoption.proof.is_some() {
+                return Err(super::operations::OperationError::State);
+            }
+            adoption.preparation.take();
+        }
+        adoptions.remove(&obligation);
+        Ok(())
     }
 
     /// Called under the actual S role lock only after native closed-head

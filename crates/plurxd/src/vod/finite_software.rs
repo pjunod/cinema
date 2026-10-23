@@ -14,7 +14,6 @@ const RUNNING: u8 = 1;
 const RETIRING: u8 = 2;
 const RETAINED: u8 = 3;
 const FAILED: u8 = 4;
-const SETTLED: u8 = 5;
 const PREPARING: u8 = 6;
 const DRIVER_UNREGISTERED: u8 = 0;
 const DRIVER_REGISTERED: u8 = 1;
@@ -89,7 +88,7 @@ impl FiniteSoftwareProducer {
         Self::projected_heap_bytes(self.owner_heap_bound?)
     }
 
-    fn projected_heap_bytes(owner_heap: usize) -> Option<usize> {
+    pub(super) fn projected_heap_bytes(owner_heap: usize) -> Option<usize> {
         std::mem::size_of::<Self>()
             .checked_add(2 * std::mem::size_of::<usize>())?
             .checked_add(owner_heap)
@@ -161,7 +160,7 @@ impl FiniteSoftwareProducer {
                 let owner = self.owner.lock().await;
                 let deadline = Instant::now() + Duration::from_secs(30);
                 match self.stage.load(Acquire) {
-                    RETAINED | SETTLED => {}
+                    RETAINED => {}
                     RETIRING => {
                         owner
                             .retire_output(deadline)
@@ -169,7 +168,14 @@ impl FiniteSoftwareProducer {
                             .map_err(io::Error::other)?;
                         self.stage.store(RETAINED, Release);
                     }
-                    _ => self.cancel_owned(&owner, deadline).await?,
+                    _ => {
+                        // A terminal finite role needs the detached closing
+                        // ticket after this application owner has dropped.
+                        // The shared closing owner performs that transaction.
+                        return Err(io::Error::other(
+                            "finite cancellation requires its closing owner",
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -202,23 +208,36 @@ impl FiniteSoftwareProducer {
             Producer::Absent { produced_through }
         }
     }
-    pub(crate) fn settled(&self) -> bool {
-        self.stage.load(Acquire) == SETTLED
-    }
     /// A completed S cannot start another publication for a missing file.
     /// The live R stages still allow ordinary materialization waits.
     pub(crate) fn retained_without_producer(&self) -> bool {
-        matches!(self.stage.load(Acquire), RETAINED | SETTLED)
+        self.stage.load(Acquire) == RETAINED
     }
-    async fn cancel_owned(&self, owner: &SoftwareVodOwner, deadline: Instant) -> io::Result<()> {
-        if owner.cancel(deadline).await.is_err() {
+    pub(crate) async fn prepare_terminate(
+        &self,
+        deadline: Instant,
+    ) -> io::Result<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket> {
+        self.control.request_stop()?;
+        let owner = self.owner.lock().await;
+        if self.stage.load(Acquire) == RETIRING {
             owner
-                .cancel_failed(deadline)
+                .retire_output(deadline)
                 .await
                 .map_err(io::Error::other)?;
+            self.stage.store(RETAINED, Release);
         }
-        self.stage.store(SETTLED, Release);
-        Ok(())
+        if self.stage.load(Acquire) == RETAINED {
+            owner
+                .output()
+                .prepare_eviction(deadline)
+                .await
+                .map_err(io::Error::other)
+        } else {
+            owner
+                .prepare_cancel(deadline)
+                .await
+                .map_err(io::Error::other)
+        }
     }
 }
 
@@ -324,6 +343,9 @@ pub(super) async fn build(
                     .requested_heap_bytes()
                     .ok_or("recovered finite output metadata overflowed")?,
             )
+            .and_then(|bytes| {
+                bytes.checked_add(finite_metadata::closing_owner_heap_bytes(key.len())?)
+            })
             .ok_or("recovered finite metadata projection overflowed")?;
         let (metadata_lease, client_lease) = output
             .reserve_metadata_partitions(
@@ -487,7 +509,8 @@ pub(super) async fn build(
             .checked_add(output.requested_heap_bytes()?)?
             .checked_add(FiniteSoftwareProducer::projected_heap_bytes(
                 owner.requested_heap_bytes()?,
-            )?)
+            )?)?
+            .checked_add(finite_metadata::closing_owner_heap_bytes(key.len())?)
     })();
     let Some(projected_metadata) = projection else {
         // Preparation already owns a charged journal operation. Even a
