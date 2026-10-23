@@ -119,32 +119,13 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         "actual P010/Main10 upload proof"
     );
     let display_target = if target_nits.is_some() || sdr {
-        let title_probe = crate::source_probe::probe_title_for_control(&manager, &file)
+        let stats = crate::source_probe::publish_title_for_control(&manager, &store, &file)
             .await
-            .expect("admitted complete-title probe of the held source");
-        let stats = plurx_core::scan::dv_title::DvTitleStats::from_probe_json(
-            title_probe
-                .raw_json
-                .as_deref()
-                .expect("title probe document"),
-        )
-        .expect("actual complete-title scanner facts, not a window sample");
+            .expect("admitted complete-title job publication for the held source");
         assert_eq!(
             stats.eligibility(),
             plurx_core::scan::dv_title::TitleEligibility::Eligible
         );
-        // This isolated fixture store has no background publisher. The real
-        // scanner itself retains the open source fence across probe and scan.
-        store
-            .upsert_file(
-                file.item_id,
-                source.to_str().expect("source path"),
-                file.size,
-                file.mtime,
-                &title_probe,
-            )
-            .await
-            .expect("store current title probe");
         let DvDisplayTargetChoice::Target(target) = (if sdr {
             DvDisplayTarget::for_sdr_title(Some(stats))
         } else {

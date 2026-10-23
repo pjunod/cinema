@@ -4,6 +4,9 @@ mod dv_title;
 #[cfg(target_os = "linux")]
 mod title_work;
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use dv_title::publish_title_for_control;
+
 use crate::state::AppState;
 use plurx_core::store::background_jobs_probe::{ProbeOutput, MAX_PROBE_RESULT_BYTES};
 use plurx_core::{
@@ -391,46 +394,6 @@ where
             }
         }
     }
-}
-
-/// Physical qualification uses the real fenced scanner and physical admission,
-/// without exposing a second production probe/publication entrypoint.
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) async fn probe_title_for_control(
-    transcode: &crate::transcode::TranscodeManager,
-    file: &plurx_core::domain::MediaFile,
-) -> Result<plurx_core::domain::ProbeResult, plurx_core::error::ProbeError> {
-    let admission = transcode
-        .admit_dv_title()
-        .await
-        .expect("title probe admission");
-    run_admitted_probe(
-        transcode,
-        &admission,
-        &CancellationToken::new(),
-        &CancellationToken::new(),
-        None,
-        async {
-            let mut result = probe::probe_single_threaded(&file.path).await?;
-            let tools = crate::vodencode::dv_runtime::ToolSet::capture()
-                .await
-                .map_err(plurx_core::error::ProbeError::Parse)?
-                .ok_or_else(|| {
-                    plurx_core::error::ProbeError::Parse("title scanner unavailable".into())
-                })?;
-            let stats = dv_title::scan(file, result.raw_json.as_deref().unwrap_or("{}"), &tools)
-                .await
-                .map_err(plurx_core::error::ProbeError::Parse)?;
-            let mut document: serde_json::Value =
-                serde_json::from_str(result.raw_json.as_deref().unwrap_or("{}"))
-                    .map_err(|e| plurx_core::error::ProbeError::Parse(e.to_string()))?;
-            document[plurx_core::scan::dv_title::PROBE_FIELD] = serde_json::to_value(stats)
-                .map_err(|e| plurx_core::error::ProbeError::Parse(e.to_string()))?;
-            result.raw_json = Some(document.to_string());
-            Ok(result)
-        },
-    )
-    .await
 }
 
 #[cfg(test)]

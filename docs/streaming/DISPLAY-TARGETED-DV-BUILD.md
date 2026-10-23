@@ -579,6 +579,7 @@ fresh durable admission and normal lease/source validation, not HTTP/full-app
 EOF. The original two-destination reuse test remains; a new SDR-only case avoids
 replaying valid cases. Both source digests include the scanner accumulator;
 existing scanner-binding rotation clears prior title facts.
+Qualification facts publish through the claimed-job fence; ordinary upserts still invalidate aggregates.
 Main qualification and promotion-test policy reconciliation remain open.
 
 ### Stage PRs target one effort branch

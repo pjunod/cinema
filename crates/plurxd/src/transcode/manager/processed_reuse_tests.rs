@@ -1018,40 +1018,15 @@ async fn fixture_with_audio(
             .await
             .expect("file")
             .expect("source");
-        let title_probe = crate::source_probe::probe_title_for_control(&manager, &source_file)
-            .await
-            .expect("real fenced complete-title scan");
-        let title_document: serde_json::Value = serde_json::from_str(
-            title_probe
-                .raw_json
-                .as_deref()
-                .expect("complete-title document"),
-        )
-        .expect("title document");
-        let title_stats = plurx_core::scan::dv_title::DvTitleStats::from_probe_json(
-            title_probe
-                .raw_json
-                .as_deref()
-                .expect("complete-title document"),
-        )
-        .expect("scanner facts");
+        let title_stats =
+            crate::source_probe::publish_title_for_control(&manager, &store, &source_file)
+                .await
+                .expect("real fenced title job publication");
         assert_eq!(
             title_stats.eligibility(),
             plurx_core::scan::dv_title::TitleEligibility::Eligible
         );
         assert_eq!(title_stats.decoded_frames, keys.len() as u64);
-        probe[plurx_core::scan::dv_title::PROBE_FIELD] =
-            title_document[plurx_core::scan::dv_title::PROBE_FIELD].clone();
-        store
-            .upsert_file(
-                item,
-                path.to_str().expect("path"),
-                metadata.len() as i64,
-                metadata.mtime(),
-                &plurx_core::scan::probe::parse_probe_json(&probe),
-            )
-            .await
-            .expect("publish source-fenced title facts");
     }
     let snapshot = store
         .playback_planning_snapshot(file_id, &QUALITY_PLANNING_KEYS)
