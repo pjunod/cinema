@@ -131,37 +131,34 @@ incident and general remote processed requalification remain out of B scope.
 
 ## C. Display-targeted HDR10-E — PR A of [DISPLAY-TARGETED-DV-BUILD.md](DISPLAY-TARGETED-DV-BUILD.md)
 
-**Current (2026-10-23), owner direct GPT/root:** A/#1216 merged into
-`effort/display-targeted-dv` at3fbb3f669 after compile-only gate5863. Remaining
-B–F commits are batched in integration PR#1269; #1266/#1267/#1268/#1270 are
-closed folded records, not separate merges. Main promotion remains open.
-The [canonical qualification ledger](DISPLAY-TARGETED-DV-BUILD.md) supersedes
-historical checkpoints below.
+**Current (2026-10-23), owner direct GPT/root:** A/#1216 and batched
+integration#1269 are merged into `effort/display-targeted-dv`, latest landing
+`3cc264068`. Smaller#1266/#1267/#1268/#1270 are closed folded records, not separate
+merges. All78 regression fields are verified in the landing. Main promotion is
+open; the [canonical ledger](DISPLAY-TARGETED-DV-BUILD.md) owns current evidence.
 
-Actual P7 mapped1000/1600 driver348 passed both cells on source503619eb,
-including audio, cadence, native BL/EL shapes and seek windows. Its title scan
-contains17983 valid frames and maximum L1 PQ code3441; that code is not a
-measurement in nits. Retain earlier P8, unit, shader and helper passes under
-their original source attribution. The integrated renderer still needs fresh
-P8 adoption; changed C inputs do not inherit helper341/P7’s source identity.
+P7 driver348 passed1000/1600 on source503619eb with audio, cadence, native BL/EL
+shapes and seek windows. Its17983 valid frames have maximum L1 PQ code3441,
+not3441nits. Earlier P8/unit/shader/helper passes retain their actual sources.
+Changed C inputs require integrated P7/P8 adoption; they do not inherit helper341.
 
-Sourceba8df0e7 passed pinned Rust1.97.1 fmt/check/all-target Clippy382 and
-production C helper link384 with zero product tests, controls, media or GPU
-execution. This includes the root-cause repair sharing fresh FEL polynomial/MMR
-admission and receipts with SDR while retaining BT.709 conversion,100-nit
-mapping and narrow P8.1 authoring. Candidate2ab5fd294 has identical protected
-runtime/Cargo inputs. Required local paperwork15/15 and fresh PR paperwork5882
-passed; gate5884 then stopped in corrective-history preflight before compiler
-allocation. Source-backed anchor repair1b904ce9 passed direct checks; the authenticated CI
-audit is still required. The broad local attempt ended130 without a result.
-No red merge occurs.
+Compile-only gate5889 passed all8 jobs on e6473332f; the effort landing has its
+identical tree. Actual sourceba8df0e7 passed pinned Rust382 and production C
+link384; final-input trim-candidate393 also compiles. All1237 protected runtime
+inputs match. These runs executed zero product tests/controls/media/GPU work.
+The fresh FEL polynomial/MMR admission and receipt fix preserves SDR BT.709
+conversion,100-nit mapping and narrow P8.1 authoring.
 
-Phase E reference acquisition and comparison machinery work, but substantial
-creative-trim errors remain. Full CM4/L8 support and creative acceptance are
-absent; the user declined Dolby contact. A scope decision is pending on whether
-to promote qualified HDR/SDR with trims explicitly unfinished or hold main for E.
-Final main promotion requires frozen current-main reconciliation, completed-code
-adversarial review, applicable once-only fast-lane evidence and qualification.
+Root chose to qualify/promote completed HDR/SDR under standing user authority
+to use judgment while away. E remains unfinished, creative false and “L1 only”
+truthful; this is not A–F completion or creative acceptance. Reference349's42
+vendor commands exited0, but comparisons353 retain large numerical errors.
+User declined Dolby contact. Physical-display acceptance remains open.
+
+Final review, fixes and exact-candidate qualification remain. The user is
+reconciling fast-lane/selective-rerun policy with full manual promotion CI;
+no main merge or validator relaxation is inferred while pending. Current
+main1eb117839 is already an ancestor of the effort.
 
 The separate full-app FEL comparison/interpreter lane remains excluded: C1 has
 a final source-EOF failure without a reviewed production repair (original

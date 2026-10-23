@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A/#1216 is merged into `effort/display-targeted-dv`; B–F are batched in integration PR #1269, with main promotion and E creative accuracy open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
+**Status:** #1216 and batched #1269 merged into `effort/display-targeted-dv`; HDR/SDR promotion qualification and E creative accuracy remain open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 The matrix below is the current qualification record. Dated implementation
@@ -10,23 +10,35 @@ new source head.
 
 ## Current qualification — source-bound evidence through F
 
-| Phase | Qualified evidence and source | Still open |
+| Phase | Retained evidence | Open for promotion |
 |---|---|---|
-| A · title scan and HDR10-E | PR #1216 merged into the effort at `3fbb3f669`; compile-only gate5863 and paperwork5862 PASS. Actual P7 driver348 passed both1000/1600 on source503619eb, with retained frame/audio/cadence/seek evidence. | Final integrated P8 adoption, EOF follow-up and main promotion remain separate. |
-| B · output metadata | PR #1266 folded into #1269; seven Rust312 cases on e53a221b and compiler361 on f57d0071 PASS. Runtime input bytes remain unchanged. Gate5870 exposed the installed Xcode27.1 pin drift before Apple compilation; repaired at23b131dc, gate5877 then exceeded the cold Apple budget; integration fixes retain full architectures and use toolchain-specific caches. | Current-candidate effort gate and encoder/device acceptance. |
-| C · server controls | PR #1267 folded into #1269; ten Rust cases on a43fcf20, fourteen badge and72 settings cases, compiler362 PASS with source attribution retained. | Own effort gate and integrated acceptance; readiness never overrides saved choices. |
-| D · client presentation | PR #1268 folded into #1269;27 web cases and compiler363 PASS with original attribution. | Own effort gate and physical display acceptance. |
-| Client builds | Android30 and Apple13 cases plus test-build passed on F7eed; client source closure unchanged through F6d48d4c. | Current Xcode27.1 compiler gate and physical acceptance. |
-| E · L2/L8 trims | Public L2 and explicitly assumed L8 prototype07c36ec; neutral-L3 provenance928407c. Fourteen comparisons353 completed; baseline PQ error.110077 and trim-delta errors~.44/.49 remain. | Supported CM4/L8 rendering contract and creative accuracy; vendor contact declined. Tooling passes do not establish creative support. |
-| F · SDR target | PR #1269 draft. Source6d48d4c retains ten Rust, two web, compiler326/Clippy324 and independent pixel325 passes (61440 samples, max1code/limit2). Current repair shares fresh FEL admission and conditional receipts across HDR10/SDR, preserving BT.709 conversion and100-nit mapping. | Repair ba8df0e7 passed pinned fmt/check/Clippy382; final-candidate regression remains unrun. Production C link384 is separate. Own effort gate, main promotion and physical acceptance remain open. |
+| A · title scan/HDR10-E | #1216 merged into the effort at `3fbb3f669`. P7 driver348 passed1000/1600 on source503619eb, with frame/audio/cadence/geometry/seek receipts. | Integrated P7/P8 adoption after changed C inputs; earlier P8 passes retain their sources. |
+| B–D · metadata, controls, clients | #1266/#1267/#1268 are closed folded records in #1269. Seven Rust312, ten Rust316,14 badge/72 settings,27 web and compiler361/362/363 passes retain their sources. | Final behavior checks only where failed/materially invalidated, plus applicable final-gate requirements. |
+| Clients | Android30 and Apple13 plus test-build passed on F7eed; client inputs remain unchanged. Current compile-only gate5889 passed Android and Xcode27.1 Apple builds. | Physical-device acceptance. |
+| E · trims | Reference349 completed42 vendor commands with exit0. Comparison353 completed14 observations; baseline PQ error.110077 and trim-delta errors.44085/.48964 fail creative acceptance. | Full CM4/L8 implementation/contract and creative accuracy remain unfinished; no vendor contact authorized. |
+| F · SDR | Source6d48d4c retains ten Rust, two web and pixel325 (61440 samples, max1code/limit2). Repairba8df0e7 shares fresh FEL admission/receipts with SDR, preserving BT.709 gamma2.4 and100-nit mapping. | Changed factory regression and integrated delivery acceptance. |
 
-Only A has merged, into `effort/display-targeted-dv`; main is unchanged.
-Remaining stage commits are batched into #1269 to avoid repeated broad compiler gates;
-#1266/#1267/#1268/#1270 retain their evidence as folded stage records.
-Results remain tied to their named sources or verified unchanged input closures.
-The final main candidate still requires adversarial review, once-only applicable
-fast-lane evidence and the Main promotion gate. No physical display acceptance
-or creative-trim equivalence is inferred from these records.
+A/#1216 and integration#1269 are merged into `effort/display-targeted-dv`;
+#1269 landed `3cc264068` with all78 regression fields. Its tree matches gated
+candidatee6473332f. Compile-only gate5889 passed all8 jobs. Actual sourceba8df0e7
+passed pinned Rust1.97.1 fmt/check/all-target Clippy382, production C link384
+and final-input trim-candidate link393. All1237 protected runtime/Cargo inputs
+match that source. These compiler runs executed zero product tests, controls,
+media or GPU work; tooling compilation establishes no trim accuracy.
+
+Root chose to qualify/promote completed HDR/SDR under the user's standing
+instruction to use judgment while away. E remains explicitly unfinished;
+`creative_trims_applied:false` and “L1 only” remain truthful. This does not
+complete all A–F or lower creative acceptance. Retain valid source-bound passes;
+repeat failed/materially invalidated cases and the applicable final-gate suite.
+
+Main promotion still needs completed-candidate adversarial review, resulting
+fixes and exact-candidate qualification. Current main1eb117839 is already an
+ancestor of the effort. The user is reconciling fast-lane/selective-rerun policy
+with the repository's full manual promotion qualification; no main merge or
+validator change is inferred while pending. Physical-display acceptance remains
+open. The separate full-app FEL EOF interpreter lane is excluded from bounded
+source qualification, not claimed complete.
 
 ## PR B implementation checkpoint
 
@@ -556,12 +568,15 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 | Stage | Contents | Recorded state |
 |---|---|---|
-| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 merged into the effort as `3fbb3f669`; source review is approved, general-FEL checks and exact regressions pass, both mapped P7 targets pass; final integrated adoption and accuracy qualification remain open. |
-| B | Processed-output MDCV/CLL writer | PR #1266 is draft; compiled #361 and seven Rust cases #312 retain source-specific passes. Not merged or promotion-qualified. |
-| C | Peak capability, buckets, elision, Developer setting, indicator and Activity text | Built; source-attributed Rust, badge and settings cases pass; not merged or promotion-qualified. |
-| D | Android / Android TV peak reporting and web setting | Built; source-attributed web, Android, Apple and build checks pass; not merged or promotion-qualified. |
-| E | Phase 2 trim comparison | Neutral-L3 reference and 14-case numerical observations are retained; creative accuracy and complete L8 contract remain unaccepted. |
-| F | Phase 3 SDR target | Built with source-attributed Rust, web and pixel checks; not merged or promotion-qualified. |
+| A | Title scan, target policy, mapping, report and controls | #1216 merged into the effort at3fbb3f669; source-bound P7 passes retained. Integrated adoption remains open. |
+| B–D | Output metadata, server controls, client presentation | Batched #1269 merged into the effort at3cc264068 after compile-only gate5889 PASS. Smaller PRs are folded records. |
+| E | Trim reference/comparison prototype | Integrated tooling compiles; known numerical errors fail creative accuracy. Implementation/acceptance remain unfinished, creative false and L1-only truthful. |
+| F | SDR target | Integrated in #1269; source-bound Rust/web/pixel passes retained. Changed FEL factory regression and final delivery qualification remain open. |
+
+Root's delivery decision under standing user authority covers completed HDR/SDR;
+the whole A–F programme is not declared complete. Main promotion retains final
+review, applicable tests and exact-candidate qualification. The promotion-test
+policy conflict awaits user reconciliation; no validator is weakened.
 
 ### Stage PRs target one effort branch
 

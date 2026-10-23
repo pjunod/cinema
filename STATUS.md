@@ -1,7 +1,8 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-22 · Newest effort first; each entry links to its current ledger.
+**Updated:** 2026-10-23 · Newest effort first; each entry links to its current ledger.
 <!-- status: insert new efforts below this line -->
+- **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). Owner direct GPT/root; #1216 and batched#1269 merged into the effort, latest3cc264068; main unchanged. Compile-only gate5889 all8 PASS, Rust382/C384/trim393 compile passes; earlier behavior/media/client evidence retains source attribution. Final integrated adoption, completed-candidate review and qualification remain. Root delivery decision covers HDR/SDR with E explicitly unfinished and truthful L1-only reporting; no full A–F completion. Promotion-test policy awaits user reconciliation; physical acceptance and the excluded full-app FEL EOF lane remain separate.
 - **2026-10-22 · Rust admission refinement:** [live ledger](docs/cluster/RUST-ADMISSION-REFINEMENT-STATUS.md); production controller and exact-body harnesses built; Fable final review delivered, amendments implemented and five affected runtime schedules passed. Qualification and landing are tracked in the PR. Owner: Codex coordinator; [PR #1260](http://forge.lan:3000/noirr/plurx/pulls/1260).
 - **2026-10-21 · Playback cache disk safety:** [shared budget contract](docs/streaming/PLAYBACK-CACHE-BUDGET.md); aggregate accounting, owner eviction and write admission built. Astra review addressed; focused qualification in progress; deployment acceptance remains open. Owner: Codex.
 - **2026-10-21 · Worker refinement:** [live ledger](docs/cluster/WORKER-REFINEMENT-STATUS.md); seven Rust schedules pass; two complete workers, reviewed correspondence and observation projection built. Qualification and landing receipt: [PR #1251](http://forge.lan:3000/noirr/plurx/pulls/1251). Owner: Codex coordinator.
@@ -16,7 +17,6 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). A/#1216 merged into `effort/display-targeted-dv` at3fbb3f669; remaining B–F commits are batched into integration PR#1269 to avoid repeated broad compiler gates, then one promotion PR to `main`. Stage PRs#1266/#1267/#1268/#1270 are folded evidence records. Current sourceba8df0e7 passed pinned fmt/check/Clippy382 and production C helper link384 with zero product tests. Earlier P7/B/C/D/F/client/pixel passes retain their original sources. E creative accuracy, final integrated P8/EOF qualification, completed-candidate review and Main promotion gate remain open.
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,
