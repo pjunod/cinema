@@ -233,6 +233,8 @@ class ReuseIdentities(OwnedScratch):
     def test_product_semantic_table_changes_invalidate_embedded_bundle(self):
         sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool',
           'crates/plurx-core/src/store/async_driver_product.rs':'product'}
+        sources.update({path:'actual-settlement source fixture' for path in runner.ACTUAL_SETTLEMENT_SOURCE_PATHS
+                        if path not in sources})
         sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
         output = self.directory/'semantic-input'; output.mkdir()
         (output/'driver-graph.json').write_text('{}\n')
@@ -248,6 +250,8 @@ class ReuseIdentities(OwnedScratch):
         sources = {'Cargo.toml':'root','Cargo.lock':'lock','rust-toolchain.toml':'tool',
           'crates/plurx-worker-control/src/lib.rs':'leaf','crates/plurx-core/src/store/mod.rs':'store',
           'crates/plurxd/src/library_work.rs':'daemon'}
+        sources.update({path:'actual-settlement source fixture' for path in runner.ACTUAL_SETTLEMENT_SOURCE_PATHS
+                        if path not in sources})
         sources.update({path:'same invocation bytes' for path in adapter.INVOCATION_PATHS})
         changed = dict(sources); changed['crates/plurx-core/src/store/mod.rs'] = 'changed'
         self.assertEqual(runner.case_sources('graph-driver',sources),runner.case_sources('graph-driver',changed))
