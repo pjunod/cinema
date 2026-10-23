@@ -474,7 +474,7 @@ fn every_preference_combination_preserves_conversion_and_native_constraints() {
                         planning_input_generation: 0,
                     };
                     let expected = match destination {
-                        DvDestination::Hdr10 => hdr,
+                        DvDestination::Hdr10 | DvDestination::Sdr => hdr,
                         DvDestination::Profile81 => fel && conversion,
                     };
                     assert_eq!(
@@ -874,6 +874,66 @@ fn display_target_semantic_digest_separates_all_buckets_and_title_constants() {
         assert_eq!(master.semantic_digest(), same.semantic_digest());
     }
 }
+#[test]
+fn resolved_source_floor_is_the_completed_plan_black_level_and_semantic_identity() {
+    use crate::scan::dv_title::*;
+    let stats = DvTitleStats {
+        schema: SCHEMA,
+        complete: true,
+        decoded_frames: 1,
+        valid_l1_frames: 1,
+        missing_l1_frames: 0,
+        invalid_l1_frames: 0,
+        max_l1_pq: Some(4095),
+        mastering_luminance: TitleConstant::Unknown,
+        mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+            index: 0,
+            custom_xy: None,
+        }),
+    };
+    let DvDisplayTargetChoice::Target(proposal) =
+        DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+    else {
+        panic!("target");
+    };
+    let export = |target| DvExportPolicy::DisplayTargetYuv420p10V1 {
+        raster: (64, 64),
+        target,
+    };
+    assert!(
+        completed_target_policy(export(proposal)).is_err(),
+        "no unresolved completed plan"
+    );
+    let source = DvSourceMastering {
+        primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+        min_1e4_nits: 17,
+    };
+    let resolved = proposal.resolve_source(Some(source)).expect("source floor");
+    let fallback = proposal.resolve_source(None).expect("renderer floor");
+    let mut source_plan = plan(DvDestination::Hdr10);
+    source_plan.capability.target =
+        completed_target_policy(export(resolved)).expect("completed target");
+    let mut fallback_plan = source_plan.clone();
+    fallback_plan.capability.target =
+        completed_target_policy(export(fallback)).expect("fallback target");
+    assert_eq!(source_plan.capability.target.black_1e4_nits, Some(17));
+    assert_eq!(source_plan.capability.target.black_millinit, 1);
+    assert_eq!(fallback_plan.capability.target.black_1e4_nits, Some(50));
+    assert_eq!(
+        source_plan.capability.target.parameters,
+        export(resolved).target_parameters()
+    );
+    assert_ne!(
+        source_plan.semantic_digest(),
+        fallback_plan.semantic_digest()
+    );
+    assert_eq!(
+        serde_json::to_value(&source_plan.capability.target).expect("completed report target")
+            ["black_1e4_nits"],
+        17
+    );
+}
+
 #[test]
 fn successor_generations_do_not_reset_recovery_episode() {
     let mut episode = DvRecoveryEpisode::default();
@@ -1628,6 +1688,87 @@ fn common_source_origin_bounds_are_absolute_exact_and_seek_stable() {
     .is_err());
 }
 
+#[test]
+fn effective_target_report_rejects_ambiguous_or_unsupported_buckets() {
+    let generation = "00000000-0000-4000-8000-000000000001";
+    let report = |targets: &[u32]| {
+        let mut operations = vec![DvOperation::RpuColorConversion, DvOperation::TargetMapping];
+        operations.extend(
+            targets
+                .iter()
+                .map(|nits| DvOperation::DisplayTargetMapping { nits: *nits }),
+        );
+        serde_json::to_vec(
+            &serde_json::json!({"generation":generation,"hdr10_enhanced":true,
+            "fel_contributed":false,"applied_operations":operations}),
+        )
+        .expect("report")
+    };
+    let master =
+        DvEffectiveProcessingReport::from_owner_wire(&report(&[]), generation, Some("hdr10"))
+            .expect("master report");
+    assert_eq!(master.display_target_nits(), None);
+    let targeted =
+        DvEffectiveProcessingReport::from_owner_wire(&report(&[1600]), generation, Some("hdr10"))
+            .expect("target report");
+    assert_eq!(targeted.display_target_nits(), Some(1600));
+    for buckets in [&[999][..], &[1000, 1600][..], &[1600, 1600][..]] {
+        assert!(DvEffectiveProcessingReport::from_owner_wire(
+            &report(buckets),
+            generation,
+            Some("hdr10")
+        )
+        .is_none());
+    }
+    assert!(DvEffectiveProcessingReport::from_owner_wire(
+        &report(&[1600]),
+        generation,
+        Some("sdr")
+    )
+    .is_none());
+    assert!(DvEffectiveProcessingReport::from_owner_wire(
+        &report(&[1600]),
+        "00000000-0000-4000-8000-000000000002",
+        Some("hdr10")
+    )
+    .is_none());
+}
+
+#[test]
+fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt() {
+    let generation = "00000000-0000-4000-8000-000000000001";
+    let mut value = serde_json::json!({"generation":generation,"hdr10_enhanced":false,"sdr_processed":true,"fel_contributed":false,"applied_operations":["RpuColorConversion","TargetMapping","Bt709Gamma24Conversion",{"DisplayTargetMapping":{"nits":100}}]});
+    let accept = |value: &serde_json::Value, delivered| {
+        DvEffectiveProcessingReport::from_owner_wire(
+            &serde_json::to_vec(value).expect("wire"),
+            generation,
+            delivered,
+        )
+    };
+    let report = accept(&value, Some("sdr")).expect("typed SDR report");
+    assert_eq!(
+        serde_json::to_value(&report).expect("wire")["creative_trims_applied"],
+        false
+    );
+    value["creative_trims_applied"] = true.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["creative_trims_applied"] = false.into();
+    assert!(report.sdr_processed());
+    assert_eq!(report.display_target_nits(), Some(100));
+    assert!(accept(&value, Some("hdr10")).is_none());
+    value["hdr10_enhanced"] = true.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["hdr10_enhanced"] = false.into();
+    value["applied_operations"][3]["DisplayTargetMapping"]["nits"] = 400.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["applied_operations"][3]["DisplayTargetMapping"]["nits"] = 100.into();
+    value["applied_operations"]
+        .as_array_mut()
+        .expect("array")
+        .remove(2);
+    assert!(accept(&value, Some("sdr")).is_none());
+}
+
 // Numeric metadata shape from public inspection; encoded pictures remain the
 // existing authored synthetic control, never a private movie fixture.
 fn general_fel_control_rpu() -> dolby_vision::rpu::dovi_rpu::DoviRpu {
@@ -1821,12 +1962,42 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
         super::super::VodSourceClock::ReportedOrigin(0),
     )
     .expect("observed control origin");
-    let make = |source_keys: &[DvFrameKey], source_rpus: &[Vec<u8>]| {
+    use crate::scan::dv_title::{DvTitleStats, TitleConstant, SCHEMA};
+    let DvDisplayTargetChoice::Target(sdr_target) =
+        DvDisplayTarget::for_sdr_title(Some(DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 3,
+            valid_l1_frames: 3,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        }))
+        .expect("SDR target")
+    else {
+        panic!("SDR conversion must not elide");
+    };
+    let sdr_target = sdr_target
+        .resolve_sdr_floor(None)
+        .expect("resolved SDR floor");
+    let mut sdr_encoded = dv_author_sdr_window(&encoded).expect("synthetic SDR declarations");
+    // Only the container contract is under test. This deliberately keeps the
+    // synthetic coded pictures; it is not evidence of an SDR pixel conversion.
+    let colors: Vec<_> = sdr_encoded
+        .windows(4)
+        .enumerate()
+        .filter_map(|(at, bytes)| (bytes == b"nclx").then_some(at))
+        .collect();
+    assert_eq!(colors.len(), 1);
+    sdr_encoded[colors[0] + 4..colors[0] + 10].copy_from_slice(&[0, 1, 0, 1, 0, 1]);
+    let make = |destination, source_keys: &[DvFrameKey], source_rpus: &[Vec<u8>]| {
         dv_plan_completed_window(DvCompletedWindowInput {
             source: facts.clone(),
-            preferences: input(DvDestination::Hdr10).preferences,
+            preferences: input(destination).preferences,
             backend: backend(),
-            destination: DvDestination::Hdr10,
+            destination,
             encoder: Encoder::Software,
             mode: DvProcessingMode::Fel,
             source_keys,
@@ -1835,9 +2006,20 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
             source_origin: origin,
             grid: super::super::VodFrameGrid::new(24000, 1001).expect("control grid"),
             first_global_frame: 48,
-            encoded: &encoded,
+            encoded: if destination == DvDestination::Sdr {
+                &sdr_encoded
+            } else {
+                &encoded
+            },
             raster: (64, 64),
-            export_policy: DvExportPolicy::NativeRgb48V1,
+            export_policy: if destination == DvDestination::Sdr {
+                DvExportPolicy::DisplayTargetYuv420p10V1 {
+                    raster: (64, 64),
+                    target: sdr_target,
+                }
+            } else {
+                DvExportPolicy::NativeRgb48V1
+            },
             source_trace: digest('d'),
             observed_at: 1,
             decoder: DecodeBackend::Software,
@@ -1845,29 +2027,48 @@ fn completed_general_fel_factory_and_receipt_keep_conditional_operations() {
     };
     // This exercises the typed factory against retained synthetic encoded data.
     // It is neither a real helper receipt nor native/GPU acceptance evidence.
-    let completed = make(&keys, &rpus).expect("bounded general FEL factory");
-    assert!(completed
-        .graph
-        .required_operations()
-        .contains(&DvOperation::MmrReshape));
-    let receipt = dv_receipt_completed_window(&completed, &keys, &[duration; 3], &rpus)
-        .expect("general FEL receipt");
-    for frame in receipt.served_frames() {
-        assert!(frame
-            .applied_operations
-            .contains(&DvOperation::PolynomialReshape));
-        assert!(frame.applied_operations.contains(&DvOperation::MmrReshape));
-        assert!(frame
-            .applied_operations
-            .contains(&DvOperation::LinearNlqResidual));
+    for destination in [DvDestination::Hdr10, DvDestination::Sdr] {
+        let completed = make(destination, &keys, &rpus).expect("bounded general FEL factory");
+        assert!(completed
+            .graph
+            .required_operations()
+            .contains(&DvOperation::MmrReshape));
+        let receipt = dv_receipt_completed_window(&completed, &keys, &[duration; 3], &rpus)
+            .expect("general FEL receipt");
+        for frame in receipt.served_frames() {
+            assert!(frame
+                .applied_operations
+                .contains(&DvOperation::PolynomialReshape));
+            assert!(frame.applied_operations.contains(&DvOperation::MmrReshape));
+            assert!(frame
+                .applied_operations
+                .contains(&DvOperation::LinearNlqResidual));
+            assert_eq!(
+                frame
+                    .applied_operations
+                    .contains(&DvOperation::Bt709Gamma24Conversion),
+                destination == DvDestination::Sdr
+            );
+            assert_eq!(
+                frame
+                    .applied_operations
+                    .contains(&DvOperation::Bt2020NclConversion),
+                destination == DvDestination::Hdr10
+            );
+            if destination == DvDestination::Sdr {
+                assert!(frame
+                    .applied_operations
+                    .contains(&DvOperation::DisplayTargetMapping { nits: 100 }));
+            }
+        }
+        assert_eq!(
+            receipt.counts().operations_applied[&DvOperation::MmrReshape],
+            3
+        );
+        assert_eq!(receipt.counts().el_accepted, 3);
+        assert!(make(destination, &keys[..2], &rpus).is_err());
+        assert!(make(destination, &keys, &rpus[..2]).is_err());
     }
-    assert_eq!(
-        receipt.counts().operations_applied[&DvOperation::MmrReshape],
-        3
-    );
-    assert_eq!(receipt.counts().el_accepted, 3);
-    assert!(make(&keys[..2], &rpus).is_err());
-    assert!(make(&keys, &rpus[..2]).is_err());
     assert!(
         dv_author_profile81_window(&encoded, (64, 64), 24000, 48048, 1001, &rpus, 1).is_err(),
         "P8.1 authoring remains narrow"

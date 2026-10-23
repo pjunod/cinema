@@ -409,8 +409,12 @@ impl PrivateWindow {
         use plurx_core::transcode::dv_processing::{
             dv_author_profile81_window, dv_validate_encoded_window, DvDestination,
         };
-        if self.display_target.is_some() && destination != DvDestination::Hdr10 {
-            return Err("display targeting is HDR10-only".into());
+        if self
+            .display_target
+            .is_some_and(|target| target.is_sdr() != (destination == DvDestination::Sdr))
+            || destination == DvDestination::Profile81 && self.display_target.is_some()
+        {
+            return Err("display target and output grade differ".into());
         }
         let rpus: Vec<_> = observed
             .pictures
@@ -421,7 +425,23 @@ impl PrivateWindow {
             plurx_core::transcode::vod_reconstructed_video_origin(grid, first_global_frame)
                 .map_err(str::to_owned)?;
         let bytes = match destination {
-            DvDestination::Hdr10 => self.encoded,
+            DvDestination::Sdr => {
+                plurx_core::transcode::dv_processing::dv_author_sdr_window(&self.encoded)
+                    .map_err(|error| error.to_string())?
+            }
+            DvDestination::Hdr10 => match self.display_target {
+                Some(target) => {
+                    let metadata = target
+                        .output_metadata()
+                        .map_err(|error| error.to_string())?;
+                    plurx_core::transcode::dv_processing::dv_author_hdr10_window(
+                        &self.encoded,
+                        metadata,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+                None => self.encoded,
+            },
             DvDestination::Profile81 => dv_author_profile81_window(
                 &self.encoded,
                 raster,
@@ -485,6 +505,7 @@ impl PrivateWindow {
             return Err("completed output stream membership differs".into());
         }
         let video = videos[0];
+        let sdr = destination == DvDestination::Sdr;
         if video.get("width").and_then(serde_json::Value::as_u64) != Some(u64::from(raster.0))
             || video.get("height").and_then(serde_json::Value::as_u64) != Some(u64::from(raster.1))
             || [
@@ -492,9 +513,9 @@ impl PrivateWindow {
                 ("profile", "Main 10"),
                 ("pix_fmt", "yuv420p10le"),
                 ("color_range", "tv"),
-                ("color_space", "bt2020nc"),
-                ("color_transfer", "smpte2084"),
-                ("color_primaries", "bt2020"),
+                ("color_space", if sdr { "bt709" } else { "bt2020nc" }),
+                ("color_transfer", if sdr { "bt709" } else { "smpte2084" }),
+                ("color_primaries", if sdr { "bt709" } else { "bt2020" }),
             ]
             .iter()
             .any(|(field, value)| {
@@ -563,6 +584,117 @@ pub(crate) fn completed_window_encoder(
     }
 }
 
+/// SDR consumes only the selected stream's mastering minimum. Missing HDR
+/// primaries do not invalidate this independent floor fact or invent BT.2020.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_mastering_minimum(stream: &serde_json::Value) -> Result<Option<u32>, String> {
+    let invalid = || "targeted SDR source MDCV minimum malformed or conflicting".to_owned();
+    let Some(records) = stream.get("side_data_list") else {
+        return Ok(None);
+    };
+    let records = records.as_array().ok_or_else(invalid)?;
+    let mut result = None;
+    for record in records.iter().filter(|record| {
+        record
+            .get("side_data_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("Mastering display metadata")
+    }) {
+        let Some(value) = record.get("min_luminance") else {
+            continue;
+        };
+        let text = value.as_str().ok_or_else(invalid)?;
+        let (numerator, denominator) = text.split_once('/').ok_or_else(invalid)?;
+        let numerator = numerator.parse::<u64>().map_err(|_| invalid())?;
+        let denominator = denominator.parse::<u64>().map_err(|_| invalid())?;
+        if denominator == 0 {
+            return Err(invalid());
+        }
+        let scaled = (u128::from(numerator) * 10_000 + u128::from(denominator / 2))
+            / u128::from(denominator);
+        let minimum = u32::try_from(scaled).map_err(|_| invalid())?;
+        if minimum > 10_000 || result.is_some_and(|old| old != minimum) {
+            return Err(invalid());
+        }
+        result = Some(minimum);
+    }
+    Ok(result)
+}
+
+/// Parse only the already-attested selected video stream, never a container or
+/// another track. FFprobe's rational values are converted with integer rounding
+/// to ST 2086 units. A missing record differs from malformed/conflicting data.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_mastering_metadata(
+    stream: &serde_json::Value,
+) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+    use plurx_core::transcode::dv_processing::DvSourceMastering;
+    let invalid = || "targeted HDR10 source MDCV malformed or conflicting".to_owned();
+    let Some(records) = stream.get("side_data_list") else {
+        return Ok(None);
+    };
+    let records = records.as_array().ok_or_else(invalid)?;
+    fn scaled(record: &serde_json::Value, field: &str, scale: u64) -> Option<u64> {
+        let text = record.get(field)?.as_str()?;
+        let (numerator, denominator) = text.split_once('/')?;
+        let numerator = numerator.parse::<u64>().ok()?;
+        let denominator = denominator.parse::<u64>().ok()?;
+        if denominator == 0 {
+            return None;
+        }
+        let value = u128::from(numerator) * u128::from(scale);
+        u64::try_from((value + u128::from(denominator / 2)) / u128::from(denominator)).ok()
+    }
+    let mut result = None;
+    let mut previous_maximum = None;
+    for record in records.iter().filter(|record| {
+        record
+            .get("side_data_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("Mastering display metadata")
+    }) {
+        let mut xy = [0; 8];
+        for (at, name) in [
+            "red_x",
+            "red_y",
+            "green_x",
+            "green_y",
+            "blue_x",
+            "blue_y",
+            "white_point_x",
+            "white_point_y",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            xy[at] = scaled(record, name, 50_000)
+                .and_then(|v| u16::try_from(v).ok())
+                .ok_or_else(invalid)?;
+        }
+        let minimum = scaled(record, "min_luminance", 10_000)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(invalid)?;
+        let maximum = scaled(record, "max_luminance", 10_000).ok_or_else(invalid)?;
+        if maximum == 0 || maximum > 100_000_000 || u64::from(minimum) >= maximum {
+            return Err(invalid());
+        }
+        plurx_core::fmp4::Hdr10OutputMetadata::new(xy, 10_000, minimum, 0)
+            .map_err(|_| invalid())?;
+        let next = DvSourceMastering {
+            primaries_rgbw: xy,
+            min_1e4_nits: minimum,
+        };
+        if result.is_some_and(|old| old != next)
+            || previous_maximum.is_some_and(|old| old != maximum)
+        {
+            return Err(invalid());
+        }
+        result = Some(next);
+        previous_maximum = Some(maximum);
+    }
+    Ok(result)
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) struct RuntimeRecipe {
     pub(crate) tools: Arc<ToolSet>,
@@ -573,7 +705,14 @@ pub(crate) struct RuntimeRecipe {
     pub(crate) native_bl: (u32, u32),
     /// The held demux origin the Encoding froze for its soundtrack.
     pub(crate) source_clock: plurx_core::transcode::VodSourceClock,
+    /// Selected held stream side data. Parse failures affect explicit targets
+    /// only; default/master processing does not consume or invent these facts.
+    pub(crate) source_mastering:
+        Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
     pub(crate) preferences: plurx_core::transcode::dv_processing::DvPreferences,
+    pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+    pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
+    pub(crate) display_target_note: Option<String>,
     pub(crate) destination: plurx_core::transcode::dv_processing::DvDestination,
     pub(crate) mode: plurx_core::transcode::dv_processing::DvProcessingMode,
     pub(crate) encoder: plurx_core::transcode::Encoder,
@@ -595,6 +734,30 @@ pub(crate) struct RuntimeRecipe {
 
 #[cfg(target_os = "linux")]
 impl RuntimeRecipe {
+    /// Physical/internal callers resolve before constructing the export policy;
+    /// a frozen live target is rechecked and cannot acquire another floor.
+    pub(crate) fn resolve_display_target(
+        &self,
+        target: plurx_core::transcode::dv_processing::DvDisplayTarget,
+    ) -> Result<plurx_core::transcode::dv_processing::DvDisplayTarget, String> {
+        if target.is_sdr() {
+            target
+                .resolved_sdr_floor()
+                .map_err(|error| error.to_string())?;
+            if self.display_target != Some(target) {
+                return Err("SDR target differs from the held verified policy".into());
+            }
+            return Ok(target);
+        }
+        let source = if target.needs_source_mastering() {
+            self.source_mastering.clone()?
+        } else {
+            None
+        };
+        target
+            .resolve_source(source)
+            .map_err(|error| error.to_string())
+    }
     pub(crate) fn clear_published_window(&self) {
         self.published_receipt
             .lock()
@@ -616,7 +779,7 @@ impl RuntimeRecipe {
         let mut receipt = receipt.clone();
         receipt.bind_publication(&generation, shape.clone()).ok()?;
         let report = receipt
-            .hdr10_effective_report(
+            .effective_report(
                 &plurx_core::transcode::dv_processing::DvProductionRegistry,
                 plan,
                 &generation,
@@ -779,13 +942,14 @@ impl RuntimeRecipe {
             cancel,
             registration_hook,
             absolute_deadline,
-            None,
+            self.display_target,
         )
         .await
     }
 
-    /// Explicit internal control policy; ordinary production entrypoints above
-    /// always pass None. No environment/caps/settings selection occurs here.
+    /// Explicit immutable policy; live preparation freezes the title-qualified
+    /// target, ordinary VOD/pre-encode recipes retain None. No per-window
+    /// environment/caps/settings selection occurs here.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_policy_until(
         &self,
@@ -808,16 +972,22 @@ impl RuntimeRecipe {
         )>,
         String,
     > {
-        if display_target.is_some()
-            && self.destination != plurx_core::transcode::dv_processing::DvDestination::Hdr10
+        use plurx_core::transcode::dv_processing::DvDestination;
+        if display_target
+            .is_some_and(|target| target.is_sdr() != (self.destination == DvDestination::Sdr))
+            || self.destination == DvDestination::Profile81 && display_target.is_some()
+            || self.destination == DvDestination::Sdr && display_target.is_none()
         {
-            return Err("display targeting is HDR10-only".into());
+            return Err("display target and output grade differ".into());
         }
         if episode_failed(&self.failure_episode) {
             return Err(
                 "DV processing previously failed for this playback/source/settings/backend".into(),
             );
         }
+        let display_target = display_target
+            .map(|target| self.resolve_display_target(target))
+            .transpose()?;
         let cancellation = cancel.clone();
         let result: Result<_, String> = async {
             use plurx_core::transcode::dv_processing::{
@@ -851,10 +1021,13 @@ impl RuntimeRecipe {
             let execution =
                 TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
                     .map_err(|e| e.to_string())?;
-            let output = plan
+            let mut output = plan
                 .completed_reconstructed_output(self.encoder)
                 .ok_or("unsupported reconstructed output encoder")?
                 .with_vaapi_hdr_policy(self.vaapi_hdr_policy);
+            if self.destination == DvDestination::Sdr {
+                output = output.with_sdr_output();
+            }
             let raster = plan
                 .output_contract()
                 .effective_width()
@@ -2000,6 +2173,46 @@ mod helper_decoder_tests {
     }
 
     #[test]
+    fn resolved_source_floor_is_required_by_the_helper_trace() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(1600, Some(stats)).expect("title")
+        else {
+            panic!("target");
+        };
+        let target = target
+            .resolve_source(Some(DvSourceMastering {
+                primaries_rgbw: [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+                min_1e4_nits: 17,
+            }))
+            .expect("source floor");
+        assert_eq!(target.endpoint_args(), ["17", "4000"]);
+        let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
+        let (max, avg) = target.validate_rpu(raw).expect("retained L1");
+        let mut row = serde_json::json!({"frame":0,"nits":1600,"method":DISPLAY_TARGET_METHOD,
+            "curve":"annex-b2-rgb","max_pq":max,"avg_pq":avg,"max0_fallback":max==0,
+            "title_min_1e4":17,"title_peak":4000});
+        let parse = |row| serde_json::from_value::<super::DisplayTargetRow>(row).expect("trace");
+        assert!(parse(row.clone()).validate(target, raw).is_ok());
+        row["title_min_1e4"] = 50.into();
+        assert!(
+            parse(row).validate(target, raw).is_err(),
+            "old default floor cannot describe source17 execution"
+        );
+    }
+
+    #[test]
     fn the_helper_decoder_report_names_the_backend() {
         for (mode, backend) in [
             ("vaapi", DecodeBackend::Vaapi),
@@ -2397,5 +2610,94 @@ mod hdr10e_export_throughput {
             .find("writer_wait_idle()")
             .expect("previous frame written");
         assert!(idle < handoff.find("release_held()").expect("surfaces released"));
+    }
+}
+
+#[cfg(test)]
+mod output_metadata_tests {
+    use super::source_mastering_metadata;
+    #[test]
+    fn targeted_metadata_source_fallback_requires_complete_selected_stream_mdcv() {
+        let record = serde_json::json!({"side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000",
+            "green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000",
+            "white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "max_luminance":"4000/1","min_luminance":"17/10000"});
+        let stream = |records| serde_json::json!({"side_data_list":records});
+        let actual = source_mastering_metadata(&stream(vec![record.clone()]))
+            .expect("valid MDCV")
+            .expect("present");
+        assert_eq!(
+            actual.primaries_rgbw,
+            [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450]
+        );
+        assert_eq!(actual.min_1e4_nits, 17);
+        assert_eq!(
+            source_mastering_metadata(&stream(vec![record.clone(), record.clone()]))
+                .expect("same duplicate"),
+            Some(actual)
+        );
+        assert_eq!(
+            source_mastering_metadata(&serde_json::json!({"color_primaries":"bt2020"}))
+                .expect("missing"),
+            None
+        );
+        for field in ["red_x", "white_point_y", "min_luminance", "max_luminance"] {
+            let mut partial = record.clone();
+            partial.as_object_mut().expect("record").remove(field);
+            assert!(
+                source_mastering_metadata(&stream(vec![partial])).is_err(),
+                "partial {field}"
+            );
+        }
+        for (field, value) in [
+            ("green_x", "1/0"),
+            ("red_y", "NaN"),
+            ("blue_x", "70000/50000"),
+            ("min_luminance", "5000/1"),
+            ("max_luminance", "0/1"),
+        ] {
+            let mut invalid = record.clone();
+            invalid[field] = value.into();
+            assert!(
+                source_mastering_metadata(&stream(vec![invalid])).is_err(),
+                "invalid {field}"
+            );
+        }
+        for (field, value) in [("red_x", "33000/50000"), ("max_luminance", "1000/1")] {
+            let mut conflicting = record.clone();
+            conflicting[field] = value.into();
+            assert!(source_mastering_metadata(&stream(vec![record.clone(), conflicting])).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod sdr_floor_tests {
+    use super::*;
+    #[test]
+    fn sdr_source_floor_does_not_require_hdr_primaries_but_refuses_conflicting_minima() {
+        let stream = serde_json::json!({"side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"17/10000"}]});
+        assert_eq!(
+            source_mastering_minimum(&stream).expect("minimum"),
+            Some(17)
+        );
+        assert!(
+            source_mastering_metadata(&stream).is_err(),
+            "HDR declarations still require their complete facts"
+        );
+        let mut conflict = stream.clone();
+        conflict["side_data_list"].as_array_mut().expect("list").push(serde_json::json!({"side_data_type":"Mastering display metadata","min_luminance":"50/10000"}));
+        assert!(source_mastering_minimum(&conflict).is_err());
+        for value in ["1/0", "-1/10000", "10001/10000"] {
+            let mut malformed = stream.clone();
+            malformed["side_data_list"][0]["min_luminance"] = value.into();
+            assert!(source_mastering_minimum(&malformed).is_err());
+        }
+        assert_eq!(
+            source_mastering_minimum(&serde_json::json!({})).expect("unknown"),
+            None
+        );
     }
 }

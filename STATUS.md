@@ -16,7 +16,7 @@ Owner: Sol (source), coordinator (native/publication); [PR #1225](http://forge.l
 
 B #1211 merged (`9753284e`, lane5600 green). Pixel diagnostics are captured; simulator fix #1215 merged (`7a7d04c6`, lane5601 green). The [handoff](docs/streaming/DV-FOLLOWUPS-HANDOFF.md#processed-root-repair) separates local qualification from Paul's deployment and live verification.
 
-- **2026-10-22 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). User-confirmed flow is stage PRs into `effort/display-targeted-dv`, then one promotion PR to `main`; PR #1216 remains draft/unmerged. General-FEL focused checks pass, and both mapped P7 targets pass at #348. E’s 14-case neutral-L3 comparison is observational, not creative-accuracy acceptance. The Main promotion gate, exact-candidate qualification, complete L8 contract and device acceptance remain open.
+- **2026-10-23 · Display-targeted HDR10-E:** [A–F ledger](docs/streaming/DISPLAY-TARGETED-DV-BUILD.md). A/#1216 merged into `effort/display-targeted-dv` at3fbb3f669; remaining B–F commits are batched into integration PR#1269 to avoid repeated broad compiler gates, then one promotion PR to `main`. Stage PRs#1266/#1267/#1268/#1270 are folded evidence records. Current sourceba8df0e7 passed pinned fmt/check/Clippy382 and production C helper link384 with zero product tests. Earlier P7/B/C/D/F/client/pixel passes retain their original sources. E creative accuracy, final integrated P8/EOF qualification, completed-candidate review and Main promotion gate remain open.
 
 - **2026-10-19 · desktop Compose host controls:** native installer correction is
   recorded in PR #1226. Linux Docker companion builds only the host tray,

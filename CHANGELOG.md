@@ -10,11 +10,19 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- Optional display-targeted HDR10-E selects a supported downward bucket from
+  the viewer's reported peak, with platform/viewer provenance, complete-title
+  L1 eligibility and master elision. The independent Developer preference is
+  off by default and readiness never blocks saving it. Activity names the
+  actual live target/master choice; DYN requires a published L1-only mapping
+  receipt. Targeted roots remain private live output, outside retained VOD
+  caches; pre-encodes and ordinary VOD remain master-only.
+
 - Internal display-targeted HDR10-E groundwork: complete-title L1 coverage,
   consistent L6/L9 facts, six explicit target identities and a stateless public
   Annex B.2/B.3 RGB shader with named engineering edge extensions. Exact requested
   policy and raw-RPU L1 are checked before helper output is accepted. No display
-  selection, metadata writer or targeted playback is exposed yet; no proprietary
+  selection was exposed by this groundwork alone; no proprietary
   Dolby, perceptual-equivalence or display-accuracy claim.
   Title acquisition uses durable source/scanner generations, retains demand on
   scheduler preemption, suppresses manual cancellation, and yields its one-thread
@@ -27,6 +35,19 @@ bump may break compatibility and a **patch** bump never does.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
 ### Fixed
+
+- Display-targeted HDR10 resolves one mastering minimum before helper execution
+  and rendition identity: consistent title L6, trusted source MDCV, then the
+  established renderer floor. Completed reports and output metadata describe
+  that exact target; metadata cannot select a different black floor afterward.
+
+- Explicit internal display-targeted HDR10 windows carry consistent post-encode
+  mastering/content-light declarations in init boxes and every IRAP prefix SEI,
+  independent of encoder family. Mastering primaries/minimum use title L9/L6 or
+  the selected held source's MDCV when missing; contradictory or unknown facts
+  refuse the target. Max luminance/CLL follow the bucket and scanned L1 bound;
+  MaxFALL remains unknown. Default/master output is unchanged, and targeting
+  controls remain unexposed pending subsequent delivery stages.
 
 - Processed P7 FEL rendering uses the same bounded public decoder-metadata
   mapper as base/RPU rendering, preserving real piecewise polynomial and MMR

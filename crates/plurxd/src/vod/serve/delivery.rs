@@ -120,6 +120,7 @@ impl VodServe {
                     let rendition = Arc::clone(session.live_rendition()?);
                     let snapshot = session.last_control_snapshot.as_ref();
                     let observation = VodActivityObservation {
+                        display_target: display_target_activity(&rendition),
                         control_demand: snapshot.map(|s| {
                             match s.demand {
                                 crate::playback_control::PlaybackDemand::Active => "active",
@@ -1893,6 +1894,83 @@ fn playlist_with_start_tag(playlist: &[u8], start_ms: i64) -> Vec<u8> {
         output.extend_from_slice(line.as_bytes());
     }
     output
+}
+
+fn display_target_activity(rendition: &Rendition) -> Option<DisplayTargetActivity> {
+    #[cfg(target_os = "linux")]
+    {
+        let runtime = rendition.recipe.encoding.as_ref()?.dv_runtime.as_ref()?;
+        if runtime.destination == plurx_core::transcode::dv_processing::DvDestination::Profile81 {
+            return None;
+        }
+        if runtime.display_target_note.is_none() && runtime.display.is_none() {
+            return None;
+        }
+        let note = runtime.display_target_note.clone().unwrap_or_else(|| {
+            "Display targeting is off for this session; the master grade is sent.".into()
+        });
+        Some(DisplayTargetActivity {
+            reported_peak_nits: runtime
+                .display
+                .as_ref()
+                .and_then(|display| display.max_nits),
+            peak_source: runtime
+                .display
+                .as_ref()
+                .and_then(|display| display.peak_source),
+            bucket_nits: runtime.display_target.map(|target| target.nits()),
+            live_rendering: rendition.ephemeral_processing,
+            note,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = rendition;
+        None
+    }
+}
+
+impl VodServe {
+    /// Observation only. Processed roots never enter retained storage; active
+    /// readers and preparation reservations retain their existing ownership.
+    pub(crate) async fn display_target_usage(
+        &self,
+    ) -> (usize, std::collections::BTreeMap<u32, Option<u64>>) {
+        let renditions = {
+            let sessions = self.shared.sessions.lock().await;
+            let mut seen = std::collections::HashSet::new();
+            sessions
+                .values()
+                .filter_map(|session| session.live_rendition())
+                .filter(|rendition| seen.insert(rendition.key.clone()))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut reports = 0;
+        let mut buckets = std::collections::BTreeMap::new();
+        for rendition in renditions {
+            if let Some(activity) = display_target_activity(&rendition) {
+                if activity
+                    .reported_peak_nits
+                    .is_some_and(|nits| nits > 0 && nits < 5000)
+                {
+                    reports += 1;
+                }
+                if let Some(bucket) = activity.bucket_nits {
+                    let bytes = rendition
+                        .manifest
+                        .try_lock()
+                        .ok()
+                        .map(|manifest| manifest.materialized_bytes());
+                    let total = buckets.entry(bucket).or_insert(Some(0u64));
+                    *total = total
+                        .zip(bytes)
+                        .map(|(total, bytes)| total.saturating_add(bytes));
+                }
+            }
+        }
+        (reports, buckets)
+    }
 }
 
 #[cfg(test)]

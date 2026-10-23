@@ -1521,8 +1521,8 @@ pub fn vod_completed_reconstructed_pipe_args(
     // with what the helper produced; the encoder writes its VUI and the
     // sample entry's colr from these frame properties.
     let mut filter = format!(
-        "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
-        grid.numerator, grid.denominator,
+        "setparams=range=tv:color_primaries={}:color_trc={}:colorspace={},format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
+        output.input_contract().primaries(), output.input_contract().transfer(), output.input_contract().matrix(), grid.numerator, grid.denominator,
     );
     if output.encoder() == super::Encoder::Vaapi {
         filter.push_str(",hwupload=extra_hw_frames=4");
@@ -1621,6 +1621,9 @@ pub fn vod_completed_reconstructed_pipe_args(
     if plan.options().input_has_audio {
         let at = args.len().saturating_sub(1);
         args.splice(at..at, ["-threads:a".into(), "1".into()]);
+    }
+    if output.codec_contract().grade() == super::OutputGrade::Sdr {
+        super::encoder::normalize_reconstructed_sdr_args(&mut args);
     }
     Ok(args)
 }

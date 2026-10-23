@@ -33,14 +33,27 @@ int main(int argc, char **argv) {
     require(vk != NULL, "Vulkan context");
     pl_gpu gpu = vk->gpu;
     pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
-        PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+        PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_RENDERABLE);
     require(format != NULL, "float32 texture format");
     pl_tex source = pl_tex_create(gpu, pl_tex_params(.w = 64, .h = 64,
         .format = format, .sampleable = true, .host_writable = true));
     require(source && pl_tex_upload(gpu, pl_tex_transfer_params(.tex = source,
         .ptr = pixels)), "input upload");
     pl_tex target = dv_target_render(log, gpu, source, 0);
-    require(dv_yuv10_init(log, gpu, 64, 64) && dv_yuv10_export(NULL, gpu, target),
+    pl_renderer renderer = NULL;
+    pl_tex sdr_texture = NULL;
+    if (dv_target.sdr) {
+        renderer = pl_renderer_create(log, gpu);
+        sdr_texture = pl_tex_create(gpu, pl_tex_params(.w = 64, .h = 64,
+            .format = format, .sampleable = true, .renderable = true));
+        struct pl_frame native = {.num_planes = 1,
+            .planes = {{.texture = target, .components = 4, .component_mapping = {0,1,2,-1}}},
+            .repr = {.sys = PL_COLOR_SYSTEM_RGB, .levels = PL_COLOR_LEVELS_FULL},
+            .color = pl_color_space_hdr10};
+        require(renderer && sdr_texture && dv_yuv10_convert_sdr_rgb(renderer, native, sdr_texture), "production SDR RGB conversion");
+        target = sdr_texture;
+    }
+    require(dv_yuv10_init(log, gpu, 64, 64) && dv_yuv10_export_color(renderer, gpu, target, dv_target.sdr),
             "production YUV export");
     dv_yuv10_wait();
     FILE *output = fopen(argv[7], "wbx");
@@ -51,6 +64,8 @@ int main(int argc, char **argv) {
     (void)dv_yuv10_source_texture;
     dv_yuv10_close(gpu);
     dv_target_destroy(gpu);
+    pl_tex_destroy(gpu, &sdr_texture);
+    pl_renderer_destroy(&renderer);
     pl_tex_destroy(gpu, &source);
     pl_vulkan_destroy(&vk);
     pl_log_destroy(&log);

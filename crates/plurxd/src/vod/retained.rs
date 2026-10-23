@@ -2300,7 +2300,7 @@ mod tests {
             use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
             let digest = [42; 32];
             let candidate = QualityCandidate {
-                processed_hdr10: false,
+                processed_dv: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -3611,7 +3611,7 @@ mod tests {
             .expect("init");
         serve.shared.retained_artifacts.collect(temp.path()).await;
         let candidate = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: candidate_id,
             recipe_digest: digest,
             route: CandidateRoute::Remux,

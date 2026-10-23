@@ -7495,3 +7495,46 @@ source = "clients/apple/Sources/LibraryView.swift"
 source_anchor = "Keep the preamble in the results scroll."
 test = "clients/apple/UITests/TVNavigationTests.swift"
 test_anchor = "testShowRowsKeepWholeCardsVisibleAtExtraLargeSize"
+
+
+# Direct-GPT DV client corrective commits: source/test anchors only.
+# Execution evidence remains bound to its recorded source.
+[[fixes]]
+id = "direct-gpt.dv-sdr-creative-trim-report"
+commits = ["4135eedb6d863eb1fa4a17c1e456618053f56f9e"]
+source = "crates/plurx-core/src/transcode/dv_processing.rs"
+source_anchor = "|| wire.creative_trims_applied"
+test = "crates/plurx-core/src/transcode/dv_processing/tests.rs"
+test_anchor = "fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt()"
+
+[[fixes]]
+id = "direct-gpt.dv-sdr-client-receipt"
+commits = ["de82d36e7af11900a2dc9fe796d806ac34a629bd"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "!hdr10Enhanced && sdrProcessed && delivered == \"sdr\""
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun sdrReceiptRequiresItsGradeAndExportOperations()"
+
+[[fixes]]
+id = "direct-gpt.dv-typed-display-target-android"
+commits = ["9cec95b5b752b2df355e479c37a2bcac322562ef"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "\"DisplayTargetMapping:$nits\""
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun displayTargetOperationObjectRetainsTheCurrentReport()"
+
+[[fixes]]
+id = "direct-gpt.dv-typed-display-target-apple"
+commits = ["696bc531f50c5c6b4d5b89d4ce5549a190eaa0e5"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "if appliedOperations.contains(where: { $0.hasPrefix(\"DisplayTargetMapping:\")"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testDisplayTargetOperationObjectRetainsCurrentReport() throws"
+
+[[fixes]]
+id = "direct-gpt.android-display-peak-provenance"
+commits = ["8be9a51a87e5308b20272ce9bda202513a8142bf"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "peak_source = peak?.source,"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun peakWireIsExplicitAndSnapshotDoesNotFollowLaterPreferences()"

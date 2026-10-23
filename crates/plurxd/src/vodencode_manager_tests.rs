@@ -191,6 +191,11 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
         .dv_runtime
         .as_ref()
         .expect("owned processing runtime");
+    let display_target = display_target.map(|target| {
+        runtime
+            .resolve_display_target(target)
+            .expect("single effective source/mastering policy before targeted windows")
+    });
     assert_eq!(runtime.encoder, Encoder::Vaapi);
     // The plan is resolved with the software source decoder; the windows
     // are encoded by the graph's admitted encoder, and every report says so.
@@ -2301,7 +2306,7 @@ async fn a_processed_auto_candidate_that_cannot_be_consumed_degrades_to_its_ordi
         recipe_digest: [7; 32],
         route: CandidateRoute::Encode,
         planned_codec: Some("hevc".into()),
-        processed_hdr10: true,
+        processed_dv: true,
         normalized_geometry: false,
         width: raster.0,
         height: raster.1,

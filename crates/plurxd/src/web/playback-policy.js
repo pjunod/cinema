@@ -2188,7 +2188,7 @@
       && Number.isInteger(candidate.height) && candidate.height > 0 && candidate.height <= 16384
       && (candidate.processed_hdr10 === undefined || typeof candidate.processed_hdr10 === "boolean")
       && (candidate.processed_hdr10 !== true || candidate.route === "encode"
-        && candidate.grade === "hdr10" && candidate.planned_codec === "hevc")
+        && ["sdr", "hdr10"].includes(candidate.grade) && candidate.planned_codec === "hevc")
       && candidate.decoder_compatible === true);
   }
   function playableQualityCandidates(candidates) {

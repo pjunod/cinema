@@ -706,6 +706,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                 });
             }
             ActivityCandidate::Vod(session) => {
+                let session = *session;
                 deliveries.push(ActivityDelivery {
                     vod_observation: session.observation.clone(),
                     method: session.method.as_str().to_owned(),
@@ -791,7 +792,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
 #[derive(Debug)]
 enum ActivityCandidate {
     Transcode(crate::transcode::DeliveryCandidate),
-    Vod(crate::vodserve::VodDeliveryInfo),
+    Vod(Box<crate::vodserve::VodDeliveryInfo>),
     Remux(crate::progressive::StreamListing),
     Direct(crate::delivery::Live),
 }
@@ -817,7 +818,10 @@ fn activity_candidates_bounded(
     let mut candidates = transcodes
         .into_iter()
         .map(ActivityCandidate::Transcode)
-        .chain(vod.into_iter().map(ActivityCandidate::Vod))
+        .chain(
+            vod.into_iter()
+                .map(|session| ActivityCandidate::Vod(Box::new(session))),
+        )
         .chain(remuxes.into_iter().map(ActivityCandidate::Remux))
         .chain(direct.into_iter().map(ActivityCandidate::Direct))
         .collect::<Vec<_>>();

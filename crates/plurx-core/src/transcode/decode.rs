@@ -2636,6 +2636,12 @@ pub struct CompletedReconstructedOutputPlan<'a> {
     vaapi_hdr_policy: Option<super::VaapiHdrPolicy>,
 }
 impl<'a> CompletedReconstructedOutputPlan<'a> {
+    /// The ordinary source plan remains unchanged; the completed GPU export
+    /// owns the final SDR transfer/gamut and encoder declaration.
+    pub fn with_sdr_output(mut self) -> Self {
+        self.codec = self.codec.with_sdr();
+        self
+    }
     pub fn source_plan(&self) -> &'a ResolvedTranscode {
         self.source
     }

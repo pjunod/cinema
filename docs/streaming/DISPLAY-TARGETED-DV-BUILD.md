@@ -1,13 +1,157 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** PR A remains draft and unmerged; A–F implementation and evidence are tracked on `effort/display-targeted-dv`, with the single main promotion still open · **Updated:** 2026-10-22 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
+**Status:** A/#1216 is merged into `effort/display-targeted-dv`; B–F are batched in integration PR #1269, with main promotion and E creative accuracy open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (PR #1216, integration and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
+
+The matrix below is the current qualification record. Dated implementation
+checkpoints retain what was known at their authored heads; they are historical
+snapshots, not current status. Later merges do not move earlier results to a
+new source head.
+
+## Current qualification — source-bound evidence through F
+
+| Phase | Qualified evidence and source | Still open |
+|---|---|---|
+| A · title scan and HDR10-E | PR #1216 merged into the effort at `3fbb3f669`; compile-only gate5863 and paperwork5862 PASS. Actual P7 driver348 passed both1000/1600 on source503619eb, with retained frame/audio/cadence/seek evidence. | Final integrated P8 adoption, EOF follow-up and main promotion remain separate. |
+| B · output metadata | PR #1266 folded into #1269; seven Rust312 cases on e53a221b and compiler361 on f57d0071 PASS. Runtime input bytes remain unchanged. Gate5870 exposed the installed Xcode27.1 pin drift before Apple compilation; repaired at23b131dc, gate5877 then exceeded the cold Apple budget; integration fixes retain full architectures and use toolchain-specific caches. | Current-candidate effort gate and encoder/device acceptance. |
+| C · server controls | PR #1267 folded into #1269; ten Rust cases on a43fcf20, fourteen badge and72 settings cases, compiler362 PASS with source attribution retained. | Own effort gate and integrated acceptance; readiness never overrides saved choices. |
+| D · client presentation | PR #1268 folded into #1269;27 web cases and compiler363 PASS with original attribution. | Own effort gate and physical display acceptance. |
+| Client builds | Android30 and Apple13 cases plus test-build passed on F7eed; client source closure unchanged through F6d48d4c. | Current Xcode27.1 compiler gate and physical acceptance. |
+| E · L2/L8 trims | Public L2 and explicitly assumed L8 prototype07c36ec; neutral-L3 provenance928407c. Fourteen comparisons353 completed; baseline PQ error.110077 and trim-delta errors~.44/.49 remain. | Supported CM4/L8 rendering contract and creative accuracy; vendor contact declined. Tooling passes do not establish creative support. |
+| F · SDR target | PR #1269 draft. Source6d48d4c retains ten Rust, two web, compiler326/Clippy324 and independent pixel325 passes (61440 samples, max1code/limit2). Current repair shares fresh FEL admission and conditional receipts across HDR10/SDR, preserving BT.709 conversion and100-nit mapping. | Repair ba8df0e7 passed pinned fmt/check/Clippy382; final-candidate regression remains unrun. Production C link384 is separate. Own effort gate, main promotion and physical acceptance remain open. |
+
+Only A has merged, into `effort/display-targeted-dv`; main is unchanged.
+Remaining stage commits are batched into #1269 to avoid repeated broad compiler gates;
+#1266/#1267/#1268/#1270 retain their evidence as folded stage records.
+Results remain tied to their named sources or verified unchanged input closures.
+The final main candidate still requires adversarial review, once-only applicable
+fast-lane evidence and the Main promotion gate. No physical display acceptance
+or creative-trim equivalence is inferred from these records.
+
+## PR B implementation checkpoint
+
+**Authored, not qualified (2026-10-22).** Explicit targeted HDR10 windows now
+resolve output mastering metadata before encoding and author it after successful
+private helper/encoder completion, before encoded-window validation and
+publication. The writer is independent of the encoder family. The same payloads
+replace stale encoder declarations in hvcC, init `mdcv`/`clli` and prefix SEI on
+every IRAP; unrelated SEI, coded picture NALs, audio and sample timing survive.
+The completed trailer is rebuilt because init/sample growth moves offsets.
+
+Consistent title L9 supplies mastering primaries. Its preset coordinates come
+from the pinned Dolby Vision dependency; custom coordinates convert from
+1/32767 into ST 2086's 1/50000 units. Missing L9 may use MDCV from the exact
+selected held source stream's already-attested probe side data. Contradictory
+L9, reserved or unrepresentable primaries, malformed/conflicting source MDCV,
+and missing source primaries refuse the explicit target with a named reason.
+No BT.2020 container colour tag or assumed P3 gamut supplies missing mastering
+facts. Title L6 supplies the minimum; missing L6 uses trusted source MDCV, then the
+established renderer floor of 0.005 nits when MDCV is absent. Contradictory L6
+and source minima outside the renderer range refuse. The effective minimum is
+resolved before helper/export policy and rendition identity are frozen; helper
+arguments, completed-plan black level, trace validation, init and IRAP metadata
+all consume that same target. A frozen target cannot silently acquire another
+minimum. Maximum luminance is the bucket,
+MaxCLL is min(bucket, scanned title L1 peak), and MaxFALL is zero (unknown).
+Default/master and elided policies retain their original encoded bytes.
+
+Authored regressions cover preset/custom units and unknown/conflict handling,
+selected-stream rational MDCV parsing, stale prefix/suffix SEI replacement for
+IRAP types and NAL length sizes, identical init/in-band payloads, unchanged
+coded pictures/audio/timing, and an independent decoded-frame ffprobe check.
+No regression has run: completed-code independent review precedes functional
+validation. Pinned compilation, independent review, once-only regressions,
+actual encoder-family/device acceptance and publication remain open. No targeting
+control or later C–F feature is introduced by B.
+
+**Independent-review P2 repair authored:** the previous output-only source-MDCV
+fallback could label 0.0017 nits while the helper and semantic target still used
+0.005. `resolve_source` now chooses one effective target before execution, and
+metadata accepts only that resolved target. Consistent L9 with missing L6/MDCV
+uses the established floor; unknown primaries and inconsistent L6/L9 still
+refuse. Focused unexecuted controls bind source17 through helper args, completed
+black level, semantic identity, trace, init and every IRAP. New pinned compile
+and narrow independent closure are required; no previous pass is relabelled.
+
+
+## PR C source checkpoint (2026-10-22)
+
+**Status:** source authored in an isolated branch; independent completed-code
+review, pinned compilation, focused regressions and publication remain open.
+PR B metadata is integrated into this candidate; its acceptance remains required
+before the setting is published. No functional pass or physical display
+acceptance is claimed here.
+
+- `DisplayCaps.max_nits` remains an optional integer; optional `peak_source`
+  is `platform` or `viewer`. Both sources use the exact downward bucket table.
+  No display minimum is collected. The server selects from the admitted
+  canonical caps and source-fenced complete-title probe; Unknown, incomplete,
+  ineligible and elided titles retain the exact master export policy, with the
+  reason in plan notes and Activity.
+- `playback.dolby_vision_display_target` / `dolby_vision_display_target` is an
+  independent default-off Developer preference. Helper/HDR10-E, active peak
+  reports, current-schema scan/eligibility counts and per-bucket storage are
+  advisory observations. None disables the toggle, rejects Save or changes the
+  saved choice. This switch never enables HDR10-E itself.
+- A live processed trial freezes an explicit title-qualified target in its
+  private candidate context and runtime recipe. Every later window uses that
+  same policy. Exact predecessor-root reuse also requires target equality;
+  ordinary VOD and pre-encode paths always keep `None` (master). The client
+  snapshot is unchanged for prepared successors and Auto rung selection.
+  The accepted probe's selected playable stream resolves the effective mastering
+  minimum before this context or preparation identity is frozen. The held-source
+  constructor independently resolves the same title/stream facts and compares
+  the exact target; a source17 floor cannot retain the old default50 identity.
+
+- **Cache disposition:** the current architecture marks processed roots
+  `ephemeral_processing`; `RetainedRegistry::offer` excludes them. There are
+  zero reusable retained buckets per title, satisfying the at-most-two bound.
+  No persisted bucket cache or new LRU is introduced. Existing private-root
+  readers, preparation reservations and shared disk budget own retirement and
+  pressure. Developer distinguishes live materialized media bytes from zero
+  retained cache bytes for each bucket. Activity says that targeting renders
+  live and has no retained bucket cache.
+- DYN uses a `DisplayTargetMapping` operation from the current published
+  effective-processing receipt, and names the bucket and **L1 only** limit.
+  A configured target alone cannot activate the badge. Activity reports the
+  raw peak, platform/viewer provenance, selected target or master, and live
+  rendering.
+- **Whole-session refusal:** an invalid runtime L1 refuses the frozen
+  targeted rendition and fences its processing episode; later windows never
+  silently become master. Before publication the established whole-start
+  fallback/refusal remains, with its actual delivered grade. It is not called
+  reconstructed master. A separate processed-master retry is not implemented:
+  the existing runtime boundary erases source/RPU/encoder/target refusals into
+  `String`, so a safe target-specific retry requires a typed error seam first.
+  No string-matching retry, watchdog or per-window fallback is added.
+
+Static inspection only: changed JavaScript files parse with `node --check`;
+`git diff --check` passes. Local rustfmt parsed/formatted changed Rust sources;
+this does not establish pinned compilation. Knowledge context identified the
+six-rule curated routing boundary with no conflicts. The requested
+`--base origin/main --worktree` obligation query refused with `KnowledgeError`;
+`--base HEAD --worktree` against the actual A base returned the standing
+capability-profile and execution-plan obligations, with no conflicts. These
+existing routing decisions are unchanged; graph metadata does not establish
+execution or targeting acceptance.
+
+Authored regression anchors (not executed):
+
+- `caps.rs::display_peak_bucket_rounds_down_and_unknown_stays_master`
+- `enhancement.rs::targeted_hdr10_dyn_names_bucket_and_l1_limit`
+- `dv_processing/tests.rs::effective_target_report_rejects_ambiguous_or_unsupported_buckets`
+- `manager/create.rs::display_target_declines_are_named_and_elision_is_master`
+- `manager/create.rs::source_mastering_resolves_before_the_live_target_is_frozen`
+- `session_request.rs::resolved_source_floor_changes_the_actual_processed_preparation_binding`
+- `http/tests.rs::display_target_setting_defaults_off_and_saves_despite_unmet_advice`
+- `settings-sections.test.js`: editable targeting and existing independent-save,
+  stale-reply and replacement-card tests extended to the new preference.
 
 ## PR A implementation checkpoint
 
 User-confirmed delivery is one effort branch followed by one promotion PR to
-`main`. PR #1216 is retargeted to `effort/display-targeted-dv`, remains a draft
-and is unmerged. The current published source checkpoint is
+`main`. PR #1216 merged into `effort/display-targeted-dv` as `3fbb3f669`;
+its compile-only gate #5863 and fresh paperwork #5862 passed. The current published source checkpoint is
 `503619eb6744264b99d4ce7858f92a244911faf3`; it remains the source identity for
 its compile and P7 evidence. This documentation-only update does not relabel
 those results. A–F stage PRs target the effort branch. Before each stage merge,
@@ -339,7 +483,7 @@ segments). This works with every encoder. The other options are ruled out:
 
 ## Tests
 
-### PR A executable qualification inventory (authored, not yet run)
+### PR A qualification inventory (definitions; outcomes above)
 
 The coordinator runs these only after complete independent review and fixes.
 Use native Linux, pinned Rust 1.97.1 and the verified API 374 dependency image.
@@ -383,7 +527,7 @@ a per-window target/master mix.
 
 | Level | Test | Proves |
 |---|---|---|
-| Core unit | bucket mapping, including elision; caps parsing of `min_nits`/`source` | mapping is total, rounds down, refuses junk |
+| Core unit | bucket mapping, including elision; caps parsing of `max_nits`/`peak_source` | mapping is total, rounds down, refuses junk |
 | Core unit | `playback_enhancement` with `display_target` | DYN active only with a target, and the text names the nits |
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
 | Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
@@ -412,8 +556,8 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 | Stage | Contents | Recorded state |
 |---|---|---|
-| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 remains draft on `effort/display-targeted-dv`; source review is approved, general-FEL checks and exact regressions pass, both mapped P7 targets pass; final integrated adoption and accuracy qualification remain open. |
-| B | Processed-output MDCV/CLL writer | Built; seven Rust cases passed at #312; not merged or promotion-qualified. |
+| A | L1 scan, helper target policy, L1-to-CIE_Y mapping, ST 2094-10, recipe identity, processing report and controls | PR #1216 merged into the effort as `3fbb3f669`; source review is approved, general-FEL checks and exact regressions pass, both mapped P7 targets pass; final integrated adoption and accuracy qualification remain open. |
+| B | Processed-output MDCV/CLL writer | PR #1266 is draft; compiled #361 and seven Rust cases #312 retain source-specific passes. Not merged or promotion-qualified. |
 | C | Peak capability, buckets, elision, Developer setting, indicator and Activity text | Built; source-attributed Rust, badge and settings cases pass; not merged or promotion-qualified. |
 | D | Android / Android TV peak reporting and web setting | Built; source-attributed web, Android, Apple and build checks pass; not merged or promotion-qualified. |
 | E | Phase 2 trim comparison | Neutral-L3 reference and 14-case numerical observations are retained; creative accuracy and complete L8 contract remain unaccepted. |

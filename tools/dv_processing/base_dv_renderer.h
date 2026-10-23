@@ -183,7 +183,7 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   size_t exported_bytes = 0;
   uint8_t *packed = NULL;
   if (EXPORT_YUV10) {
-    require(dv_yuv10_export(base_context.renderer, gpu, base_context.output_texture),
+    require(dv_yuv10_export_color(base_context.renderer, gpu, base_context.output_texture, dv_target.sdr),
             "base GPU yuv420p10 export");
     pl_unmap_avframe(gpu, &source);
     exported = dv_yuv10_context.frame;

@@ -722,7 +722,7 @@ impl TranscodeManager {
             && !req
                 .candidate_context
                 .as_ref()
-                .is_some_and(|context| context.selected_candidate.processed_hdr10)
+                .is_some_and(|context| context.selected_candidate.processed_dv)
         {
             return Err(vod_refusal_error(
                 "candidate_recipe_unavailable",
@@ -1005,7 +1005,7 @@ impl TranscodeManager {
         let (req, degraded_processing) = match req
             .candidate_context
             .as_ref()
-            .filter(|context| context.selected_candidate.processed_hdr10)
+            .filter(|context| context.selected_candidate.processed_dv)
         {
             Some(context) => match context.ordinary_request.as_deref() {
                 Some(ordinary) if ordinary.file_id == req.file_id => {
@@ -1177,7 +1177,7 @@ impl TranscodeManager {
         reorder_frames: bool,
         context: &CandidateExecutionContext,
     ) -> Result<[u8; 32], String> {
-        if context.selected_candidate.processed_hdr10 {
+        if context.selected_candidate.processed_dv {
             return Err(vod_refusal_error(
                 "candidate_recipe_changed",
                 "processed HDR10 requires its admitted executable, not ordinary plan equality",
@@ -1247,6 +1247,110 @@ impl TranscodeManager {
         Ok(DvSelection::KeepExisting(reason))
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn display_target_policy(
+        enabled: bool,
+        display: Option<&plurx_core::playback::caps::DisplayCaps>,
+        probe: Option<&str>,
+    ) -> Result<
+        (
+            Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+            Option<String>,
+        ),
+        String,
+    > {
+        use plurx_core::transcode::dv_processing::{DvDisplayTarget, DvDisplayTargetChoice};
+        if !enabled {
+            return Ok((None, None));
+        }
+        if display.is_some_and(|display| !display.hdr && !display.dolby_vision) {
+            return match DvDisplayTarget::for_sdr_title(
+                probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json),
+            )
+            .map_err(|e| e.to_string())?
+            {
+                DvDisplayTargetChoice::Target(target) => {
+                    let minimum = if target.needs_source_floor() {
+                        let document: serde_json::Value =
+                            serde_json::from_str(probe.ok_or("complete-title probe unavailable")?)
+                                .map_err(|error| error.to_string())?;
+                        let selected = crate::decode_facts::first_playable_video_index(&document);
+                        document
+                            .get("streams")
+                            .and_then(serde_json::Value::as_array)
+                            .and_then(|streams| {
+                                streams.iter().find(|stream| {
+                                    selected.is_some_and(|index| {
+                                        stream.get("index").and_then(serde_json::Value::as_u64)
+                                            == Some(u64::from(index))
+                                    })
+                                })
+                            })
+                            .map(crate::vodencode::dv_runtime::source_mastering_minimum)
+                            .transpose()?
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    let target = target
+                        .resolve_sdr_floor(minimum)
+                        .map_err(|error| error.to_string())?;
+                    Ok((Some(target), Some("SDR: per-shot L1 mapped for 100-nit BT.709 gamma 2.4 limited output; rendered live (L1 only; creative trims are not applied)".into())))
+                }
+                DvDisplayTargetChoice::Master { reason } => Ok((
+                    None,
+                    Some(
+                        reason
+                            .reason()
+                            .replace("master grade sent", "ordinary SDR tone mapping used"),
+                    ),
+                )),
+            };
+        }
+        let Some(bucket) = display.and_then(|display| display.hdr10_target_bucket()) else {
+            return Ok((None, Some("your display did not report a supported HDR peak (400–4999 nits), so the master grade is sent".into())));
+        };
+        match DvDisplayTarget::for_title(
+            bucket,
+            probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json),
+        )
+        .map_err(|e| e.to_string())?
+        {
+            DvDisplayTargetChoice::Target(target) => {
+                // Resolve the effective source floor BEFORE the private context,
+                // prepared lease and rendition identity freeze this policy.
+                let source = if target.needs_source_mastering() {
+                    let document: serde_json::Value =
+                        serde_json::from_str(probe.ok_or("complete-title probe unavailable")?)
+                            .map_err(|error| error.to_string())?;
+                    let selected = crate::decode_facts::first_playable_video_index(&document);
+                    let stream = document
+                        .get("streams")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|streams| {
+                            streams.iter().find(|stream| {
+                                selected.is_some_and(|index| {
+                                    stream.get("index").and_then(serde_json::Value::as_u64)
+                                        == Some(u64::from(index))
+                                })
+                            })
+                        });
+                    stream
+                        .map(crate::vodencode::dv_runtime::source_mastering_metadata)
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
+                let target = target
+                    .resolve_source(source)
+                    .map_err(|error| error.to_string())?;
+                Ok((Some(target), Some(format!("HDR10-E: per-shot L1 mapped for {bucket} nits; rendered live, with no retained bucket cache (L1 only; creative trims are not applied)"))))
+            }
+            DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason()))),
+        }
+    }
+
     /// Freeze an executable encoded recipe before any rendition is named.
     /// Copy remains index-driven; selecting burn pixels requires an encoder
     /// even when the incoming request otherwise asks for source quality.
@@ -1280,7 +1384,6 @@ impl TranscodeManager {
         }
         #[cfg(target_os = "linux")]
         {
-            use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
             // Two processed destinations. A Profile 7 copy converted to 8.1
             // for a Dolby Vision display becomes the reconstructed 8.1 (the
             // FEL rebuilt into the picture, a new RPU) under FEL re-encode.
@@ -1320,6 +1423,7 @@ impl TranscodeManager {
             // processing, subject to the actual completed decoder contract.
             if request.dv_processing_destination.is_none()
                 && !profile81
+                && destination != DvDestination::Sdr
                 && !hdr10_intent
                 && original.selected_candidate.grade != OutputGrade::Hdr10
             {
@@ -1421,6 +1525,24 @@ impl TranscodeManager {
             if height < 32 {
                 return Err("the source has no picture height to process".into());
             }
+            let target_enabled = !profile81
+                && plurx_core::store::stored_switch(
+                    planning
+                        .settings
+                        .get(keys::DV_DISPLAY_TARGET)
+                        .map(String::as_str),
+                    false,
+                );
+            let (display_target, display_target_note) = Self::display_target_policy(
+                target_enabled,
+                caps.display.as_ref(),
+                planning.probe_json.as_deref(),
+            )?;
+            if destination == DvDestination::Sdr
+                && !display_target.is_some_and(|target| target.is_sdr())
+            {
+                return Err(display_target_note.unwrap_or_else(|| "SDR display targeting needs a complete eligible L1 scan and the display-target setting".into()));
+            }
             let (mut trial, projected) =
                 Self::processed_qualification_input(&planning, request, height)?;
             trial.request_id = Some(recovery.incarnation_id.clone());
@@ -1429,6 +1551,8 @@ impl TranscodeManager {
                 .as_mut()
                 .ok_or("processed trial context missing")?;
             context.prepared_processing = None;
+            context.display_target = display_target;
+            context.display_target_note = display_target_note.clone();
             context.retained_output = None;
             context.normalized_geometry = false;
             context.profile = None;
@@ -1448,7 +1572,8 @@ impl TranscodeManager {
                     .await
                     .filter(|root| root.encoding.options.target_height == height
                         && matches!(&root.encoding.dv_processing,
-                            plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination))
+                            plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == destination)
+                        && root.encoding.dv_runtime.as_ref().is_some_and(|runtime| runtime.display_target == display_target))
             } else {
                 None
             };
@@ -1507,7 +1632,7 @@ impl TranscodeManager {
                 );
             }
             let digest = encoding.processed_candidate_digest(&file, &binding)?;
-            if original.selected_candidate.processed_hdr10 && digest != original.recipe_digest {
+            if original.selected_candidate.processed_dv && digest != original.recipe_digest {
                 return Err(vod_refusal_error(
                     "candidate_recipe_changed",
                     "processed candidate inputs changed during qualification",
@@ -1559,57 +1684,19 @@ impl TranscodeManager {
             }
             let facts = Self::quality_facts_from_snapshot(&planning)
                 .ok_or("processed client facts unavailable")?;
-            let contract = encoding.plan.output_contract();
-            let Some((width, height_px)) =
-                contract.effective_width().zip(contract.effective_height())
-            else {
-                return Err("the processed recipe has no effective geometry".into());
-            };
-            if !super::manager_candidates::processed_client_compatible(
-                caps,
+            let candidate = super::manager_candidates::prepared_processed_candidate(
+                digest,
                 &encoding.plan,
+                &encoding.options,
+                caps,
                 &facts,
                 destination,
-            ) {
-                return Err("the processed recipe is not one this client can decode".into());
-            }
-            let actual_audio = encoding
-                .options
-                .audio
-                .as_ref()
-                .ok_or("the processed recipe has no resolved audio answer")?;
-            if projected
-                .audio_delivery
-                .as_ref()
-                .is_none_or(|expected| expected.byte_identity() != actual_audio.byte_identity())
-            {
-                return Err("the processed audio differs from its canonical encoded claim".into());
-            }
-            trial.audio_delivery = Some(actual_audio.clone());
-            let audio = if encoding.plan.options().input_has_audio {
-                u64::from(encoding.options.audio_bitrate_kbps) * 1000
-            } else {
-                0
-            };
-            let candidate = QualityCandidate {
-                id: CandidateId::for_recipe_digest(digest),
-                recipe_digest: digest,
-                route: CandidateRoute::Encode,
-                planned_codec: Some("hevc".into()),
-                processed_hdr10: true,
-                normalized_geometry: encoding.options.normalized_geometry,
-                width,
-                height: height_px,
-                target_height: u32::try_from(encoding.options.target_height)
-                    .map_err(|_| "processed rung overflow")?,
-                average_bps: Some(u64::from(encoding.options.video_bitrate_kbps) * 1000 + audio),
-                peak_bps: Some(u64::from(encoding.options.video_bitrate_kbps) * 1500 + audio),
-                grade: OutputGrade::Hdr10,
-                decoder_compatible: true,
-                complete_cache: false,
-                sustainable: true,
-            };
+                projected.audio_delivery.as_ref(),
+            )?;
+            trial.audio_delivery = encoding.options.audio.clone();
             let mut context = Self::candidate_context(&candidate);
+            context.display_target = display_target;
+            context.display_target_note = display_target_note;
             context.catalog_query = original.catalog_query.clone();
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = Some(binding);
@@ -1620,8 +1707,9 @@ impl TranscodeManager {
             // if the prepared graph cannot be consumed; a client that named
             // the processed candidate itself has no such fallback.
             context.ordinary_request =
-                (!original.selected_candidate.processed_hdr10).then(|| Box::new(request.clone()));
+                (!original.selected_candidate.processed_dv).then(|| Box::new(request.clone()));
             trial.candidate_context = Some(Box::new(context));
+            trial.hdr10 = destination != DvDestination::Sdr;
             let lease_binding = trial.processed_preparation_binding(recovery)?;
             trial
                 .candidate_context
@@ -2496,8 +2584,38 @@ impl TranscodeManager {
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    let source_mastering = crate::vodencode::dv_runtime::source_mastering_metadata(stream);
+                    let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
+                    // Recheck against the exact stored document compared with
+                    // this held source. A title scan replacement cannot reuse
+                    // an older live policy or silently change a later window.
+                    if let Some(target) = display_target {
+                        let stats = probe.as_deref().and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json);
+                        let selected = if target.is_sdr() { plurx_core::transcode::dv_processing::DvDisplayTarget::for_sdr_title(stats) } else { plurx_core::transcode::dv_processing::DvDisplayTarget::for_title(target.nits(), stats) }
+                            .map_err(|error| error.to_string())?;
+                        let selected = match selected {
+                            plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(proposal) => {
+                                let proposal = if proposal.is_sdr() {
+                                    let minimum = if proposal.needs_source_floor() { crate::vodencode::dv_runtime::source_mastering_minimum(stream)? } else { None };
+                                    proposal.resolve_sdr_floor(minimum).map_err(|error| error.to_string())?
+                                } else {
+                                    let source = if proposal.needs_source_mastering() { source_mastering.clone()? } else { None };
+                                    proposal.resolve_source(source).map_err(|error| error.to_string())?
+                                };
+                                plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(proposal)
+                            }
+                            other => other,
+                        };
+                        if selected != plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(target) {
+                            return Err("complete-title display-target scan changed during preparation".into());
+                        }
+                    }
                     let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
                         source_tick, source_origin, native_bl, source_clock, preferences,
+                        display_target,
+                        display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
+                        display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
+                        source_mastering,
                         destination, mode, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
@@ -2795,11 +2913,11 @@ impl TranscodeManager {
                 use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
                 let actual_grade = encoding.as_ref().map_or_else(
                     || super::manager_candidates::copy_candidate_grade(file),
-                    |encoding| encoding.options.pipeline.output_grade(),
+                    |encoding| encoding.delivered_output_grade(),
                 );
                 let (actual, route) = if let Some(encoding) = encoding {
                     (
-                        if context.selected_candidate.processed_hdr10 {
+                        if context.selected_candidate.processed_dv {
                             encoding.processed_candidate_digest(
                                 file,
                                 context
@@ -3128,15 +3246,16 @@ impl TranscodeManager {
             || context.owner_node_id.as_deref() != self.cache_location().map(|(_, node)| node)
             || req.continuous_media.is_some()
             || req.subtitle_burn.is_some()
-            || !req.hdr10
+            || req.hdr10
+                != (destination != plurx_core::transcode::dv_processing::DvDestination::Sdr)
             || context.normalized_geometry != prepared.encoding.options.normalized_geometry
             || context.profile != prepared.encoding.options.auto_quality_rate_profile
             || !context.selected_candidate.decoder_compatible
-            || !context.selected_candidate.processed_hdr10
+            || !context.selected_candidate.processed_dv
             || context.selected_candidate.route
                 != plurx_core::playback::candidate::CandidateRoute::Encode
             || context.selected_candidate.planned_codec.as_deref() != Some("hevc")
-            || context.selected_candidate.grade != OutputGrade::Hdr10
+            || context.selected_candidate.grade != prepared.encoding.delivered_output_grade()
             || context.selected_candidate.width
                 != prepared
                     .encoding
@@ -3256,7 +3375,7 @@ impl TranscodeManager {
         let (req, root_admission) = match req
             .candidate_context
             .as_ref()
-            .filter(|context| context.selected_candidate.processed_hdr10)
+            .filter(|context| context.selected_candidate.processed_dv)
         {
             Some(context) => match self
                 .admit_prepared_processing(req, context, recovery, &file)
@@ -3310,7 +3429,7 @@ impl TranscodeManager {
                 encoding.options.target_height
             });
         let grade = encoding.as_ref().map_or(OutputGrade::Sdr, |encoding| {
-            encoding.options.pipeline.output_grade()
+            encoding.delivered_output_grade()
         });
         let kind = encoding
             .as_ref()
@@ -4330,7 +4449,7 @@ impl TranscodeManager {
             let processed = remote
                 .candidate_catalog
                 .as_ref()
-                .is_some_and(|catalog| catalog.candidate.processed_hdr10);
+                .is_some_and(|catalog| catalog.candidate.processed_dv);
             let root_admission = if processed {
                 let Some(predecessor) = processed_predecessor.as_ref() else {
                     return false;
@@ -5061,3 +5180,201 @@ mod retained_recovery_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod processed_reuse_tests;
+
+#[cfg(test)]
+mod display_target_policy_tests {
+    use super::*;
+    use plurx_core::{
+        playback::caps::{DisplayCaps, DisplayPeakSource},
+        scan::dv_title::*,
+    };
+    #[test]
+    fn explicit_sdr_capability_uses_100_without_converting_unknown_hdr_peak_to_sdr() {
+        use plurx_core::playback::caps::DisplayCaps;
+        use plurx_core::scan::dv_title::{DvTitleStats, TitleConstant, SCHEMA};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(0),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        // Use the existing probe writer's actual key, not a synthetic shortcut.
+        let document = serde_json::json!({PROBE_FIELD:stats}).to_string();
+        let display = DisplayCaps {
+            hdr: false,
+            dolby_vision: false,
+            ..Default::default()
+        };
+        let (target, note) =
+            TranscodeManager::display_target_policy(true, Some(&display), Some(&document))
+                .expect("SDR");
+        assert!(target.expect("SDR target").is_sdr());
+        assert!(note.expect("note").contains("gamma 2.4"));
+        for display in [
+            None,
+            Some(DisplayCaps {
+                hdr: true,
+                ..Default::default()
+            }),
+        ] {
+            assert!(TranscodeManager::display_target_policy(
+                true,
+                display.as_ref(),
+                Some(&document)
+            )
+            .expect("unknown")
+            .0
+            .is_none());
+        }
+        assert!(
+            TranscodeManager::display_target_policy(true, Some(&display), None)
+                .expect("missing scan")
+                .0
+                .is_none()
+        );
+        assert!(
+            TranscodeManager::display_target_policy(false, Some(&display), Some(&document))
+                .expect("disabled")
+                .0
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn source_mastering_resolves_before_the_live_target_is_frozen() {
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let record = serde_json::json!({"side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000","white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "max_luminance":"4000/1","min_luminance":"17/10000"});
+        let mut unrelated = record.clone();
+        unrelated["min_luminance"] = "999/10000".into();
+        let document = serde_json::json!({PROBE_FIELD:stats,"streams":[
+            {"index":0,"codec_type":"video","disposition":{"attached_pic":1},"side_data_list":[unrelated.clone()]},
+            {"index":1,"codec_type":"audio","side_data_list":[unrelated]},
+            {"index":7,"codec_type":"video","side_data_list":[record]}]});
+        let display = DisplayCaps {
+            max_nits: Some(1600),
+            ..Default::default()
+        };
+        let select = |document: &serde_json::Value| {
+            TranscodeManager::display_target_policy(
+                true,
+                Some(&display),
+                Some(&document.to_string()),
+            )
+        };
+        let frozen = select(&document)
+            .expect("selected source mastering")
+            .0
+            .expect("target");
+        assert_eq!(frozen.endpoint_args(), ["17", "4000"]);
+        assert_eq!(
+            serde_json::to_value(frozen).expect("frozen identity")["mastering"]["min_1e4_nits"],
+            17
+        );
+        let missing = serde_json::json!({PROBE_FIELD:stats});
+        let fallback = select(&missing)
+            .expect("known L9 and renderer floor")
+            .0
+            .expect("target");
+        assert_eq!(fallback.endpoint_args(), ["50", "4000"]);
+        assert_ne!(
+            serde_json::to_value(frozen).expect("source identity"),
+            serde_json::to_value(fallback).expect("fallback identity")
+        );
+        let mut unknown = missing.clone();
+        unknown[PROBE_FIELD]["mastering_primaries"] =
+            serde_json::to_value(TitleConstant::<MasteringPrimaries>::Unknown).expect("unknown");
+        assert!(select(&unknown).is_err());
+        for field in ["mastering_primaries", "mastering_luminance"] {
+            let mut contradictory = document.clone();
+            contradictory[PROBE_FIELD][field] = serde_json::json!({"state":"inconsistent"});
+            assert!(select(&contradictory).is_err(), "{field}");
+        }
+        let mut unsupported = document;
+        unsupported["streams"][2]["side_data_list"][0]["min_luminance"] = "10001/10000".into();
+        assert!(select(&unsupported).is_err());
+    }
+
+    #[test]
+    fn display_target_declines_are_named_and_elision_is_master() {
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 2,
+            valid_l1_frames: 2,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Consistent(MasteringPrimaries {
+                index: 0,
+                custom_xy: None,
+            }),
+        };
+        let probe = |stats| serde_json::json!({PROBE_FIELD:stats}).to_string();
+        let high = probe(stats);
+        let display = DisplayCaps {
+            hdr: true,
+            max_nits: Some(1999),
+            peak_source: Some(DisplayPeakSource::Platform),
+            ..Default::default()
+        };
+        let select = |enabled, display, probe| {
+            TranscodeManager::display_target_policy(enabled, display, probe).expect("policy")
+        };
+        assert_eq!(
+            select(false, Some(&display), Some(high.as_str())),
+            (None, None)
+        );
+        let (target, note) = select(true, Some(&display), Some(high.as_str()));
+        assert_eq!(target.expect("target").nits(), 1600);
+        assert!(note.expect("note").contains("rendered live"));
+        let viewer = DisplayCaps {
+            peak_source: Some(DisplayPeakSource::Viewer),
+            ..display.clone()
+        };
+        assert_eq!(select(true, Some(&viewer), Some(high.as_str())).0, target);
+        for missing in [None, Some("{}"), Some("{broken")] {
+            let (target, note) = select(true, Some(&display), missing);
+            assert!(target.is_none());
+            assert!(note.expect("decline").contains("scan unavailable"));
+        }
+        let incomplete = probe(DvTitleStats {
+            complete: false,
+            ..stats
+        });
+        let (target, note) = select(true, Some(&display), Some(incomplete.as_str()));
+        assert!(target.is_none());
+        assert!(note.is_some());
+        let fits = probe(DvTitleStats {
+            max_l1_pq: Some(0),
+            ..stats
+        });
+        let (target, note) = select(true, Some(&display), Some(fits.as_str()));
+        assert!(target.is_none());
+        assert!(note.expect("elision").contains("already fits a 1600-nit"));
+        let (target, note) = select(true, None, Some(high.as_str()));
+        assert!(target.is_none());
+        assert!(note.expect("unknown").contains("master grade"));
+    }
+}
