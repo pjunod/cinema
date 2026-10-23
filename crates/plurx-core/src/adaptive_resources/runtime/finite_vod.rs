@@ -1072,20 +1072,13 @@ impl NodeResourceRuntime {
             directory_path: directory_path.clone(),
             encoded_process_marker: request.encoded_process_marker,
         };
-        #[cfg(target_os = "linux")]
-        let history_key = history_basis.and_then(|basis| {
-            self.ledger
-                .actual_history_mix_for(family)
-                .ok()
-                .map(|mix| basis.with_mix(mix))
-        });
         let (pump, events) = pump::SoftwarePump::new(output, request.producer)
             .map_err(|error| FiniteVodError(OperationError::Physical(error)))?;
         #[cfg(target_os = "linux")]
         let pump = {
             let mut pump = pump;
-            if let Some(key) = history_key {
-                pump.bind_history_key(key);
+            if let Some(basis) = history_basis {
+                pump.bind_history_context(basis, self.ledger.clone(), family);
             }
             pump
         };

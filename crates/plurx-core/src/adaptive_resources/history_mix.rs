@@ -8,11 +8,13 @@ use sha2::{Digest, Sha256};
 mod tests;
 
 impl ResourceLedger {
-    /// Hash actual unsettled owners under the same ledger lock used by
-    /// admission. Bind role, claim, state, trial status and every numeric
-    /// resource dimension. The selected family must own exactly one unknown
-    /// producer; every other owner must be process-free retained S. No other
-    /// active workload recipe is silently collapsed into resource totals.
+    /// Hash actual incumbent unsettled owners under the same ledger lock used
+    /// by admission. Bind role, claim, state, trial status and every numeric
+    /// resource dimension. The selected family must own exactly one active
+    /// unknown video producer with a process reservation; that selected row
+    /// is excluded because its own recipe and demand have their own key fields.
+    /// Every other owner must be process-free retained S. No other active
+    /// workload recipe is silently collapsed into resource totals.
     /// Random reservation IDs are omitted so equivalent resident mixtures
     /// can still have a useful prior after restart.
     pub(crate) fn actual_history_mix_for(
@@ -32,11 +34,14 @@ impl ResourceLedger {
             if entry.state == ReservationState::UnknownHeld {
                 return Err(AdmissionRefusal::InsufficientEvidence);
             }
-            if entry
+            let is_selected = entry
                 .family_role
                 .is_some_and(|(family, role)| family == selected && role == FamilyRole::Video)
-                && entry.memory_claim == MemoryClaim::UnknownProducerPeak
-            {
+                && entry.memory_claim == MemoryClaim::UnknownProducerPeak;
+            if is_selected {
+                if entry.resources.processes == 0 || entry.state == ReservationState::Reaping {
+                    return Err(AdmissionRefusal::InsufficientEvidence);
+                }
                 selected_count = selected_count
                     .checked_add(1)
                     .ok_or(AdmissionRefusal::ArithmeticOverflow)?;
@@ -45,6 +50,9 @@ impl ResourceLedger {
                 || entry.state != ReservationState::Reaping
             {
                 return Err(AdmissionRefusal::InsufficientEvidence);
+            }
+            if is_selected {
+                continue;
             }
             let role = match entry.family_role.map(|(_, role)| role) {
                 None => 0,

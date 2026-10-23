@@ -35,6 +35,7 @@ fn number(hasher: &mut Sha256, value: u64) {
 
 /// Selected recipe portion captured before source planning moves any fields.
 /// Only the ledger can later supply the actual concurrent-owner mix.
+#[derive(Clone, Copy)]
 pub(in crate::adaptive_resources::runtime) struct HistoryBasis {
     runtime_epoch: [u8; 32],
     workload: [u8; 32],
@@ -153,7 +154,55 @@ fn classify_window(before: Baseline, current: Baseline, now: Instant) -> WindowD
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixRefresh {
+    Unavailable,
+    Changed,
+    Unchanged,
+}
+
+fn rebase_for_new_mix(
+    baseline: &mut Option<Baseline>,
+    units: &mut u64,
+    recorded_windows: &mut u32,
+    current: Baseline,
+) {
+    *baseline = Some(current);
+    *units = 0;
+    *recorded_windows = 0;
+}
+
+fn refresh_history_key(
+    key: &mut Option<HistoryKey>,
+    basis: Option<HistoryBasis>,
+    ledger: Option<&crate::adaptive_resources::ResourceLedger>,
+    selected_family: Option<crate::adaptive_resources::FamilyIdentity>,
+) -> MixRefresh {
+    let Some((basis, ledger, selected_family)) = basis
+        .zip(ledger)
+        .zip(selected_family)
+        .map(|((basis, ledger), family)| (basis, ledger, family))
+    else {
+        *key = None;
+        return MixRefresh::Unavailable;
+    };
+    let Ok(mix) = ledger.actual_history_mix_for(selected_family) else {
+        *key = None;
+        return MixRefresh::Unavailable;
+    };
+    let refreshed = basis.with_mix(mix);
+    if *key == Some(refreshed) {
+        MixRefresh::Unchanged
+    } else {
+        *key = Some(refreshed);
+        MixRefresh::Changed
+    }
+}
+
 pub(super) struct FiniteTelemetry {
+    basis: Option<HistoryBasis>,
+    ledger: Option<crate::adaptive_resources::ResourceLedger>,
+    selected_family: Option<crate::adaptive_resources::FamilyIdentity>,
     key: Option<HistoryKey>,
     control: RegisteredChildControl,
     history: Arc<Mutex<ResourceHistory>>,
@@ -164,12 +213,20 @@ pub(super) struct FiniteTelemetry {
 }
 impl FiniteTelemetry {
     pub(super) fn new(
-        key: Option<HistoryKey>,
+        context: Option<(
+            HistoryBasis,
+            crate::adaptive_resources::ResourceLedger,
+            crate::adaptive_resources::FamilyIdentity,
+        )>,
         control: RegisteredChildControl,
         history: Arc<Mutex<ResourceHistory>>,
     ) -> Self {
         let now = Instant::now();
-        let baseline =
+        let mut key = None;
+        if let Some((basis, ledger, family)) = &context {
+            let _ = refresh_history_key(&mut key, Some(*basis), Some(ledger), Some(*family));
+        }
+        let baseline = key.and_then(|_| {
             control
                 .snapshot_resources(now)
                 .and_then(
@@ -181,8 +238,16 @@ impl FiniteTelemetry {
                         }),
                         _ => None,
                     },
-                );
+                )
+        });
+        let (basis, ledger, selected_family) = match context {
+            Some((basis, ledger, family)) => (Some(basis), Some(ledger), Some(family)),
+            None => (None, None, None),
+        };
         Self {
+            basis,
+            ledger,
+            selected_family,
             key,
             control,
             history,
@@ -210,9 +275,7 @@ impl FiniteTelemetry {
     /// samples and stale windows lose this observation rather than becoming
     /// zero-cost samples or an inferred InputPaced classification.
     pub(super) fn durable_unit(&mut self, entered_publish: Instant, now: Instant) {
-        if self.key.is_none()
-            || now.saturating_duration_since(entered_publish) > MAX_PUBLICATION_WAIT
-        {
+        if now.saturating_duration_since(entered_publish) > MAX_PUBLICATION_WAIT {
             self.reset();
             return;
         }
@@ -232,6 +295,27 @@ impl FiniteTelemetry {
         if !matches!(counters.resident_bytes, Metric::Known(_)) {
             self.reset();
             return;
+        }
+        match refresh_history_key(
+            &mut self.key,
+            self.basis,
+            self.ledger.as_ref(),
+            self.selected_family,
+        ) {
+            MixRefresh::Unavailable => {
+                self.reset();
+                return;
+            }
+            MixRefresh::Changed => {
+                rebase_for_new_mix(
+                    &mut self.baseline,
+                    &mut self.units,
+                    &mut self.recorded_windows,
+                    current,
+                );
+                return;
+            }
+            MixRefresh::Unchanged => {}
         }
         let Some(before) = self.baseline else {
             self.baseline = Some(current);

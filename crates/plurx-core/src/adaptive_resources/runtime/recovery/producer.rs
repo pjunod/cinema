@@ -12,6 +12,34 @@ impl ImportedActiveR {
     pub(in crate::adaptive_resources::runtime) fn claim(&self) -> &ActiveFiniteRImportClaim {
         &self.claim
     }
+    pub(in crate::adaptive_resources::runtime) fn verifies_closed_domain(
+        &self,
+        authority: &RecoveredRAuthority,
+        binding: ReservationBinding,
+        member: Uuid,
+    ) -> bool {
+        authority.binding() == binding
+            && authority.obligation_id() == self.claim.obligation_id()
+            && authority.graph_id() == self.claim.graph_id()
+            && authority.original_owner_id() == self.claim.old_owner_id()
+            && authority.root_member_id() == self.root_exit.root_member_id()
+            && authority.root_pid() == self.root_exit.pid()
+            && authority.root_creation_marker() == self.root_exit.creation_marker()
+            && member == self.claim.scratch_member_id().uuid()
+            && self.directories.lock().is_ok_and(|guard| guard.is_none())
+            && self.claim.fold_consumed()
+    }
+    pub(in crate::adaptive_resources::runtime) fn into_closed_domain(
+        self,
+        authority: &RecoveredRAuthority,
+        binding: ReservationBinding,
+        member: Uuid,
+    ) -> Result<PositivePreviousRootExit, Self> {
+        if !self.verifies_closed_domain(authority, binding, member) {
+            return Err(self);
+        }
+        Ok(self.root_exit)
+    }
 }
 
 /// Nonserde, move-only proof held by the runtime before it can submit a
@@ -106,6 +134,7 @@ pub(crate) struct RecoveredRAuthority {
     adoption_operation_id: Uuid,
     adoption_sequence: i64,
     state_head: v2::scratch::AssetEventRefV1,
+    scratch_member_id: Uuid,
     root_member_id: Uuid,
     root_pid: u32,
     root_creation_marker: u64,
@@ -140,6 +169,9 @@ impl RecoveredRAuthority {
     }
     pub(crate) fn state_head(&self) -> &v2::scratch::AssetEventRefV1 {
         &self.state_head
+    }
+    pub(crate) fn scratch_member_id(&self) -> Uuid {
+        self.scratch_member_id
     }
     pub(crate) fn root_member_id(&self) -> Uuid {
         self.root_member_id
@@ -209,6 +241,7 @@ impl NativeActiveRImportProof {
             adoption_operation_id: ack.operation_id,
             adoption_sequence: ack.sequence,
             state_head: self.state_head().clone(),
+            scratch_member_id: self.claim().scratch_member_id().uuid(),
             root_member_id: self.root_exit().root_member_id(),
             root_pid: self.root_exit().pid(),
             root_creation_marker: self.root_exit().creation_marker(),
@@ -240,6 +273,7 @@ impl RecoveredRAuthority {
             || claim.graph_id() != self.graph_id
             || claim.old_owner_id() != self.original_owner_id
             || claim.state_head() != &self.state_head
+            || claim.scratch_member_id().uuid() != self.scratch_member_id
             || imported.root_exit.root_member_id() != self.root_member_id
             || imported.root_exit.pid() != self.root_pid
             || imported.root_exit.creation_marker() != self.root_creation_marker
@@ -365,8 +399,8 @@ impl NodeResourceRuntime {
         Ok(())
     }
 
-    /// Drive only native scratch cleanup under the original full R hold. This
-    /// does not settle root/task/source facts or release any ledger credit.
+    /// Drive native scratch cleanup, exact typed settlement, then the sole
+    /// ledger refund after a known durable acknowledgement.
     pub(crate) async fn cleanup_recovered_r_outputs(
         &self,
         deadline: Instant,
@@ -402,7 +436,7 @@ impl NodeResourceRuntime {
                 .claim()
                 .scratch_member_id()
                 .uuid();
-            self.close_producer_finite_native(&preparation, 0, member, deadline)
+            self.complete_recovered_r_preparation(&preparation, member, deadline)
                 .await
                 .map_err(|_| unavailable())?;
         }

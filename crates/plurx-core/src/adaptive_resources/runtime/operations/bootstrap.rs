@@ -48,6 +48,12 @@ pub(super) struct PreparedBootstrapTransfer {
 
 #[cfg(unix)]
 impl PreparedBootstrapTransfer {
+    pub(super) fn resident_inventory_bytes(&self) -> Result<u64, OperationError> {
+        self.target_fold
+            .resident_inventory_bytes()
+            .map_err(Into::into)
+    }
+
     /// Infallibly moves the original RootCell/publication/sync owners into the
     /// adopted member after every validation has completed. The caller must
     /// use the exact source member that produced this token under its held

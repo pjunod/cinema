@@ -51,6 +51,8 @@ impl SealedPhysicalGraph {
         members.receipt_issued = true;
         Ok(PhysicalCloseReceipt {
             binding: self.custody.binding,
+            #[cfg(target_os = "linux")]
+            _recovered_r: None,
         })
     }
 

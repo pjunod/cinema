@@ -5,6 +5,8 @@ struct Fixture {
     ledger: ResourceLedger,
     selected_family: FamilyIdentity,
     selected: ResourceReservation,
+    retained_binding: ReservationBinding,
+    retained_durable: Uuid,
 }
 
 fn vector(memory: u64, processes: u64) -> ResourceVector {
@@ -63,9 +65,11 @@ fn fixture(retained_memory: u64) -> Fixture {
         entry.state = ReservationState::Reaping;
     }
     let retained = vector(retained_memory, 0);
+    let retained_durable = Uuid::new_v4();
     let mut swap = ledger
-        .prepare_retained_swap(source_binding, source_durable, Uuid::new_v4(), retained)
+        .prepare_retained_swap(source_binding, source_durable, retained_durable, retained)
         .expect("retained replacement");
+    let retained_binding = swap.target_binding();
     let receipt = crate::adaptive_resources::PhysicalRetirementReceipt::adapter_fixture(
         source_binding,
         swap.target_binding(),
@@ -94,23 +98,103 @@ fn fixture(retained_memory: u64) -> Fixture {
         ledger,
         selected_family,
         selected,
+        retained_binding,
+        retained_durable,
     }
+}
+
+fn replace_retained(fixture: &mut Fixture, memory: u64) {
+    let next_durable = Uuid::new_v4();
+    let mut swap = fixture
+        .ledger
+        .prepare_retained_swap(
+            fixture.retained_binding,
+            fixture.retained_durable,
+            next_durable,
+            vector(memory, 0),
+        )
+        .expect("prepare retained accounting replacement");
+    let receipt = crate::adaptive_resources::PhysicalRetirementReceipt::adapter_fixture(
+        fixture.retained_binding,
+        swap.target_binding(),
+    );
+    let committed = CommittedRetirementReceipt::adapter_fixture(receipt);
+    let _authority = fixture
+        .ledger
+        .commit_retained_swap(&mut swap, &committed)
+        .expect("accounting-only retained replacement");
+    fixture.retained_binding = swap.target_binding();
+    fixture.retained_durable = next_durable;
 }
 
 #[test]
 fn actual_mix_changes_with_the_committed_retained_resource_vector() {
-    let smaller = fixture(256);
-    let larger = fixture(512);
-    let small_mix = smaller
+    let mut actual = fixture(256);
+    let small_mix = actual
         .ledger
-        .actual_history_mix_for(smaller.selected_family)
+        .actual_history_mix_for(actual.selected_family)
         .expect("one selected producer plus retained S");
-    let large_mix = larger
+    replace_retained(&mut actual, 512);
+    let large_mix = actual
         .ledger
-        .actual_history_mix_for(larger.selected_family)
+        .actual_history_mix_for(actual.selected_family)
         .expect("one selected producer plus retained S");
     assert_ne!(small_mix, large_mix);
-    let _keep_reservations_alive = (smaller.selected, larger.selected);
+    let _keep_reservations_alive = actual.selected;
+}
+
+#[test]
+fn selected_spawn_transition_does_not_change_incumbent_mix() {
+    let actual = fixture(256);
+    let before = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("active selected producer and retained S");
+    {
+        let mut state = actual.ledger.inner.lock().expect("ledger state");
+        state
+            .entries
+            .get_mut(&actual.selected.binding.reservation)
+            .expect("selected entry")
+            .state = ReservationState::SpawnPossible;
+    }
+    let after = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("selected spawn transition remains identifiable");
+    assert_eq!(before, after);
+}
+
+#[test]
+fn capacity_epoch_change_rekeys_without_dropping_prepaid_producer() {
+    use crate::process::observation::Metric;
+    let actual = fixture(256);
+    let before = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("selected prepaid producer and retained S");
+    actual
+        .ledger
+        .update_capacity(
+            2,
+            Metric::Known(ResourceVector {
+                cpu_ns_per_second: 20_000,
+                peak_memory_bytes: 20_000,
+                handles: 20_000,
+                processes: 20_000,
+                hardware_slots: 20_000,
+                tuner_slots: 20_000,
+                scratch_bytes: 20_000,
+            })
+            .into(),
+        )
+        .expect("new explicit limits");
+    let after = actual
+        .ledger
+        .actual_history_mix_for(actual.selected_family)
+        .expect("prepaid producer remains held across limit update");
+    assert_ne!(before, after);
+    let _keep_selected = actual.selected;
 }
 
 #[test]

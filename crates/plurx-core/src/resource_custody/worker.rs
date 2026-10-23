@@ -451,7 +451,7 @@ impl CustodyJournal {
                         Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
                     ) | (
                         Some(RecoveryAuthority::ProducerR(_)),
-                        Mutation::AssetChangeV3 { .. }
+                        Mutation::AssetChangeV3 { .. } | Mutation::SettleTyped(_)
                     )
                 )
             {

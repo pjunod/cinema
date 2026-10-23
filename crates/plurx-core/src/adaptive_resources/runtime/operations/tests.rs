@@ -240,6 +240,8 @@ async fn durable_graph_drop_and_public_cleanup_cannot_bypass_journal_settlement(
             ._cleanup
             .close(PhysicalCloseReceipt {
                 binding: role.binding,
+                #[cfg(target_os = "linux")]
+                _recovered_r: None,
             })
             .expect_err("durable close must retain proof");
         assert_eq!(rejected.reason, AdmissionRefusal::InvalidTransition);
@@ -273,7 +275,11 @@ async fn proof_is_retained_synchronously_on_queue_rejection_and_busy_owner_retur
     let binding = owner.state.lock().await.roles[0].binding;
     // Synthetic private test receipt checks ownership, not physical extinction.
     let proof = PhysicalSettlement {
-        receipt: PhysicalCloseReceipt { binding },
+        receipt: PhysicalCloseReceipt {
+            binding,
+            #[cfg(target_os = "linux")]
+            _recovered_r: None,
+        },
         facts: Vec::new(),
     };
     let guard = owner.state.lock().await;
@@ -436,7 +442,11 @@ async fn corrected_definite_settlement_retains_original_proof_and_refunds_after_
             &owner,
             0,
             PhysicalSettlement {
-                receipt: PhysicalCloseReceipt { binding },
+                receipt: PhysicalCloseReceipt {
+                    binding,
+                    #[cfg(target_os = "linux")]
+                    _recovered_r: None,
+                },
                 facts: Vec::new(),
             },
             deadline(),

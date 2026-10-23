@@ -220,7 +220,9 @@ fn restored_binding_is_fresh_and_an_old_receipt_cannot_refund_it() {
     assert_eq!(
         cleanup
             .close(PhysicalCloseReceipt {
-                binding: old_bindings[&obligation]
+                binding: old_bindings[&obligation],
+                #[cfg(target_os = "linux")]
+                _recovered_r: None,
             })
             .map_err(|rejected| rejected.reason),
         Err(AdmissionRefusal::ReceiptMismatch)

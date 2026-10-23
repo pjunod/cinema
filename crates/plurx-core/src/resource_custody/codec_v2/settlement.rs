@@ -91,6 +91,16 @@ pub(crate) enum ClosedFact {
         join_operation_id: Id,
         owners: Vec<OwnerClosed>,
     },
+    /// Same-boot fixed software root and daemon domains were positively
+    /// extinct before import. This records old task-owner extinction, not a
+    /// fabricated join or an assertion that no task effect occurred.
+    VodOutputTaskDomainExtinctV1 {
+        task: VodOutputTask,
+        root_member_id: Id,
+        root_pid: u32,
+        root_creation_marker: u64,
+        operation_id: Id,
+    },
     /// The original graph proved that no writer was registered. This is
     /// disjoint from a joined VodOutputTaskV1 and closes no invented owner.
     VodOutputTaskNeverAcquiredV1 {
@@ -295,6 +305,22 @@ pub(crate) fn validate_settlement(
                 {
                     validate_closed_owners(owners, &task.inventory)?
                 }
+                (
+                    MemberPlan::VodOutputTaskV1 { task, .. },
+                    ClosedFact::VodOutputTaskDomainExtinctV1 {
+                        task: closed,
+                        root_member_id,
+                        root_pid,
+                        root_creation_marker,
+                        operation_id,
+                    },
+                ) if task == closed
+                    && task.root_member_id == *root_member_id
+                    && *root_pid > 0
+                    && *root_creation_marker > 0
+                    && !operation_id.uuid().is_nil()
+                    && envelope.observed.as_ref().is_none_or(|observed|
+                        matches!(observed, Observed::VodOutputTaskV1 { task: actual } if actual == task)) => {}
                 (
                     MemberPlan::VodOutputTaskV1 { task, .. },
                     ClosedFact::VodOutputTaskNeverAcquiredV1 {

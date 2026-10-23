@@ -580,6 +580,9 @@ impl ActiveFiniteRImportClaim {
         let mut guard = self.fold.lock().map_err(|_| codec::invalid())?;
         guard.take().ok_or_else(codec::invalid)
     }
+    pub(crate) fn fold_consumed(&self) -> bool {
+        self.fold.lock().is_ok_and(|guard| guard.is_none())
+    }
 }
 
 pub(crate) fn select_active_finite_r(

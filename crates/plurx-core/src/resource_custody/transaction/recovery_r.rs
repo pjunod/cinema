@@ -3,6 +3,13 @@
 use super::*;
 use crate::resource_custody::codec_v2::{self as v2, scratch::AssetEventRefV1};
 
+struct OverlayRecord {
+    owner_id: Uuid,
+    phase: Phase,
+    sequence: i64,
+    inventory: ObligationInventory,
+}
+
 pub(super) fn load_overlay(
     connection: &Connection,
     schema_version: i64,
@@ -19,6 +26,7 @@ pub(super) fn load_overlay(
     let mut rows = statement.query([])?;
     let mut holders = Vec::new();
     let mut effective = BTreeMap::<Uuid, (Uuid, i64)>::new();
+    let mut recovered = BTreeMap::<Uuid, OverlayRecord>::new();
     while let Some(row) = rows.next()? {
         if holders.len() >= codec::ACTIVE_LIMIT {
             return Err(codec::invalid());
@@ -39,10 +47,48 @@ pub(super) fn load_overlay(
         let root_creation_marker = root_creation_marker
             .parse::<u64>()
             .map_err(|_| codec::invalid())?;
-        let record = obligations
-            .iter()
-            .find(|r| r.obligation_id == obligation_id)
-            .ok_or_else(codec::invalid)?;
+        if !recovered.contains_key(&obligation_id) {
+            let record = if let Some(active) = obligations
+                .iter()
+                .find(|r| r.obligation_id == obligation_id)
+            {
+                OverlayRecord {
+                    owner_id: active.owner_id,
+                    phase: active.phase,
+                    sequence: active.sequence,
+                    inventory: active.inventory.clone(),
+                }
+            } else {
+                let (owner, graph, phase, sequence, manifest_json, settlement_json):
+                    (Vec<u8>, Vec<u8>, String, i64, String, Option<String>) = connection.query_row(
+                        "SELECT owner_id,graph_id,phase,sequence,manifest_json,settlement_json FROM obligations WHERE obligation_id=?1",
+                        [obligation_id.as_bytes()],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                    )?;
+                let owner = codec::uuid_from_bytes(&owner)?;
+                let graph = codec::uuid_from_bytes(&graph)?;
+                let phase = Phase::parse(&phase)?;
+                if phase != Phase::Settled || settlement_json.is_none() {
+                    return Err(codec::invalid());
+                }
+                OverlayRecord {
+                    owner_id: owner,
+                    phase,
+                    sequence,
+                    inventory: inventory::load(
+                        connection,
+                        obligation_id,
+                        owner,
+                        graph,
+                        phase,
+                        &manifest_json,
+                        settlement_json.as_deref(),
+                    )?,
+                }
+            };
+            recovered.insert(obligation_id, record);
+        }
+        let record = recovered.get(&obligation_id).ok_or_else(codec::invalid)?;
         if effective.contains_key(&obligation_id) {
             // This version supports one exact old-domain handoff, not a chain
             // of reconstructed producer owners.
@@ -88,13 +134,13 @@ pub(super) fn load_overlay(
             || original_r_sequence > record.sequence
             || !matches!(
                 record.phase,
-                Phase::AcquisitionPossible | Phase::Sealed | Phase::UnknownHeld
+                Phase::AcquisitionPossible | Phase::Sealed | Phase::UnknownHeld | Phase::Settled
             )
             || !matches!(
                 &root.recovery,
                 RecoveryMethod::TrustedFixedSoftwareSameBootV1 { .. }
             )
-            || root_record.phase != "acquired"
+            || (record.phase != Phase::Settled && root_record.phase != "acquired")
             || process.pid != root_pid
             || process.creation_marker != Some(root_creation_marker)
         {
@@ -113,6 +159,9 @@ pub(super) fn load_overlay(
             root_pid,
             root_creation_marker,
         };
+        if record.phase == Phase::Settled {
+            validate_settled_holder(connection, &holder, record)?;
+        }
         let result_json: String = connection.query_row(
             "SELECT result_json FROM operations WHERE operation_id=?1",
             [operation_id.as_bytes()],
@@ -132,8 +181,68 @@ pub(super) fn load_overlay(
         effective.insert(obligation_id, (current_owner_id, adoption_sequence));
         holders.push(holder);
     }
-    validate_overlay_history(connection, &holders, obligations, next)?;
+    validate_overlay_history(connection, &holders, &recovered, next)?;
     Ok(holders)
+}
+
+fn validate_settled_holder(
+    connection: &Connection,
+    holder: &RecoveredRHolder,
+    record: &OverlayRecord,
+) -> Result<(), CustodyError> {
+    let settlement_json: String = connection.query_row(
+        "SELECT settlement_json FROM obligations WHERE obligation_id=?1",
+        [holder.obligation_id.as_bytes()],
+        |row| row.get(0),
+    )?;
+    let v2::SettlementDocument::Physical(settlement) = v2::decode_settlement(&settlement_json)?
+    else {
+        return Err(codec::invalid());
+    };
+    let ObligationInventory::TypedV2 { manifest, .. } = &record.inventory else {
+        return Err(codec::invalid());
+    };
+    if settlement.owner_id != manifest.owner_id || settlement.graph_id != manifest.graph_id {
+        return Err(codec::invalid());
+    }
+    let mut roots = 0;
+    let mut tasks = 0;
+    let mut scratch = 0;
+    for (plan, disposition) in manifest.members.iter().zip(&settlement.members) {
+        let v2::MemberDisposition::Closed { member_id, fact } = disposition else {
+            return Err(codec::invalid());
+        };
+        if member_id.uuid() != plan.member_id() {
+            return Err(codec::invalid());
+        }
+        match (plan, fact) {
+            (v2::MemberPlan::SourceV1 { source, .. }, v2::ClosedFact::SourceV1 { copies, .. })
+                if copies.len() == source.planned_copies.len()
+                    && copies.iter().all(|copy| matches!(copy,
+                        v2::CopyClosed::DomainExtinct { domain, .. } if domain == &source.filesystem_domain)) => {}
+            (v2::MemberPlan::LegacyV1 { planned }, v2::ClosedFact::LegacyV1 { fact })
+                if planned.member_id == holder.root_member_id
+                    && fact.object_identity == format!("{}:{}", holder.root_pid, holder.root_creation_marker) => {
+                roots += 1;
+            }
+            (v2::MemberPlan::VodOutputTaskV1 { task, .. }, v2::ClosedFact::VodOutputTaskDomainExtinctV1 {
+                task: closed, root_member_id, root_pid, root_creation_marker, ..
+            }) if closed == task
+                && root_member_id.uuid() == holder.root_member_id
+                && *root_pid == holder.root_pid
+                && *root_creation_marker == holder.root_creation_marker => {
+                tasks += 1;
+            }
+            (v2::MemberPlan::ScratchAssetsV3 { .. }, v2::ClosedFact::ScratchAssetsV3 { .. }) => {
+                scratch += 1;
+            }
+            _ => return Err(codec::invalid()),
+        }
+    }
+    if roots != 1 || tasks != 1 || scratch != 1 {
+        return Err(codec::invalid());
+    }
+    Ok(())
 }
 
 /// Replay the post-adoption producer fold from its exact imported head. The
@@ -141,13 +250,13 @@ pub(super) fn load_overlay(
 fn validate_overlay_history(
     connection: &Connection,
     holders: &[RecoveredRHolder],
-    obligations: &[ObligationRecord],
+    obligations: &BTreeMap<Uuid, OverlayRecord>,
     next: i64,
 ) -> Result<(), CustodyError> {
     if holders.is_empty() {
         return Ok(());
     }
-    let mut tracked = BTreeMap::<Uuid, (i64, i64, AssetEventRefV1, bool)>::new();
+    let mut tracked = BTreeMap::<Uuid, (i64, i64, AssetEventRefV1, bool, bool)>::new();
     for holder in holders {
         if tracked
             .insert(
@@ -156,6 +265,7 @@ fn validate_overlay_history(
                     holder.original_r_sequence,
                     holder.adoption_sequence,
                     holder.head.clone(),
+                    false,
                     false,
                 ),
             )
@@ -210,7 +320,7 @@ fn validate_overlay_history(
                     .get_mut(&record.ack.obligation_id)
                     .ok_or_else(codec::invalid)?;
                 if record.ack.sequence > state.1 {
-                    if !state.3 || record.change.previous.as_ref() != Some(&state.2) {
+                    if !state.3 || state.4 || record.change.previous.as_ref() != Some(&state.2) {
                         return Err(codec::invalid());
                     }
                     state.0 = record.ack.sequence;
@@ -221,7 +331,15 @@ fn validate_overlay_history(
             DiskResult::Changed(ack)
                 if tracked.get(&ack.obligation_id).is_some_and(|state| state.3) =>
             {
-                return Err(codec::invalid())
+                let state = tracked
+                    .get_mut(&ack.obligation_id)
+                    .ok_or_else(codec::invalid)?;
+                if state.4 || ack.phase != Phase::Settled || ack.sequence <= state.1 {
+                    return Err(codec::invalid());
+                }
+                state.0 = ack.sequence;
+                state.1 = ack.sequence;
+                state.4 = true;
             }
             DiskResult::RetiredWithAssets(ack)
                 if tracked
@@ -244,12 +362,11 @@ fn validate_overlay_history(
         return Err(codec::invalid());
     }
     for holder in holders {
-        let (last_data, _, head, adopted) = tracked
+        let (last_data, _, head, adopted, settled) = tracked
             .get(&holder.obligation_id)
             .ok_or_else(codec::invalid)?;
         let record = obligations
-            .iter()
-            .find(|record| record.obligation_id == holder.obligation_id)
+            .get(&holder.obligation_id)
             .ok_or_else(codec::invalid)?;
         let ObligationInventory::TypedV2 { members, .. } = &record.inventory else {
             return Err(codec::invalid());
@@ -261,7 +378,11 @@ fn validate_overlay_history(
                 _ => None,
             })
             .ok_or_else(codec::invalid)?;
-        if !*adopted || *last_data != record.sequence || head != current_head {
+        if !*adopted
+            || *last_data != record.sequence
+            || *settled != (record.phase == Phase::Settled)
+            || head != current_head
+        {
             return Err(codec::invalid());
         }
     }
@@ -358,7 +479,7 @@ pub(super) fn adopt(
 }
 
 /// Only the actual imported producer owner can write the exact scratch cleanup
-/// fold. This grants no new acquisition and no settlement or resource credit.
+/// fold or settle after native closure. This grants no new acquisition.
 #[cfg(target_os = "linux")]
 pub(super) fn change(
     tx: &Transaction<'_>,
@@ -423,6 +544,163 @@ pub(super) fn change(
         Mutation::AssetChangeV3 { change } => {
             scratch::bootstrap::change(tx, key, prior, &manifest, change)
         }
+        Mutation::SettleTyped(proof) => settle(tx, key, prior, &manifest, proof, authority),
         _ => Err(codec::invalid()),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn settle(
+    tx: &Transaction<'_>,
+    key: &TransitionKey,
+    prior: Phase,
+    manifest: &v2::Manifest,
+    proof: &PhysicalTypedSettlement,
+    authority: &crate::adaptive_resources::runtime::recovery::RecoveredRAuthority,
+) -> Result<DiskResult, CustodyError> {
+    if !matches!(
+        prior,
+        Phase::AcquisitionPossible | Phase::Sealed | Phase::UnknownHeld
+    ) || proof.receipt.custody_binding() != key.handle.runtime_binding
+        || proof.settlement.version != 2
+        || proof.settlement.owner_id != manifest.owner_id
+        || proof.settlement.graph_id != manifest.graph_id
+        || proof.settlement.operation_id.uuid() != key.operation_id
+        || manifest.owner_id.uuid() != authority.original_owner_id()
+        || manifest.members.len() != proof.settlement.members.len()
+    {
+        return Err(codec::invalid());
+    }
+    let mut envelopes = Vec::new();
+    let mut scratch = None;
+    for (planned, disposition) in manifest.members.iter().zip(&proof.settlement.members) {
+        let v2::MemberDisposition::Closed { member_id, fact } = disposition else {
+            return Err(codec::invalid());
+        };
+        if member_id.uuid() != planned.member_id() {
+            return Err(codec::invalid());
+        }
+        let (phase, identity_json): (String, String) = tx.query_row(
+            "SELECT phase,identity_json FROM members WHERE obligation_id=?1 AND member_id=?2",
+            params![
+                key.handle.obligation_id.as_bytes(),
+                member_id.uuid().as_bytes()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if phase != "planned" && phase != "acquired" {
+            return Err(codec::invalid());
+        }
+        let envelope: v2::Envelope = codec::decode(&identity_json)?;
+        v2::validate_envelope(manifest, &envelope)?;
+        if envelope.planned != *planned {
+            return Err(codec::invalid());
+        }
+        match (planned, fact) {
+            (
+                v2::MemberPlan::SourceV1 { source, .. },
+                v2::ClosedFact::SourceV1 { holder_id, copies },
+            ) if holder_id == &source.holder_id
+                && copies.len() == source.planned_copies.len()
+                && copies.iter().all(|copy| {
+                    matches!(copy,
+                        v2::CopyClosed::DomainExtinct { domain, operation_id, .. }
+                            if domain == &source.filesystem_domain
+                                && operation_id.uuid() == key.operation_id)
+                }) => {}
+            (v2::MemberPlan::LegacyV1 { planned }, v2::ClosedFact::LegacyV1 { fact })
+                if planned.kind == MemberKind::Root
+                    && planned.member_id == authority.root_member_id()
+                    && fact.member_id == planned.member_id
+                    && fact.domain == planned.domain
+                    && fact.object_identity
+                        == format!(
+                            "{}:{}",
+                            authority.root_pid(),
+                            authority.root_creation_marker()
+                        )
+                    && !fact.evidence.is_empty() => {}
+            (
+                v2::MemberPlan::VodOutputTaskV1 { task, .. },
+                v2::ClosedFact::VodOutputTaskDomainExtinctV1 {
+                    task: closed,
+                    root_member_id,
+                    root_pid,
+                    root_creation_marker,
+                    operation_id,
+                },
+            ) if closed == task
+                && root_member_id.uuid() == authority.root_member_id()
+                && *root_pid == authority.root_pid()
+                && *root_creation_marker == authority.root_creation_marker()
+                && operation_id.uuid() == key.operation_id => {}
+            (
+                v2::MemberPlan::ScratchAssetsV3 { slot, plan },
+                v2::ClosedFact::ScratchAssetsV3 {
+                    plan: closed,
+                    exact_head,
+                    operation_id,
+                },
+            ) if slot.member_id == *member_id
+                && closed == plan
+                && exact_head.operation_id == *operation_id =>
+            {
+                let Some(v2::Observed::ScratchAssetsV3 { state }) = &envelope.observed else {
+                    return Err(codec::invalid());
+                };
+                if phase != "acquired" || state.asset.head.as_ref() != Some(exact_head) {
+                    return Err(codec::invalid());
+                }
+                let fold = scratch::bootstrap::restore(
+                    tx,
+                    key.handle.obligation_id,
+                    key.handle.graph_id,
+                    slot.member_id,
+                    plan,
+                    Some(state),
+                )?;
+                let closed = fold.state();
+                if closed != *state
+                    || closed.asset.lifecycle != v2::scratch::ScratchLifecycleV1::RetiredClosed
+                    || closed.asset.directory.is_some()
+                    || closed.asset.totals != v2::scratch::AssetTotalsV1::default()
+                    || closed.bootstrap.phase != v2::scratch::bootstrap::BootstrapPhase::Closed
+                    || closed.bootstrap.current.is_some()
+                    || closed.bootstrap.parent.is_some()
+                    || closed.bootstrap.possible_child.is_some()
+                    || !fold.files().is_empty()
+                {
+                    return Err(codec::invalid());
+                }
+                scratch = Some(slot.member_id);
+            }
+            _ => return Err(codec::invalid()),
+        }
+        envelopes.push(envelope);
+    }
+    if scratch.map(v2::Id::uuid) != Some(authority.scratch_member_id()) {
+        return Err(codec::invalid());
+    }
+    v2::validate_settlement(manifest, &envelopes, &proof.settlement)?;
+    let settlement_json = codec::encode(&proof.settlement)?;
+    let sequence = next_sequence(tx)?;
+    if tx.execute(
+        "UPDATE obligations SET phase='settled',sequence=?2,last_operation_id=?3,hold_reason=NULL,settlement_json=?4 WHERE obligation_id=?1 AND sequence=?5",
+        params![key.handle.obligation_id.as_bytes(), sequence, key.operation_id.as_bytes(), settlement_json, key.expected_sequence],
+    )? != 1 {
+        return Err(codec::invalid());
+    }
+    if tx.execute(
+        "UPDATE members SET phase='closed',proof_json=?2 WHERE obligation_id=?1 AND phase IN ('planned','acquired')",
+        params![key.handle.obligation_id.as_bytes(), codec::encode(&proof.settlement)?],
+    )? != manifest.members.len() {
+        return Err(codec::invalid());
+    }
+    Ok(DiskResult::Changed(CommitAck {
+        operation_id: key.operation_id,
+        obligation_id: key.handle.obligation_id,
+        graph_id: key.handle.graph_id,
+        sequence,
+        phase: Phase::Settled,
+    }))
 }

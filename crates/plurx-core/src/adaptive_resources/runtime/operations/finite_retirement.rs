@@ -138,11 +138,13 @@ impl NodeResourceRuntime {
         // Runtime payload accounting is separate from frozen durable totals.
         // The active unknown producer claim remains held throughout cloning;
         // only a fold fitting S's explicit resident partition can transfer.
-        if bootstrap.resident_inventory_bytes()? > plan.limits.resident_memory_bytes {
+        let current_inventory_bytes = bootstrap.resident_inventory_bytes()?;
+        if current_inventory_bytes > plan.limits.resident_memory_bytes {
             return Err(OperationError::State);
         }
         let full = bootstrap.frozen_inventory()?;
-        if full.resident_inventory_bytes()? > plan.limits.resident_memory_bytes {
+        let frozen_inventory_bytes = full.resident_inventory_bytes()?;
+        if frozen_inventory_bytes > plan.limits.resident_memory_bytes {
             return Err(OperationError::State);
         }
         let reference = frozen_snapshot_ref(plan, &full)?;
@@ -168,15 +170,47 @@ impl NodeResourceRuntime {
             }
             entry.resources
         };
-        // Preserve the whole admitted nonproducer allowance. This is deliberately
-        // conservative; no sampled RSS or incomplete metadata recount reduces S.
+        let response_memory_bytes = role
+            .response_budget
+            .as_ref()
+            .ok_or(OperationError::State)?
+            .limit_bytes()?;
+        // Keep every future output/reader subpartition, the configured-root
+        // bootstrap allowance, the actual inventory payload, the complete
+        // response budget, and the existing persistent metadata allowance.
+        // These are known requested capacities, not a whole-RSS estimate.
+        const PERSISTENT_METADATA_BYTES: u64 = 64 * 1024;
+        let retained_memory_bytes = plan
+            .limits
+            .resident_memory_bytes
+            .checked_add(plan.bootstrap().bounds.resident_memory_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(current_inventory_bytes.max(frozen_inventory_bytes))
+            })
+            .and_then(|bytes| bytes.checked_add(response_memory_bytes))
+            .and_then(|bytes| bytes.checked_add(PERSISTENT_METADATA_BYTES))
+            .ok_or(OperationError::State)?;
+        let retained_handles = u64::from(
+            full.state
+                .asset
+                .totals
+                .handles_reserved
+                .max(plan.limits.live_handles),
+        );
         let retained_resources = ResourceVector {
             cpu_ns_per_second: 0,
+            peak_memory_bytes: retained_memory_bytes,
+            handles: retained_handles,
             processes: 0,
             hardware_slots: 0,
             tuner_slots: 0,
-            ..source_resources
+            scratch_bytes: full.state.asset.totals.charged_storage_bytes,
         };
+        // The original R charge must cover every S dimension. An incomplete
+        // profile refuses transfer and preserves the original producer claim.
+        if source_resources.checked_sub(retained_resources).is_none() {
+            return Err(OperationError::State);
+        }
         let target_durable = Uuid::new_v4();
         let swap = self.ledger.prepare_retained_swap(
             role.binding,
@@ -253,6 +287,14 @@ impl NodeResourceRuntime {
             v2::Id::new(target.obligation_id())?,
             target_member,
         )?;
+        if prepared.resident_inventory_bytes()?
+            > current_inventory_bytes.max(frozen_inventory_bytes)
+        {
+            // The staged target fold is an actual post-transfer allocation.
+            // Refuse before native movement if cloning exceeded S's payload
+            // partition; the entire original R charge remains held.
+            return Err(OperationError::State);
+        }
         let key = TransitionKey {
             handle: source.clone(),
             operation_id: operation_id.uuid(),
@@ -353,6 +395,19 @@ impl NodeResourceRuntime {
                 &retirement.target,
             )?);
         }
+        // The journal has positively committed R→S and this continuation
+        // retains its original operation, target native cell and receipt.
+        // Release producer-only heap/native owners while R is STILL charged;
+        // a failed ledger swap can retry with the same committed capability.
+        role.members.clear();
+        role.typed_members = None;
+        role.armed.clear();
+        role.invoked.clear();
+        role.sources.clear();
+        role.roots.clear();
+        role.sealed = None;
+        role.finite_vod = None;
+        role.bootstrap.clear();
         // The original post-COMMIT capability is retained before any ledger or
         // operation-book lock. Failure preserves it for this exact continuation.
         let mut book = self.operations.lock().map_err(|_| OperationError::State)?;

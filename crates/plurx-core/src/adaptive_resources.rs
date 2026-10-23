@@ -243,6 +243,8 @@ pub struct ReservationBinding {
 #[derive(Debug)]
 pub struct PhysicalCloseReceipt {
     binding: ReservationBinding,
+    #[cfg(target_os = "linux")]
+    _recovered_r: Option<Box<runtime::RecoveredRClosure>>,
 }
 
 impl PhysicalCloseReceipt {
@@ -252,6 +254,8 @@ impl PhysicalCloseReceipt {
     fn from_finite_cancel(closure: runtime::FiniteCancellationClosure) -> Self {
         Self {
             binding: closure.into_binding(),
+            #[cfg(target_os = "linux")]
+            _recovered_r: None,
         }
     }
     /// Consumes the original native retained-output closure. Audit heads and
@@ -260,6 +264,17 @@ impl PhysicalCloseReceipt {
     fn from_retained_finite(closure: runtime::RetainedFiniteClosure) -> Self {
         Self {
             binding: closure.into_binding(),
+            #[cfg(target_os = "linux")]
+            _recovered_r: None,
+        }
+    }
+    /// Consumes actual recovered producer scratch closure together with the
+    /// private exact old-domain exit owner; no journal DTO can mint this.
+    #[cfg(target_os = "linux")]
+    fn from_recovered_r(closure: runtime::RecoveredRClosure) -> Self {
+        Self {
+            binding: closure.binding(),
+            _recovered_r: Some(Box::new(closure)),
         }
     }
 
@@ -1171,6 +1186,8 @@ mod tests {
         cleanup
             .close(PhysicalCloseReceipt {
                 binding: cleanup.binding,
+                #[cfg(target_os = "linux")]
+                _recovered_r: None,
             })
             .expect("exact physical closure");
         assert_eq!(ledger.snapshot().expect("closed snapshot").used, vector(0));
@@ -1190,7 +1207,11 @@ mod tests {
         cleanup.mark_reaping().expect("same owner reaping");
         let binding = cleanup.binding;
         cleanup
-            .close(PhysicalCloseReceipt { binding })
+            .close(PhysicalCloseReceipt {
+                binding,
+                #[cfg(target_os = "linux")]
+                _recovered_r: None,
+            })
             .expect("confirmed closure");
         let (not_spawned, _cleanup) = ledger.reserve(demand(1, true)).expect("replacement trial");
         drop(not_spawned);
@@ -1319,6 +1340,8 @@ mod tests {
         cleanup
             .close(PhysicalCloseReceipt {
                 binding: cleanup.binding,
+                #[cfg(target_os = "linux")]
+                _recovered_r: None,
             })
             .expect("physical close releases reservation");
 
@@ -1377,7 +1400,9 @@ mod tests {
         assert_eq!(
             authority
                 .close(PhysicalCloseReceipt {
-                    binding: other_authority.binding
+                    binding: other_authority.binding,
+                    #[cfg(target_os = "linux")]
+                    _recovered_r: None,
                 })
                 .map_err(|rejected| rejected.reason),
             Err(AdmissionRefusal::ReceiptMismatch)
@@ -1392,6 +1417,8 @@ mod tests {
         authority
             .close(PhysicalCloseReceipt {
                 binding: authority.binding,
+                #[cfg(target_os = "linux")]
+                _recovered_r: None,
             })
             .expect("matching closure after refusal");
         assert_eq!(first.snapshot().expect("closed snapshot").held, 0);
@@ -1442,6 +1469,8 @@ mod tests {
             last_cleanup
                 .close(PhysicalCloseReceipt {
                     binding: last_cleanup.binding,
+                    #[cfg(target_os = "linux")]
+                    _recovered_r: None,
                 })
                 .expect("one confirmed role");
             assert!(ledger.snapshot().expect("partial closure").trial_held);

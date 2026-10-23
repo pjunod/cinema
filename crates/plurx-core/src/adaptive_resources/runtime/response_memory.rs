@@ -27,6 +27,14 @@ pub(in crate::adaptive_resources::runtime) struct ResponseBudget {
 }
 
 impl ResponseBudget {
+    /// The complete original in-role partition remains available to S for
+    /// future counted bodies, including when no response is live at transfer.
+    pub(in crate::adaptive_resources::runtime) fn limit_bytes(
+        &self,
+    ) -> Result<u64, OperationError> {
+        u64::try_from(self.limit).map_err(|_| OperationError::State)
+    }
+
     pub(in crate::adaptive_resources::runtime) fn new(
         limit: usize,
     ) -> Result<Arc<Self>, OperationError> {

@@ -34,6 +34,8 @@ pub(super) use operations::bootstrap::retirement::RetainedFiniteClosure;
 pub(super) use operations::finite_cancel::FiniteCancellationClosure;
 #[cfg(unix)]
 pub(super) use operations::finite_retirement::FiniteRetirementClosure;
+#[cfg(target_os = "linux")]
+pub(super) use operations::recovered_producer::RecoveredRClosure;
 #[cfg(unix)]
 pub use operations::source_files::RetainedSourceLease;
 
@@ -80,6 +82,9 @@ pub struct NodeResourceRuntime {
     recovered_s: Mutex<BTreeMap<Uuid, Arc<recovery::ImportedRetainedS>>>,
     #[cfg(target_os = "linux")]
     recovered_r: Mutex<BTreeMap<Uuid, Arc<recovery::ImportedActiveR>>>,
+    #[cfg(target_os = "linux")]
+    recovered_r_domains:
+        Mutex<BTreeMap<Uuid, crate::resource_custody::recovery::PositivePreviousRootExit>>,
     #[cfg(target_os = "linux")]
     recovered_r_adoptions:
         Mutex<BTreeMap<Uuid, Arc<tokio::sync::Mutex<recovery::RecoveryRAdoption>>>>,
@@ -133,6 +138,8 @@ impl NodeResourceRuntime {
             #[cfg(target_os = "linux")]
             recovered_r: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
+            recovered_r_domains: Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
             recovered_r_adoptions: Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             recovered_adoptions: Mutex::new(BTreeMap::new()),
@@ -150,7 +157,12 @@ impl NodeResourceRuntime {
         let mut runtime = Self::open(options)?;
         runtime.rendition_root = Some(root);
         #[cfg(target_os = "linux")]
-        runtime.begin_recovered_s_imports(Instant::now() + std::time::Duration::from_secs(30))?;
+        {
+            runtime
+                .begin_recovered_s_imports(Instant::now() + std::time::Duration::from_secs(30))?;
+            runtime
+                .begin_recovered_r_imports(Instant::now() + std::time::Duration::from_secs(30))?;
+        }
         Ok(runtime)
     }
 
@@ -211,8 +223,14 @@ impl NodeResourceRuntime {
     /// cleanup/serving. Unknown old domains remain fully held and refuse startup.
     pub async fn reconcile_startup_recovery(&self) -> Result<(), RuntimeOpenError> {
         #[cfg(target_os = "linux")]
-        self.reconcile_recovered_s_imports(Instant::now() + std::time::Duration::from_secs(30))
-            .await?;
+        {
+            self.reconcile_recovered_s_imports(Instant::now() + std::time::Duration::from_secs(30))
+                .await?;
+            self.reconcile_recovered_r_imports(Instant::now() + std::time::Duration::from_secs(30))
+                .await?;
+            self.cleanup_recovered_r_outputs(Instant::now() + std::time::Duration::from_secs(30))
+                .await?;
+        }
         Ok(())
     }
 

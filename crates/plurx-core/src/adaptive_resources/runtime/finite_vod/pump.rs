@@ -3,6 +3,8 @@
 //! graph must join the original task and root and close every other owner.
 use super::{FiniteFile, FiniteOutput};
 use crate::adaptive_resources::physical_graph::finite_pipes::FiniteRootPipes;
+#[cfg(target_os = "linux")]
+use crate::adaptive_resources::{FamilyIdentity, ResourceLedger};
 use crate::fmp4::{CutPolicy, PromotionInputs, VideoCodec};
 use crate::process::priority::RegisteredChildControl;
 use crate::segplan::{PlanEntry, SegmentPlan};
@@ -172,7 +174,7 @@ pub(in crate::adaptive_resources) struct SoftwarePump {
     plan: SoftwareAvcPumpPlan,
     events: mpsc::Sender<SoftwareVodEvent>,
     #[cfg(target_os = "linux")]
-    history_key: Option<crate::resource_history::HistoryKey>,
+    history_context: Option<(telemetry::HistoryBasis, ResourceLedger, FamilyIdentity)>,
 }
 pub(in crate::adaptive_resources) struct PumpFinished {
     pub outcome: Outcome,
@@ -260,7 +262,7 @@ impl SoftwarePump {
                 plan,
                 events,
                 #[cfg(target_os = "linux")]
-                history_key: None,
+                history_context: None,
             },
             receiver,
         ))
@@ -269,11 +271,13 @@ impl SoftwarePump {
         self.plan.minimum_memory_bytes()
     }
     #[cfg(target_os = "linux")]
-    pub(in crate::adaptive_resources::runtime) fn bind_history_key(
+    pub(in crate::adaptive_resources::runtime) fn bind_history_context(
         &mut self,
-        key: crate::resource_history::HistoryKey,
+        basis: telemetry::HistoryBasis,
+        ledger: ResourceLedger,
+        selected_family: FamilyIdentity,
     ) {
-        self.history_key = Some(key);
+        self.history_context = Some((basis, ledger, selected_family));
     }
     pub(in crate::adaptive_resources) async fn run(
         self,
@@ -321,7 +325,7 @@ impl SoftwarePump {
     ) -> io::Result<Outcome> {
         #[cfg(target_os = "linux")]
         let telemetry = FiniteTelemetry::new(
-            self.history_key,
+            self.history_context,
             control,
             std::sync::Arc::clone(&self.output.runtime.history),
         );

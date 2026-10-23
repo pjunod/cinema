@@ -180,7 +180,11 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
                 }) => {
                     assert!(
                         serve
-                            .commit_resolved_media("finite-software-client", &owner, entry as u32)
+                            .commit_resolved_media(
+                                "finite-software-client",
+                                &owner,
+                                Some(entry as u32)
+                            )
                             .await
                     );
                     break ready;
@@ -237,6 +241,36 @@ async fn ordinary_selected_finite_vod_retains_s_reuses_producer_claim_and_refund
         },
     )
     .await;
+    let retained = runtime.accounting().expect("known retained S accounting");
+    assert!(
+        retained.used.peak_memory_bytes < initial.used.peak_memory_bytes,
+        "producer-only memory allowance must return after the known R-to-S commit"
+    );
+    assert!(
+        retained.used.scratch_bytes < initial.used.scratch_bytes,
+        "unused producer storage allowance must return after the known R-to-S commit"
+    );
+    assert!(retained.used.handles > 0);
+    assert!(retained.used.peak_memory_bytes > 0);
+    assert!(retained.used.scratch_bytes > 0);
+    let retained_len = output
+        .file_len(FiniteFile::Segment(0))
+        .await
+        .expect("retained segment lookup")
+        .expect("retained segment");
+    let mut retained_file = ReadyFile::Finite {
+        output: output.clone(),
+        file: FiniteFile::Segment(0),
+        len: retained_len,
+    };
+    let retained_body = retained_file
+        .read_all_bounded(retained_len, deadline)
+        .await
+        .expect("retained S still owns its full response partition");
+    assert!(matches!(&retained_body, ReadyBytes::Finite(_)));
+    assert_eq!(retained_body.len() as u64, retained_len);
+    drop(retained_body);
+    drop(retained_file);
     // A second ordinary selected finite builder really admits another R
     // while the first S still owns every retained file and reader budget.
     let second_key = "b".repeat(64);
