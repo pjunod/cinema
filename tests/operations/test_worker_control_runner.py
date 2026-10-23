@@ -149,7 +149,12 @@ class WorkerControlLinuxT6Tests(unittest.TestCase):
             runner.parser_stdlib_attestation(env)
 
     def test_original_rejected_t6_is_reparsed_without_solver_or_tool_normalization(self) -> None:
+        """Reparse the real format; its old module envelope cannot be adopted."""
         raw, provenance = real_linux_t6()
+        parsed = runner.verdict(raw, 0, provenance["harness"], None,
+            fmt_stdlib_sha256=provenance["tools"]["fmt_stdlib_sha256"],
+            parser_attestation=provenance["parser_stdlib_attestation"])
+        self.assertEqual(parsed["outcome"], "proved")
         base = ROOT / "target/worker-control-runner-fixtures"
         base.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=base) as directory:
@@ -164,13 +169,18 @@ class WorkerControlLinuxT6Tests(unittest.TestCase):
                 "unwinding_checks": True, "default_safety_checks": True, "log_sha256": runner.digest(log_path)}
             runner.write_json(prior / f"{name}.json", rejected)
             with mock.patch.object(runner, "validate_case_sources"), mock.patch.object(runner, "command", side_effect=AssertionError("solver replay forbidden")):
-                retained = runner.verify(Path("unused"), {}, output, harness, source, tools,
-                    manifest=output / "source/Cargo.toml", prior=prior, parser_attestation=provenance["parser_stdlib_attestation"])
-                self.assertEqual(retained["outcome"], "proved")
-                self.assertEqual(retained["tools"], tools)
-                self.assertEqual(retained["original_parser_rejection"]["error"], rejected["error"])
-                self.assertTrue(retained["parser_attestation_bridge"]["solver_tool_identity_unchanged"])
-                self.assertNotIn("slice_cmp_sha256", retained["tools"])
+                # Parsing success does not bind the new driver module to this
+                # historical solver execution. Preserve its original identity.
+                driver_input = f"{runner.CRATE}/src/library_driver.rs"
+                self.assertIn(driver_input, runner.PROOF_INPUTS)
+                self.assertNotIn(driver_input, source["files"])
+                self.assertNotIn("library_driver.rs", source["staging"]["source_files"])
+                self.assertIsNone(runner.retain_previous(prior, output, harness, source, tools, None, None,
+                    parser_attestation=provenance["parser_stdlib_attestation"]))
+                self.assertEqual(runner.digest(log_path), rejected["log_sha256"])
+                self.assertEqual(json.loads((prior / f"{name}.json").read_text()), rejected)
+                self.assertFalse((output / f"{name}.json").exists())
+                self.assertFalse((output / f"{name}.log").exists())
                 changed_tools = dict(tools, driver_sha256="different-native-binary")
                 self.assertIsNone(runner.retain_previous(prior, output, harness, source, changed_tools, None, None,
                     parser_attestation=provenance["parser_stdlib_attestation"]))
@@ -367,7 +377,16 @@ class WorkerControlResumeTests(unittest.TestCase):
 
 class WorkerControlRejectedParserReuseTests(unittest.TestCase):
     def test_real_log_is_reused_after_parser_repair_but_bad_attempts_are_not(self) -> None:
-        raw, provenance = real_positive()
+        """Keep the landing-regression ID; real parsing and receipt reuse differ.
+
+        The real three-module log remains a parser fixture, never proof of the
+        new driver input. Promotion/negative cases below use a complete-schema
+        unit-contract receipt and synthetic log, not qualification evidence.
+        """
+        historical_raw, provenance = real_positive()
+        parsed = runner.verdict(historical_raw, 0, provenance["harness"], None,
+            fmt_stdlib_sha256=provenance["reparse_tools"]["fmt_stdlib_sha256"])
+        self.assertEqual(parsed["outcome"], "proved")
         harness = provenance["harness"]
         name = harness.rsplit("::", 1)[1]
         base = ROOT / "target/worker-control-runner-fixtures"
@@ -375,8 +394,29 @@ class WorkerControlRejectedParserReuseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=base) as directory:
             prior, output = Path(directory) / "prior", Path(directory) / "next"
             prior.mkdir(); output.mkdir()
-            source = copy.deepcopy(provenance["source_binding"])
+            historical_source = copy.deepcopy(provenance["source_binding"])
             tools = provenance["reparse_tools"]
+            historical_log = prior / f"{name}.log"
+            historical_log.write_text(historical_raw)
+            historical_case = {"harness": harness, "outcome": "rejected", "error": "old parser rejection",
+                "exit_code": 0, "source": historical_source, "tools": tools,
+                "command": ["cargo-kani", "--harness", harness, "--exact", "--output-format", "regular",
+                    "--manifest-path", str(prior / "source/Cargo.toml"), "--target-dir", str(prior / "build")],
+                "execution_directory": str(prior), "unwinding_checks": True, "default_safety_checks": True,
+                "log_sha256": runner.digest(historical_log)}
+            runner.write_json(prior / f"{name}.json", historical_case)
+            with mock.patch.object(runner, "validate_case_sources"):
+                self.assertIsNone(runner.retain_previous(prior, output, harness, historical_source, tools, None, None))
+            self.assertEqual(runner.digest(historical_log), historical_case["log_sha256"])
+            self.assertFalse((output / f"{name}.json").exists())
+
+            # This complete input schema is deliberately a unit fixture. Do not
+            # fill the absent driver identity into the real old provenance.
+            source = {"head": "unit-contract-fixture",
+                "files": {path: "fixture-input" for path in runner.PROOF_INPUTS},
+                "staging": {"manifest_sha256": "fixture-envelope",
+                    "source_files": {module: "fixture-input" for module in runner.STAGED_RUST_SOURCES}}}
+            raw = log(harness=harness, description="T2 complete-schema unit-contract assertion")
             def captured_command(args, cwd, env, log_path, **kwargs):
                 log_path.write_text(raw)
                 return 0, raw
@@ -391,11 +431,14 @@ class WorkerControlRejectedParserReuseTests(unittest.TestCase):
                 self.assertTrue(rejected["unwinding_checks"] and rejected["default_safety_checks"])
                 retained = runner.verify(Path("unused"), {}, output, harness, source, tools,
                                          manifest=output / "source/Cargo.toml", prior=prior)
-                self.assertEqual(executed.call_count, 1, "compatible raw proof must not execute the solver again")
+                self.assertEqual(executed.call_count, 1, "compatible unit receipt must not execute its mocked command again")
                 self.assertEqual(retained["outcome"], "proved")
                 self.assertEqual(retained["original_parser_rejection"]["error"], rejected["error"])
                 self.assertNotIn("error", retained)
                 self.assertEqual(retained["source"], source)
+                self.assertEqual(retained["tools"], tools)
+                self.assertTrue(retained["parser_attestation_bridge"]["solver_tool_identity_unchanged"])
+                self.assertEqual(retained["retained_from"]["log_sha256"], runner.digest(prior / f"{name}.log"))
                 self.assertEqual(retained["revalidated_by_parser_sha256"], runner.digest(ROOT / "scripts/check-worker-control"))
                 for kind in ("weak command", "timeout", "compiler", "missing harness"):
                     bad = copy.deepcopy(rejected)
