@@ -1,13 +1,14 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation incomplete · published checkpoint
-`f84483e14881` passed exact native Linux core+daemon compilation on Rust 1.97.1
-(200.721 seconds; `../evidence/direct-linux-f84483e14881-RESULT.json`, log SHA-256
-`d683ae7c6fee65bcc112f9860025ff86a63836424a4caa1808d3d973cd5ab000`). Current
-uncommitted ordinary-path integration passed host all-target compilation
-(69.460 seconds; `../evidence/direct-check-20261022-232806.json`); exact native
-Linux compilation of this phase is pending. Behavioral tests, final Fable review and qualification have not
-run.
+`dd0a5b4cb068abb051678186648d5968488c67fe` passed exact native Linux core+daemon
+compilation on Rust 1.97.1 (230.430 seconds;
+`../evidence/direct-linux-dd0a5b4cb068-RESULT.json`, log SHA-256
+`37b14a4bceb08c322eef719b155e5ebad8e3f6e5eafb4dc745f2154da6cf65ca`). The
+published source has 415 authored regression anchors, not run. Current
+uncommitted cancellation/diagnostic integration is compiling on the host; that
+check has not completed. Behavioral tests, final Fable review and qualification
+have not run.
 Primary owner: direct Codex harness (`/root`; actual model unspecified). The former
 Hermes Sol task `t_161f6652` is parked and its worker exited; its heartbeat remains
 paused. Work remains on `effort/adaptive-playback-resources`, draft PR #1248.
@@ -20,22 +21,22 @@ The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
 ## Authoritative first ordinary VOD source checklist
 
 All five items are **OPEN** at published checkpoint
-`f84483e14881`. The immediate target is one ordinary
+`dd0a5b4cb068abb051678186648d5968488c67fe`. The immediate target is one ordinary
 local-file software VOD request on supported Linux, using a fresh rendition in
 the existing configured root. Source-complete is not behavior-verified.
 
-The published checkpoint passed exact native Linux core+daemon compilation with
-Rust 1.97.1 (EXIT 0, 200.721 seconds); behavioral tests did not run. Current
-uncommitted work adds a measured per-dimension headroom provider and one-second
-checked admission while retaining ledger custody through generation. Borrowed
-HLS init inspection removes two copies; track-metadata bounds remain open. The
-selected ordinary software-AVC branch now reserves before the legacy first
-source open and authors the same persistent finite owner, durable events and
-normal R→S driver integration. Root-only/no-writer/SinkReady partial-start
-cancellation and typed settlement are authored; registered-writer and earlier
-partial-start cleanup remain open. The host compile is running and has not
-passed. All V1–V5 and M0–M7 remain OPEN; no behavioral tests, final Fable review
-or qualification has run.
+Published checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe` passed exact
+native Linux core+daemon compilation with Rust 1.97.1 (EXIT 0, 230.430 seconds);
+its 415 authored regression anchors were not run. The published source already
+has the ordinary branch, same-held-source before/after-publication drift latch
+and root-only cancellation. Current uncommitted work extends cancellation to
+the original registered writer and the no-root/all-sources-registered/unstarted
+bootstrap case, including once-only close of the same file on identity
+rejection. Typed capacity routing, finite progress belief and advisory output
+measurement are also integrated. Earlier partial startup traversal, possible
+child, restart/adoption/seeks and the full allocation profile remain open. The
+host compile is running and has not passed. All V1–V5 and M0–M7 remain OPEN; no
+behavioral tests, final Fable review or qualification has run.
 
 | Item | Actual missing production connection / binary closure |
 |---|---|
@@ -79,10 +80,10 @@ obligation identity. S cleanup execution, typed settlement and dormant eviction
 are connected; HTTP counted-range selection and native-error causality are in
 the published source. Image verification now reuses only prior successful
 full-S1/digest/ELF attestations on the same rechecked held file. Published
-checkpoint `f84483e14881` passed exact native Linux core+daemon all-targets
-compilation (200.721 seconds). Current ordinary-path work is compiling on the
-host; that check is pending. Behavioral tests are NOT RUN and no V item closes
-from this checkpoint.
+checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe` passed exact native Linux
+core+daemon all-targets compilation (230.430 seconds). Current cancellation and
+diagnostic integration is compiling on the host; that check is pending.
+Behavioral tests are NOT RUN and no V item closes from this checkpoint.
 
 The current source binds a hashed native ELF held in the same source custodian
 to fd-based fixed launch. A process-only graph witness now requires original
@@ -91,9 +92,9 @@ Source-copy audits and staged same-owner frozen-bootstrap transfer are authored;
 the private retirement adapter now installs the same native output in provisional
 S before its receipt/command, preserves full R over unknown results, then performs
 one post-COMMIT ledger swap and role rebinding. S retains the whole R nonproducer
-allowance. Published checkpoint `f84483e14881` passed native Linux core+daemon
-all-targets compilation in 200.721 seconds; current ordinary-path work is
-compiling on the host. Actual serving,
+allowance. Published checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe`
+passed native Linux core+daemon all-targets compilation in 230.430 seconds;
+current cancellation and diagnostic integration is compiling on the host. Actual serving,
 complete quotas, S cleanup and ordinary wiring remain open. No behavioral tests
 have run. This does not close any V item.
 
@@ -133,9 +134,10 @@ connection, full memory profile, serving leases, retained-output transfer,
 conserving retirement and exact settlement/capacity reuse still lack their
 production connections. The
 [source ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md#direct-harness-integration--2026-10-22)
-records the limits. The latest published checkpoint is `f84483e14881`; its
-native Linux core+daemon all-target Rust 1.97.1 compile passed in 200.721
-seconds (EXIT 0). The current ordinary-path host compile remains pending.
+records the limits. The latest published checkpoint is
+`dd0a5b4cb068abb051678186648d5968488c67fe`; its native Linux core+daemon
+all-target Rust 1.97.1 compile passed in 230.430 seconds (EXIT 0). The current
+cancellation and diagnostic host compile remains pending.
 This is warning-level compilation.
 Host-eligible authored cases compiled; Linux-only bodies and Windows remain
 outside that evidence. No behavioral tests or review ran for this slice.

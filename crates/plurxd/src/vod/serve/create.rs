@@ -2065,7 +2065,7 @@ impl AdmittedSourceVodRendition {
         assert!(rendition.readers.lock().await.is_empty());
         assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
         assert!(matches!(
-            rendition.slot.belief().await,
+            rendition.producer_belief().await,
             Producer::Absent { .. }
         ));
     }

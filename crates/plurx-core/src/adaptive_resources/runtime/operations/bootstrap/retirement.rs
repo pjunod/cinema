@@ -386,7 +386,11 @@ impl NodeResourceRuntime {
                 || (mode == CleanupMode::Producer
                     && (role.retirement.is_some()
                         || role.finite_vod.as_ref().is_none_or(|finite| {
-                            finite.root_only_closure.is_none() || !finite.retiring
+                            let root_only = finite.root_only_closure.is_some();
+                            let joined = finite.process_closure.is_some();
+                            !finite.retiring
+                                || root_only == joined
+                                || finite.producer_joined != joined
                         })))
             {
                 return Err(OperationError::State);

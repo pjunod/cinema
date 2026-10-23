@@ -776,7 +776,7 @@ impl VodServe {
         };
         let wait = self.shared.pool.session_snapshot(session_id);
         let failed = rendition.failure();
-        let belief = rendition.slot.belief().await;
+        let belief = rendition.producer_belief().await;
         let complete = planned_segments > 0 && materialized_segments == planned_segments;
         let (producer_state, producer_hold, suspended) = if failed.is_some() {
             ("failed", None, false)

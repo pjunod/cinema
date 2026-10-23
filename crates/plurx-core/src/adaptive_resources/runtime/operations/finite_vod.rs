@@ -2,16 +2,17 @@
 //! substitute a Command, future, pipe owner, source descriptor or close proof.
 use super::*;
 use crate::adaptive_resources::physical_graph::finite_vod::{
-    FiniteFixedImage, FiniteVodProcessClosure, FiniteVodRootOnlyClosure, GraphFiniteVodTask,
+    FiniteFixedImage, FiniteVodNeverRootClosure, FiniteVodProcessClosure, FiniteVodRootOnlyClosure,
+    GraphFiniteVodTask,
 };
 use crate::adaptive_resources::runtime::finite_vod::{pump::SoftwarePump, SoftwareAvcCommand};
 use std::process::Stdio;
 
 pub(super) struct FiniteLaunch {
     pub(super) root_member: Uuid,
-    task_member: Uuid,
+    pub(super) task_member: Uuid,
     pub(super) acquisition_id: Uuid,
-    source_members: Vec<Uuid>,
+    pub(super) source_members: Vec<Uuid>,
     command: SoftwareAvcCommand,
     pump: Option<SoftwarePump>,
     pub(super) entered: bool,
@@ -21,6 +22,7 @@ pub(super) struct FiniteLaunch {
     fixed_image: Option<FiniteFixedImage>,
     pub(super) process_closure: Option<FiniteVodProcessClosure>,
     pub(super) root_only_closure: Option<FiniteVodRootOnlyClosure>,
+    pub(super) never_root_closure: Option<FiniteVodNeverRootClosure>,
     completion: Option<crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion>,
     task_observation: Uuid,
     task_observed_committed: bool,
@@ -83,6 +85,7 @@ impl NodeResourceRuntime {
             fixed_image: None,
             process_closure: None,
             root_only_closure: None,
+            never_root_closure: None,
             completion: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,

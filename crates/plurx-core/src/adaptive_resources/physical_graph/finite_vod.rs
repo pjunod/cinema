@@ -189,6 +189,40 @@ impl FiniteVodRootOnlyClosure {
     }
 }
 
+/// Original fixed graph never entered process acquisition. It proves absence
+/// of both root and writer without borrowing a process identity or PID.
+#[must_use]
+pub(in crate::adaptive_resources) struct FiniteVodNeverRootClosure {
+    binding: ReservationBinding,
+    generation: Uuid,
+    root_member: Uuid,
+    task_member: Uuid,
+    acquisition_id: Uuid,
+    close_operation_id: Uuid,
+}
+impl FiniteVodNeverRootClosure {
+    pub(in crate::adaptive_resources) fn matches(&self, graph: &SealedPhysicalGraph) -> bool {
+        self.binding == graph.custody.binding
+            && self.generation == graph.custody.identity.generation
+            && graph.custody.sealed.load(Ordering::Acquire)
+    }
+    pub(in crate::adaptive_resources) fn generation(&self) -> Uuid {
+        self.generation
+    }
+    pub(in crate::adaptive_resources) fn root_member(&self) -> Uuid {
+        self.root_member
+    }
+    pub(in crate::adaptive_resources) fn task_member(&self) -> Uuid {
+        self.task_member
+    }
+    pub(in crate::adaptive_resources) fn acquisition_id(&self) -> Uuid {
+        self.acquisition_id
+    }
+    pub(in crate::adaptive_resources) fn close_operation_id(&self) -> Uuid {
+        self.close_operation_id
+    }
+}
+
 pub(super) struct FiniteRecord {
     selection: GraphFiniteVodTask,
     pipes: [PipeRecord; 2],
@@ -442,6 +476,50 @@ impl SealedPhysicalGraph {
         }
         pipes_closed?;
         Ok(joined)
+    }
+}
+
+impl SealedPhysicalGraph {
+    /// Mint a one-shot absence witness only from the sealed original graph.
+    /// An acquisition window, unknown spawn result, generic handoff, or any
+    /// retained native graph member refuses; no numeric PID guess is involved.
+    pub(in crate::adaptive_resources) async fn try_finite_vod_never_root_closure(
+        &self,
+        root_member: Uuid,
+        task_member: Uuid,
+        acquisition_id: Uuid,
+    ) -> io::Result<FiniteVodNeverRootClosure> {
+        let mut members = self.custody.members.lock().await;
+        if !cfg!(target_os = "linux")
+            || !self.custody.sealed.load(Ordering::Acquire)
+            || members.acquired
+            || members.uncertain_launch
+            || members.unaudited_handoff
+            || members.receipt_issued
+            || members.finite_process_closed
+            || !members.roots.is_empty()
+            || !members.writers.is_empty()
+            || !members.source_files.is_empty()
+            || members.joined_writers != 0
+            || members.abandoned_writers != 0
+            || root_member.is_nil()
+            || task_member.is_nil()
+            || acquisition_id.is_nil()
+            || root_member == task_member
+        {
+            return Err(io::Error::other(
+                "fixed AVC no-root inventory is incomplete",
+            ));
+        }
+        members.finite_process_closed = true;
+        Ok(FiniteVodNeverRootClosure {
+            binding: self.custody.binding,
+            generation: self.custody.identity.generation,
+            root_member,
+            task_member,
+            acquisition_id,
+            close_operation_id: Uuid::new_v4(),
+        })
     }
 }
 

@@ -14,6 +14,7 @@ const RETIRING: u8 = 2;
 const RETAINED: u8 = 3;
 const FAILED: u8 = 4;
 const SETTLED: u8 = 5;
+const PREPARING: u8 = 6;
 
 /// Persistent application owner. Stage is diagnostic/control serialization;
 /// only core's original receipts and known journal commits release resources.
@@ -21,6 +22,8 @@ pub(crate) struct FiniteSoftwareProducer {
     owner: Mutex<SoftwareVodOwner>,
     control: SoftwareVodControl,
     stage: AtomicU8,
+    produced_through: AtomicU64,
+    suspended: AtomicBool,
 }
 impl std::fmt::Debug for FiniteSoftwareProducer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,6 +38,8 @@ impl FiniteSoftwareProducer {
             control: owner.control(),
             owner: Mutex::new(owner),
             stage: AtomicU8::new(PREPARED),
+            produced_through: AtomicU64::new(0),
+            suspended: AtomicBool::new(false),
         }
     }
     pub(crate) fn request_stop(&self) -> io::Result<()> {
@@ -42,8 +47,14 @@ impl FiniteSoftwareProducer {
     }
     pub(crate) async fn perform(&self, step: Step) -> io::Result<Performed> {
         match step {
-            Step::Stop => self.control.suspend()?,
-            Step::Resume => self.control.resume()?,
+            Step::Stop => {
+                self.control.suspend()?;
+                self.suspended.store(true, Release);
+            }
+            Step::Resume => {
+                self.control.resume()?;
+                self.suspended.store(false, Release);
+            }
             Step::Terminate { .. } => {
                 self.control.request_stop()?;
                 let owner = self.owner.lock().await;
@@ -63,6 +74,30 @@ impl FiniteSoftwareProducer {
             _ => {}
         }
         Ok(Performed::Done)
+    }
+    /// Executor/diagnostic belief only; settlement uses core native receipts.
+    pub(crate) fn belief(&self) -> Producer {
+        let produced_through = self
+            .produced_through
+            .load(Acquire)
+            .checked_sub(1)
+            .and_then(|value| u32::try_from(value).ok());
+        if self.stage.load(Acquire) == RUNNING {
+            if self.suspended.load(Acquire) {
+                Producer::Stopped {
+                    produced_through,
+                    positioned_at: 0,
+                    reason: crate::prodsched::Hold::Ahead,
+                }
+            } else {
+                Producer::Running {
+                    produced_through,
+                    positioned_at: 0,
+                }
+            }
+        } else {
+            Producer::Absent { produced_through }
+        }
     }
     pub(crate) fn settled(&self) -> bool {
         self.stage.load(Acquire) == SETTLED
@@ -123,7 +158,16 @@ pub(super) async fn build(
     // reserves the complete role and retains its prepare operation before return.
     let owner = runtime
         .prepare_software_vod(request, Instant::now() + settings.materialize_budget)
-        .map_err(|error| format!("preparing finite software VOD: {error}"))?;
+        .map_err(|error| {
+            if let Some(refusal) = error.admission_refusal() {
+                crate::transcode::vod_refusal_error(
+                    "vod_family_capacity",
+                    &format!("finite software admission refused: {refusal:?}"),
+                )
+            } else {
+                format!("preparing finite software VOD: {error}")
+            }
+        })?;
     let dir = RenditionDir::from_finite_producer(owner);
     let manifest = Manifest::new(plan.clone());
     Ok(Shared::construct_rendition(
@@ -162,7 +206,7 @@ pub(super) async fn run(
         }
         return;
     }
-    producer.stage.store(RUNNING, Release);
+    producer.stage.store(PREPARING, Release);
     let Some(mut events) = owner.take_events() else {
         return;
     };
@@ -187,6 +231,7 @@ pub(super) async fn run(
         }
         return;
     }
+    producer.stage.store(RUNNING, Release);
     let completion = {
         let joined = owner.join_producer();
         tokio::pin!(joined);
@@ -317,7 +362,7 @@ async fn observe(
                     .output_measurement
                     .lock()
                     .expect("output measurement lock")
-                    .observe(
+                    .observe_finite(
                         rendition,
                         init,
                         epoch,
@@ -328,6 +373,11 @@ async fn observe(
                             publication,
                         },
                     );
+            }
+            if let Some(producer) = rendition.dir.finite_producer() {
+                producer
+                    .produced_through
+                    .store(u64::from(entry) + 1, Release);
             }
             shared.working_set.fetch_add(bytes, Relaxed);
             rendition.clear_demand(entry);

@@ -211,6 +211,17 @@ impl RenditionHooks for RenditionTestHooks {
 }
 
 impl Rendition {
+    /// Diagnostic producer belief for user-facing state. Finite VOD retains
+    /// its persistent executor after setup; it does not replace core's
+    /// physical closure or settlement authority.
+    pub(super) async fn producer_belief(&self) -> Producer {
+        #[cfg(target_os = "linux")]
+        if let Some(producer) = self.dir.finite_producer() {
+            return producer.belief().await;
+        }
+        self.slot.belief().await
+    }
+
     pub(super) fn kick(&self) {
         self.wake.notify_one();
     }

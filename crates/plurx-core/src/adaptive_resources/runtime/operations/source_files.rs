@@ -771,6 +771,36 @@ impl SourceCell {
     /// Closes only this retained parent descriptor. A failed/ambiguous close is
     /// terminal because retrying its numeric fd could close a recycled handle.
     pub(super) async fn close_parent(&mut self) -> Result<(), OperationError> {
+        self.close_parent_inner(true).await
+    }
+
+    /// A sealed no-root graph proves that no child inherited this source.
+    /// An original open may still have returned a File before metadata rejected
+    /// it, so close that SAME File even without a durable SourceObserved.
+    pub(super) async fn close_parent_before_root(
+        &mut self,
+        closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure,
+    ) -> Result<(), OperationError> {
+        self.no_root_copy_plan(closure)?;
+        self.join_registered().await?;
+        if self.parent_closed() {
+            return Ok(());
+        }
+        if self.spec.is_some() {
+            return Ok(());
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        if result.file.is_none() {
+            return if result.observed.is_none() {
+                Ok(())
+            } else {
+                Err(OperationError::State)
+            };
+        }
+        self.close_parent_inner(false).await
+    }
+
+    async fn close_parent_inner(&mut self, require_observed: bool) -> Result<(), OperationError> {
         match &self.parent_close {
             ParentCloseState::Closed => return Ok(()),
             ParentCloseState::Failed(errno) => {
@@ -785,7 +815,7 @@ impl SourceCell {
             // the source still has another exported owner.
             if !cfg!(target_os = "linux")
                 || self.lease_issued
-                || !self.observed_committed
+                || (require_observed && !self.observed_committed)
                 || self.pending.is_some()
                 || self.spec.is_some()
             {
@@ -793,7 +823,7 @@ impl SourceCell {
             }
             let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
             let result = self.result.as_mut().ok_or(OperationError::State)?;
-            if result.observed.is_none() {
+            if require_observed && result.observed.is_none() {
                 return Err(OperationError::State);
             }
             let file = result.file.take().ok_or(OperationError::State)?;
@@ -859,6 +889,107 @@ impl SourceCell {
                 Err(OperationError::State)
             }
         }
+    }
+
+    fn no_root_copy_plan(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure,
+    ) -> Result<(v2::SourceCopy, v2::SourceCopy, v2::Id), OperationError> {
+        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        let v2::SourceRecovery::LocalSourceHandlesV1 {
+            graph_id, owner_id, ..
+        } = &plan.recovery;
+        if graph_id.uuid() != closure.generation()
+            || *owner_id != plan.filesystem_domain.daemon_owner_id
+            || self.lease_issued
+            || self.root_observed_committed
+            || self.selected_root_member.is_some()
+            || self.failed_join
+            || plan.planned_copies.len() != 2
+        {
+            return Err(OperationError::State);
+        }
+        let mut originals = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner,
+                v2::CopyOwner::DaemonSourceCell { owner_id: held_owner, graph_id: held_graph, member_id }
+                    if held_owner == *owner_id && held_graph == *graph_id && member_id == plan.member_id)
+        });
+        let original = originals.next().ok_or(OperationError::State)?;
+        if originals.next().is_some() {
+            return Err(OperationError::State);
+        }
+        let mut children = plan.planned_copies.iter().filter(|copy| {
+            matches!(copy.owner,
+                v2::CopyOwner::OwnedRoot { graph_id: held_graph, root_member_id }
+                    if held_graph == *graph_id && root_member_id.uuid() == closure.root_member())
+                && copy.parent_copy_id == Some(original.copy_id)
+                && copy.acquisition_operation_id.uuid() == closure.acquisition_id()
+        });
+        let child = children.next().ok_or(OperationError::State)?;
+        if children.next().is_some()
+            || original.copy_id == child.copy_id
+            || self
+                .pending_root
+                .as_ref()
+                .is_some_and(|(root, staged, _)| *root != closure.root_member() || staged != child)
+            || self
+                .result
+                .as_ref()
+                .and_then(|r| r.observed.as_ref())
+                .is_some_and(|observed| {
+                    observed
+                        .copies
+                        .iter()
+                        .any(|copy| copy.copy_id == child.copy_id)
+                })
+        {
+            return Err(OperationError::State);
+        }
+        Ok((original.clone(), child.clone(), plan.holder_id))
+    }
+
+    /// Exact original parent close or proven no acquisition, plus absence of
+    /// the planned root copy under the separate sealed original graph witness.
+    pub(in crate::adaptive_resources::runtime) fn finite_never_root_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        let (original, child, holder_id) = self.no_root_copy_plan(closure)?;
+        if self.pending.is_some() {
+            return Err(OperationError::State);
+        }
+        let original_fact = if self.parent_closed() {
+            v2::CopyClosed::ActualOwnedClose {
+                copy: original,
+                operation_id: v2::Id::new(self.parent_close_operation_id)?,
+            }
+        } else if matches!(&self.parent_close, ParentCloseState::NotStarted)
+            && (self.spec.is_some() && self.result.is_none()
+                || self.spec.is_none()
+                    && self
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.file.is_none() && result.observed.is_none()))
+        {
+            v2::CopyClosed::ProvenNeverAcquired {
+                copy: original,
+                operation_id: v2::Id::new(closure.close_operation_id())?,
+            }
+        } else {
+            return Err(OperationError::State);
+        };
+        Ok(v2::ClosedFact::SourceV1 {
+            holder_id,
+            copies: vec![
+                original_fact,
+                v2::CopyClosed::ProvenNeverAcquired {
+                    copy: child,
+                    operation_id: v2::Id::new(closure.close_operation_id())?,
+                },
+            ],
+        })
     }
 
     pub(super) fn parent_closed(&self) -> bool {

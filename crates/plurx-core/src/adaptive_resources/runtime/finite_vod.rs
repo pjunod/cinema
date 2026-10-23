@@ -39,6 +39,12 @@ use v2::scratch::{
 #[error("{0}")]
 pub struct FiniteVodError(OperationError);
 impl FiniteVodError {
+    pub fn admission_refusal(&self) -> Option<crate::adaptive_resources::AdmissionRefusal> {
+        match &self.0 {
+            OperationError::Admission(refusal) => Some(*refusal),
+            _ => None,
+        }
+    }
     /// Preserve a native failure when adapting counted reads to an I/O stream.
     pub fn into_io_error(self) -> std::io::Error {
         match self.0 {

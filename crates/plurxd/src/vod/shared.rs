@@ -278,7 +278,7 @@ impl Shared {
             // Name the phase the deadline caught rather than calling every
             // expiry a producer failure: a rendition parked on a refused
             // encoder permit never had a producer to fail.
-            let verdict = rendition.materialize_verdict(index, rendition.slot.belief().await);
+            let verdict = rendition.materialize_verdict(index, rendition.producer_belief().await);
             tracing::warn!(
                 target: "plurxd::vodserve",
                 rendition = %rendition.key,

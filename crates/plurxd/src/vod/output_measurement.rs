@@ -97,7 +97,6 @@ impl PublishedOutputMeasurement {
         entry: u32,
         member: ObservedOutputMember,
     ) {
-        let bytes = member.bytes;
         if self.refused {
             return;
         }
@@ -105,6 +104,63 @@ impl PublishedOutputMeasurement {
             self.refused = true;
             return;
         };
+        self.observe_version(
+            rendition,
+            init,
+            epoch,
+            entry,
+            member,
+            source.object_version(),
+        );
+    }
+
+    /// Finite output has no daemon `SourceFence`; core owns the actual held
+    /// source. This is called only after its durable-publication and
+    /// same-held-source postcheck event, and remains advisory measurement only.
+    #[cfg(target_os = "linux")]
+    pub(super) fn observe_finite(
+        &mut self,
+        rendition: &Rendition,
+        init: &InitIdentity,
+        epoch: u64,
+        entry: u32,
+        member: ObservedOutputMember,
+    ) {
+        if rendition.dir.finite_producer().is_none() {
+            self.refused = true;
+            return;
+        }
+        let Some(encoding) = rendition.recipe.encoding.as_ref() else {
+            self.refused = true;
+            return;
+        };
+        let source_version = encoding.source_object_version.as_str();
+        if source_version.is_empty()
+            || rendition
+                .recipe
+                .source_object_version
+                .as_deref()
+                .is_some_and(|version| version != source_version)
+        {
+            self.refused = true;
+            return;
+        }
+        self.observe_version(rendition, init, epoch, entry, member, source_version);
+    }
+
+    fn observe_version(
+        &mut self,
+        rendition: &Rendition,
+        init: &InitIdentity,
+        epoch: u64,
+        entry: u32,
+        member: ObservedOutputMember,
+        source_version: &str,
+    ) {
+        let bytes = member.bytes;
+        if self.refused {
+            return;
+        }
         if let Some(observation) = self.observation.as_mut() {
             if observation.epoch != epoch
                 || observation.muxer_init != init.muxer_init
@@ -128,7 +184,7 @@ impl PublishedOutputMeasurement {
         hash.update(self.nonce.as_bytes());
         hash.update(epoch.to_le_bytes());
         for field in [
-            source.object_version().as_bytes(),
+            source_version.as_bytes(),
             rendition.key.as_bytes(),
             &rendition.playlist,
             init.muxer_init.as_bytes(),
@@ -160,7 +216,7 @@ impl PublishedOutputMeasurement {
                 preimage: OutputOrigin {
                     nonce: *self.nonce.as_bytes(),
                     epoch,
-                    source_version: source.object_version().to_owned(),
+                    source_version: source_version.to_owned(),
                     recipe_key: rendition.key.clone(),
                     playlist: rendition.playlist.to_vec(),
                     muxer_init: init.muxer_init.clone(),

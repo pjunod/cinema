@@ -223,7 +223,7 @@ impl MaterializeDemand {
         if recorded.is_some() {
             return recorded;
         }
-        let belief = self.rendition.slot.belief().await;
+        let belief = self.rendition.producer_belief().await;
         Some(self.rendition.materialize_verdict(self.index, belief))
     }
 }

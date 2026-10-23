@@ -1,15 +1,17 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete; published checkpoint
-`f84483e14881` passed exact native Linux core+daemon compilation on Rust 1.97.1
-(200.721 seconds; `../evidence/direct-linux-f84483e14881-RESULT.json`, log
-SHA-256 `d683ae7c6fee65bcc112f9860025ff86a63836424a4caa1808d3d973cd5ab000`).
-Current uncommitted ordinary-path integration passed host core+daemon all-target
-compilation (69.460 seconds; `../evidence/direct-check-20261022-232806.json`).
-Exact native Linux compilation of this phase is pending. Behavioral tests, final Fable review and qualification
-have not run.
-**Updated:** 2026-10-22 at published checkpoint `f84483e14881`; current
-uncommitted work described below.
+`dd0a5b4cb068abb051678186648d5968488c67fe` passed exact native Linux core+daemon
+compilation on Rust 1.97.1 (230.430 seconds;
+`../evidence/direct-linux-dd0a5b4cb068-RESULT.json`, log SHA-256
+`37b14a4bceb08c322eef719b155e5ebad8e3f6e5eafb4dc745f2154da6cf65ca`). Its 415
+authored regression anchors were not run. Current uncommitted
+cancellation/diagnostic integration is compiling on the host; that check has
+not completed. Behavioral tests, final Fable review and qualification have not
+run.
+**Updated:** 2026-10-22 at published checkpoint
+`dd0a5b4cb068abb051678186648d5968488c67fe`; current uncommitted work described
+below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
 non-overlapping tasks. Former Hermes Sol task `t_161f6652` is parked; its worker
@@ -35,21 +37,20 @@ acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
 
-Published checkpoint `f84483e14881` passed exact native Linux core+daemon
-all-targets compilation with pinned Rust 1.97.1 (EXIT 0, 200.721 seconds;
-`../evidence/direct-linux-f84483e14881-RESULT.json`, log SHA-256
-`d683ae7c6fee65bcc112f9860025ff86a63836424a4caa1808d3d973cd5ab000`). Current
-uncommitted work adds a measured per-dimension headroom provider and one-second
-checked admission retaining ledger custody through generation. Borrowed HLS
-init inspection removes two copies; track-metadata bounds remain open. The
-selected ordinary software-AVC branch reserves before legacy first-source open
-and authors persistent finite ownership, durable events and normal R→S driver
-integration. Root-only/no-writer/SinkReady partial-start cancellation and typed
-settlement are authored; registered-writer and earlier partial-start cleanup
-remain open. Host all-target compilation passed (69.460 seconds, stable source); native Linux compilation of this phase is pending. All V1–V5 and
-R1/M0–M7 remain OPEN. No behavioral tests, final Fable review or qualification
-have run. Ordinary admission and the remaining root-cause integration are
-unfinished.
+Published checkpoint `dd0a5b4cb068abb051678186648d5968488c67fe` passed exact
+native Linux core+daemon all-targets compilation with pinned Rust 1.97.1 (EXIT
+0, 230.430 seconds; `../evidence/direct-linux-dd0a5b4cb068-RESULT.json`, log
+SHA-256 `37b14a4bceb08c322eef719b155e5ebad8e3f6e5eafb4dc745f2154da6cf65ca`).
+Its 415 authored regression anchors were not run. The published source has the
+ordinary branch, same-held-source before/after-publication drift latch and
+root-only cancellation. Current uncommitted work extends cancellation to the
+original registered writer and the no-root/all-sources-registered/unstarted
+bootstrap case, including once-only close of the same file on identity
+rejection. Typed capacity routing, finite progress belief and advisory output
+measurement are integrated. Earlier partial startup traversal, possible child,
+restart/adoption/seeks and the full allocation profile remain open. Host
+compilation is running and has not passed. All V1–V5 and R1/M0–M7 remain OPEN.
+No behavioral tests, final Fable review or qualification have run.
 
 The selected executable now uses a fixed eight-entry verification cache keyed by
 all seven S1 identity fields and digest. Only a prior successful held-file native
@@ -136,16 +137,19 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `f84483e14881`. Its native Linux core+daemon
-all-target Rust 1.97.1 compile passed in 200.721 seconds. Current uncommitted
-work adds measured per-dimension headroom, checked admission with retained
-custody, borrowed HLS init inspection and the selected ordinary software-AVC
-finite owner/driver path. Root-only partial-start cancellation and typed
-settlement are authored; registered-writer and earlier partial-start cleanup
-remain open. Host all-target compilation passed (69.460 seconds, stable source); native Linux compilation of this phase is pending. All V1–V5 and
-R1/M0–M7 remain open; no behavioral tests, strict Clippy, final independent
-review, qualification/fast lane, merge or deployment are claimed. The ordinary
-call path and remaining root-cause integration are unfinished.
+The latest published base is `dd0a5b4cb068abb051678186648d5968488c67fe`. Its
+native Linux core+daemon all-target Rust 1.97.1 compile passed in 230.430 seconds.
+The 415 authored regression anchors were not run. The published source has the
+ordinary branch, same-held-source before/after-publication drift latch and
+root-only cancellation. Current uncommitted work extends cancellation to the
+original registered writer and the no-root/all-sources-registered/unstarted
+bootstrap case, including once-only close of the same file on identity
+rejection. Typed capacity routing, finite progress belief and advisory output
+measurement are integrated. Earlier partial startup traversal, possible child,
+restart/adoption/seeks and the full allocation profile remain open. Host
+compilation is running and has not passed. All V1–V5 and R1/M0–M7 remain open;
+no behavioral tests, strict Clippy, final independent review, qualification/fast
+lane, merge or deployment are claimed.
 
 ## Current source and compiler receipt
 
