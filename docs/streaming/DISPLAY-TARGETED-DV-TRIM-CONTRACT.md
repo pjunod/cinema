@@ -401,3 +401,21 @@ including L2. Reports distinguish strict authored L8 input variation from the
 mixed original packet's L8-plus-companion-L2 variation. A controlled input
 variation supports numerical QC of that input; it does not identify a
 proprietary algorithm or establish CM2.9 equivalence.
+
+**Neutral-Level3 strict variant (authored, not yet qualified):** the acquired
+14-case packet declares `strict-l8-only-authored-xml-neutral-l3` and binds the
+strict packet's `RESULT.json` as its parent. Each case changes the matched
+parent XML's four shot/frame `Level3/L1Offset` texts from
+`0 -0.178274 0` to `0 0 0`. The adapter verifies every parent/output hash,
+four direct Level3 nodes, the authoring receipt, and full XML-tree equality
+after only those offsets are normalized. Source, target, L1, L2, L8, order
+and vectors remain fixed across that parent transition. Within the new
+packet, only L8 varies; the actual imported RPU must also hold non-L8
+metadata fixed. Pass the strict packet as `--parent-reference-packet`.
+
+The zero reference now has neutral Level3 offsets but retains nonneutral
+Level2 instructions and Level1 image character. The candidate still applies
+no Level3, and these official software comparisons remain numerical
+observations, not Dolby algorithm acceptance. Independent review precedes
+the one new authoring regression and the official comparison attempt; neither
+is claimed as run here.

@@ -11,9 +11,10 @@ import json
 from pathlib import Path
 import struct
 import subprocess
+import xml.etree.ElementTree as ET
 
 from trim_software_metrics import (acquisition, bind, comparison, differences,
-    metrics, non_l8_rpu_identity, non_l8_xml_identity, packet_file, rgb16, rgba32, sha, xml_companion_l2, xml_contract, xyz, XYZ)
+    metrics, non_l8_rpu_identity, non_l8_xml_identity, one, packet_file, rgb16, rgba32, sha, xml_companion_l2, xml_contract, xyz, XYZ)
 
 
 def command(argv, root, name):
@@ -88,11 +89,52 @@ def reference_case(root, result, transfer, case):
     return xml, image, frozen
 
 
+def l3_offsets(root):
+    """Require one direct Level3/L1Offset in the shot and each of three frames."""
+    track = one(root, './/{*}Video/{*}Track')
+    shot = one(track, './{*}Shot')
+    frames = shot.findall('./{*}Frame')
+    if len(frames) != 3:
+        raise ValueError('Level3 authoring requires shot and three frames')
+    levels = []
+    for item in (shot, *frames):
+        data = one(item, './{*}PluginNode/{*}DVDynamicData')
+        levels.append(one(data, './{*}Level3'))
+    if len(root.findall('.//{*}Level3')) != 4:
+        raise ValueError('exactly four direct Level3 nodes required')
+    return [one(level, './{*}L1Offset') for level in levels]
+
+
+def neutral_l3_authoring(parent_xml, output_xml, record):
+    """Prove a case changes only the four acquired Level3 offset texts."""
+    parent = ET.parse(parent_xml).getroot()
+    output = ET.parse(output_xml).getroot()
+    before, after = l3_offsets(parent), l3_offsets(output)
+    input_offsets = [(node.text or '').strip() for node in before]
+    output_offsets = [(node.text or '').strip() for node in after]
+    if (record['replaced_l3_nodes'] != 4 or
+            input_offsets != ['0 -0.178274 0'] * 4 or
+            output_offsets != ['0 0 0'] * 4 or
+            record['input_l3_offsets'] != input_offsets or
+            record['output_l3_offsets'] != output_offsets):
+        raise ValueError('Level3 authoring offsets/receipt mismatch')
+    for node in before:
+        node.text = '0 0 0'
+    def tree(node):
+        return (node.tag, tuple(sorted(node.attrib.items())), (node.text or '').strip(),
+                (node.tail or '').strip(),
+                tuple(tree(child) for child in node))
+    if tree(parent) != tree(output):
+        raise ValueError('neutral Level3 authoring changed other XML')
+    return output_offsets
+
+
 def authoring_scope(reference, cases, reference_root, parent_root):
     scope = reference.get('metadata_delta_scope', 'L8-plus-officially-regenerated-companion-L2')
     if scope == 'L8-plus-officially-regenerated-companion-L2':
         return ('Level2', 'Level8'), None, None
-    if scope != 'strict-l8-only-authored-xml' or parent_root is None:
+    neutral_l3 = scope == 'strict-l8-only-authored-xml-neutral-l3'
+    if scope not in ('strict-l8-only-authored-xml', 'strict-l8-only-authored-xml-neutral-l3') or parent_root is None:
         raise ValueError('strict authored XML requires its original parent reference packet')
     parent_root = parent_root.resolve(strict=True)
     parent, transfer = acquisition(parent_root)
@@ -108,19 +150,34 @@ def authoring_scope(reference, cases, reference_root, parent_root):
     baseline_name = 'cases/zero/metadata.xml'
     baseline = packet_file(parent_root, baseline_name, transfer[baseline_name])
     fixed = non_l8_xml_identity(baseline)
+    output_fixed = (non_l8_xml_identity(reference_root / baseline_name)
+                    if neutral_l3 else fixed)
     for case in cases:
         name = case['name']; record = records[name]
         donor_name = f'cases/{name}/metadata.xml'
         donor = packet_file(parent_root, donor_name, transfer[donor_name])
         output = reference_root/f'cases/{name}/metadata.xml'
-        if (record['baseline_xml_sha256'], record['donor_xml_sha256'],
-            record['output_xml_sha256'], record['replaced_l8_nodes']) != (
-                sha(baseline), sha(donor), sha(output), 4) or parents[name]['l8_vector'] != case['l8_vector']:
+        expected = (sha(baseline), sha(donor), sha(output))
+        if ((record['baseline_xml_sha256'], record['donor_xml_sha256'],
+             record['output_xml_sha256']) != expected or
+                parents[name]['l8_vector'] != case['l8_vector'] or
+                (not neutral_l3 and record['replaced_l8_nodes'] != 4)):
             raise ValueError('metadata-authoring input/output/vector binding mismatch')
-        if non_l8_xml_identity(output) != fixed:
-            raise ValueError('authored variant changed non-L8 original baseline XML')
-    return ('Level8',), {'parent_reference_acquisition': bind(parent_root/'RESULT.json'),
-        'records': list(records.values()), 'method': 'original zero XML; donor L8 only; fixed non-L8 verified'}, fixed
+        if neutral_l3:
+            if non_l8_xml_identity(donor) != fixed:
+                raise ValueError('parent variants changed non-L8 baseline XML')
+            neutral_l3_authoring(donor, output, record)
+        if non_l8_xml_identity(output) != output_fixed:
+            raise ValueError('authored variant changed fixed non-L8 XML' if neutral_l3
+                             else 'authored variant changed non-L8 original baseline XML')
+    authored = {'parent_reference_acquisition': bind(parent_root/'RESULT.json'),
+        'records': list(records.values()),
+        'method': 'original zero XML; donor L8 only; fixed non-L8 verified'}
+    if neutral_l3:
+        authored.update(method='matched parent case; four Level3/L1Offset texts normalized; all other XML frozen',
+            parent_delta_levels=['Level3'], within_packet_delta_levels=['Level8'],
+            companion_l2_frozen=True)
+    return ('Level8',), authored, fixed
 
 
 def parsed_block(parsed, level):
@@ -183,6 +240,12 @@ def observe(args):
     xml_baseline = non_l8_xml_identity(frozen[0][0], varying_levels)
     if any(non_l8_xml_identity(xml, varying_levels) != xml_baseline for xml, _, _ in frozen):
         raise ValueError('metadata beyond explicitly recorded L8/companion-L2 changed in XML')
+    reference_l3_offsets = {case['name']: [(node.text or '').strip() for node in
+        ET.parse(xml).getroot().findall('.//{*}Level3/{*}L1Offset')]
+        for case, (xml, _, _) in zip(cases, frozen, strict=True)}
+    zero_l3_neutral = reference_l3_offsets['zero'] == ['0 0 0'] * 4
+    zero_l2 = xml_companion_l2(frozen[0][0])
+    zero_l2_nonneutral = any(any(value != 0 for value in level['xml_trim']) for level in zero_l2)
     binaries = {k: Path(getattr(args, k)).resolve(strict=True)
                 for k in ('converter', 'decoder', 'probe', 'candidate')}
     output = args.output.resolve(); output.mkdir()
@@ -273,6 +336,10 @@ def observe(args):
         'frozen_metadata_xml_sha256': xml_baseline, 'frozen_metadata_rpu_sha256': rpu_baseline,
         'metadata_delta_scope': reference.get('metadata_delta_scope', 'L8-plus-officially-regenerated-companion-L2'),
         'metadata_authoring': authored, 'original_fixed_xml_sha256': original_fixed,
+        'reference_l3_offsets': reference_l3_offsets,
+        'zero_reference_l3_neutral': zero_l3_neutral,
+        'zero_reference_l2_nonneutral': zero_l2_nonneutral,
+        'l3_applied': False,
         'companion_l2_changed_cases': [a['case'] for a in association
             if a['actual_rpu_companion_l2'] != association[0]['actual_rpu_companion_l2']],
         'reference_quantization_step_normalized_pq': 1/65535,
@@ -287,9 +354,15 @@ def observe(args):
                                 'linear_xyz_cd_m2': metrics(differences(candidate_xyz[0], reference_xyz[0]))},
         'comparisons': comparisons, 'patches': patches,
         'limitations': ['selected L8 has SOP only; L8 chroma/saturation and all L3/detail/extended controls unapplied',
-            'zero-reference has other nonneutral instructions; baseline error is separate from metadata delta',
+            ('zero-reference Level3/L1Offset is neutral; nonneutral Level2 remains; baseline error is separate from metadata delta'
+             if zero_l3_neutral and zero_l2_nonneutral else
+             'zero-reference Level3/L1Offset is nonneutral; baseline error is separate from metadata delta'
+             if not zero_l3_neutral else
+             'zero-reference Level3/L1Offset and Level2 are neutral; baseline error is separate from metadata delta'),
             ('Metafier regenerated L2; recorded delta is not a causally isolated L8-only effect'
-             if authored is None else 'L8-only authored XML input variation; finite cases do not establish an algorithm'),
+             if authored is None else 'L8-only within-packet XML input variation; parent Level3 normalization is explicit; finite cases do not establish an algorithm'
+             if authored.get('parent_delta_levels') == ['Level3'] else
+             'L8-only authored XML input variation; finite cases do not establish an algorithm'),
             'delta comparison does not remove nonlinear interactions with baseline instructions',
             'supported public XML importer supplies actual RPU mapping, not Dolby algorithm equivalence',
             'candidate L8 centered /4096 raw normalization is a fixed engineering assumption',
@@ -306,6 +379,6 @@ if __name__ == '__main__':
                 'candidate', 'source-archive', 'dependency-manifest', 'output'):
         parser.add_argument('--' + key, required=True, type=Path)
     parser.add_argument('--parent-reference-packet', type=Path,
-        help='original mixed packet, required for strict L8-only authored variants')
+        help='parent reference packet required for strict authored variants')
     report = observe(parser.parse_args())
     print(f"{report['status']}: {report['matched_cases']} software-reference cases")

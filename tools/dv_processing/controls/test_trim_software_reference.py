@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 from annex_b2 import oetf
-from compare_trim_software_reference import check_selected
+from compare_trim_software_reference import check_selected, neutral_l3_authoring
 from trim_software_metrics import (acquisition, bind, comparison, metrics,
     non_l8_rpu_identity, packet_file, rgb16, rgba32, sha, xml_contract, xyz, MAX_PACKET_FILE_BYTES)
 
@@ -85,6 +85,36 @@ class SoftwareReferenceTests(unittest.TestCase):
         self.assertEqual(non_l8_rpu_identity(parsed, ('Level2', 'Level8')), mixed)
         parsed['vdr_dm_data']['cmv40_metadata']['ext_metadata_blocks'][2]['Level3']['avg_pq_offset'] = 1501
         self.assertNotEqual(non_l8_rpu_identity(parsed, ('Level2', 'Level8')), mixed)
+
+    def test_neutral_l3_authoring_accepts_only_four_offsets(self):
+        def dynamic():
+            return ('<PluginNode><DVDynamicData><Level1><ImageCharacter>1</ImageCharacter></Level1>'
+                    '<Level2><Trim>2</Trim></Level2>'
+                    '<Level3><L1Offset>0 -0.178274 0</L1Offset></Level3>'
+                    '<Level8><L8Trim>3</L8Trim></Level8></DVDynamicData></PluginNode>')
+        parent = '<Root><Video><Track><Shot>' + dynamic() + ''.join(
+            '<Frame>' + dynamic() + '</Frame>' for _ in range(3)) + '</Shot></Track></Video></Root>'
+        neutral = parent.replace('0 -0.178274 0', '0 0 0')
+        record = {'replaced_l3_nodes': 4, 'input_l3_offsets': ['0 -0.178274 0'] * 4,
+                  'output_l3_offsets': ['0 0 0'] * 4}
+        with tempfile.TemporaryDirectory(dir=os.environ['PLURX_DV_CONTROL_SCRATCH']) as folder:
+            before, after = Path(folder)/'before.xml', Path(folder)/'after.xml'
+            before.write_text(parent)
+            after.write_text(neutral)
+            self.assertEqual(neutral_l3_authoring(before, after, record), ['0 0 0'] * 4)
+            mutations = [
+                neutral.replace('<Level3><L1Offset>0 0 0</L1Offset></Level3>', '', 1),
+                neutral.replace('<Level3><L1Offset>0 0 0</L1Offset></Level3>',
+                                '<Level3><L1Offset>0 0 0</L1Offset></Level3>' * 2, 1),
+                neutral.replace('<L1Offset>0 0 0</L1Offset>', '<L1Offset>0 0.1 0</L1Offset>', 1),
+                neutral.replace('<ImageCharacter>1</ImageCharacter>', '<ImageCharacter>9</ImageCharacter>', 1),
+                neutral.replace('<Trim>2</Trim>', '<Trim>9</Trim>', 1),
+                neutral.replace('<L8Trim>3</L8Trim>', '<L8Trim>9</L8Trim>', 1),
+            ]
+            for xml in mutations:
+                after.write_text(xml)
+                with self.assertRaises(ValueError):
+                    neutral_l3_authoring(before, after, record)
 
     def test_acquired_xml_target_and_frame_association_are_frozen(self):
         import xml.etree.ElementTree as ET
