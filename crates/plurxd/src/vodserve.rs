@@ -1470,6 +1470,12 @@ mod vod_serve_serve;
 // split: end vod-serve
 
 // split: begin vod-shared
+#[cfg(target_os = "linux")]
+#[path = "vod/finite_profile.rs"]
+mod finite_profile;
+#[cfg(target_os = "linux")]
+#[path = "vod/finite_software.rs"]
+pub(crate) mod finite_software;
 #[path = "vod/shared.rs"]
 mod shared;
 // split: end vod-shared

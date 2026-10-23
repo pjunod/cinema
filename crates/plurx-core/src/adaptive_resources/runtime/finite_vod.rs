@@ -112,10 +112,32 @@ pub struct SoftwareVodRequest {
     pub output: FiniteOutputLimits,
 }
 
+impl SoftwareVodRequest {
+    /// Known requested allocations only. The additional producer peak is
+    /// explicitly unknown and serialized by the runtime's memory claim.
+    pub fn known_memory_component(
+        command: &SoftwareAvcCommand,
+        producer: &SoftwareAvcPumpPlan,
+        output: &FiniteOutputLimits,
+    ) -> std::io::Result<u64> {
+        producer
+            .minimum_memory_bytes()?
+            .checked_add(
+                u64::try_from(command.resident_memory_bytes()?)
+                    .map_err(|_| std::io::Error::other("finite memory overflow"))?,
+            )
+            .and_then(|bytes| bytes.checked_add(64 * 1024))
+            .and_then(|bytes| bytes.checked_add(output.resident_memory_bytes))
+            .and_then(|bytes| bytes.checked_add(output.response_memory_bytes))
+            .ok_or_else(|| std::io::Error::other("finite memory overflow"))
+    }
+}
+
 /// Nonserde ownership selection. The runtime book retains all actual resources
 /// if a request drops this value or cancels any borrowed setup wait.
 pub(in crate::adaptive_resources::runtime) struct FiniteControl {
     requested: std::sync::atomic::AtomicBool,
+    suspended: std::sync::atomic::AtomicBool,
     root: std::sync::Mutex<Option<crate::process::priority::RegisteredChildControl>>,
     task: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
@@ -123,6 +145,7 @@ impl FiniteControl {
     fn new() -> Self {
         Self {
             requested: std::sync::atomic::AtomicBool::new(false),
+            suspended: std::sync::atomic::AtomicBool::new(false),
             root: std::sync::Mutex::new(None),
             task: std::sync::Mutex::new(None),
         }
@@ -146,6 +169,8 @@ impl FiniteControl {
         *root = Some(control);
         if self.requested() {
             control.start_kill()?;
+        } else if self.suspended.load(std::sync::atomic::Ordering::Acquire) {
+            control.signal(crate::process::ProcessSignal::Suspend)?;
         }
         Ok(())
     }
@@ -168,6 +193,24 @@ impl FiniteControl {
         *task = Some(abort);
         Ok(())
     }
+    fn suspend(&self, suspended: bool) -> std::io::Result<()> {
+        // Serialize state and the original registry control, including late
+        // installation. This never addresses a recycled numeric PID directly.
+        let root = self
+            .root
+            .lock()
+            .map_err(|_| std::io::Error::other("finite root control unavailable"))?;
+        self.suspended
+            .store(suspended, std::sync::atomic::Ordering::Release);
+        if let Some(root) = *root {
+            root.signal(if suspended {
+                crate::process::ProcessSignal::Suspend
+            } else {
+                crate::process::ProcessSignal::Resume
+            })?;
+        }
+        Ok(())
+    }
     fn request(&self) -> std::io::Result<()> {
         self.requested
             .store(true, std::sync::atomic::Ordering::Release);
@@ -188,6 +231,22 @@ impl FiniteControl {
             .map_err(|_| std::io::Error::other("finite root control unavailable"))
             .and_then(|root| root.as_ref().map_or(Ok(()), |root| root.start_kill()));
         task_result.and(root_result)
+    }
+}
+
+/// Control for the same registered producer while its owner is joining or
+/// waiting for durable I/O. Signalling conveys no close or refund proof.
+#[derive(Clone)]
+pub struct SoftwareVodControl(Arc<FiniteControl>);
+impl SoftwareVodControl {
+    pub fn request_stop(&self) -> std::io::Result<()> {
+        self.0.request()
+    }
+    pub fn suspend(&self) -> std::io::Result<()> {
+        self.0.suspend(true)
+    }
+    pub fn resume(&self) -> std::io::Result<()> {
+        self.0.suspend(false)
     }
 }
 
@@ -247,6 +306,14 @@ impl FiniteFile {
 }
 
 impl FiniteOutput {
+    /// Recheck the same originally held source files around publication. A
+    /// latched drift prevents later freezing/retirement of mixed-source bytes.
+    async fn validate_sources(&self) -> Result<(), FiniteVodError> {
+        self.runtime
+            .validate_finite_sources(&self.preparation, 0)
+            .await
+            .map_err(Into::into)
+    }
     /// Reserve the complete buffered response under the same retained role
     /// before allocating or opening the native reader.
     pub async fn allocate_response_buffer(
@@ -427,6 +494,19 @@ impl FiniteOutput {
 }
 
 impl SoftwareVodOwner {
+    pub fn control(&self) -> SoftwareVodControl {
+        SoftwareVodControl(Arc::clone(&self.control))
+    }
+    /// Selector only: construction does not open the source or output root.
+    pub fn output(&self) -> FiniteOutput {
+        FiniteOutput {
+            runtime: Arc::clone(&self.runtime),
+            preparation: self.preparation.clone(),
+            member: self.scratch_member,
+            directory_path: self.directory_path.clone(),
+            encoded_process_marker: self.encoded_process_marker,
+        }
+    }
     /// Resolve prepare BEFORE queueing either source native open or output
     /// traversal. Each source request is registered synchronously in core.
     pub async fn prepare(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
@@ -548,6 +628,19 @@ impl SoftwareVodOwner {
     pub async fn stop_producer(&self) -> Result<FiniteProducerCompletion, FiniteVodError> {
         self.request_stop()?;
         self.join_producer().await
+    }
+
+    /// Positive partial-start cancellation through original retained native
+    /// owners. Unsupported earlier acquisition states keep their complete hold.
+    pub async fn cancel_failed(&self, deadline: Instant) -> Result<(), FiniteVodError> {
+        self.request_stop()?;
+        self.runtime
+            .settle_failed_finite_vod(&self.preparation, 0, deadline)
+            .await?;
+        self.runtime
+            .forget_preparation(self.preparation.clone())
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn cancel(&self, deadline: Instant) -> Result<(), FiniteVodError> {

@@ -19,6 +19,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub(super) mod bootstrap;
 #[cfg(unix)]
+pub(in crate::adaptive_resources::runtime) mod finite_cancel;
+#[cfg(unix)]
 pub(super) mod finite_retirement;
 #[cfg(unix)]
 mod finite_settlement;

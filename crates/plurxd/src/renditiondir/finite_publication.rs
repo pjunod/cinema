@@ -121,6 +121,32 @@ impl FinitePublication {
 }
 
 impl RenditionDir {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn finite_producer(
+        &self,
+    ) -> Option<std::sync::Arc<crate::vodserve::finite_software::FiniteSoftwareProducer>> {
+        self.writes
+            .finite_producer
+            .as_ref()
+            .map(std::sync::Arc::clone)
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_finite_producer(
+        owner: plurx_core::adaptive_resources::runtime::finite_vod::SoftwareVodOwner,
+    ) -> Self {
+        let output = owner.output();
+        let producer = std::sync::Arc::new(
+            crate::vodserve::finite_software::FiniteSoftwareProducer::new(owner),
+        );
+        Self {
+            dir: output.path().to_owned(),
+            writes: std::sync::Arc::new(PendingWrites {
+                finite: Some(FinitePublication::new(output)),
+                finite_producer: Some(producer),
+                ..PendingWrites::default()
+            }),
+        }
+    }
     pub(crate) fn is_finite(&self) -> bool {
         self.writes.finite.is_some()
     }

@@ -332,6 +332,11 @@ pub(crate) enum AssetEventV1 {
     BeginRetirement {
         exact_head_before_retirement: AssetEventRefV1,
     },
+    /// Distinct producer-R cancellation. It cannot impersonate the retained
+    /// S read-only transition and still needs original native cleanup proof.
+    BeginProducerCancellation {
+        exact_head_before_cancellation: AssetEventRefV1,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -111,7 +111,8 @@ impl NodeResourceRuntime {
             .process_closure
             .as_ref()
             .ok_or(OperationError::State)?;
-        if !finite.producer_joined
+        if finite.source_drifted
+            || !finite.producer_joined
             || !finite.retiring
             || !process.matches(role.sealed.as_ref().ok_or(OperationError::State)?)
             || process.generation() != source.graph_id()

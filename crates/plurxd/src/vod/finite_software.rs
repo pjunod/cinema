@@ -1,0 +1,339 @@
+//! Ordinary software VOD owns one concrete finite producer through retirement.
+//! Native resources remain inside core; events follow durable publication and
+//! the daemon manifest is only a serving index, never settlement authority.
+use super::*;
+use plurx_core::adaptive_resources::runtime::finite_vod::{
+    FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
+};
+use plurx_core::transcode::{DecodeBackend, Encoder};
+use std::sync::atomic::AtomicU8;
+
+const PREPARED: u8 = 0;
+const RUNNING: u8 = 1;
+const RETIRING: u8 = 2;
+const RETAINED: u8 = 3;
+const FAILED: u8 = 4;
+const SETTLED: u8 = 5;
+
+/// Persistent application owner. Stage is diagnostic/control serialization;
+/// only core's original receipts and known journal commits release resources.
+pub(crate) struct FiniteSoftwareProducer {
+    owner: Mutex<SoftwareVodOwner>,
+    control: SoftwareVodControl,
+    stage: AtomicU8,
+}
+impl std::fmt::Debug for FiniteSoftwareProducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FiniteSoftwareProducer")
+            .field("stage", &self.stage.load(Acquire))
+            .finish_non_exhaustive()
+    }
+}
+impl FiniteSoftwareProducer {
+    pub(crate) fn new(owner: SoftwareVodOwner) -> Self {
+        Self {
+            control: owner.control(),
+            owner: Mutex::new(owner),
+            stage: AtomicU8::new(PREPARED),
+        }
+    }
+    pub(crate) fn request_stop(&self) -> io::Result<()> {
+        self.control.request_stop()
+    }
+    pub(crate) async fn perform(&self, step: Step) -> io::Result<Performed> {
+        match step {
+            Step::Stop => self.control.suspend()?,
+            Step::Resume => self.control.resume()?,
+            Step::Terminate { .. } => {
+                self.control.request_stop()?;
+                let owner = self.owner.lock().await;
+                let deadline = Instant::now() + Duration::from_secs(30);
+                match self.stage.load(Acquire) {
+                    RETAINED | SETTLED => {}
+                    RETIRING => {
+                        owner
+                            .retire_output(deadline)
+                            .await
+                            .map_err(io::Error::other)?;
+                        self.stage.store(RETAINED, Release);
+                    }
+                    _ => self.cancel_owned(&owner, deadline).await?,
+                }
+            }
+            _ => {}
+        }
+        Ok(Performed::Done)
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.stage.load(Acquire) == SETTLED
+    }
+    async fn cancel_owned(&self, owner: &SoftwareVodOwner, deadline: Instant) -> io::Result<()> {
+        if owner.cancel(deadline).await.is_err() {
+            owner
+                .cancel_failed(deadline)
+                .await
+                .map_err(io::Error::other)?;
+        }
+        self.stage.store(SETTLED, Release);
+        Ok(())
+    }
+}
+
+pub(super) fn selected(key: &str, recipe: &Recipe, private: bool, ephemeral: bool) -> bool {
+    !private
+        && !ephemeral
+        && !key.starts_with("source-")
+        && recipe.encoding.as_ref().is_some_and(|encoding| {
+            encoding.plan.encoder() == Encoder::Software
+                && encoding.plan.decode().backend() == DecodeBackend::Software
+                && encoding.plan.output_contract().output_codec() == "h264"
+                && encoding.plan.options().strict_dolby.is_none()
+                && encoding.plan.macos_processing_identity().is_none()
+                && encoding.plan.options().subtitle_burn.is_none()
+                && encoding.subtitle.is_none()
+                && encoding.dv_runtime.is_none()
+                && encoding.shared_audio.is_none()
+                && recipe.file.dolby_vision.is_empty()
+        })
+}
+
+pub(super) async fn build(
+    shared: &Arc<Shared>,
+    key: &str,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    plan: SegmentPlan,
+    settings: &VodSettings,
+) -> Result<Arc<Rendition>, String> {
+    let runtime = shared
+        .resource_runtime
+        .as_ref()
+        .ok_or("finite resource runtime unavailable")?;
+    let observed_runtime = Arc::clone(runtime);
+    let epoch = tokio::task::spawn_blocking(move || observed_runtime.observe_admission_capacity())
+        .await
+        .map_err(|error| format!("finite admission observer failed: {error}"))?
+        .map_err(|error| format!("observing finite admission: {error:?}"))?;
+    let capacity = runtime
+        .accounting()
+        .map_err(|error| format!("reading finite admission: {error:?}"))?
+        .capacity;
+    let request = finite_profile::compile(shared, key, &recipe, &plan, epoch, capacity)?;
+    // No selected source/root/marker has been opened. Core synchronously
+    // reserves the complete role and retains its prepare operation before return.
+    let owner = runtime
+        .prepare_software_vod(request, Instant::now() + settings.materialize_budget)
+        .map_err(|error| format!("preparing finite software VOD: {error}"))?;
+    let dir = RenditionDir::from_finite_producer(owner);
+    let manifest = Manifest::new(plan.clone());
+    Ok(Shared::construct_rendition(
+        key,
+        dir,
+        recipe,
+        None,
+        plan,
+        index,
+        settings,
+        None,
+        false,
+        None,
+        manifest,
+        IdentityState::default(),
+    ))
+}
+
+pub(super) async fn run(
+    shared: Arc<Shared>,
+    rendition: Arc<Rendition>,
+    producer: Arc<FiniteSoftwareProducer>,
+) {
+    // The same registered per-rendition driver waits for demand; it does not
+    // create a detached retry loop or one native producer per response.
+    if !rendition.closed.load(Acquire) {
+        rendition.wake.notified().await;
+    }
+    let mut owner = producer.owner.lock().await;
+    if rendition.closed.load(Acquire) {
+        if let Err(error) = producer
+            .cancel_owned(&owner, Instant::now() + rendition.materialize_budget)
+            .await
+        {
+            tracing::warn!(target: "plurxd::vodserve", rendition=%rendition.key, %error, "finite preparation remains held during cancellation");
+        }
+        return;
+    }
+    producer.stage.store(RUNNING, Release);
+    let Some(mut events) = owner.take_events() else {
+        return;
+    };
+    // Start publishes only the start decision, never completion. Its concrete
+    // writer owns a bounded event channel, drained before joining that writer.
+    let start_result = owner
+        .start(Instant::now() + rendition.materialize_budget)
+        .await;
+    if let Err(error) = start_result {
+        fail(
+            &shared,
+            &rendition,
+            &producer,
+            format!("starting finite software VOD: {error}"),
+        );
+        let _ = owner.stop_producer().await;
+        if let Err(error) = producer
+            .cancel_owned(&owner, Instant::now() + rendition.materialize_budget)
+            .await
+        {
+            tracing::warn!(target: "plurxd::vodserve", rendition=%rendition.key, %error, "finite failed start remains charged");
+        }
+        return;
+    }
+    let completion = {
+        let joined = owner.join_producer();
+        tokio::pin!(joined);
+        let mut channel_open = true;
+        loop {
+            tokio::select! {
+                completion = &mut joined => break completion,
+                event = events.recv(), if channel_open => match event {
+                    Some(event) => if let Err(error) = observe(&shared, &rendition, event).await {
+                        fail(&shared, &rendition, &producer, format!("indexing finite output: {error}"));
+                    },
+                    None => channel_open = false,
+                },
+                _ = rendition.wake.notified() => {
+                    if rendition.closed.load(Acquire) { let _ = producer.request_stop(); }
+                },
+            }
+        }
+    };
+    // The writer can finish before the final metadata event wins select.
+    while let Ok(event) = events.try_recv() {
+        if let Err(error) = observe(&shared, &rendition, event).await {
+            fail(
+                &shared,
+                &rendition,
+                &producer,
+                format!("indexing finite output: {error}"),
+            );
+        }
+    }
+    let success = completion.as_ref().is_ok_and(|completion| {
+        completion
+            .root_status
+            .is_some_and(|status| status.success())
+            && completion.writer.is_some_and(|writer| {
+                writer.outcome == FiniteWriterOutcome::Ran && writer.completed_output
+            })
+    });
+    if !success || rendition.failure().is_some() {
+        fail(
+            &shared,
+            &rendition,
+            &producer,
+            format!("finite producer did not complete: {completion:?}"),
+        );
+        if let Err(error) = producer
+            .cancel_owned(&owner, Instant::now() + rendition.materialize_budget)
+            .await
+        {
+            tracing::warn!(target: "plurxd::vodserve", rendition=%rendition.key, %error, "finite failed producer remains charged");
+        }
+        return;
+    }
+    producer.stage.store(RETIRING, Release);
+    let deadline = Instant::now() + rendition.materialize_budget;
+    let retired = async {
+        owner.freeze_output(deadline).await?;
+        owner.retire_output(deadline).await
+    }
+    .await;
+    match retired {
+        Ok(_) => {
+            producer.stage.store(RETAINED, Release);
+            let mut manifest = rendition.manifest.lock().await;
+            shared.try_admit(&rendition, &mut manifest).await;
+            rendition.kick();
+        }
+        Err(error) => {
+            // Exact runtime operation and full R survive a lost/unknown result.
+            record_failure(
+                &shared,
+                &rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerWriteFailed,
+                format!("finite retirement remains held: {error}"),
+            );
+        }
+    }
+}
+
+fn fail(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    producer: &FiniteSoftwareProducer,
+    cause: String,
+) {
+    producer.stage.store(FAILED, Release);
+    let _ = producer.request_stop();
+    record_failure(
+        shared,
+        rendition,
+        crate::playback_control::ProducerDecisionReason::ProducerWriteFailed,
+        cause,
+    );
+}
+
+async fn observe(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    event: SoftwareVodEvent,
+) -> io::Result<()> {
+    match event {
+        SoftwareVodEvent::Initialized(identity) => {
+            rendition.identity.lock().await.identity = Some(identity);
+            rendition.init_notify.notify_waiters();
+        }
+        SoftwareVodEvent::Materialized {
+            entry,
+            bytes,
+            digest,
+        } => {
+            let init = rendition.identity.lock().await.identity.clone();
+            let mut manifest = rendition.manifest.lock().await;
+            if manifest
+                .state(entry)
+                .is_none_or(|state| state.is_materialized())
+            {
+                return Err(io::Error::other(
+                    "finite event is outside the immutable plan or duplicated",
+                ));
+            }
+            if !manifest.materialize(entry, bytes, now_ms()) {
+                return Err(io::Error::other("finite plan entry absent"));
+            }
+            let epoch = rendition.gen_epoch.load(Acquire);
+            let publication = credit_marker_prewarm_publication(rendition, epoch, entry).await;
+            if let Some(init) = init.as_ref() {
+                rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .observe(
+                        rendition,
+                        init,
+                        epoch,
+                        entry,
+                        output_measurement::ObservedOutputMember {
+                            bytes,
+                            digest,
+                            publication,
+                        },
+                    );
+            }
+            shared.working_set.fetch_add(bytes, Relaxed);
+            rendition.clear_demand(entry);
+            shared.pool.satisfy(&rendition.key, entry);
+        }
+    }
+    rendition.kick();
+    Ok(())
+}

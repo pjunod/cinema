@@ -2,7 +2,7 @@
 //! substitute a Command, future, pipe owner, source descriptor or close proof.
 use super::*;
 use crate::adaptive_resources::physical_graph::finite_vod::{
-    FiniteFixedImage, FiniteVodProcessClosure, GraphFiniteVodTask,
+    FiniteFixedImage, FiniteVodProcessClosure, FiniteVodRootOnlyClosure, GraphFiniteVodTask,
 };
 use crate::adaptive_resources::runtime::finite_vod::{pump::SoftwarePump, SoftwareAvcCommand};
 use std::process::Stdio;
@@ -17,14 +17,31 @@ pub(super) struct FiniteLaunch {
     pub(super) entered: bool,
     pub(super) control: Arc<crate::adaptive_resources::runtime::finite_vod::FiniteControl>,
     task_entered: bool,
-    task: Option<GraphFiniteVodTask>,
+    task: FiniteTaskDisposition,
     fixed_image: Option<FiniteFixedImage>,
     pub(super) process_closure: Option<FiniteVodProcessClosure>,
+    pub(super) root_only_closure: Option<FiniteVodRootOnlyClosure>,
     completion: Option<crate::adaptive_resources::runtime::finite_vod::FiniteProducerCompletion>,
     task_observation: Uuid,
     task_observed_committed: bool,
     pub(super) retiring: bool,
     pub(super) producer_joined: bool,
+    pub(super) source_drifted: bool,
+}
+
+#[derive(Clone, Copy)]
+enum FiniteTaskDisposition {
+    Pending,
+    Registered(GraphFiniteVodTask),
+    ProvenNeverAcquired,
+}
+impl FiniteTaskDisposition {
+    fn registered(self) -> Option<GraphFiniteVodTask> {
+        match self {
+            Self::Registered(task) => Some(task),
+            Self::Pending | Self::ProvenNeverAcquired => None,
+        }
+    }
 }
 
 impl NodeResourceRuntime {
@@ -62,16 +79,70 @@ impl NodeResourceRuntime {
             entered: false,
             control,
             task_entered: false,
-            task: None,
+            task: FiniteTaskDisposition::Pending,
             fixed_image: None,
             process_closure: None,
+            root_only_closure: None,
             completion: None,
             task_observation: Uuid::new_v4(),
             task_observed_committed: false,
             retiring: false,
             producer_joined: false,
+            source_drifted: false,
         });
         Ok(())
+    }
+
+    /// Revalidate each media source through its original retained File. Any
+    /// failed native identity check latches the producer against later freeze
+    /// or R-to-S transfer, including when the waiting caller is cancelled.
+    pub(in crate::adaptive_resources::runtime) async fn validate_finite_sources(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle.installed {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+        let result = {
+            let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+            if role.refunded
+                || finite.source_drifted
+                || !finite.entered
+                || !finite.task_entered
+                || finite.producer_joined
+                || finite.source_members.len() != finite.command.source_count() + 1
+            {
+                return Err(OperationError::State);
+            }
+            let mut result = Ok(());
+            for member in finite
+                .source_members
+                .iter()
+                .take(finite.command.source_count())
+            {
+                if let Err(error) = role
+                    .sources
+                    .get(member)
+                    .ok_or(OperationError::State)
+                    .and_then(source_files::SourceCell::unchanged_for_publication)
+                {
+                    result = Err(error);
+                    break;
+                }
+            }
+            result
+        };
+        if result.is_err() {
+            role.finite_vod
+                .as_mut()
+                .ok_or(OperationError::State)?
+                .source_drifted = true;
+        }
+        result
     }
 
     pub(in crate::adaptive_resources::runtime) async fn start_finite_vod(
@@ -227,6 +298,10 @@ impl NodeResourceRuntime {
             )
             .await?
         };
+        role.finite_vod
+            .as_mut()
+            .ok_or(OperationError::State)?
+            .entered = true;
         // Actual launch succeeded and its original Child/ChildJob are retained.
         // Only now may the predeclared inherited copies enrich SourceObserved.
         for member in &source_members {
@@ -286,8 +361,15 @@ impl NodeResourceRuntime {
             .as_ref()
             .ok_or(OperationError::State)?
             .task
+            .registered()
             .is_none()
         {
+            if !matches!(
+                role.finite_vod.as_ref().ok_or(OperationError::State)?.task,
+                FiniteTaskDisposition::Pending
+            ) {
+                return Err(OperationError::State);
+            }
             if role.invoked.contains(&member) || role.graph.is_none() {
                 return Err(OperationError::State);
             }
@@ -323,12 +405,12 @@ impl NodeResourceRuntime {
                     &mut finite.fixed_image,
                 )
                 .await?;
-            finite.task = Some(task);
+            finite.task = FiniteTaskDisposition::Registered(task);
             role.invoked.insert(member);
             finite.control.install_task(abort)?;
         }
         let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
-        if finite.task.is_none() {
+        if finite.task.registered().is_none() {
             return Err(OperationError::State);
         }
         // The exact plan describes this fixed actor; the original graph has
@@ -361,7 +443,7 @@ impl NodeResourceRuntime {
         if !finite.task_observed_committed || finite.control.requested() {
             return Err(OperationError::State);
         }
-        let task = finite.task.ok_or(OperationError::State)?;
+        let task = finite.task.registered().ok_or(OperationError::State)?;
         let enter = role
             .graph
             .as_ref()
@@ -380,7 +462,9 @@ pub(super) fn acknowledge_task(
     operation: Uuid,
 ) -> Result<(), OperationError> {
     let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
-    if finite.task_member != member || finite.task_observation != operation || finite.task.is_none()
+    if finite.task_member != member
+        || finite.task_observation != operation
+        || finite.task.registered().is_none()
     {
         return Err(OperationError::State);
     }
@@ -400,7 +484,7 @@ impl NodeResourceRuntime {
         OperationError,
     > {
         self.validate_preparation(owner)?;
-        let (graph, task, root, control) = {
+        let (graph, task, root, control, root_only_closed) = {
             let mut bundle = owner.state.lock().await;
             if !bundle.installed {
                 return Err(OperationError::State);
@@ -410,14 +494,25 @@ impl NodeResourceRuntime {
             if let Some(completion) = finite.completion {
                 return Ok(completion);
             }
-            if role.refunded || (!finite.control.requested() && !finite.task_entered) {
+            let root_only_closed = finite.root_only_closure.is_some();
+            if matches!(finite.task, FiniteTaskDisposition::ProvenNeverAcquired) != root_only_closed
+            {
+                return Err(OperationError::State);
+            }
+            if role.refunded
+                || (!root_only_closed && !finite.control.requested() && !finite.task_entered)
+            {
                 return Err(OperationError::State);
             }
             // Seal only graph entry here. The admitted writer still needs its
             // original runtime entry to finish queued publications and fsyncs.
             finite.retiring = true;
-            let task = finite.task;
-            let root = role.roots.get(&finite.root_member).copied();
+            let task = finite.task.registered();
+            let root = if root_only_closed {
+                None
+            } else {
+                role.roots.get(&finite.root_member).copied()
+            };
             let control = Arc::clone(&finite.control);
             if let Some(graph) = role.graph.take() {
                 role.sealed = Some(graph.seal());
@@ -427,7 +522,7 @@ impl NodeResourceRuntime {
                 .as_ref()
                 .ok_or(OperationError::State)?
                 .select_same();
-            (graph, task, root, control)
+            (graph, task, root, control, root_only_closed)
         };
         // No bundle lock is held while joining. The SAME task/result remain in
         // graph custody if this waiter is cancelled before or after the join.
@@ -454,6 +549,35 @@ impl NodeResourceRuntime {
         // Once the writer has joined, fence later native entry through the SAME
         // ledger. Existing native workers are joined without new Arm/Observe.
         self.close_retained_entry(role.binding)?;
+        if task.is_none() && !root_only_closed {
+            let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
+            let root = root.ok_or(OperationError::State)?;
+            // Close the waited original root before source reconciliation:
+            // an uncommitted source Observe may prevent parent close, but
+            // cannot justify keeping this already-waited process and pipes.
+            let closure = graph
+                .try_finite_vod_root_only_closure(
+                    root,
+                    finite.root_member,
+                    finite.task_member,
+                    finite.acquisition_id,
+                    &mut finite.fixed_image,
+                )
+                .await?;
+            let exact = closure.matches(&graph)
+                && closure.root() == root
+                && closure.root_member() == finite.root_member
+                && closure.task_member() == finite.task_member
+                && closure.acquisition_id() == finite.acquisition_id
+                && !closure.close_operation_id().is_nil()
+                && closure.executable_identity() == finite.command.executable().source_identity()
+                && closure.executable_sha256() == finite.command.executable().sha256();
+            finite.root_only_closure = Some(closure);
+            finite.task = FiniteTaskDisposition::ProvenNeverAcquired;
+            if !exact {
+                return Err(OperationError::State);
+            }
+        }
         let mut first_error = None;
         for bootstrap in role.bootstrap.values_mut() {
             if let Err(error) = bootstrap.join_registered_native().await {
@@ -478,8 +602,26 @@ impl NodeResourceRuntime {
         if let Some(error) = first_error {
             return Err(error);
         }
+        if task.is_none() {
+            let closure = role
+                .finite_vod
+                .as_ref()
+                .and_then(|finite| finite.root_only_closure.as_ref())
+                .ok_or(OperationError::State)?;
+            for source in role.sources.values() {
+                // The original source copy and root inheritance are checked
+                // against the separate no-writer native closure. These data
+                // facts alone cannot authorize whole-role settlement.
+                let _ = source.finite_root_only_closed_fact(closure)?;
+            }
+        }
         let finite = role.finite_vod.as_mut().ok_or(OperationError::State)?;
-        let task = task.ok_or(OperationError::State)?;
+        let Some(task) = task else {
+            return Err(OperationError::Physical(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "fixed AVC root closed without task acquisition; typed settlement unavailable",
+            )));
+        };
         if finite.process_closure.is_none() {
             // No await or fallible operation separates the original one-shot
             // witness from installation into this retained runtime owner.

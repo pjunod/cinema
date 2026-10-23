@@ -4,6 +4,10 @@ pub(super) fn spawn_driver(
     shared: Arc<Shared>,
     rendition: Arc<Rendition>,
 ) -> tokio::task::JoinHandle<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(producer) = rendition.dir.finite_producer() {
+        return tokio::spawn(finite_software::run(shared, rendition, producer));
+    }
     #[cfg(test)]
     if let Some(driver) = controlled_driver::spawn(&rendition) {
         return driver;
@@ -211,6 +215,12 @@ pub(super) async fn perform_driver_step(
     rendition: &Rendition,
     step: Step,
 ) -> std::io::Result<Performed> {
+    #[cfg(target_os = "linux")]
+    if let Some(producer) = rendition.dir.finite_producer() {
+        let performed = producer.perform(step).await?;
+        rendition.kick();
+        return Ok(performed);
+    }
     let performed = rendition.slot.perform(step, || {}).await?;
     record_performed_step(shared, rendition, step);
     Ok(performed)
@@ -538,6 +548,12 @@ fn arm_handoff_expiry(rendition: &Arc<Rendition>) {
 
 /// One pass: demand → decide → step → carry it out.
 pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
+    #[cfg(target_os = "linux")]
+    if rendition.dir.finite_producer().is_some() {
+        rendition.kick();
+        return;
+    }
+
     let mut prepared_permit = None;
     loop {
         if rendition.closed.load(Relaxed) {

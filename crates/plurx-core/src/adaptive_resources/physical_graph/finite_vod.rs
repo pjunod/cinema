@@ -142,6 +142,53 @@ impl FiniteVodProcessClosure {
     }
 }
 
+/// Original fixed root closure when task preflight never registered a writer.
+/// This is deliberately distinct from FiniteVodProcessClosure: no task was
+/// acquired or joined, so it cannot satisfy the typed producer settlement.
+#[must_use]
+pub(in crate::adaptive_resources) struct FiniteVodRootOnlyClosure {
+    binding: ReservationBinding,
+    generation: Uuid,
+    root: GraphRoot,
+    root_member: Uuid,
+    task_member: Uuid,
+    acquisition_id: Uuid,
+    close_operation_id: Uuid,
+    executable_identity: SourceIdentity,
+    executable_sha256: [u8; 32],
+}
+impl FiniteVodRootOnlyClosure {
+    pub(in crate::adaptive_resources) fn matches(&self, graph: &SealedPhysicalGraph) -> bool {
+        self.binding == graph.custody.binding
+            && self.generation == graph.custody.identity.generation
+            && graph.custody.sealed.load(Ordering::Acquire)
+    }
+    pub(in crate::adaptive_resources) fn root(&self) -> GraphRoot {
+        self.root
+    }
+    pub(in crate::adaptive_resources) fn generation(&self) -> Uuid {
+        self.generation
+    }
+    pub(in crate::adaptive_resources) fn root_member(&self) -> Uuid {
+        self.root_member
+    }
+    pub(in crate::adaptive_resources) fn task_member(&self) -> Uuid {
+        self.task_member
+    }
+    pub(in crate::adaptive_resources) fn acquisition_id(&self) -> Uuid {
+        self.acquisition_id
+    }
+    pub(in crate::adaptive_resources) fn close_operation_id(&self) -> Uuid {
+        self.close_operation_id
+    }
+    pub(in crate::adaptive_resources) fn executable_identity(&self) -> SourceIdentity {
+        self.executable_identity
+    }
+    pub(in crate::adaptive_resources) fn executable_sha256(&self) -> [u8; 32] {
+        self.executable_sha256
+    }
+}
+
 pub(super) struct FiniteRecord {
     selection: GraphFiniteVodTask,
     pipes: [PipeRecord; 2],
@@ -395,6 +442,88 @@ impl SealedPhysicalGraph {
         }
         pipes_closed?;
         Ok(joined)
+    }
+}
+
+impl SealedPhysicalGraph {
+    /// Close the actual waited root's unclaimed pipes and registered job only
+    /// when the graph inventory proves that no writer was ever installed.
+    /// A failed native close consumes its descriptor once and leaves no
+    /// retryable positive proof; the original reservation remains held.
+    pub(in crate::adaptive_resources) async fn try_finite_vod_root_only_closure(
+        &self,
+        root: GraphRoot,
+        root_member_id: Uuid,
+        task_member_id: Uuid,
+        acquisition_id: Uuid,
+        image: &mut Option<FiniteFixedImage>,
+    ) -> io::Result<FiniteVodRootOnlyClosure> {
+        let mut members = self.custody.members.lock().await;
+        if !cfg!(target_os = "linux")
+            || !self.custody.sealed.load(Ordering::Acquire)
+            || !members.acquired
+            || members.uncertain_launch
+            || members.unaudited_handoff
+            || members.finite_process_closed
+            || members.roots.len() != 1
+            || !members.writers.is_empty()
+            || root.index != 0
+            || root.generation != self.custody.identity.generation
+            || image.as_ref().is_none_or(|image| {
+                image.root_member != root_member_id
+                    || image.task_member != task_member_id
+                    || image.acquisition_id != acquisition_id
+            })
+        {
+            return Err(io::Error::other(
+                "fixed AVC root-only inventory is incomplete",
+            ));
+        }
+        let owned = root_member(&self.custody, &mut members, root)?;
+        if !owned.waited
+            || owned.exit_status.is_none()
+            || owned.job.is_none()
+            || owned.pipes_claimed
+            || owned.child.stdin.is_some()
+            || owned.child.stdout.is_none()
+            || owned.child.stderr.is_none()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "original fixed AVC root or unclaimed pipe remains unresolved",
+            ));
+        }
+        let stdout = owned
+            .child
+            .stdout
+            .take()
+            .expect("validated original stdout");
+        let stderr = owned
+            .child
+            .stderr
+            .take()
+            .expect("validated original stderr");
+        let stdout_close = super::finite_pipes::close_unclaimed_stdout(stdout);
+        let stderr_close = super::finite_pipes::close_unclaimed_stderr(stderr);
+        stdout_close?;
+        stderr_close?;
+        let image = image.take().expect("validated fixed image");
+        let closure = FiniteVodRootOnlyClosure {
+            binding: self.custody.binding,
+            generation: self.custody.identity.generation,
+            root,
+            root_member: image.root_member,
+            task_member: image.task_member,
+            acquisition_id: image.acquisition_id,
+            close_operation_id: image.close_operation_id,
+            executable_identity: image.identity,
+            executable_sha256: image.sha256,
+        };
+        // Dispose original waited Child and ChildJob only after both native
+        // closes returned success. This never marks a writer joined.
+        members.roots.clear();
+        members.finite_process_closed = true;
+        Ok(closure)
     }
 }
 

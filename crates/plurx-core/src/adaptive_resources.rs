@@ -242,6 +242,14 @@ pub struct PhysicalCloseReceipt {
 }
 
 impl PhysicalCloseReceipt {
+    /// Only the same live runtime's original no-writer root, source and
+    /// producer-output native closures can construct a cancellation receipt.
+    #[cfg(unix)]
+    fn from_finite_cancel(closure: runtime::FiniteCancellationClosure) -> Self {
+        Self {
+            binding: closure.into_binding(),
+        }
+    }
     /// Consumes the original native retained-output closure. Audit heads and
     /// serialized terminal states cannot construct this physical capability.
     #[cfg(unix)]
@@ -316,6 +324,7 @@ struct NativeOverageObservation {
 struct State {
     epoch: u64,
     cap: ResourceCapacity,
+    capacity_observed_at: Option<std::time::Instant>,
     used: ResourceVector,
     next_reservation: u64,
     next_family: u64,
@@ -354,6 +363,8 @@ pub struct CleanupAuthority {
 pub struct LedgerSnapshot {
     pub limit_epoch: u64,
     pub capacity: ResourceCapacity,
+    /// Fresh headroom sample age; unknown for explicit fixed fixture/policy caps.
+    pub capacity_observation_age_ms: Metric<u64>,
     pub unknown_peak_producers: usize,
     /// Complete managed peak is unknown while any producer has an unknown
     /// additional peak. `used` still includes every known reserved component.
@@ -414,6 +425,12 @@ impl State {
         }
         if demand.limit_epoch != self.epoch {
             return Err(AdmissionRefusal::StaleEpoch);
+        }
+        if self
+            .capacity_observed_at
+            .is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(1))
+        {
+            return Err(AdmissionRefusal::InsufficientEvidence);
         }
         let Metric::Known(resources) = demand.resources else {
             return Err(AdmissionRefusal::InsufficientEvidence);
@@ -484,6 +501,7 @@ impl ResourceLedger {
             inner: Arc::new(Mutex::new(State {
                 epoch: limit_epoch,
                 cap: hard_cap,
+                capacity_observed_at: None,
                 used: ResourceVector::default(),
                 next_reservation: 1,
                 next_family: 1,
@@ -778,8 +796,33 @@ impl ResourceLedger {
         }
         state.epoch = epoch;
         state.cap = cap;
+        state.capacity_observed_at = None;
         // A lower cap never discards already held physical work.
         Ok(())
+    }
+
+    /// Install a fresh observational headroom sample without changing custody's
+    /// allocation generation. Every reservation rechecks this sample under the
+    /// ledger lock; an assessment made before it is never execution authority.
+    /// Older concurrent samples cannot overwrite a newer one. Existing prepaid
+    /// output readers remain tied to their original reservation and generation.
+    pub(crate) fn observe_capacity(
+        &self,
+        cap: ResourceCapacity,
+        observed_at: std::time::Instant,
+    ) -> Result<u64, AdmissionRefusal> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| AdmissionRefusal::Unavailable)?;
+        if state
+            .capacity_observed_at
+            .is_none_or(|old| observed_at > old)
+        {
+            state.cap = cap;
+            state.capacity_observed_at = Some(observed_at);
+        }
+        Ok(state.epoch)
     }
 
     /// Record a monotonically observed native resource overage against the
@@ -869,6 +912,12 @@ impl ResourceLedger {
         Ok(LedgerSnapshot {
             limit_epoch: state.epoch,
             capacity: state.cap,
+            capacity_observation_age_ms: state
+                .capacity_observed_at
+                .map(|at| {
+                    Metric::Known(u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX))
+                })
+                .unwrap_or(Metric::Unknown(UnknownReason::InsufficientEvidence)),
             managed_memory_peak_bytes: if state
                 .entries
                 .values()

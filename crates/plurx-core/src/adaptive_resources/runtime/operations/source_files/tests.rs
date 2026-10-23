@@ -208,6 +208,31 @@ async fn binary_digest_uses_same_source_descriptor_without_changing_its_offset()
 
 #[cfg(target_os = "linux")]
 #[test]
+fn publication_rechecks_the_same_held_file_after_in_place_mutation() {
+    let directory = tempfile::Builder::new()
+        .prefix("plurx-source-publication-fence-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("repository-local fixture directory");
+    let path = directory.path().join("source.bin");
+    std::fs::write(&path, b"original-source").expect("fixture source");
+    let mut cell = source_cell(&path, filesystem_domain(namespace()));
+    let cache = Mutex::new(VerifiedExecutableCache::new());
+    let opened = open_with_cache(&mut cell, &cache);
+    cell.result = Some(opened);
+    assert!(cell.result.as_ref().unwrap().observed.is_some());
+    // The runtime sets these only after both original observations commit;
+    // this fixture isolates the later native identity check.
+    cell.observed_committed = true;
+    cell.root_observed_committed = true;
+    cell.selected_root_member = Some(Uuid::new_v4());
+    assert!(cell.unchanged_for_publication().is_ok());
+
+    std::fs::write(&path, b"rewritten-source-longer").expect("mutate original inode");
+    assert!(cell.unchanged_for_publication().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn repeated_held_source_uses_bounded_identity_cache_after_descriptor_stat_checks() {
     let directory = tempfile::Builder::new()
         .prefix("plurx-source-digest-cache-")

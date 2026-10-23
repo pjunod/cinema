@@ -90,6 +90,9 @@ struct PendingWrites {
     >,
     #[cfg(unix)]
     finite: Option<finite_publication::FinitePublication>,
+    #[cfg(target_os = "linux")]
+    finite_producer:
+        Option<std::sync::Arc<crate::vodserve::finite_software::FiniteSoftwareProducer>>,
     #[cfg(test)]
     native_barrier: std::sync::Mutex<Option<NativePublicationBarrier>>,
 }
@@ -380,6 +383,19 @@ impl RenditionDir {
     /// For a rendition being given up whole. Record-then-unlink is not needed
     /// here because nothing survives to be wrong.
     pub async fn purge(&self, manifest: &mut Manifest) -> Freed {
+        #[cfg(target_os = "linux")]
+        if self
+            .finite_producer()
+            .is_some_and(|producer| producer.settled())
+        {
+            // The original producer cancellation already removed every asset
+            // and returned credit after known durable settlement.
+            let bytes = manifest.materialized_bytes();
+            for index in 0..manifest.len() as u32 {
+                manifest.forget(index);
+            }
+            return Freed { bytes, error: None };
+        }
         #[cfg(unix)]
         if let Some(output) = self.finite_output() {
             let bytes = manifest.materialized_bytes();

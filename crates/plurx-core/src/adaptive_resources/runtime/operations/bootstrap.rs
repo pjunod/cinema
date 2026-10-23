@@ -322,7 +322,7 @@ impl NodeResourceRuntime {
         let id = bundle.id;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
-        if role.refunded || !finite.producer_joined || !finite.retiring {
+        if role.refunded || finite.source_drifted || !finite.producer_joined || !finite.retiring {
             return Err(OperationError::State);
         }
         let planned = role.typed_members.as_ref().is_some_and(|members| {

@@ -1,14 +1,14 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete; published checkpoint
-`35e7cff19940` passed exact native Linux core+daemon compilation on Rust 1.97.1
-(192.956 seconds; `../evidence/direct-linux-35e7cff19940-RESULT.json`). Current
-uncommitted memory-accounting work passes the host all-target check on Rust
-1.97.1 (EXIT 0, 26.445 seconds; `../evidence/direct-check-20261022-225025.json`,
-log SHA-256 `bc119c421216a71c553169bfd2404a2ecff2188784d673b41a622f43505a3577`);
-native Linux compilation is pending. Behavioral tests, final Fable review and
-qualification have not run.
-**Updated:** 2026-10-22 at published checkpoint `35e7cff19940`; current
+`f84483e14881` passed exact native Linux core+daemon compilation on Rust 1.97.1
+(200.721 seconds; `../evidence/direct-linux-f84483e14881-RESULT.json`, log
+SHA-256 `d683ae7c6fee65bcc112f9860025ff86a63836424a4caa1808d3d973cd5ab000`).
+Current uncommitted ordinary-path integration passed host core+daemon all-target
+compilation (69.460 seconds; `../evidence/direct-check-20261022-232806.json`).
+Exact native Linux compilation of this phase is pending. Behavioral tests, final Fable review and qualification
+have not run.
+**Updated:** 2026-10-22 at published checkpoint `f84483e14881`; current
 uncommitted work described below.
 **Integration owner:** direct Codex harness (`/root`; actual model unspecified),
 primary and sole integration writer. Lower-model assistants may take bounded,
@@ -35,18 +35,21 @@ acceptance status are recorded here.
 
 ## Direct harness integration — 2026-10-22
 
-Published checkpoint `35e7cff19940` passed exact native Linux core+daemon
-all-targets compilation with pinned Rust 1.97.1 (EXIT 0, 192.956 seconds;
-`../evidence/direct-linux-35e7cff19940-RESULT.json`). Current uncommitted work
-adds explicit unknown FFmpeg peak accounting: it excludes every other active
-producer in the same ledger while validated retained residents may coexist. It
-also adds strict schema-v3 persistence/migration, a transactional admission
-guard, independent per-dimension capacities and full recovery holds. Host
-all-target compilation for this phase passes; native Linux compilation is
-pending. All V1–V5 and R1/M0–M7 remain OPEN. No behavioral tests, final Fable
-review or qualification have run.
-Ordinary VOD still uses legacy admission, and parser/framework/runtime-index
-overheads remain incomplete.
+Published checkpoint `f84483e14881` passed exact native Linux core+daemon
+all-targets compilation with pinned Rust 1.97.1 (EXIT 0, 200.721 seconds;
+`../evidence/direct-linux-f84483e14881-RESULT.json`, log SHA-256
+`d683ae7c6fee65bcc112f9860025ff86a63836424a4caa1808d3d973cd5ab000`). Current
+uncommitted work adds a measured per-dimension headroom provider and one-second
+checked admission retaining ledger custody through generation. Borrowed HLS
+init inspection removes two copies; track-metadata bounds remain open. The
+selected ordinary software-AVC branch reserves before legacy first-source open
+and authors persistent finite ownership, durable events and normal R→S driver
+integration. Root-only/no-writer/SinkReady partial-start cancellation and typed
+settlement are authored; registered-writer and earlier partial-start cleanup
+remain open. Host all-target compilation passed (69.460 seconds, stable source); native Linux compilation of this phase is pending. All V1–V5 and
+R1/M0–M7 remain OPEN. No behavioral tests, final Fable review or qualification
+have run. Ordinary admission and the remaining root-cause integration are
+unfinished.
 
 The selected executable now uses a fixed eight-entry verification cache keyed by
 all seven S1 identity fields and digest. Only a prior successful held-file native
@@ -133,18 +136,16 @@ ownership/terminal composition; the first metadata-marker caller; complete
 memory/index and durable-debt accounting; actual reader leases; retained-output
 transfer, conserving R→S and exact cleanup/settlement/capacity reuse.
 
-The latest published base is `35e7cff19940`. Its native Linux core+daemon
-all-target Rust 1.97.1 compile passed in 192.956 seconds. Current uncommitted
-memory-accounting work passes host all-target compilation (EXIT 0, 26.445
-seconds; `../evidence/direct-check-20261022-225025.json`) and awaits native Linux
-compilation. Unknown FFmpeg peak is serialized against every other active
-producer in the same ledger; validated retained residents may coexist. Strict
-schema-v3 persistence/migration, transactional admission guard, independent
-per-dimension capacities and full recovery holds are included in this phase.
-No behavioral tests, strict Clippy, final independent review, qualification/fast
-lane, merge or deployment are claimed. Ordinary admission and terminal
-integration remain open; parser/framework/runtime-index overhead and partial-
-start ownership remain unresolved.
+The latest published base is `f84483e14881`. Its native Linux core+daemon
+all-target Rust 1.97.1 compile passed in 200.721 seconds. Current uncommitted
+work adds measured per-dimension headroom, checked admission with retained
+custody, borrowed HLS init inspection and the selected ordinary software-AVC
+finite owner/driver path. Root-only partial-start cancellation and typed
+settlement are authored; registered-writer and earlier partial-start cleanup
+remain open. Host all-target compilation passed (69.460 seconds, stable source); native Linux compilation of this phase is pending. All V1–V5 and
+R1/M0–M7 remain open; no behavioral tests, strict Clippy, final independent
+review, qualification/fast lane, merge or deployment are claimed. The ordinary
+call path and remaining root-cause integration are unfinished.
 
 ## Current source and compiler receipt
 

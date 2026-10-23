@@ -445,6 +445,15 @@ impl Shared {
                     }));
                 }
                 Some(existing) => {
+                    #[cfg(unix)]
+                    if existing.dir.is_finite() {
+                        // An unresolved original finite producer/output is
+                        // still the owner. Maintenance must finish its exact
+                        // terminal transaction before another incarnation.
+                        existing.closed.store(true, Release);
+                        existing.kick();
+                        return Err("finite rendition cleanup remains in progress".into());
+                    }
                     if existing.ephemeral_processing {
                         return Err(
                             "processed incarnation requires physical storage cleanup".into()
@@ -670,6 +679,15 @@ impl Shared {
         ephemeral_processing: bool,
         processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     ) -> Result<Arc<Rendition>, String> {
+        #[cfg(target_os = "linux")]
+        if finite_software::selected(
+            key,
+            &recipe,
+            private_storage.is_some(),
+            ephemeral_processing,
+        ) {
+            return finite_software::build(self, key, index, recipe, plan, settings).await;
+        }
         let source = if key.starts_with("source-") {
             crate::fragment_index_cluster::open_source_playback_fence(
                 &recipe.file,
@@ -896,6 +914,37 @@ impl Shared {
             }
         }
 
+        Ok(Self::construct_rendition(
+            key,
+            dir,
+            recipe,
+            Some(source),
+            plan,
+            index,
+            settings,
+            private_storage,
+            ephemeral_processing,
+            processed_instance_allowance,
+            manifest,
+            identity_state,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn construct_rendition(
+        key: &str,
+        dir: RenditionDir,
+        recipe: Recipe,
+        source: Option<crate::fragment_index_cluster::SourceFence>,
+        plan: SegmentPlan,
+        index: Option<FragmentIndex>,
+        settings: &VodSettings,
+        private_storage: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        ephemeral_processing: bool,
+        processed_instance_allowance: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+        manifest: Manifest,
+        identity_state: IdentityState,
+    ) -> Arc<Rendition> {
         let timescale = plan.timescale.max(1);
         let seconds_per_segment = if plan.is_empty() {
             1.0
@@ -909,7 +958,7 @@ impl Shared {
             key: key.to_string(),
             dir,
             recipe,
-            source: Some(source),
+            source,
             playlist: plan.playlist().into_bytes(),
             plan,
             timescale,
@@ -966,7 +1015,7 @@ impl Shared {
             demand_since: StdMutex::new(HashMap::new()),
             fragment_received: StdMutex::new(None),
         });
-        Ok(rendition)
+        rendition
     }
 
     /// Completion → admission (plan §2.4): reserve, make durable, complete —

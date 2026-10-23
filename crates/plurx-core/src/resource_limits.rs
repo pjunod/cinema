@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::process::observation::{Metric, UnknownReason};
 
+pub mod admission;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct EffectiveLimits {
     /// The standard library's affinity/container-aware scheduling width, not

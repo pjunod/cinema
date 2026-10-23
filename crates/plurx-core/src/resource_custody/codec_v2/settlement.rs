@@ -78,6 +78,10 @@ pub(crate) enum ClosedFact {
     LegacyV1 {
         fact: super::super::ClosedMemberFact,
     },
+    LegacyNeverAcquiredV1 {
+        planned: super::super::PlannedMember,
+        operation_id: Id,
+    },
     SourceV1 {
         holder_id: Id,
         copies: Vec<CopyClosed>,
@@ -86,6 +90,12 @@ pub(crate) enum ClosedFact {
         task: VodOutputTask,
         join_operation_id: Id,
         owners: Vec<OwnerClosed>,
+    },
+    /// The original graph proved that no writer was registered. This is
+    /// disjoint from a joined VodOutputTaskV1 and closes no invented owner.
+    VodOutputTaskNeverAcquiredV1 {
+        task: VodOutputTask,
+        operation_id: Id,
     },
     ScratchAssetsV1 {
         scratch: ScratchAssets,
@@ -96,6 +106,10 @@ pub(crate) enum ClosedFact {
     ScratchAssetsV3 {
         plan: super::scratch::bootstrap::ScratchPlanV3,
         exact_head: super::scratch::AssetEventRefV1,
+        operation_id: Id,
+    },
+    ScratchAssetsNeverAcquiredV3 {
+        plan: super::scratch::bootstrap::ScratchPlanV3,
         operation_id: Id,
     },
 }
@@ -242,6 +256,15 @@ pub(crate) fn validate_settlement(
                     }
                 }
                 (
+                    MemberPlan::LegacyV1 { planned },
+                    ClosedFact::LegacyNeverAcquiredV1 {
+                        planned: closed,
+                        operation_id,
+                    },
+                ) if planned == closed
+                    && envelope.observed.is_none()
+                    && !operation_id.uuid().is_nil() => {}
+                (
                     MemberPlan::SourceV1 { source, .. },
                     ClosedFact::SourceV1 { holder_id, copies },
                 ) => {
@@ -266,7 +289,21 @@ pub(crate) fn validate_settlement(
                         owners,
                         ..
                     },
-                ) if task == closed => validate_closed_owners(owners, &task.inventory)?,
+                ) if task == closed
+                    && matches!(&envelope.observed,
+                        Some(Observed::VodOutputTaskV1 { task: observed }) if observed == task) =>
+                {
+                    validate_closed_owners(owners, &task.inventory)?
+                }
+                (
+                    MemberPlan::VodOutputTaskV1 { task, .. },
+                    ClosedFact::VodOutputTaskNeverAcquiredV1 {
+                        task: closed,
+                        operation_id,
+                    },
+                ) if task == closed
+                    && envelope.observed.is_none()
+                    && !operation_id.uuid().is_nil() => {}
                 (
                     MemberPlan::ScratchAssetsV1 { scratch, .. },
                     ClosedFact::ScratchAssetsV1 {
@@ -313,6 +350,15 @@ pub(crate) fn validate_settlement(
                         return Err(codec::invalid());
                     }
                 }
+                (
+                    MemberPlan::ScratchAssetsV3 { plan, .. },
+                    ClosedFact::ScratchAssetsNeverAcquiredV3 {
+                        plan: closed,
+                        operation_id,
+                    },
+                ) if plan == closed
+                    && envelope.observed.is_none()
+                    && !operation_id.uuid().is_nil() => {}
                 _ => return Err(codec::invalid()),
             },
             MemberDisposition::Transferred {

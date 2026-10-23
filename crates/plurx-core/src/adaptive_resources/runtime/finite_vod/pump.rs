@@ -154,7 +154,11 @@ impl SoftwareAvcPumpPlan {
 /// Bounded-channel metadata; never a terminal receipt or a resource refund.
 pub enum SoftwareVodEvent {
     Initialized(InitIdentity),
-    Materialized { entry: u32, bytes: u64 },
+    Materialized {
+        entry: u32,
+        bytes: u64,
+        digest: [u8; 32],
+    },
 }
 
 pub(in crate::adaptive_resources) struct SoftwarePump {
@@ -403,12 +407,15 @@ struct FiniteSink<'a> {
 }
 impl Sink for FiniteSink<'_> {
     async fn materialize(&self, entry: u32, mut bytes: Vec<u8>) -> io::Result<()> {
+        use sha2::Digest as _;
         let count = u64::try_from(bytes.len()).map_err(|_| overflow())?;
+        let digest: [u8; 32] = sha2::Sha256::digest(&bytes).into();
         publish(self.output, FiniteFile::Segment(entry), &mut bytes).await?;
         self.events
             .send(SoftwareVodEvent::Materialized {
                 entry,
                 bytes: count,
+                digest,
             })
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "finite VOD observer dropped"))
@@ -419,6 +426,7 @@ impl Sink for FiniteSink<'_> {
 }
 
 async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -> io::Result<()> {
+    output.validate_sources().await.map_err(io::Error::other)?;
     let ticket = output
         .queue_file_wait(file, bytes)
         .await
@@ -434,7 +442,8 @@ async fn publish(output: &FiniteOutput, file: FiniteFile, bytes: &mut Vec<u8>) -
     output
         .finish(&ticket, deadline()?)
         .await
-        .map_err(io::Error::other)
+        .map_err(io::Error::other)?;
+    output.validate_sources().await.map_err(io::Error::other)
 }
 fn deadline() -> io::Result<Instant> {
     Instant::now()

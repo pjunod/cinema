@@ -27,6 +27,8 @@ mod response_memory;
 #[cfg(unix)]
 pub(super) use operations::bootstrap::retirement::RetainedFiniteClosure;
 #[cfg(unix)]
+pub(super) use operations::finite_cancel::FiniteCancellationClosure;
+#[cfg(unix)]
 pub(super) use operations::finite_retirement::FiniteRetirementClosure;
 #[cfg(unix)]
 pub use operations::source_files::RetainedSourceLease;
@@ -106,6 +108,21 @@ impl NodeResourceRuntime {
 
     pub fn accounting(&self) -> Result<LedgerSnapshot, AdmissionRefusal> {
         self.ledger.snapshot()
+    }
+
+    /// Refresh actual node/filesystem headroom before compiling an ordinary
+    /// finite demand. This exposes no ledger, journal or caller-supplied cap.
+    /// Physical reads happen outside the ledger lock; reservation still checks
+    /// the newest sample and every live claim atomically. Samples expire in one
+    /// second and never rewrite an existing allocation's custody generation.
+    pub fn observe_admission_capacity(&self) -> Result<u64, AdmissionRefusal> {
+        let root = self
+            .rendition_root
+            .as_deref()
+            .ok_or(AdmissionRefusal::Unavailable)?;
+        let sample = crate::resource_limits::admission::snapshot(root);
+        self.ledger
+            .observe_capacity(sample.capacity, sample.measured_at)
     }
 
     /// Complete cleanup-only diagnostic data, not launch, fencing or refund

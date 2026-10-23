@@ -13,6 +13,30 @@ pub(in crate::adaptive_resources) struct RetainedFiniteClosure {
     member: Uuid,
     head: AssetEventRefV1,
 }
+/// Producer-R output closure after its own Open→Retiring cancellation event.
+/// This cannot be consumed as a retained-S close receipt.
+pub(in crate::adaptive_resources) struct ProducerFiniteClosure {
+    binding: ReservationBinding,
+    member: Uuid,
+    head: AssetEventRefV1,
+}
+impl ProducerFiniteClosure {
+    pub(in crate::adaptive_resources) fn binding(&self) -> ReservationBinding {
+        self.binding
+    }
+    pub(in crate::adaptive_resources) fn member(&self) -> Uuid {
+        self.member
+    }
+    pub(in crate::adaptive_resources) fn head(&self) -> AssetEventRefV1 {
+        self.head.clone()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupMode {
+    Retained,
+    Producer,
+}
 impl RetainedFiniteClosure {
     pub(in crate::adaptive_resources) fn binding(&self) -> ReservationBinding {
         self.binding
@@ -48,15 +72,19 @@ enum CleanupPending {
     Io(CleanupIo),
 }
 pub(super) struct CleanupRun {
+    mode: CleanupMode,
     pending: Option<CleanupPending>,
     closed: Option<RetainedFiniteClosure>,
+    producer_closed: Option<ProducerFiniteClosure>,
     issued: bool,
 }
 impl CleanupRun {
-    fn new() -> Self {
+    fn new(mode: CleanupMode) -> Self {
         Self {
+            mode,
             pending: None,
             closed: None,
+            producer_closed: None,
             issued: false,
         }
     }
@@ -95,7 +123,17 @@ fn directory_ref(
 fn next_step(bootstrap: &BootstrapMember) -> Result<CleanupPending, OperationError> {
     let fold = bootstrap.fold.as_ref().ok_or(OperationError::State)?;
     let state = fold.state();
-    if state.asset.lifecycle == ScratchLifecycleV1::RetainedReadOnly {
+    let mode = bootstrap
+        .retirement
+        .as_ref()
+        .ok_or(OperationError::State)?
+        .mode;
+    if (mode == CleanupMode::Retained
+        && state.asset.lifecycle == ScratchLifecycleV1::RetainedReadOnly)
+        || (mode == CleanupMode::Producer
+            && state.asset.lifecycle == ScratchLifecycleV1::Open
+            && state.bootstrap.phase == BootstrapPhase::SinkReady)
+    {
         return Ok(CleanupPending::Begin { operation: id()? });
     }
     if state.asset.lifecycle != ScratchLifecycleV1::Retiring {
@@ -261,6 +299,43 @@ impl BootstrapMember {
         run.issued = true;
         run.closed.take().ok_or(OperationError::State)
     }
+
+    pub(in crate::adaptive_resources::runtime) fn producer_close_fact(
+        &self,
+        expected_binding: ReservationBinding,
+        expected_member: Uuid,
+    ) -> Result<(ScratchPlanV3, AssetEventRefV1), OperationError> {
+        let run = self.retirement.as_ref().ok_or(OperationError::State)?;
+        let closed = run.producer_closed.as_ref().ok_or(OperationError::State)?;
+        if run.mode != CleanupMode::Producer
+            || closed.binding() != expected_binding
+            || closed.member() != expected_member
+            || run.issued
+            || run.pending.is_some()
+            || self.change.is_some()
+            || self.next_arm.is_some()
+            || !self.readers.is_empty()
+        {
+            return Err(OperationError::State);
+        }
+        let state = self.fold.as_ref().ok_or(OperationError::State)?.state();
+        if state.asset.lifecycle != ScratchLifecycleV1::RetiredClosed
+            || state.asset.head != Some(closed.head())
+        {
+            return Err(OperationError::State);
+        }
+        Ok((self.plan.clone(), closed.head()))
+    }
+    pub(in crate::adaptive_resources::runtime) fn take_producer_close(
+        &mut self,
+        expected_binding: ReservationBinding,
+        expected_member: Uuid,
+    ) -> Result<ProducerFiniteClosure, OperationError> {
+        self.producer_close_fact(expected_binding, expected_member)?;
+        let run = self.retirement.as_mut().ok_or(OperationError::State)?;
+        run.issued = true;
+        run.producer_closed.take().ok_or(OperationError::State)
+    }
 }
 
 impl NodeResourceRuntime {
@@ -273,6 +348,29 @@ impl NodeResourceRuntime {
         member: Uuid,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        self.close_finite_native(owner, index, member, deadline, CleanupMode::Retained)
+            .await
+    }
+
+    pub(in crate::adaptive_resources::runtime) async fn close_producer_finite_native(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        self.close_finite_native(owner, index, member, deadline, CleanupMode::Producer)
+            .await
+    }
+
+    async fn close_finite_native(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        member: Uuid,
+        deadline: Instant,
+        mode: CleanupMode,
+    ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         self.close_dropped_finite_readers(owner, index, deadline)
             .await?;
@@ -283,6 +381,16 @@ impl NodeResourceRuntime {
             let mut bundle = owner.state.lock().await;
             let bundle_id = bundle.id;
             let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
+            if role.refunded
+                || (mode == CleanupMode::Retained && role.retirement.is_none())
+                || (mode == CleanupMode::Producer
+                    && (role.retirement.is_some()
+                        || role.finite_vod.as_ref().is_none_or(|finite| {
+                            finite.root_only_closure.is_none() || !finite.retiring
+                        })))
+            {
+                return Err(OperationError::State);
+            }
             let bootstrap = role
                 .bootstrap
                 .get_mut(&member)
@@ -320,12 +428,14 @@ impl NodeResourceRuntime {
             if bootstrap.retirement.is_none() {
                 // Install the owner before the first await, journal arm or
                 // destructive native entry.
-                bootstrap.retirement = Some(CleanupRun::new());
+                bootstrap.retirement = Some(CleanupRun::new(mode));
             }
-            if bootstrap
-                .retirement
-                .as_ref()
-                .is_some_and(|run| run.closed.is_some())
+            let run = bootstrap.retirement.as_ref().ok_or(OperationError::State)?;
+            if run.mode != mode {
+                return Err(OperationError::State);
+            }
+            if (mode == CleanupMode::Retained && run.closed.is_some())
+                || (mode == CleanupMode::Producer && run.producer_closed.is_some())
             {
                 return Ok(());
             }
@@ -386,6 +496,12 @@ impl NodeResourceRuntime {
             .asset
             .head;
         if begin {
+            let mode = role
+                .bootstrap
+                .get(&member)
+                .and_then(|bootstrap| bootstrap.retirement.as_ref())
+                .ok_or(OperationError::State)?
+                .mode;
             if head.as_ref().is_none_or(|head| head.operation_id != arm) {
                 if role.transition.is_none()
                     && role
@@ -400,8 +516,14 @@ impl NodeResourceRuntime {
                         role,
                         member,
                         arm.uuid(),
-                        AssetEventV1::BeginRetirement {
-                            exact_head_before_retirement: head.ok_or(OperationError::State)?,
+                        match mode {
+                            CleanupMode::Retained => AssetEventV1::BeginRetirement {
+                                exact_head_before_retirement: head.ok_or(OperationError::State)?,
+                            },
+                            CleanupMode::Producer => AssetEventV1::BeginProducerCancellation {
+                                exact_head_before_cancellation: head
+                                    .ok_or(OperationError::State)?,
+                            },
                         },
                         deadline,
                     )?;
@@ -683,15 +805,24 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            bootstrap
-                .retirement
-                .as_mut()
-                .ok_or(OperationError::State)?
-                .closed = Some(RetainedFiniteClosure {
-                binding: role.binding,
-                member,
-                head: state.asset.head.ok_or(OperationError::State)?,
-            });
+            let run = bootstrap.retirement.as_mut().ok_or(OperationError::State)?;
+            let head = state.asset.head.ok_or(OperationError::State)?;
+            match run.mode {
+                CleanupMode::Retained => {
+                    run.closed = Some(RetainedFiniteClosure {
+                        binding: role.binding,
+                        member,
+                        head,
+                    });
+                }
+                CleanupMode::Producer => {
+                    run.producer_closed = Some(ProducerFiniteClosure {
+                        binding: role.binding,
+                        member,
+                        head,
+                    });
+                }
+            }
         }
         bootstrap
             .retirement

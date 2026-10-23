@@ -221,3 +221,46 @@ fn unknown_nonmemory_capacity_refuses_serialized_cold_work() {
     assert_eq!(snapshot.used, ResourceVector::default());
     assert_eq!(snapshot.held, 0);
 }
+
+#[test]
+fn stale_observed_headroom_refuses_without_erasing_existing_hold() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    let mut held =
+        reserve_single(&ledger, FamilyRole::Video, demand(1, 1, 8), None).expect("original hold");
+    let before = ledger.snapshot().unwrap().used;
+    let old = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        ledger.observe_capacity(capacity(Metric::Known(100), Metric::Known(100)), old),
+        Ok(1)
+    );
+    assert!(matches!(
+        reserve_single(&ledger, FamilyRole::Audio, demand(1, 1, 8), None),
+        Err(AdmissionRefusal::InsufficientEvidence)
+    ));
+    let snapshot = ledger.snapshot().unwrap();
+    assert_eq!(snapshot.used, before);
+    assert_eq!(snapshot.held, 1);
+    drop(held.pop());
+}
+
+#[test]
+fn older_concurrent_sample_cannot_replace_newer_lower_headroom() {
+    let ledger = ledger(Metric::Known(100), Metric::Known(100));
+    let now = std::time::Instant::now();
+    let old = now
+        .checked_sub(std::time::Duration::from_millis(10))
+        .unwrap();
+    ledger
+        .observe_capacity(capacity(Metric::Known(1), Metric::Known(100)), now)
+        .unwrap();
+    ledger
+        .observe_capacity(capacity(Metric::Known(100), Metric::Known(100)), old)
+        .unwrap();
+    assert!(matches!(
+        reserve_single(&ledger, FamilyRole::Video, demand(1, 2, 8), None),
+        Err(AdmissionRefusal::HardLimit(ResourceDimension::Cpu))
+    ));
+    assert_eq!(ledger.snapshot().unwrap().held, 0);
+}

@@ -406,6 +406,20 @@ impl ScratchFold {
                 self.state.lifecycle = ScratchLifecycleV1::Retiring;
                 self.state.directory_synced = false;
             }
+            AssetEventV1::BeginProducerCancellation {
+                exact_head_before_cancellation,
+            } => {
+                if self.state.head.as_ref() != Some(exact_head_before_cancellation)
+                    || self.state.lifecycle != ScratchLifecycleV1::Open
+                    || self.pending.is_some()
+                    || !self.readers.is_empty()
+                    || self.state.totals.pending_jobs != 0
+                {
+                    return Err(codec::invalid());
+                }
+                self.state.lifecycle = ScratchLifecycleV1::Retiring;
+                self.state.directory_synced = false;
+            }
         }
         Ok(())
     }

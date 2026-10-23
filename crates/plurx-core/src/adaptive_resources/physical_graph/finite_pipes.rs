@@ -3,6 +3,8 @@
 //! This primitive only ties reader lifetime to the actual standard pipe handle.
 //! It does not prove task, process, descendant, or whole-resource closure.
 use std::io;
+#[cfg(unix)]
+use std::os::fd::IntoRawFd;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +22,7 @@ enum NativePipe {
 struct State {
     pipe: Mutex<Option<NativePipe>>,
     reader_alive: AtomicBool,
+    close_failed: AtomicBool,
 }
 
 /// Move-only async reader. It exposes no descriptor, handle, or clone operation.
@@ -79,9 +82,51 @@ impl PipeRecord {
             self.state.pipe.lock().map_err(|_| {
                 io::Error::other("finite pipe lock poisoned; pipe remains retained")
             })?;
-        drop(pipe.take());
+        if self.state.close_failed.load(Ordering::Acquire) {
+            return Err(io::Error::other("original finite pipe close was uncertain"));
+        }
+        if let Some(native) = pipe.take() {
+            if let Err(error) = close_native(native) {
+                self.state.close_failed.store(true, Ordering::Release);
+                return Err(error);
+            }
+        }
         Ok(())
     }
+}
+
+/// Consume one original pipe and observe the kernel close result exactly once.
+/// A failed close must never retry a numeric descriptor that may be reused.
+#[cfg(unix)]
+fn close_native(pipe: NativePipe) -> io::Result<()> {
+    let owned = match pipe {
+        NativePipe::Stdout(pipe) => pipe.into_owned_fd()?,
+        NativePipe::Stderr(pipe) => pipe.into_owned_fd()?,
+    };
+    let raw = owned.into_raw_fd();
+    if unsafe { libc::close(raw) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn close_native(_pipe: NativePipe) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "checked finite pipe closure requires Unix",
+    ))
+}
+
+#[cfg(unix)]
+pub(super) fn close_unclaimed_stdout(pipe: ChildStdout) -> io::Result<()> {
+    close_native(NativePipe::Stdout(pipe))
+}
+
+#[cfg(unix)]
+pub(super) fn close_unclaimed_stderr(pipe: ChildStderr) -> io::Result<()> {
+    close_native(NativePipe::Stderr(pipe))
 }
 
 /// The two actual child output pipes, exposed only as async readers.
@@ -98,10 +143,12 @@ pub(super) fn prepare(
     let stdout = Arc::new(State {
         pipe: Mutex::new(Some(NativePipe::Stdout(stdout))),
         reader_alive: AtomicBool::new(true),
+        close_failed: AtomicBool::new(false),
     });
     let stderr = Arc::new(State {
         pipe: Mutex::new(Some(NativePipe::Stderr(stderr))),
         reader_alive: AtomicBool::new(true),
+        close_failed: AtomicBool::new(false),
     });
     (
         [
@@ -152,6 +199,14 @@ mod tests {
         let stdout = child.stdout.take().expect("fixture stdout");
         let stderr = child.stderr.take().expect("fixture stderr");
         (child, stdout, stderr)
+    }
+
+    #[tokio::test]
+    async fn unclaimed_original_pipes_close_after_root_wait_without_a_writer() {
+        let (mut child, stdout, stderr) = child_pipes().await;
+        child.wait().await.expect("wait original fixture root");
+        close_unclaimed_stdout(stdout).expect("close original unclaimed stdout once");
+        close_unclaimed_stderr(stderr).expect("close original unclaimed stderr once");
     }
 
     #[tokio::test]

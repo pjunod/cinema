@@ -286,13 +286,20 @@ pub enum HevcSampleEntryLayout {
 /// stricter than finding an `avcC` byte sequence: payloads in unrelated boxes
 /// and ambiguous alternate descriptions must not become playlist identity.
 pub fn avc_rfc6381_codec(init: &Init) -> Result<Option<String>, Fmp4Error> {
-    let Some(video) = init.video() else {
+    avc_rfc6381_codec_bytes(&init.bytes, init.video())
+}
+
+fn avc_rfc6381_codec_bytes(
+    bytes: &[u8],
+    video: Option<&Track>,
+) -> Result<Option<String>, Fmp4Error> {
+    let Some(video) = video else {
         return Ok(None);
     };
     if video.codec != Some(VideoCodec::H264) {
         return Ok(None);
     }
-    let (description_count, locations) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    let (description_count, locations) = locate_avc_sample_entries(bytes, video.id)?;
     if locations.is_empty() || locations.len() != description_count {
         return Err(Fmp4Error::Unsupported(
             "the H.264 video track has a missing or non-AVC sample description".into(),
@@ -301,7 +308,7 @@ pub fn avc_rfc6381_codec(init: &Init) -> Result<Option<String>, Fmp4Error> {
 
     let mut codec = None;
     for location in locations {
-        let record = &init.bytes[location.payload];
+        let record = &bytes[location.payload];
         let [1, profile, compatibility, level, ..] = record else {
             return malformed("avcC has no complete profile/compatibility/level header");
         };
@@ -606,8 +613,10 @@ pub struct FragmentReader {
 }
 
 mod bounded_reader;
+mod init_view;
 mod memory;
 pub use bounded_reader::{BoundedFragmentReader, FragmentReaderBounds};
+pub use init_view::BorrowedInit;
 
 impl FragmentReader {
     pub fn new() -> FragmentReader {
@@ -2480,13 +2489,20 @@ pub fn replace_dolby_file_type_brand(bytes: &mut [u8]) -> bool {
 /// satisfy an `hvc1`/`dvh1` sample entry until promotion supplies all three,
 /// each with its mandatory `array_completeness` flag.
 pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
-    let Some(video) = init.video() else {
+    hevc_parameter_sets_complete_bytes(&init.bytes, init.video())
+}
+
+fn hevc_parameter_sets_complete_bytes(
+    bytes: &[u8],
+    video: Option<&Track>,
+) -> Result<bool, Fmp4Error> {
+    let Some(video) = video else {
         return Ok(false);
     };
     if video.codec != Some(VideoCodec::Hevc) {
         return Ok(false);
     }
-    let locations = locate_hevc_sample_entries(&init.bytes)?;
+    let locations = locate_hevc_sample_entries(bytes)?;
     if locations.is_empty() {
         return Ok(false);
     }
@@ -2494,7 +2510,7 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
         let Some(location) = location else {
             return Ok(false);
         };
-        if !hvcc_parameter_set_arrays_complete(&init.bytes[location.payload])? {
+        if !hvcc_parameter_set_arrays_complete(&bytes[location.payload])? {
             return Ok(false);
         }
     }
@@ -2511,13 +2527,20 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
 /// comes from the emitted init itself rather than probe metadata, which may be
 /// absent or stale.
 pub fn validate_hevc_sample_entries(init: &Init) -> Result<HevcSampleEntryLayout, Fmp4Error> {
-    let Some(video) = init.video() else {
+    validate_hevc_sample_entries_bytes(&init.bytes, init.video())
+}
+
+fn validate_hevc_sample_entries_bytes(
+    bytes: &[u8],
+    video: Option<&Track>,
+) -> Result<HevcSampleEntryLayout, Fmp4Error> {
+    let Some(video) = video else {
         return Ok(HevcSampleEntryLayout::NotHevc);
     };
     if video.codec != Some(VideoCodec::Hevc) {
         return Ok(HevcSampleEntryLayout::NotHevc);
     }
-    let locations = locate_hevc_sample_entries(&init.bytes)?;
+    let locations = locate_hevc_sample_entries(bytes)?;
     if locations.is_empty() {
         return Err(Fmp4Error::Unsupported(
             "the HEVC video sample entry has no hvcC box".into(),
@@ -2533,7 +2556,7 @@ pub fn validate_hevc_sample_entries(init: &Init) -> Result<HevcSampleEntryLayout
         if location.parameter_sets_in_band {
             continue;
         }
-        if !hvcc_parameter_set_arrays_complete(&init.bytes[location.payload])? {
+        if !hvcc_parameter_set_arrays_complete(&bytes[location.payload])? {
             return Err(Fmp4Error::Unsupported(
                 "an out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
             ));

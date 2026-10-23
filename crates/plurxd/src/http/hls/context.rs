@@ -328,11 +328,17 @@ fn bind_hls_init_context(
     init: &[u8],
     sample_entry: &str,
 ) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
-    let mut reader = plurx_core::fmp4::FragmentReader::new();
-    reader.push(init);
-    let parsed = match reader.next_unit() {
-        Ok(Some(plurx_core::fmp4::Unit::Init(init))) => init,
-        Ok(Some(_)) | Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+    let inspection_limit = INIT_INSPECTION_LIMIT_BYTES as usize;
+    let bounds = plurx_core::fmp4::FragmentReaderBounds {
+        buffer_bytes: inspection_limit,
+        unit_bytes: inspection_limit,
+        max_tracks: 8,
+        max_runs: 1,
+        max_samples: 1,
+    };
+    let parsed = match plurx_core::fmp4::BorrowedInit::parse(init, bounds) {
+        Ok(parsed) => parsed,
+        Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
             return Err(HlsInitInspectionError::invalid());
         }
         Err(
@@ -353,7 +359,7 @@ fn bind_hls_init_context(
         return Err(HlsInitInspectionError::invalid());
     }
     if matches!(sample_entry, "hvc1" | "dvh1") {
-        match plurx_core::fmp4::hevc_parameter_sets_complete(&parsed) {
+        match parsed.hevc_parameter_sets_complete() {
             Ok(true) => {}
             Ok(false) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
                 return Err(HlsInitInspectionError::invalid());
@@ -365,7 +371,7 @@ fn bind_hls_init_context(
         }
     }
     if sample_entry != "avc1" {
-        match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
+        match parsed.validate_hevc_sample_entries() {
             Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
             Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
             | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
@@ -381,7 +387,7 @@ fn bind_hls_init_context(
         }
     }
     let derived = if sample_entry == "avc1" {
-        match plurx_core::fmp4::avc_rfc6381_codec(&parsed) {
+        match parsed.avc_rfc6381_codec() {
             Ok(Some(codec)) => Some(codec),
             Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
                 return Err(HlsInitInspectionError::invalid());

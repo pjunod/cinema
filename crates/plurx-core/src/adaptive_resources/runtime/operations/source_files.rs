@@ -617,6 +617,53 @@ impl NodeResourceRuntime {
 }
 
 impl SourceCell {
+    /// Recheck the SAME retained native file against its durably observed S1
+    /// identity. A pathname lookup cannot substitute another object here.
+    pub(super) fn unchanged_for_publication(&self) -> Result<(), OperationError> {
+        let v2::MemberPlan::SourceV1 { source: plan, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if !self.observed_committed
+            || !self.root_observed_committed
+            || self.selected_root_member.is_none()
+            || self.pending.is_some()
+            || self.spec.is_some()
+            || self.failed_join
+            || self.lease_issued
+            || self.pending_root.is_some()
+            || !matches!(&self.parent_close, ParentCloseState::NotStarted)
+        {
+            return Err(OperationError::State);
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        let file = result.file.as_ref().ok_or(OperationError::State)?;
+        let observed = result.observed.as_ref().ok_or(OperationError::State)?;
+        let metadata = file.metadata()?;
+        let native = &observed.native_object;
+        if !metadata.is_file()
+            || observed.holder_id != plan.holder_id
+            || observed.member_id != plan.member_id
+            || observed.source_association != plan.source_association
+            || observed.access != v2::SourceAccess::ReadOnlyRegular
+            || native.file_type != v2::FileType::Regular
+            || native.filesystem_domain != plan.filesystem_domain
+            || native.device
+                != (v2::NativeValue::Known {
+                    value: metadata.dev(),
+                })
+            || native.inode
+                != (v2::NativeValue::Known {
+                    value: metadata.ino(),
+                })
+            || native.mount_id != bootstrap::native::steps::mount_id(file)
+            || SourceIdentity::from_metadata(&metadata).render_s1()
+                != observed.source_association.object_version
+        {
+            return Err(OperationError::State);
+        }
+        Ok(())
+    }
+
     pub(super) fn inherited_source(
         &mut self,
         root_member: Uuid,
@@ -829,15 +876,53 @@ impl SourceCell {
         &self,
         closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodProcessClosure,
     ) -> Result<v2::ClosedFact, OperationError> {
+        self.finite_closed_fact_with(FiniteProcessClosedProof::Joined(closure))
+    }
+
+    /// A root-only graph can close an inherited copy even when the root-copy
+    /// enrichment was not durably observed. Its original native witness is
+    /// distinct from the joined-writer witness above.
+    pub(in crate::adaptive_resources::runtime) fn finite_root_only_closed_fact(
+        &self,
+        closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodRootOnlyClosure,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.finite_closed_fact_with(FiniteProcessClosedProof::RootOnly(closure))
+    }
+
+    fn finite_closed_fact_with(
+        &self,
+        proof: FiniteProcessClosedProof<'_>,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        let (generation, root_member, acquisition_id, close_operation_id, joined_writer) =
+            match proof {
+                FiniteProcessClosedProof::Joined(closure) => (
+                    closure.generation(),
+                    closure.root_member(),
+                    closure.acquisition_id(),
+                    closure.close_operation_id(),
+                    true,
+                ),
+                FiniteProcessClosedProof::RootOnly(closure) => (
+                    closure.generation(),
+                    closure.root_member(),
+                    closure.acquisition_id(),
+                    closure.close_operation_id(),
+                    false,
+                ),
+            };
         if !self.parent_closed()
             || self.pending.is_some()
             || self.spec.is_some()
             || self.failed_join
             || self.lease_issued
             || !self.observed_committed
-            || !self.root_observed_committed
-            || self.selected_root_member != Some(closure.root_member())
-            || self.pending_root.is_some()
+            || (joined_writer && (!self.root_observed_committed || self.pending_root.is_some()))
+            || (self.root_observed_committed && self.selected_root_member != Some(root_member))
+            || (!self.root_observed_committed
+                && self
+                    .pending_root
+                    .as_ref()
+                    .is_none_or(|(selected, _, _)| *selected != root_member))
         {
             return Err(OperationError::State);
         }
@@ -852,14 +937,14 @@ impl SourceCell {
         let planned_graph = match &plan.recovery {
             v2::SourceRecovery::LocalSourceHandlesV1 { graph_id, .. } => *graph_id,
         };
-        if closure.generation() != planned_graph.uuid()
+        if generation != planned_graph.uuid()
             || observed.version != 1
             || observed.holder_id != plan.holder_id
             || observed.member_id != plan.member_id
             || observed.source_association != plan.source_association
             || observed.access != v2::SourceAccess::ReadOnlyRegular
             || plan.planned_copies.len() != 2
-            || observed.copies != plan.planned_copies
+            || (joined_writer && observed.copies != plan.planned_copies)
         {
             return Err(OperationError::State);
         }
@@ -883,18 +968,36 @@ impl SourceCell {
             matches!(copy.owner,
                 v2::CopyOwner::OwnedRoot { graph_id, root_member_id }
                     if graph_id == planned_graph
-                        && root_member_id.uuid() == closure.root_member())
+                    && root_member_id.uuid() == root_member)
         });
         let root_copy = root_copies.next().ok_or(OperationError::State)?;
         if root_copies.next().is_some()
             || root_copy.parent_copy_id != Some(source_copy.copy_id)
-            || root_copy.acquisition_operation_id.uuid() != closure.acquisition_id()
+            || root_copy.acquisition_operation_id.uuid() != acquisition_id
+        {
+            return Err(OperationError::State);
+        }
+        if !joined_writer
+            && (!observed.copies.contains(source_copy)
+                || (self.root_observed_committed && !observed.copies.contains(root_copy))
+                || (!self.root_observed_committed
+                    && self.pending_root.as_ref().is_none_or(
+                        |(_, staged_copy, staged_observed)| {
+                            staged_copy != root_copy
+                                || !staged_observed.copies.contains(root_copy)
+                                || !staged_observed.copies.contains(source_copy)
+                        },
+                    ))
+                || observed
+                    .copies
+                    .iter()
+                    .any(|copy| !plan.planned_copies.contains(copy)))
         {
             return Err(OperationError::State);
         }
 
         let source_close = v2::Id::new(self.parent_close_operation_id)?;
-        let root_close = v2::Id::new(closure.close_operation_id())?;
+        let root_close = v2::Id::new(close_operation_id)?;
         if source_close == root_close {
             return Err(OperationError::State);
         }
@@ -920,6 +1023,11 @@ impl SourceCell {
             copies,
         })
     }
+}
+
+enum FiniteProcessClosedProof<'a> {
+    Joined(&'a crate::adaptive_resources::physical_graph::finite_vod::FiniteVodProcessClosure),
+    RootOnly(&'a crate::adaptive_resources::physical_graph::finite_vod::FiniteVodRootOnlyClosure),
 }
 
 pub(super) fn acknowledge(
