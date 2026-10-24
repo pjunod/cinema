@@ -1259,6 +1259,23 @@ impl TranscodeManager {
         ),
         String,
     > {
+        Self::display_target_policy_with_source(enabled, display, probe, None, None)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    fn display_target_policy_with_source(
+        enabled: bool,
+        display: Option<&plurx_core::playback::caps::DisplayCaps>,
+        probe: Option<&str>,
+        held_mastering: Option<plurx_core::transcode::dv_processing::DvSourceMastering>,
+        held_minimum: Option<u32>,
+    ) -> Result<
+        (
+            Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+            Option<String>,
+        ),
+        String,
+    > {
         use plurx_core::transcode::dv_processing::{DvDisplayTarget, DvDisplayTargetChoice};
         if !enabled {
             return Ok((None, None));
@@ -1289,6 +1306,7 @@ impl TranscodeManager {
                             .map(crate::vodencode::dv_runtime::source_mastering_minimum)
                             .transpose()?
                             .flatten()
+                            .or(held_minimum)
                     } else {
                         None
                     };
@@ -1339,6 +1357,7 @@ impl TranscodeManager {
                         .map(crate::vodencode::dv_runtime::source_mastering_metadata)
                         .transpose()?
                         .flatten()
+                        .or(held_mastering)
                 } else {
                     None
                 };
@@ -1349,6 +1368,90 @@ impl TranscodeManager {
             }
             DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason()))),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn display_target_policy_for_source(
+        &self,
+        enabled: bool,
+        display: Option<&plurx_core::playback::caps::DisplayCaps>,
+        file: &plurx_core::domain::MediaFile,
+        probe: Option<&str>,
+    ) -> Result<
+        (
+            Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
+            Option<String>,
+        ),
+        String,
+    > {
+        use plurx_core::transcode::dv_processing::{DvDisplayTarget, DvDisplayTargetChoice};
+        let sdr = display.is_some_and(|display| !display.hdr && !display.dolby_vision);
+        let proposal = if !enabled {
+            None
+        } else if sdr {
+            Some(
+                DvDisplayTarget::for_sdr_title(
+                    probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json),
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        } else {
+            display
+                .and_then(|display| display.hdr10_target_bucket())
+                .map(|bucket| {
+                    DvDisplayTarget::for_title(
+                        bucket,
+                        probe.and_then(plurx_core::scan::dv_title::DvTitleStats::from_probe_json),
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .transpose()?
+        };
+        let needs_source = match proposal {
+            Some(DvDisplayTargetChoice::Target(target)) if target.is_sdr() => {
+                target.needs_source_floor()
+            }
+            Some(DvDisplayTargetChoice::Target(target)) => target.needs_source_mastering(),
+            _ => false,
+        };
+        if !needs_source {
+            return Self::display_target_policy(enabled, display, probe);
+        }
+        let stored = probe.ok_or("complete-title probe unavailable")?;
+        let document: serde_json::Value =
+            serde_json::from_str(stored).map_err(|error| error.to_string())?;
+        let selected = crate::decode_facts::first_playable_video_index(&document);
+        let stream = document
+            .get("streams")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|streams| {
+                streams.iter().find(|stream| {
+                    selected.is_some_and(|index| {
+                        stream.get("index").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(index))
+                    })
+                })
+            });
+        if sdr {
+            let minimum = stream
+                .map(crate::vodencode::dv_runtime::source_mastering_minimum)
+                .transpose()?
+                .flatten();
+            if minimum.is_some() {
+                return Self::display_target_policy(enabled, display, probe);
+            }
+            let minimum = self.held_minimum_for_policy(file, stored).await?;
+            return Self::display_target_policy_with_source(enabled, display, probe, None, minimum);
+        }
+        let mastering = stream
+            .map(crate::vodencode::dv_runtime::source_mastering_metadata)
+            .transpose()?
+            .flatten();
+        if mastering.is_some() {
+            return Self::display_target_policy(enabled, display, probe);
+        }
+        let mastering = self.held_mastering_for_policy(file, stored).await?;
+        Self::display_target_policy_with_source(enabled, display, probe, mastering, None)
     }
 
     /// Freeze an executable encoded recipe before any rendition is named.
@@ -1533,11 +1636,19 @@ impl TranscodeManager {
                         .map(String::as_str),
                     false,
                 );
-            let (display_target, display_target_note) = Self::display_target_policy(
-                target_enabled,
-                caps.display.as_ref(),
-                planning.probe_json.as_deref(),
-            )?;
+            let (display_target, display_target_note) = tokio::time::timeout_at(
+                deadline,
+                self.display_target_policy_for_source(
+                    target_enabled,
+                    caps.display.as_ref(),
+                    &file,
+                    planning.probe_json.as_deref(),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                "display-target source verification exceeded the preparation budget".to_owned()
+            })??;
             if destination == DvDestination::Sdr
                 && !display_target.is_some_and(|target| target.is_sdr())
             {
@@ -2417,6 +2528,13 @@ impl TranscodeManager {
         // Local finite VOD has no shared Source evidence, but owns the same capture.
         let held_font_digest = engine.font_digest();
         let phase_started = std::time::Instant::now();
+        #[cfg(target_os = "linux")]
+        let source_offsets = Arc::new(tokio::sync::Semaphore::new(1));
+        #[cfg(target_os = "linux")]
+        let source_frame_probe = if let Some(prepared) = held_decode_facts.as_ref().filter(|_| dv_tools.is_some()) {
+            let selected = prepared.absolute_video_stream().ok_or("held video stream unavailable")?;
+            self.source_frame_probe(file, Arc::new(source.handle.try_clone().map_err(|error| error.to_string())?), Arc::clone(&source_offsets), prepared, selected)?
+        } else { None };
         let plan = if let Some(prepared) = held_decode_facts {
             self.resolve_vod_prepared_source(
                 file,
@@ -2584,7 +2702,11 @@ impl TranscodeManager {
                     let worker_encoder = self.encoder_for_preference(planning.settings.get(keys::HWACCEL).map(String::as_str).unwrap_or(""));
                     let processed_encoder = crate::vodencode::dv_runtime::completed_window_encoder(
                         worker_encoder, self.hdr10_passthrough_vaapi, &processed_plan, grid);
+                    if source_frame_probe.as_ref().is_some_and(|probe| probe.absolute_stream() != retained.0.decode().input_video_stream()) {
+                        return Err("source frame metadata selected stream differs from the held decoder plan".into());
+                    }
                     let source_mastering = crate::vodencode::dv_runtime::source_mastering_metadata(stream);
+                    let source_mastering_minimum = crate::vodencode::dv_runtime::source_mastering_minimum(stream);
                     let display_target = req.candidate_context.as_ref().filter(|_| processed_trial).and_then(|context| context.display_target);
                     // Recheck against the exact stored document compared with
                     // this held source. A title scan replacement cannot reuse
@@ -2596,10 +2718,14 @@ impl TranscodeManager {
                         let selected = match selected {
                             plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(proposal) => {
                                 let proposal = if proposal.is_sdr() {
-                                    let minimum = if proposal.needs_source_floor() { crate::vodencode::dv_runtime::source_mastering_minimum(stream)? } else { None };
+                                    let minimum = if proposal.needs_source_floor() {
+                                        crate::vodencode::dv_runtime::held_source_minimum(source_mastering_minimum.clone(), source_frame_probe.as_deref(), None).await?
+                                    } else { None };
                                     proposal.resolve_sdr_floor(minimum).map_err(|error| error.to_string())?
                                 } else {
-                                    let source = if proposal.needs_source_mastering() { source_mastering.clone()? } else { None };
+                                    let source = if proposal.needs_source_mastering() {
+                                        crate::vodencode::dv_runtime::held_source_mastering(source_mastering.clone(), source_frame_probe.as_deref(), None).await?
+                                    } else { None };
                                     proposal.resolve_source(source).map_err(|error| error.to_string())?
                                 };
                                 plurx_core::transcode::dv_processing::DvDisplayTargetChoice::Target(proposal)
@@ -2610,12 +2736,12 @@ impl TranscodeManager {
                             return Err("complete-title display-target scan changed during preparation".into());
                         }
                     }
-                    let runtime = RuntimeRecipe { tools, source, source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+                    let runtime = RuntimeRecipe { tools, source, source_offsets, source_frame_probe,
                         source_tick, source_origin, native_bl, source_clock, preferences,
                         display_target,
                         display: req.candidate_context.as_ref().and_then(|context| context.canonical_caps.as_ref()).and_then(|caps| caps.display.clone()),
                         display_target_note: req.candidate_context.as_ref().and_then(|context| context.display_target_note.clone()),
-                        source_mastering,
+                        source_mastering, source_mastering_minimum,
                         destination, mode, encoder: processed_encoder,
                         vaapi_hdr_policy: (processed_encoder == Encoder::Vaapi).then_some(self.caps.vaapi_hdr_policy).flatten(),
                         runtime_cache: self.runtime_cache.clone(),
@@ -5330,6 +5456,289 @@ mod display_target_policy_tests {
         let mut unsupported = document;
         unsupported["streams"][2]["side_data_list"][0]["min_luminance"] = "10001/10000".into();
         assert!(select(&unsupported).is_err());
+    }
+
+    #[test]
+    fn sdr_frame_minimum_freezes_floor_without_hdr_primaries_or_title_override() {
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 3,
+            valid_l1_frames: 3,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let display = DisplayCaps::default();
+        let document = serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"1/10000"}]}]});
+        let minimum = crate::vodencode::dv_runtime::source_mastering_minimum_from_frames(
+            &serde_json::Value::Null,
+            &document,
+            7,
+        )
+        .expect("validated minimum-only frame fact");
+        let probe = serde_json::json!({PROBE_FIELD:stats}).to_string();
+        let target = TranscodeManager::display_target_policy_with_source(
+            true,
+            Some(&display),
+            Some(&probe),
+            None,
+            minimum,
+        )
+        .expect("policy")
+        .0
+        .expect("target");
+        assert!(target.is_sdr());
+        assert_eq!(target.resolved_sdr_floor().expect("frozen floor"), 1);
+        assert!(
+            target.resolve_sdr_floor(Some(50)).is_err(),
+            "changed held floor cannot reuse frozen policy"
+        );
+        let absent = TranscodeManager::display_target_policy_with_source(
+            true,
+            Some(&display),
+            Some(&probe),
+            None,
+            None,
+        )
+        .expect("absent source minimum")
+        .0
+        .expect("target");
+        assert_eq!(
+            absent.resolved_sdr_floor().expect("established default"),
+            50
+        );
+        let known = DvTitleStats {
+            mastering_luminance: TitleConstant::Consistent(MasteringLuminance {
+                min_1e4_nits: 50,
+                max_nits: 4000,
+            }),
+            ..stats
+        };
+        let probe = serde_json::json!({PROBE_FIELD:known}).to_string();
+        let target = TranscodeManager::display_target_policy_with_source(
+            true,
+            Some(&display),
+            Some(&probe),
+            None,
+            minimum,
+        )
+        .expect("title floor retained")
+        .0
+        .expect("target");
+        assert_eq!(target.resolved_sdr_floor().expect("known floor"), 50);
+        let inconsistent = DvTitleStats {
+            mastering_luminance: TitleConstant::Inconsistent,
+            ..stats
+        };
+        let probe = serde_json::json!({PROBE_FIELD:inconsistent}).to_string();
+        assert!(
+            TranscodeManager::display_target_policy_with_source(
+                true,
+                Some(&display),
+                Some(&probe),
+                None,
+                minimum
+            )
+            .is_err(),
+            "source minimum never waives inconsistent title L6"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn master_and_known_l6_sdr_policy_do_not_open_missing_source() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let root = crate::test_tempdir().expect("policy setup");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let library = store
+            .create_library(&NewLibrary {
+                name: "policy source".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "policy source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let missing = root.path().join("source-does-not-exist.mkv");
+        let file = store
+            .upsert_file(
+                item,
+                missing.to_str().expect("path"),
+                1,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(file).await.expect("lookup").expect("file");
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 3,
+            valid_l1_frames: 3,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_primaries: TitleConstant::Unknown,
+            mastering_luminance: TitleConstant::Consistent(MasteringLuminance {
+                min_1e4_nits: 50,
+                max_nits: 4000,
+            }),
+        };
+        let display = DisplayCaps::default();
+        let probe = |stats| {
+            serde_json::json!({PROBE_FIELD:stats,"streams":[{"index":7,"codec_type":"video","side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"malformed but irrelevant with known L6"}]}]}).to_string()
+        };
+        let document = probe(stats);
+        let target = manager
+            .display_target_policy_for_source(true, Some(&display), &file, Some(&document))
+            .await
+            .expect("known title floor must not open source")
+            .0
+            .expect("target");
+        assert_eq!(target.resolved_sdr_floor().expect("floor"), 50);
+        assert_eq!(
+            manager
+                .display_target_policy_for_source(false, Some(&display), &file, Some(&document))
+                .await
+                .expect("disabled/master must not open source"),
+            (None, None)
+        );
+        let document = probe(DvTitleStats {
+            complete: false,
+            ..stats
+        });
+        assert!(manager
+            .display_target_policy_for_source(true, Some(&display), &file, Some(&document))
+            .await
+            .expect("unavailable-title/master must not open source")
+            .0
+            .is_none());
+        let document = probe(DvTitleStats {
+            mastering_luminance: TitleConstant::Inconsistent,
+            ..stats
+        });
+        assert!(manager
+            .display_target_policy_for_source(true, Some(&display), &file, Some(&document))
+            .await
+            .expect_err("inconsistent title refuses before source read")
+            .contains("inconsistent"));
+        assert!(!missing.exists(), "no fixture source was materialized");
+    }
+
+    #[test]
+    fn frame_mastering_fallback_freezes_hdr_policy_without_inventing_title_l9() {
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 3,
+            valid_l1_frames: 3,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let display = DisplayCaps {
+            hdr: true,
+            max_nits: Some(1000),
+            peak_source: Some(DisplayPeakSource::Platform),
+            ..Default::default()
+        };
+        let frame = serde_json::json!({"stream_index":7,"side_data_list":[{
+            "side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000","green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000","white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "min_luminance":"1/10000","max_luminance":"10000000/10000"}]});
+        let source = crate::vodencode::dv_runtime::source_mastering_from_frames(
+            &serde_json::Value::Null,
+            &serde_json::json!({"frames":[frame]}),
+            7,
+        )
+        .expect("validated frame metadata");
+        let probe = serde_json::json!({PROBE_FIELD:stats}).to_string();
+        assert!(
+            TranscodeManager::display_target_policy(true, Some(&display), Some(&probe)).is_err(),
+            "unknown L9 still requires real source metadata"
+        );
+        let target = TranscodeManager::display_target_policy_with_source(
+            true,
+            Some(&display),
+            Some(&probe),
+            source,
+            None,
+        )
+        .expect("source-backed policy")
+        .0
+        .expect("target");
+        assert_eq!(target.mastering().min_1e4_nits, 1);
+        assert_eq!(
+            target.output_metadata().expect("frozen declarations"),
+            plurx_core::fmp4::Hdr10OutputMetadata::new(
+                [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450],
+                1000,
+                1,
+                1000,
+            )
+            .expect("exact expected source-backed declarations")
+        );
+        let known_floor = DvTitleStats {
+            mastering_luminance: TitleConstant::Consistent(MasteringLuminance {
+                min_1e4_nits: 50,
+                max_nits: 4000,
+            }),
+            ..stats
+        };
+        let probe = serde_json::json!({PROBE_FIELD:known_floor}).to_string();
+        let target = TranscodeManager::display_target_policy_with_source(
+            true,
+            Some(&display),
+            Some(&probe),
+            source,
+            None,
+        )
+        .expect("title floor retained")
+        .0
+        .expect("target");
+        assert_eq!(target.mastering().min_1e4_nits, 50);
+        let inconsistent = DvTitleStats {
+            mastering_primaries: TitleConstant::Inconsistent,
+            ..stats
+        };
+        let probe = serde_json::json!({PROBE_FIELD:inconsistent}).to_string();
+        assert!(
+            TranscodeManager::display_target_policy_with_source(
+                true,
+                Some(&display),
+                Some(&probe),
+                source,
+                None
+            )
+            .is_err(),
+            "frame metadata never waives inconsistent title facts"
+        );
     }
 
     #[test]

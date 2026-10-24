@@ -36,6 +36,11 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- Display-targeted playback reads mastering metadata carried on decoded frames
+  when stream metadata omits it. The bounded probe stays bound to the held source
+  and selected stream; HDR primaries and unknown-title SDR black levels resolve
+  before the rendition policy is frozen.
+
 - Display-targeted HDR10 resolves one mastering minimum before helper execution
   and rendition identity: consistent title L6, trusted source MDCV, then the
   established renderer floor. Completed reports and output metadata describe

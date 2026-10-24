@@ -77,7 +77,7 @@ impl TranscodeManager {
             macos_video_preference_update: Mutex::new(()),
             macos_video_probe,
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
-            decode_facts: crate::decode_facts::DecodeFactCache::new(),
+            decode_facts: Arc::new(crate::decode_facts::DecodeFactCache::new()),
             decode_probe_identity: None,
             candidate_production_proofs: Arc::new(
                 crate::vodencode::CandidateProductionProofs::default(),

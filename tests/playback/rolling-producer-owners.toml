@@ -4861,7 +4861,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # observation bounds and a ten-millisecond startup poll inside the first bound.
 # The task retains admission until bounded child completion; none of these
 # observation deadlines grants reap, publication or admission-release evidence.
-expected_occurrences = 1850
+# Frame-MDCV repair: +1 awaited creation-budget timeout around held-source
+# metadata resolution; expiry refuses preparation and creates no recovery owner.
+expected_occurrences = 1851
 
 
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap

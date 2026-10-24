@@ -3,42 +3,44 @@
 **Status:** #1216 and batched #1269 merged into `effort/display-targeted-dv`; HDR/SDR promotion qualification and E creative accuracy remain open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (promotion #1271 and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
-The matrix below is the current qualification record. Dated implementation
-checkpoints retain what was known at their authored heads; they are historical
-snapshots, not current status. Later merges do not move earlier results to a
-new source head.
+The matrix is the current source-bound qualification record. Later commits do
+not transfer historical execution results to a new source head.
 
 ## Current qualification — source-bound evidence through F
 
 | Phase | Retained evidence | Open for promotion |
 |---|---|---|
-| A · title scan/HDR10-E | #1216 merged into the effort at `3fbb3f669`. P7 driver348 passed1000/1600 on source503619eb, with frame/audio/cadence/geometry/seek receipts. | Integrated P7/P8 adoption after changed C inputs; earlier P8 passes retain their sources. |
-| B–D · metadata, controls, clients | #1266/#1267/#1268 are closed folded records in #1269. Seven Rust312, ten Rust316,14 badge/72 settings,27 web and compiler361/362/363 passes retain their sources. | Final behavior checks only where failed/materially invalidated, plus applicable final-gate requirements. |
-| Clients | Android30 and Apple13 plus test-build passed on F7eed; review398 repairs SDR identities; new client cases await final qualification. Current compile-only gate5889 passed Android and Xcode27.1 Apple builds. | Physical-device acceptance. |
-| E · trims | Reference349 completed42 vendor commands with exit0. Comparison353 completed14 observations; baseline PQ error.110077 and trim-delta errors.44085/.48964 fail creative acceptance. | Full CM4/L8 implementation/contract and creative accuracy remain unfinished; no vendor contact authorized. |
-| F · SDR | Source6d48d4c retains ten Rust, two web and pixel325 (61440 samples, max1code/limit2). Repairba8df0e7 shares fresh FEL admission/receipts with SDR, preserving BT.709 gamma2.4 and100-nit mapping. | Changed factory regression and integrated delivery acceptance. |
+| A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Current-source P7/P8 HDR1000 after the frame-MDCV repair; earlier media evidence retains its source. |
+| B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Repair-specific behavior and current-candidate qualification; physical-device acceptance remains separate. |
+| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. Official CPU screen448 rendered48 4K RGB16 frames in21.6s,2.22fps. A separate CUDA-capable node is available for offline reference/QC. | Full CM4/L8 rendering and creative accuracy; GPU feasibility is being checked. No vendor contact authorized. |
+| F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Retain valid-L6 SDR evidence; new unknown-L6 source-minimum cases require focused verification. |
 
-A/#1216 and integration#1269 landed in `effort/display-targeted-dv`;
-#1269 is `3cc264068`, with78 regression fields and all8 compile-gate jobs
-passing. Sourcea7642100 passes Rust1.97.1 fmt/check/Clippy403; helper404
-and binary415 link without tests. Review398 closed four production findings
-and its harness follow-up.
+A/#1216 and integration#1269 landed in the effort at3cc264068, with78 regression
+fields and all8 compile-gate jobs passing. Source4499 passed Rust1.97.1
+fmt/check/Clippy/link/list428 and all9 fast-lane5904 jobs. The latter retains2044
+Python positives; successful unchanged cases are not replayed. Helper404 retains
+its original a764 build attribution, with13 unchanged inputs adopted explicitly.
 
-Native SDR418 failed once after scanning17983 frames: source comparison omitted
-the application-owned title enrichment from normalization and rejected fresh
-publication. The repair excludes that exact typed key beside existing app
-measurements, preserving strict media comparison and independent title fences.
-Its focused regression and native retry remain pending. CI5903 retains2044
-Python passes; a web fixture omitted its display-peak script. Review398 closed both repairs424; qualification remains pending; no media pass is inferred.
+Native418 rejected freshly published title facts because normalization omitted
+the app-owned enrichment. Repair4499 excludes precisely that typed key while
+retaining strict media comparison and title fences; both SDR retries passed.
+Native427 then failed P7 HDR1000 before encoding because stream-only probing
+missed full mastering metadata carried on decoded frames. P8 HDR was unstarted.
+Diagnosis444 found full frame MDCV in both sources. The reviewed repair uses a
+bounded selected-stream frame sidecar, sealed to the held descriptor, source and
+probe identities. It leaves raw probe documents intact and resolves one target
+before policy freeze. Unknown-L6 SDR consumes only the mastering minimum;
+valid-L6 SDR and master remain unsampled. The same review398 closed both repair
+findings445; compilation and focused execution are pending, not implied passes.
 
 Root chose HDR/SDR delivery under standing authority to use judgment while away.
-E remains unfinished, `creative_trims_applied:false` and “L1 only” truthful;
-this does not complete A–F. Retain source-bound passes and retry failed or
-materially invalidated cases. Main1eb117839 is an ancestor. Main promotion needs
-repair review and exact-candidate qualification. Test-policy reconciliation
-remains pending: user fast-lane/selective reruns versus full manual promotion.
-No merge or validator waiver is inferred. Physical-display and separate full-app
-FEL EOF acceptance remain open; bounded source qualification proves neither.
+E remains unfinished, with truthful `creative_trims_applied:false` and “L1 only”;
+this does not complete A–F. Retain source-bound passes and retry only failed or
+materially invalidated cases. Main1eb117839 was an ancestor at the last check.
+Promotion-test policy reconciliation remains pending: user fast-lane/selective
+reruns versus full manual effort promotion. No merge or validator waiver is
+inferred. Physical-display and full-app FEL EOF acceptance remain separate;
+bounded source qualification proves neither.
 
 ## PR B implementation checkpoint
 

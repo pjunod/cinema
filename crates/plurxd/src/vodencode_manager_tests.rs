@@ -228,12 +228,15 @@ async fn actual_processed_hdr_windows_verify_audio_cadence_native_shapes_and_see
             .resolved_sdr_floor()
             .expect("admission froze the source floor");
         Some(frozen)
-    } else {
-        display_target.map(|target| {
+    } else if let Some(target) = display_target {
+        Some(
             runtime
-                .resolve_display_target(target)
-                .expect("single effective source/mastering policy before targeted windows")
-        })
+                .resolve_display_target(target, None)
+                .await
+                .expect("single effective held source/mastering policy before targeted windows"),
+        )
+    } else {
+        None
     };
     assert_eq!(runtime.encoder, Encoder::Vaapi);
     // The plan is resolved with the software source decoder; the windows

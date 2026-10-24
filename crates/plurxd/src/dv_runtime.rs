@@ -629,9 +629,9 @@ pub(crate) fn source_mastering_minimum(stream: &serde_json::Value) -> Result<Opt
 /// another track. FFprobe's rational values are converted with integer rounding
 /// to ST 2086 units. A missing record differs from malformed/conflicting data.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn source_mastering_metadata(
+fn source_mastering_metadata_details(
     stream: &serde_json::Value,
-) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+) -> Result<Option<ValidatedSourceMastering>, String> {
     use plurx_core::transcode::dv_processing::DvSourceMastering;
     let invalid = || "targeted HDR10 source MDCV malformed or conflicting".to_owned();
     let Some(records) = stream.get("side_data_list") else {
@@ -650,7 +650,6 @@ pub(crate) fn source_mastering_metadata(
         u64::try_from((value + u128::from(denominator / 2)) / u128::from(denominator)).ok()
     }
     let mut result = None;
-    let mut previous_maximum = None;
     for record in records.iter().filter(|record| {
         record
             .get("side_data_type")
@@ -688,15 +687,148 @@ pub(crate) fn source_mastering_metadata(
             primaries_rgbw: xy,
             min_1e4_nits: minimum,
         };
-        if result.is_some_and(|old| old != next)
-            || previous_maximum.is_some_and(|old| old != maximum)
-        {
+        let next = ValidatedSourceMastering {
+            mastering: next,
+            max_1e4_nits: maximum,
+        };
+        if result.is_some_and(|old| old != next) {
             return Err(invalid());
         }
         result = Some(next);
-        previous_maximum = Some(maximum);
     }
     Ok(result)
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ValidatedSourceMastering {
+    mastering: plurx_core::transcode::dv_processing::DvSourceMastering,
+    max_1e4_nits: u64,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_mastering_metadata(
+    stream: &serde_json::Value,
+) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+    source_mastering_metadata_details(stream).map(|value| value.map(|value| value.mastering))
+}
+
+/// The frame projection is a separate observation of the same held object.
+/// Require its absolute stream index on every frame and compare complete MDCV,
+/// including maximum luminance, before projecting the fields mapping consumes.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_mastering_from_frames(
+    stream: &serde_json::Value,
+    document: &serde_json::Value,
+    absolute_stream: u32,
+) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+    let invalid = || "targeted HDR10 source frame MDCV malformed or conflicting".to_owned();
+    let frames = source_frame_records(document, absolute_stream, "HDR10")?;
+    let mut observed = source_mastering_metadata_details(stream)?;
+    for frame in frames {
+        if let Some(next) = source_mastering_metadata_details(frame).map_err(|_| invalid())? {
+            if observed.is_some_and(|old| old != next) {
+                return Err(invalid());
+            }
+            observed = Some(next);
+        }
+    }
+    Ok(observed.map(|value| value.mastering))
+}
+
+/// Both mastering projections require the same bounded absolute-stream fence.
+#[cfg(any(target_os = "linux", test))]
+fn source_frame_records<'a>(
+    document: &'a serde_json::Value,
+    absolute_stream: u32,
+    destination: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    let invalid = || format!("targeted {destination} source frame MDCV malformed or conflicting");
+    let frames = document
+        .get("frames")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(invalid)?;
+    if frames.len() > 3 {
+        return Err(invalid());
+    }
+    for frame in frames {
+        if frame
+            .get("stream_index")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(absolute_stream))
+        {
+            return Err(format!(
+                "targeted {destination} source frame MDCV selected stream differs"
+            ));
+        }
+    }
+    Ok(frames)
+}
+
+/// SDR consumes only actual minima; unrelated/absent coordinates and maxima
+/// cannot invalidate that floor or become invented HDR mastering authority.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn source_mastering_minimum_from_frames(
+    stream: &serde_json::Value,
+    document: &serde_json::Value,
+    absolute_stream: u32,
+) -> Result<Option<u32>, String> {
+    let mut observed = source_mastering_minimum(stream)?;
+    for frame in source_frame_records(document, absolute_stream, "SDR")? {
+        if let Some(next) = source_mastering_minimum(frame)? {
+            if observed.is_some_and(|old| old != next) {
+                return Err(
+                    "targeted SDR source frame MDCV minimum malformed or conflicting".into(),
+                );
+            }
+            observed = Some(next);
+        }
+    }
+    Ok(observed)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn held_source_minimum(
+    stream: Result<Option<u32>, String>,
+    probe: Option<&crate::decode_facts::SourceFrameProbe>,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<Option<u32>, String> {
+    match stream? {
+        Some(minimum) => Ok(Some(minimum)),
+        None => match probe {
+            Some(probe) => source_mastering_minimum_from_frames(
+                &serde_json::Value::Null,
+                probe.document(cancelled).await.map_err(|error| {
+                    format!("targeted SDR held source frame probe failed: {error}")
+                })?,
+                probe.absolute_stream(),
+            ),
+            None => Ok(None),
+        },
+    }
+}
+
+/// Resolve absent stream MDCV through the lazy source-bound frame projection.
+/// A malformed stream record refuses rather than being overwritten by a frame.
+#[cfg(target_os = "linux")]
+pub(crate) async fn held_source_mastering(
+    stream: Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
+    probe: Option<&crate::decode_facts::SourceFrameProbe>,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String> {
+    match stream? {
+        Some(source) => Ok(Some(source)),
+        None => match probe {
+            Some(probe) => source_mastering_from_frames(
+                &serde_json::Value::Null,
+                probe.document(cancelled).await.map_err(|error| {
+                    format!("targeted HDR10 held source frame probe failed: {error}")
+                })?,
+                probe.absolute_stream(),
+            ),
+            None => Ok(None),
+        },
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -713,6 +845,11 @@ pub(crate) struct RuntimeRecipe {
     /// only; default/master processing does not consume or invent these facts.
     pub(crate) source_mastering:
         Result<Option<plurx_core::transcode::dv_processing::DvSourceMastering>, String>,
+    /// Independent SDR floor parse; invalid/absent HDR coordinates are irrelevant.
+    pub(crate) source_mastering_minimum: Result<Option<u32>, String>,
+    /// Lazy, source/probe/absolute-stream-bound metadata. Master and SDR paths
+    /// with a title floor never invoke this separate frame projection.
+    pub(crate) source_frame_probe: Option<Arc<crate::decode_facts::SourceFrameProbe>>,
     pub(crate) preferences: plurx_core::transcode::dv_processing::DvPreferences,
     pub(crate) display_target: Option<plurx_core::transcode::dv_processing::DvDisplayTarget>,
     pub(crate) display: Option<plurx_core::playback::caps::DisplayCaps>,
@@ -740,9 +877,10 @@ pub(crate) struct RuntimeRecipe {
 impl RuntimeRecipe {
     /// Physical/internal callers resolve before constructing the export policy;
     /// a frozen live target is rechecked and cannot acquire another floor.
-    pub(crate) fn resolve_display_target(
+    pub(crate) async fn resolve_display_target(
         &self,
         target: plurx_core::transcode::dv_processing::DvDisplayTarget,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<plurx_core::transcode::dv_processing::DvDisplayTarget, String> {
         if target.is_sdr() {
             target
@@ -751,10 +889,27 @@ impl RuntimeRecipe {
             if self.display_target != Some(target) {
                 return Err("SDR target differs from the held verified policy".into());
             }
-            return Ok(target);
+            let minimum = if target.needs_source_floor() {
+                held_source_minimum(
+                    self.source_mastering_minimum.clone(),
+                    self.source_frame_probe.as_deref(),
+                    cancelled,
+                )
+                .await?
+            } else {
+                None
+            };
+            return target
+                .resolve_sdr_floor(minimum)
+                .map_err(|error| error.to_string());
         }
         let source = if target.needs_source_mastering() {
-            self.source_mastering.clone()?
+            held_source_mastering(
+                self.source_mastering.clone(),
+                self.source_frame_probe.as_deref(),
+                cancelled,
+            )
+            .await?
         } else {
             None
         };
@@ -989,9 +1144,10 @@ impl RuntimeRecipe {
                 "DV processing previously failed for this playback/source/settings/backend".into(),
             );
         }
-        let display_target = display_target
-            .map(|target| self.resolve_display_target(target))
-            .transpose()?;
+        let display_target = match display_target {
+            Some(target) => Some(self.resolve_display_target(target, Some(&cancel)).await?),
+            None => None,
+        };
         let cancellation = cancel.clone();
         let result: Result<_, String> = async {
             use plurx_core::transcode::dv_processing::{
@@ -2620,6 +2776,132 @@ mod hdr10e_export_throughput {
 #[cfg(test)]
 mod output_metadata_tests {
     use super::source_mastering_metadata;
+    fn mastering_record() -> serde_json::Value {
+        serde_json::json!({"side_data_type":"Mastering display metadata",
+            "red_x":"34000/50000","red_y":"16000/50000",
+            "green_x":"13250/50000","green_y":"34500/50000",
+            "blue_x":"7500/50000","blue_y":"3000/50000",
+            "white_point_x":"15635/50000","white_point_y":"16450/50000",
+            "max_luminance":"40000000/10000","min_luminance":"50/10000"})
+    }
+
+    #[test]
+    fn selected_frame_only_mdcv_preserves_full_metadata_and_raw_probe_comparison() {
+        let raw = serde_json::json!({"streams":[
+            {"index":7,"codec_type":"video","codec_name":"hevc","width":3840,"height":2160,
+             "side_data_list":[{"side_data_type":"DOVI configuration record"}]},
+            {"index":9,"codec_type":"audio","codec_name":"aac"}],"format":{"format_name":"matroska"}});
+        let before = raw.to_string();
+        for minimum in ["1/10000", "50/10000"] {
+            let mut record = mastering_record();
+            record["min_luminance"] = minimum.into();
+            let frame = serde_json::json!({"stream_index":7,"side_data_list":[record]});
+            let frames = serde_json::json!({"frames":[frame.clone(),frame.clone(),frame]});
+            let actual = super::source_mastering_from_frames(&raw["streams"][0], &frames, 7)
+                .expect("bounded selected frames")
+                .expect("frame-only MDCV");
+            assert_eq!(
+                actual.primaries_rgbw,
+                [34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450]
+            );
+            assert_eq!(
+                actual.min_1e4_nits,
+                if minimum == "1/10000" { 1 } else { 50 }
+            );
+        }
+        assert_eq!(
+            raw.to_string(),
+            before,
+            "frame facts never decorate raw source JSON"
+        );
+        assert!(
+            crate::ffmpeg::compare_probe_documents(&before, &raw.to_string())
+                .expect("compare")
+                .same
+        );
+        let mut changed = raw.clone();
+        changed["streams"][0]["width"] = 1920.into();
+        assert!(
+            !crate::ffmpeg::compare_probe_documents(&before, &changed.to_string())
+                .expect("changed media")
+                .same
+        );
+        assert_eq!(raw["streams"].as_array().expect("all streams").len(), 2);
+    }
+
+    #[test]
+    fn frame_mdcv_refuses_wrong_stream_malformed_and_conflicting_records() {
+        let record = mastering_record();
+        let frame = serde_json::json!({"stream_index":7,"side_data_list":[record.clone()]});
+        let document = serde_json::json!({"frames":[frame.clone()]});
+        let stream = serde_json::json!({"side_data_list":[record.clone()]});
+        assert!(super::source_mastering_from_frames(&stream, &document, 7)
+            .expect("matching declarations")
+            .is_some());
+        assert!(
+            super::source_mastering_from_frames(&serde_json::Value::Null, &document, 8)
+                .expect_err("wrong absolute stream")
+                .contains("selected stream differs")
+        );
+        for (field, value) in [
+            ("red_x", "33000/50000"),
+            ("min_luminance", "1/10000"),
+            ("max_luminance", "10000000/10000"),
+        ] {
+            let mut changed = record.clone();
+            changed[field] = value.into();
+            let conflicting = serde_json::json!({"stream_index":7,"side_data_list":[changed]});
+            let disagreement = serde_json::json!({"frames":[frame.clone(),conflicting.clone()]});
+            assert!(
+                super::source_mastering_from_frames(&serde_json::Value::Null, &disagreement, 7)
+                    .is_err(),
+                "frame conflict {field}"
+            );
+            assert!(
+                super::source_mastering_from_frames(
+                    &stream,
+                    &serde_json::json!({"frames":[conflicting]}),
+                    7
+                )
+                .is_err(),
+                "stream/frame conflict {field}"
+            );
+        }
+        for field in ["red_x", "white_point_y", "min_luminance", "max_luminance"] {
+            let mut malformed = record.clone();
+            malformed.as_object_mut().expect("record").remove(field);
+            assert!(super::source_mastering_from_frames(&serde_json::Value::Null,&serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[malformed.clone()]}]}),7).is_err());
+            assert!(
+                super::source_mastering_from_frames(
+                    &serde_json::json!({"side_data_list":[malformed]}),
+                    &document,
+                    7
+                )
+                .is_err(),
+                "malformed stream cannot be overwritten by frame"
+            );
+        }
+        for malformed in [
+            serde_json::json!({}),
+            serde_json::json!({"frames":{}}),
+            serde_json::json!({"frames":[frame.clone(),frame.clone(),frame.clone(),frame.clone()]}),
+        ] {
+            assert!(
+                super::source_mastering_from_frames(&serde_json::Value::Null, &malformed, 7)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            super::source_mastering_from_frames(
+                &serde_json::json!({"color_primaries":"bt2020"}),
+                &serde_json::json!({"frames":[{"stream_index":7}]}),
+                7
+            )
+            .expect("absent"),
+            None
+        );
+    }
+
     #[test]
     fn targeted_metadata_source_fallback_requires_complete_selected_stream_mdcv() {
         let record = serde_json::json!({"side_data_type":"Mastering display metadata",
@@ -2680,6 +2962,71 @@ mod output_metadata_tests {
 #[cfg(test)]
 mod sdr_floor_tests {
     use super::*;
+    #[test]
+    fn sdr_frame_minimum_ignores_hdr_coordinates_but_refuses_bad_or_conflicting_minima() {
+        let minimum = serde_json::json!({"side_data_type":"Mastering display metadata","min_luminance":"1/10000","red_x":"invalid and irrelevant for SDR"});
+        let frame = serde_json::json!({"stream_index":7,"side_data_list":[minimum.clone()]});
+        let document = serde_json::json!({"frames":[frame.clone()]});
+        assert_eq!(
+            source_mastering_minimum_from_frames(&serde_json::Value::Null, &document, 7)
+                .expect("minimum-only source"),
+            Some(1)
+        );
+        assert!(
+            source_mastering_from_frames(&serde_json::Value::Null, &document, 7).is_err(),
+            "HDR still requires complete mastering facts"
+        );
+        let duplicate = serde_json::json!({"frames":[frame.clone(),frame.clone()]});
+        assert_eq!(
+            source_mastering_minimum_from_frames(&serde_json::Value::Null, &duplicate, 7)
+                .expect("consistent"),
+            Some(1)
+        );
+        assert!(
+            source_mastering_minimum_from_frames(&serde_json::Value::Null, &document, 8).is_err(),
+            "same selected-stream fence"
+        );
+        for value in ["1/0", "NaN", "-1/10000", "10001/10000"] {
+            let mut bad = minimum.clone();
+            bad["min_luminance"] = value.into();
+            assert!(source_mastering_minimum_from_frames(&serde_json::Value::Null,&serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[bad.clone()]}]}),7).is_err(),"malformed frame minimum {value}");
+            assert!(
+                source_mastering_minimum_from_frames(
+                    &serde_json::json!({"side_data_list":[bad]}),
+                    &document,
+                    7
+                )
+                .is_err(),
+                "malformed stream minimum cannot be overwritten"
+            );
+        }
+        let mut changed = minimum.clone();
+        changed["min_luminance"] = "50/10000".into();
+        let conflict = serde_json::json!({"frames":[frame,{"stream_index":7,"side_data_list":[changed.clone()]}]});
+        assert!(
+            source_mastering_minimum_from_frames(&serde_json::Value::Null, &conflict, 7).is_err()
+        );
+        assert!(
+            source_mastering_minimum_from_frames(
+                &serde_json::json!({"side_data_list":[changed]}),
+                &document,
+                7
+            )
+            .is_err(),
+            "stream/frame minimum conflict"
+        );
+        for absent in [
+            serde_json::json!({"frames":[]}),
+            serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[{"side_data_type":"Mastering display metadata","red_x":"unknown"}]}]}),
+        ] {
+            assert_eq!(
+                source_mastering_minimum_from_frames(&serde_json::Value::Null, &absent, 7)
+                    .expect("unknown minimum remains absent"),
+                None
+            );
+        }
+    }
+
     #[test]
     fn sdr_source_floor_does_not_require_hdr_primaries_but_refuses_conflicting_minima() {
         let stream = serde_json::json!({"side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"17/10000"}]});

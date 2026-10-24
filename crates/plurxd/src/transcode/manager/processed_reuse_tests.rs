@@ -1333,6 +1333,8 @@ async fn fixture_with_audio(
         native_bl: (64, 64),
         source_clock,
         source_mastering: Ok(None),
+        source_mastering_minimum: Ok(None),
+        source_frame_probe: None,
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
