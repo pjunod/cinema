@@ -2716,15 +2716,16 @@ async fn queued_transcode_publishes_while_holding_its_own_admission() {
         other => panic!("{other:?}"),
     };
     let job = projection(&claimed).expect("projection");
+    let original_claim = claimed.token.clone().expect("token");
     let active = crate::background_jobs::ActiveBackgroundJob::start(
         Arc::clone(&store),
         Arc::new(UnclusteredJobAuthority),
-        claimed.token.expect("token"),
+        original_claim.clone(),
         tokio::time::Instant::now() + Duration::from_secs(30),
         JobKind::TranscodePrepare,
     )
     .expect("active job");
-    let fence = PretranscodeFence::new(job, active.fence(), admission);
+    let fence = PretranscodeFence::new(job, active.fence(), admission, original_claim);
     let source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
         .await
         .expect("source");

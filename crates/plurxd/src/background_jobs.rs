@@ -514,6 +514,26 @@ impl JobFence {
         state.token.clone()
     }
 
+    /// Check the same durable claim supplied by the worker before it opens a
+    /// source. Renewal may change revision/expiry, so those are deliberately
+    /// not identity fields. This is a liveness/identity preflight only; a
+    /// later native action still needs its own physical resource owner.
+    pub(crate) async fn snapshot_for_claim(&self, original: &JobToken) -> Option<JobToken> {
+        if self.0.lost.is_cancelled() || Instant::now() >= *self.0.deadline.borrow() {
+            return None;
+        }
+        let state = self.0.state.lock().await;
+        if state.cancelling
+            || self.0.lost.is_cancelled()
+            || Instant::now() >= *self.0.deadline.borrow()
+        {
+            return None;
+        }
+        state.token.as_ref()
+            .filter(|current| current.same_claim_as(original))
+            .cloned()
+    }
+
     async fn renew(&self) -> Result<bool, StoreError> {
         let mut state = self.0.state.lock().await;
         if self.0.lost.is_cancelled() || !self.0.authority.may_execute_job(self.0.kind).await {
@@ -1788,11 +1808,12 @@ pub(crate) async fn claim_pretranscode(
                 continue;
             };
             let projection = plurx_core::store::background_jobs_pretranscode::projection(&job)?;
+            let original_claim = job.token.clone()
+                .ok_or_else(|| StoreError::Task("claimed job has no ownership token".into()))?;
             let active = ActiveBackgroundJob::start(
                 Arc::clone(&store),
                 Arc::clone(&authority),
-                job.token
-                    .ok_or_else(|| StoreError::Task("claimed job has no ownership token".into()))?,
+                original_claim.clone(),
                 deadline,
                 JobKind::TranscodePrepare,
             )?;
@@ -1800,6 +1821,7 @@ pub(crate) async fn claim_pretranscode(
                 projection.clone(),
                 active.fence(),
                 admission,
+                original_claim,
             );
             return Ok(Some(PreparationClaim::Transcode(projection, active, fence)));
         }

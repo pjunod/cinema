@@ -11868,6 +11868,16 @@ impl JobManager {
                             };
                             // Preserve the existing worker's configured-library
                             // boundary before the independently held source open.
+                            let original_claim = job.token.as_ref().ok_or(
+                                crate::background_jobs::PreparationError::Fail(
+                                    "copy_claim_token_missing",
+                                ),
+                            )?;
+                            if fence.snapshot_for_claim(original_claim).await.is_none() {
+                                return Err(crate::background_jobs::PreparationError::Yield(
+                                    "lease_lost",
+                                ));
+                            }
                             crate::transcode::pretranscode_source_snapshot(&file, &roots)
                                 .await
                                 .ok_or("copy source unavailable on owner")?;
@@ -11964,6 +11974,12 @@ impl JobManager {
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
+            if fence.snapshot().await.is_none() {
+                active.finish().await;
+                skipped += 1;
+                *reasons.entry("lease_lost").or_default() += 1;
+                continue;
+            }
             let Some(source_snapshot) =
                 crate::transcode::pretranscode_source_snapshot(&file, &trusted_roots).await
             else {

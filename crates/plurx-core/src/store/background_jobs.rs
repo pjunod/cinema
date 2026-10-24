@@ -1332,6 +1332,17 @@ pub struct JobToken {
 }
 
 impl JobToken {
+    /// A renewal may advance the revision and lease expiry while retaining
+    /// the original durable claim. This compares only that claim identity;
+    /// it is a negative binding check, not evidence of a live native owner.
+    pub fn same_claim_as(&self, other: &Self) -> bool {
+        self.job_id == other.job_id
+            && self.node_id == other.node_id
+            && self.boot_id == other.boot_id
+            && self.claim_id == other.claim_id
+            && self.fence == other.fence
+    }
+
     pub fn validate(&self) -> Result<(), StoreError> {
         if uuid::Uuid::parse_str(&self.job_id).is_err()
             || !identifier(&self.node_id)
@@ -1345,6 +1356,39 @@ impl JobToken {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn renewed_background_token_keeps_only_its_original_claim_identity() {
+    let original = JobToken {
+        job_id: uuid::Uuid::new_v4().to_string(),
+        node_id: "media1".into(),
+        boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(),
+        fence: 7,
+        revision: 3,
+        lease_expires_ms: 1_000,
+    };
+    let mut renewed = original.clone();
+    renewed.revision += 1;
+    renewed.lease_expires_ms += 1_000;
+    assert!(renewed.same_claim_as(&original));
+    let mut foreign = renewed.clone();
+    foreign.job_id = uuid::Uuid::new_v4().to_string();
+    assert!(!foreign.same_claim_as(&original));
+    foreign = renewed.clone();
+    foreign.node_id = "media2".into();
+    assert!(!foreign.same_claim_as(&original));
+    foreign = renewed.clone();
+    foreign.boot_id = uuid::Uuid::new_v4().to_string();
+    assert!(!foreign.same_claim_as(&original));
+    foreign = renewed.clone();
+    foreign.claim_id = uuid::Uuid::new_v4().to_string();
+    assert!(!foreign.same_claim_as(&original));
+    foreign = renewed;
+    foreign.fence += 1;
+    assert!(!foreign.same_claim_as(&original));
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -638,6 +638,7 @@ pub struct PretranscodeFence {
     pub(super) job: PretranscodeJob,
     pub(super) durable: crate::background_jobs::JobFence,
     pub(super) admission: Arc<PretranscodeAdmission>,
+    original_claim: plurx_core::store::background_jobs::JobToken,
 }
 
 pub(crate) struct FragmentAdmission {
@@ -665,16 +666,24 @@ impl PretranscodeFence {
         job: PretranscodeJob,
         durable: crate::background_jobs::JobFence,
         admission: PretranscodeAdmission,
+        original_claim: plurx_core::store::background_jobs::JobToken,
     ) -> Self {
         Self {
             job,
             durable,
             admission: Arc::new(admission),
+            original_claim,
         }
     }
 
     pub async fn snapshot(&self) -> Option<PretranscodeJob> {
-        let token = self.durable.snapshot().await?;
+        let token = self.durable.snapshot_for_claim(&self.original_claim).await?;
+        if token.job_id != self.job.id
+            || token.node_id != self.job.owner_node_id
+            || token.fence != self.job.fence
+        {
+            return None;
+        }
         let mut job = self.job.clone();
         job.fence = token.fence;
         job.lease_expires_ms = token.lease_expires_ms;

@@ -751,6 +751,11 @@ impl TranscodeManager {
         if !self.fragment_worker_idle(admission) {
             return Err(PreparationError::Yield("owner_busy"));
         }
+        let original_claim = job.token.as_ref()
+            .ok_or(PreparationError::Fail("copy_claim_token_missing"))?;
+        if fence.snapshot_for_claim(original_claim).await.is_none() {
+            return Err(PreparationError::Yield("lease_lost"));
+        }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
         if !source.unchanged() || source.object_version() != source_object_version {
             if !manual {
