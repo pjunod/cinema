@@ -547,6 +547,11 @@ recordings library.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
+- **The iPhone Guide shows the time grid.** In portrait and landscape, stations
+  occupy separate rows with logos and pinned channel labels, while programme
+  widths follow their durations. The old single-channel schedule preference
+  no longer changes Guide into a dropdown list; the current Live TV player and
+  programme/DVR actions stay in place.
 - **Station artwork comes from the guide.** Every client — the web list, grid
   and current-programme details; the Apple and Android list rows, grid
   headers, programme details, picture badge and fullscreen identity — draws

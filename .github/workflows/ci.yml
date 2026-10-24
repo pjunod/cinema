@@ -1506,7 +1506,7 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: (needs.scope.outputs.apple == 'true' && needs.scope.outputs.retain_apple != 'true') || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
     concurrency:
       group: plurx-apple-silicon-heavy
       cancel-in-progress: false
@@ -1524,6 +1524,7 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
           grep -Fxq "Xcode 27.1" <<< "$xcode_version"
           grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift

@@ -4105,7 +4105,7 @@ assert.equal(context.ACT_TIMER, null);
             "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
         android = local("Linux", "X64", "lab", "android-kvm")
-        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27")
+        apple = local("macOS", "ARM64", "lab", "apple", "xcode-27.1")
         ci_store = local("Linux", "X64", "lab", "ci-store")
         ci_topology = local("Linux", "X64", "lab", "ci-topology")
         release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
