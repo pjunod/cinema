@@ -19,6 +19,9 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- The iPhone Live TV guide opens the station-logo time grid instead of the
+  single-channel dropdown schedule, including phones with the old saved choice.
+
 - Playback info describes the device's Dolby Vision profile compatibility
   without claiming FEL was discarded or the base picture copied before the
   session selects its processing. Session enhancement details distinguish

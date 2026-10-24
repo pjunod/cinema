@@ -77,6 +77,8 @@ sequence to prove they no longer collide.
 
 ## Notes moved from the docs index
 
+iPhone Live TV guide: [Restore the station-logo time grid](1273-iphone-guide-grid.md).
+
 Apple TV timeline Select: [Commit the previewed seek position](1264-tvos-timeline-select.md).
 
 These lines used to sit in `docs/README.md`; they point at fragments in this folder.
