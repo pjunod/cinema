@@ -232,7 +232,11 @@ elapsed seconds. Timing fields are cumulative, and pool timings are inclusive
 of nested pool/accounting work, so they must not be summed as disjoint costs.
 A timed-out Rust command retains bounded stdout/stderr and an explicit failed
 source/tool/argv/log identity; interrupted output never enters the success
-parser or becomes a graph acceptance. The dedicated capture is used only for
+parser or becomes a graph acceptance. A current reusable success requires a
+complete capture with the unchanged deadline and exact byte counts/hashes for
+both streams, bound to the raw combined log. Missing legacy capture metadata,
+truncation and forged timeout rows are rejected even when `accepted=true`.
+The dedicated capture is used only for
 Rust cases; generic version and TLC subprocess behavior remains separate.
 
 Qualification inventories and partial receipts retain

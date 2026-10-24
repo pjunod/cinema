@@ -589,6 +589,26 @@ def case_sources(name, sources, root=ROOT, out=None):
     return selected
 
 
+def complete_rust_capture(row, raw):
+    """Current Rust success requires complete, exactly bound stream evidence."""
+    capture = row.get('output_capture')
+    fields = {'timeout_seconds','timed_out','output_limit_exceeded','complete','failure',
+      'stdout_bytes','stdout_sha256','stderr_bytes','stderr_sha256'}
+    if (not isinstance(capture,dict) or set(capture) != fields
+        or capture['complete'] is not True or capture['timed_out'] is not False
+        or capture['output_limit_exceeded'] is not False or capture['failure'] is not None
+        or type(capture['timeout_seconds']) is not int or capture['timeout_seconds'] != 1800
+        or len(raw) > async_resume.MAX_SMALL_BYTES):
+        return False
+    lengths = [capture[label+'_bytes'] for label in ('stdout','stderr')]
+    if any(type(size) is not int or size < 0 for size in lengths): return False
+    if sum(lengths)+1 != len(raw) or raw[lengths[0]:lengths[0]+1] != b'\n': return False
+    streams = (raw[:lengths[0]],raw[lengths[0]+1:])
+    return all(isinstance(capture[label+'_sha256'],str)
+      and hashlib.sha256(block).hexdigest() == capture[label+'_sha256']
+      for label,block in zip(('stdout','stderr'),streams))
+
+
 def reusable_case(name, row, out, sources):
     log = out/f'rust-{name}.log'
     if (row.get('accepted') is not True or row.get('scope') != case_scope(name) or row.get('input_sha256') != case_sources(name,sources,out=out)
@@ -596,7 +616,9 @@ def reusable_case(name, row, out, sources):
         or c.sha(log) != row.get('log_sha256')):
         return False
     try:
-        output = log.read_text()
+        raw = log.read_bytes()
+        if not complete_rust_capture(row,raw): return False
+        output = raw.decode('utf-8')
         evidence = case_evidence(name,output,row.get('exit_code'))
         if name in {'control-C4','control-C9'}:
             evidence.update(control_causal_evidence(name,output,out))
@@ -709,6 +731,7 @@ def run_rust_case(argv, *, env, log, timeout=1800):
         failure = failure or 'Rust output is not UTF-8'
         output = [block.decode('utf-8',errors='replace') for block in data]
     capture['failure'] = failure
+    capture['complete'] = failure is None
     result = subprocess.CompletedProcess(argv,proc.returncode if proc is not None else 127,*output)
     return result,round(time.monotonic()-started,3),capture
 
@@ -836,6 +859,7 @@ def build_inputs(args):
         journal['cases'][name] = record; journal['complete'] = False
         refresh_graphs(journal,out,sources); write(journal_path,journal)
         c.require(capture['failure'] is None,f"Rust command did not complete; no semantic result: {name}: {capture['failure']}")
+        c.require(complete_rust_capture(record,log.read_bytes()),'Rust output capture incomplete or unbound')
         c.require(source_identity(False) == sources,'source changed during graph/regression execution')
         facts = case_evidence(name,output,proc.returncode)
         if name in {'control-C4','control-C9'}:
@@ -870,6 +894,7 @@ def validate_provenance(path,driver_path,product_path):
         c.require(row.get('argv') == rendered_command(name,path.parent) and row.get('accepted') is True,
                   f'command provenance mismatch: {name}')
         c.require(log.is_file() and c.sha(log) == row.get('log_sha256'),f'command log missing/changed: {name}')
+        c.require(complete_rust_capture(row,log.read_bytes()),f'command output capture incomplete/unbound: {name}')
         evidence = case_evidence(name,log.read_text(),row.get('exit_code'))
         c.require(all(row.get(key) == value for key,value in evidence.items()),f'case evidence/receipt differs: {name}')
     c.require(p.get('graphs') == {'driver':{'sha256':c.sha(driver_path)},'product':{'sha256':c.sha(product_path)}},

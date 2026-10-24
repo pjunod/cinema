@@ -75,6 +75,49 @@ class RustCommandDiagnostics(OwnedScratch):
         self.assertEqual(runner.case_evidence(name,output,0),
           {'test_count':1,'result_class':'product_runtime_diagnostic_records_are_bounded'})
 
+    def test_forged_accepted_capture_cannot_reuse_or_validate_provenance(self):
+        name = 'driver-closure'
+        argv = runner.rendered_command(name,self.directory)
+        text = 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
+        raw = text.encode()+b'\n'
+        log = self.directory/f'rust-{name}.log'; log.write_bytes(raw)
+        sources = {path:'a'*64 for path in adapter.INVOCATION_PATHS}
+        tools = {'fixture':'pinned'}
+        capture = {'timeout_seconds':1800,'timed_out':False,'output_limit_exceeded':False,
+          'complete':True,'failure':None,'stdout_bytes':len(text.encode()),'stderr_bytes':0,
+          'stdout_sha256':hashlib.sha256(text.encode()).hexdigest(),'stderr_sha256':hashlib.sha256(b'').hexdigest()}
+        row = {'argv':argv,'exit_code':0,'log_sha256':runner.c.sha(log),'elapsed_seconds':0.1,
+          'test_count':1,'accepted':True,'result_class':'focused_rust_regression','scope':'leaf',
+          'input_sha256':runner.case_sources(name,sources,out=self.directory),'output_capture':capture}
+        driver = self.directory/'driver-graph.json'; driver.write_text('{}')
+        product = self.directory/'product-bundle.json'; product.write_text('{}')
+        journal = {'schema_version':2,'complete':True,'source_sha256':sources,'rust_toolchain':tools,
+          'cases':{name:row},'graphs':{'driver':{'sha256':runner.c.sha(driver)},'product':{'sha256':runner.c.sha(product)}}}
+        path = self.directory/'provenance.json'
+        with patch.object(runner,'CASES',{name:runner.CASES[name]}), \
+             patch.object(runner,'source_identity',return_value=sources), \
+             patch.object(runner,'rust_identity',return_value=tools):
+            self.assertTrue(runner.reusable_case(name,row,self.directory,sources))
+            path.write_text(json.dumps(journal))
+            runner.validate_provenance(path,driver,product)
+            mutations = [None,{'complete':False},{'timed_out':True},{'timed_out':0},
+              {'output_limit_exceeded':True},{'failure':'deadline exceeded'},
+              {'timeout_seconds':3600},{'stdout_bytes':True},{'stderr_bytes':1},
+              {'stdout_sha256':'0'*64},{'stderr_sha256':'0'*64}]
+            for mutation in mutations:
+                changed = json.loads(json.dumps(row))
+                if mutation is None: changed.pop('output_capture')
+                else: changed['output_capture'].update(mutation)
+                with self.subTest(mutation=mutation),patch.object(runner,'case_evidence') as parser:
+                    self.assertFalse(runner.reusable_case(name,changed,self.directory,sources))
+                    journal['cases'][name] = changed; path.write_text(json.dumps(journal))
+                    with self.assertRaises(runner.c.Invalid): runner.validate_provenance(path,driver,product)
+                    parser.assert_not_called()
+            # Even an updated combined-log SHA cannot hide a truncated stream.
+            log.write_bytes(raw[:-1]); changed = json.loads(json.dumps(row))
+            changed['log_sha256'] = runner.c.sha(log)
+            self.assertFalse(runner.reusable_case(name,changed,self.directory,sources))
+
     def test_rust_capture_preserves_exact_json_stdout_and_separate_stderr(self):
         stdout = '{"exact":[true,null,"é"]}\n'
         stderr = 'diagnostic only\n'
@@ -82,6 +125,7 @@ class RustCommandDiagnostics(OwnedScratch):
         self.assertEqual(proc.returncode,0)
         self.assertEqual((proc.stdout,proc.stderr),(stdout,stderr))
         self.assertIsNone(capture['failure'])
+        self.assertTrue(capture['complete'])
         self.assertEqual(capture['stdout_bytes'],len(stdout.encode()))
         self.assertEqual(capture['stderr_sha256'],hashlib.sha256(stderr.encode()).hexdigest())
         self.assertEqual((self.directory/'rust-driver-closure.log').read_bytes(),
@@ -116,6 +160,7 @@ class RustCommandDiagnostics(OwnedScratch):
         self.assertEqual((row['accepted'],row['test_count'],row['result_class']),
           (False,0,'failed_command'))
         self.assertTrue(row['output_capture']['timed_out'])
+        self.assertFalse(row['output_capture']['complete'])
         self.assertEqual(row['output_capture']['timeout_seconds'],0.3)
         self.assertGreaterEqual(row['elapsed_seconds'],0.3)
         self.assertLess(row['exit_code'],0)
