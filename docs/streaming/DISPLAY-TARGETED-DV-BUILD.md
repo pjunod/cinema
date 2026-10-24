@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** #1216 and batched #1269 merged into `effort/display-targeted-dv`; HDR/SDR promotion qualification and E creative accuracy remain open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (promotion #1271 and qualification) ·
+**Status:** A–D and F promote to `main` through #1271 by Paul's decision of 2026-10-24; E (creative trims) continues as its own effort and playback keeps reporting `creative_trims_applied:false` / “L1 only” until E is accepted · **Updated:** 2026-10-24 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 Evidence remains bound to its recorded source.
@@ -11,7 +11,7 @@ Evidence remains bound to its recorded source.
 |---|---|---|
 | A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Native459 P7/P8 HDR1000 PASS on91cbe; earlier evidence keeps its source. Current-candidate promotion remains. |
 | B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Eight new Rust460 cases PASS on91cbe; physical-device acceptance remains separate. |
-| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. Official CPU screen448 rendered48 4K RGB16 frames in21.6s,2.22fps. GPU456/461 produced48 4K RGB16 outputs with observed CUDA; warm startup.172s, steady10.32fps misses24fps. | Full CM4/L8 accuracy needs a source-backed contract or supported real-time integration; tested CLI misses throughput. No vendor contact. |
+| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. GPU456/461: 4K mapping steady10.32fps. FIFO491: one continuous `cm_offline` process mapped96 frames at2560×1280, pixel-exact to TIFF488, second48 at27.62fps. Encode493 added P010+NVENC fragmented HEVC: both native exits0, two complete fragments, 0.963× real time end to end; the controller failed only on missing primaries/transfer tags (ffmpeg8.1 frame properties override encoder options for untagged RGB input; `setparams` fixes it). | Not part of this promotion. The vendor tool is a QC referee only. Accurate trims need a source-backed implementation of our own, validated against it. |
 | F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Valid-L6 SDR passes retained; unknown-L6 source-minimum focused460 cases PASS. |
 
 Effort3cc264068 integrated#1216/#1269:78 regression fields, gate5889 8/8.
@@ -34,12 +34,12 @@ eight focused460 cases once. Native459 P7/P8 HDR1000 each pass once, with
 true queue/outer0,17983 valid L1/zero holes and four48-frame720p windows.
 Only failed/unrun HDR cells ran; earlier SDR passes remain attributed to4499.
 
-Root chose HDR/SDR delivery under standing authority. E stays unfinished,
-`creative_trims_applied:false` / “L1 only”; A–F is not complete. Retain passes at
-their sources; retry failed or materially invalidated cases only. Main1eb117839
-was an ancestor. User fast-lane/selective policy versus full manual promotion
-awaits reconciliation; no merge or validator waiver is inferred. Physical-display
-and full-app FEL EOF acceptance remain outside bounded excerpt qualification.
+Paul decided on 2026-10-24 to ship what is done: A–D and F promote with E
+unfinished, so playback reports `creative_trims_applied:false` / “L1 only”, and
+E continues as a separate effort. Promotion runs the main fast lane once on the
+candidate; only failed jobs rerun (Paul, 2026-10-24), and passes stay attributed
+to their sources. Physical-display and full-app FEL EOF acceptance remain
+outside bounded excerpt qualification.
 
 ## PR B implementation checkpoint
 
@@ -569,8 +569,8 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 #1216/#1269 are integrated into the effort at3cc264068, preserving all78
 original regression fields. The [current matrix](#current-qualification--source-bound-evidence-through-f)
-owns source-bound evidence. Root's delivery decision covers HDR/SDR with E
-unfinished, not all A–F completion.
+owns source-bound evidence. Paul's 2026-10-24 decision promotes A–D and F
+with E unfinished; E continues as its own effort.
 
 Review398 closed all four production findings and the qualification-fixture
 follow-up at a7642100: actual SDR grade/Main10 facts, L6/L9 contradictions across
@@ -582,7 +582,7 @@ normal lease/source checks; it does not prove HTTP/full-app EOF. The old two-cas
 reuse test remains; a separate SDR-only case avoids repeating valid cases.
 Both scanner digests include the accumulator; binding rotation clears old facts.
 Two formal producer hashes refresh only reviewed source identity; fences unchanged.
-Main qualification and promotion-test policy reconciliation remain open.
+Promotion qualification is the main fast lane, once, on the exact candidate.
 
 ### Stage PRs target one effort branch
 
