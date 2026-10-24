@@ -1,6 +1,6 @@
 # Apple runners — the M4 primary and M3 Max standby
 
-**Status:** live · **Updated:** 2026-09-30
+**Status:** live · **Updated:** 2026-10-23
 
 Companion to [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (what Apple
 CI verifies) and [RUNNER-DISK.md](RUNNER-DISK.md) (runner disk maintenance).
@@ -10,8 +10,8 @@ This document owns Apple runner preference, outage detection and installation.
 
 | Role | Forgejo runner | Host | Account | Toolchain |
 |---|---|---|---|---|
-| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a` |
-| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.0, `27A266a` |
+| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.1, `27A9275` |
+| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.1, `27A9275` |
 
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.

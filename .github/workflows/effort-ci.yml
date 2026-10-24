@@ -282,8 +282,9 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
-          grep -Fxq "Xcode 27.0" <<< "$xcode_version"
-          grep -Fxq "Build version 27A266a" <<< "$xcode_version"
+          printf '%s\n' "$xcode_version"
+          grep -Fxq "Xcode 27.1" <<< "$xcode_version"
+          grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
       - name: Compile native macOS server tray
         if: needs.scope.outputs.desktop_macos == 'true'
