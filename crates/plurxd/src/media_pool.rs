@@ -1804,7 +1804,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     let runtime = state.transcode.media_node_runtime().await;
     #[cfg(target_os = "linux")]
     let adaptive_worker_quote = {
-        let serving = state.serving.state();
+        let serving = state.serving.authority().state();
         state
             .resource_runtime
             .as_ref()

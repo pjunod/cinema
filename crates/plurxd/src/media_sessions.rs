@@ -1543,15 +1543,8 @@ pub(crate) struct RemoteStartResponse {
     pub activation_generation: Option<u64>,
 }
 
-/// Attach a worker to a successor that the shared preparation ledger already
-/// reserved for this target. The recipe stays in the durable row; the wire
-/// carries only exact identity, so a peer cannot ask the target to prime bytes
-/// that Store did not authorize first.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(
-    try_from = "RemotePrepareRequestWire",
-    into = "RemotePrepareRequestWire"
-)]
+/// Versioned adaptive preparation retains the authoritative attempt identity
+/// alongside intent that the worker rederives locally before native entry.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1609,8 +1602,14 @@ pub(crate) struct AdaptiveAttemptStatusV1 {
     pub key: plurx_core::store::adaptive_resource_attempts::AttemptKey,
 }
 
+/// Attach a worker to a successor that Store already reserved for this target.
+/// Preserve the strict legacy wire conversion, including its negotiated
+/// output-capture compatibility, independently of the adaptive v1 envelope.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(
+    try_from = "RemotePrepareRequestWire",
+    into = "RemotePrepareRequestWire"
+)]
 pub(crate) struct RemotePrepareRequest {
     pub protocol_version: i64,
     pub incarnation_id: String,
