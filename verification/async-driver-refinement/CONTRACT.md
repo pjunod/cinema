@@ -223,6 +223,18 @@ and all-worker stable safe-window checks. This existential witness establishes
 eligibility mechanics; it does not establish stable fairness nonvacuity or
 universal recovery from failed attempts.
 
+Runtime diagnostics do not change this relation. Host monotonic timers and
+aggregate Oracle replay/cache, interning, accounting and phase counters remain
+outside Store identities, valuations, pool rows and canonical hashes. At most
+128 diagnostic records of at most 8192 bytes each go to stderr, including context
+and phase markers and a first-expansion sample; periodic samples require 30
+elapsed seconds. Timing fields are cumulative, and pool timings are inclusive
+of nested pool/accounting work, so they must not be summed as disjoint costs.
+A timed-out Rust command retains bounded stdout/stderr and an explicit failed
+source/tool/argv/log identity; interrupted output never enters the success
+parser or becomes a graph acceptance. The dedicated capture is used only for
+Rust cases; generic version and TLC subprocess behavior remains separate.
+
 Qualification inventories and partial receipts retain
 `ordinary_settlement_payload_transfer="pending"`. A complete accepted
 receipt may derive `closed_bounded` only after product validation, every

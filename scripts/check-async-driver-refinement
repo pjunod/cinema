@@ -9,9 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 
@@ -63,6 +66,8 @@ PRODUCT_WIRE_CASES = [case for case in STORE_TESTS['core_tests'] if case.rsplit(
 c.require(len(PRODUCT_WIRE_CASES) == len(PRODUCT_WIRE_TESTS) and
  {case.rsplit('::',1)[-1] for case in PRODUCT_WIRE_CASES} == PRODUCT_WIRE_TESTS,
  'product wire regression registry incomplete or duplicated')
+PRODUCT_RUNTIME_TEST = 'store::async_driver_product::product_runtime_diagnostic_records_are_bounded'
+c.require(STORE_TESTS['core_tests'].count(PRODUCT_RUNTIME_TEST) == 1,'runtime diagnostic regression registry incomplete or duplicated')
 ACTUAL_SETTLEMENT_TESTS = {
  'actual_ordinary_settlement_payload_and_time_conformance',
  'actual_ordinary_local_guard_and_response_conformance',
@@ -103,6 +108,7 @@ CASES = {
  'driver-executor': LEAF+['production_executor_consumes_real_environment_replies_in_order','--','--exact','--nocapture'],
  'driver-selector': LEAF+['selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
  **{'store-'+case.rsplit('::',1)[-1]:CORE+[case,'--','--exact','--nocapture'] for case in PRODUCT_WIRE_CASES},
+ 'store-product_runtime_diagnostic_records_are_bounded': CORE+[PRODUCT_RUNTIME_TEST,'--','--exact','--nocapture'],
  'graph-product': CORE+[STORE_TESTS['product_test'],'--','--exact','--nocapture'],
  'control-C4': CORE+[STORE_TESTS['product_controls']['C4'],'--','--exact','--nocapture'],
  'control-C9': CORE+[STORE_TESTS['product_controls']['C9'],'--','--exact','--nocapture'],
@@ -159,7 +165,7 @@ def case_evidence(name, output, code):
         c.require(re.findall(r'test result: ok\. (\d+) passed; 0 failed;',output) == ['1'],
                   f'{name}: requires exactly one selected Rust test')
     facts = {'test_count':1,'result_class':'focused_rust_regression'}
-    if name.removeprefix('store-') in PRODUCT_WIRE_TESTS:
+    if name.removeprefix('store-') in PRODUCT_WIRE_TESTS | {PRODUCT_RUNTIME_TEST.rsplit('::',1)[-1]}:
         selected_name = CASES[name][CASES[name].index('--')-1]
         c.require(re.findall(r'^test '+re.escape(selected_name)+r' \.\.\. ok$',output,re.MULTILINE) ==
                   ['test '+selected_name+' ... ok'],'product wire regression exact named pass missing')
@@ -615,6 +621,98 @@ def run(argv, *, env=None, timeout=1800):
         raise c.Invalid(f'command did not complete; no semantic result: {argv}: {exc}') from exc
     return proc, round(time.monotonic()-start,3)
 
+def rust_capture_limit(log):
+    # Only existing evidence members count; selector/build trees are not artifacts.
+    members = list(log.parent.iterdir())
+    tlc = log.parent/'tlc'
+    if tlc.is_dir(): members.extend(tlc.iterdir())
+    retained = sum(path.stat().st_size for path in members if path.is_file() and path != log
+      and async_resume.selected(path.relative_to(log.parent).parts))
+    # Reserve one small-member budget for the rewritten provenance journal.
+    available = c.ARTIFACT_MAX_BYTES - retained - async_resume.MAX_SMALL_BYTES
+    c.require(available > 1,'aggregate artifact bound leaves no Rust capture budget')
+    return min(async_resume.MAX_SMALL_BYTES,available)-1
+
+
+def run_rust_case(argv, *, env, log, timeout=1800):
+    """Bounded, separate Rust streams; generic version/TLC run() stays unchanged."""
+    TASK_SCRATCH.mkdir(parents=True,exist_ok=True)
+    environment = dict(env)
+    environment.update({name:str(TASK_SCRATCH) for name in ('TMPDIR','TMP','TEMP')})
+    limit = rust_capture_limit(log)
+    started = time.monotonic()
+    failure = None
+    proc = None
+    sizes = [0,0]
+    capture = {'timeout_seconds':timeout,'timed_out':False,'output_limit_exceeded':False}
+    # Stream to task-owned files, never an unbounded PIPE buffer. The final
+    # allowlisted log is stdout + one newline + stderr, preserving each exactly.
+    with tempfile.TemporaryFile(dir=log.parent) as stdout, tempfile.TemporaryFile(dir=log.parent) as stderr:
+        streams = (stdout,stderr)
+        def append(index,block):
+            remaining = limit-sum(sizes)
+            streams[index].write(block[:remaining])
+            sizes[index] += min(len(block),remaining)
+            return len(block) <= remaining
+        try:
+            proc = subprocess.Popen(argv,cwd=ROOT,env=environment,stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,start_new_session=True)
+            with selectors.DefaultSelector() as poll:
+                for index,pipe in enumerate((proc.stdout,proc.stderr)):
+                    os.set_blocking(pipe.fileno(),False)
+                    poll.register(pipe,selectors.EVENT_READ,index)
+                while poll.get_map() or proc.poll() is None:
+                    remaining = timeout-(time.monotonic()-started)
+                    if remaining <= 0:
+                        capture['timed_out'] = True
+                        failure = 'deadline exceeded'
+                        break
+                    for key,_ in poll.select(min(remaining,0.1)):
+                        block = os.read(key.fd,65536)
+                        if not block:
+                            poll.unregister(key.fileobj)
+                        elif not append(key.data,block):
+                            capture['output_limit_exceeded'] = True
+                            failure = 'Rust output byte bound exceeded'
+                            break
+                    if failure: break
+        except OSError as exc:
+            failure = f'Rust command did not start or capture failed: {exc}'[:512]
+        finally:
+            if proc is not None:
+                # The session is created by us. Kill the whole owned group,
+                # including children left after the parent exits; never a PID search.
+                try: os.killpg(proc.pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                proc.wait()
+                for index,pipe in enumerate((proc.stdout,proc.stderr)):
+                    # Preserve bytes already in the pipes at a timeout, bounded
+                    # and nonblocking even if an escaped descendant retains a fd.
+                    while True:
+                        try: block = os.read(pipe.fileno(),65536)
+                        except BlockingIOError: break
+                        if not block: break
+                        if not append(index,block):
+                            capture['output_limit_exceeded'] = True
+                            failure = failure or 'Rust output byte bound exceeded'
+                            break
+                    pipe.close()
+        data = []
+        for stream in streams:
+            stream.seek(0); data.append(stream.read())
+        log.write_bytes(data[0]+b'\n'+data[1])
+    for label,block in zip(('stdout','stderr'),data):
+        capture[label+'_bytes'] = len(block)
+        capture[label+'_sha256'] = hashlib.sha256(block).hexdigest()
+    try: output = [block.decode('utf-8') for block in data]
+    except UnicodeDecodeError:
+        failure = failure or 'Rust output is not UTF-8'
+        output = [block.decode('utf-8',errors='replace') for block in data]
+    capture['failure'] = failure
+    result = subprocess.CompletedProcess(argv,proc.returncode if proc is not None else 127,*output)
+    return result,round(time.monotonic()-started,3),capture
+
+
 def rust_identity():
     proc,_ = run(['rustc','+1.97.1','--version'],timeout=30)
     c.require(proc.returncode == 0 and proc.stdout.startswith('rustc 1.97.1 '), 'requires pinned rustc 1.97.1')
@@ -729,12 +827,15 @@ def build_inputs(args):
         if name == 'graph-product':
             graph.unlink(missing_ok=True)
             environment['PLURX_ASYNC_PRODUCT_BUNDLE'] = str(graph)
-        proc,seconds = run(argv,env=environment)
-        output = proc.stdout+'\n'+proc.stderr; log.write_text(output)
+        input_sources = case_sources(name,sources,out=out)
+        proc,seconds,capture = run_rust_case(argv,env=environment,log=log)
+        output = proc.stdout+'\n'+proc.stderr
         record = {'argv':argv,'exit_code':proc.returncode,'log_sha256':c.sha(log),'elapsed_seconds':seconds,
-                  'test_count':0,'accepted':False,'result_class':'failed_command','scope':case_scope(name),'input_sha256':case_sources(name,sources,out=out)}
+                  'test_count':0,'accepted':False,'result_class':'failed_command','scope':case_scope(name),'input_sha256':input_sources,
+                  'output_capture':capture}
         journal['cases'][name] = record; journal['complete'] = False
         refresh_graphs(journal,out,sources); write(journal_path,journal)
+        c.require(capture['failure'] is None,f"Rust command did not complete; no semantic result: {name}: {capture['failure']}")
         c.require(source_identity(False) == sources,'source changed during graph/regression execution')
         facts = case_evidence(name,output,proc.returncode)
         if name in {'control-C4','control-C9'}:

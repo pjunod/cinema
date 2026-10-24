@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
+import time
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -48,6 +50,108 @@ class OwnedScratch(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=self.scratch)
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
+
+
+class RustCommandDiagnostics(OwnedScratch):
+    def command(self, code):
+        return [sys.executable,'-u','-c',code]
+
+    def capture(self, code, **kwargs):
+        with patch.object(runner,'TASK_SCRATCH',self.directory/'scratch'):
+            return runner.run_rust_case(self.command(code),env=os.environ.copy(),
+              log=self.directory/'rust-driver-closure.log',**kwargs)
+
+    def test_runtime_diagnostic_unit_is_bound_once_before_product_closure(self):
+        name = 'store-product_runtime_diagnostic_records_are_bounded'
+        case = runner.PRODUCT_RUNTIME_TEST
+        self.assertEqual(runner.STORE_TESTS['core_tests'].count(case),1)
+        self.assertEqual(sum(case in argv for argv in runner.CASES.values()),1)
+        self.assertLess(list(runner.CASES).index(name),list(runner.CASES).index('graph-product'))
+        self.assertEqual(runner.CASES[name],runner.CORE+[case,'--','--exact','--nocapture'])
+        source = 'crates/plurx-core/src/store/async_driver_product.rs'
+        sources = {source:'a'*64,**{path:'b'*64 for path in adapter.INVOCATION_PATHS}}
+        self.assertEqual(runner.case_sources(name,sources,out=self.directory),sources)
+        output = f'test {case} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
+        self.assertEqual(runner.case_evidence(name,output,0),
+          {'test_count':1,'result_class':'product_runtime_diagnostic_records_are_bounded'})
+
+    def test_rust_capture_preserves_exact_json_stdout_and_separate_stderr(self):
+        stdout = '{"exact":[true,null,"é"]}\n'
+        stderr = 'diagnostic only\n'
+        proc,_,capture = self.capture(f'import sys; sys.stdout.write({stdout!r}); sys.stderr.write({stderr!r})')
+        self.assertEqual(proc.returncode,0)
+        self.assertEqual((proc.stdout,proc.stderr),(stdout,stderr))
+        self.assertIsNone(capture['failure'])
+        self.assertEqual(capture['stdout_bytes'],len(stdout.encode()))
+        self.assertEqual(capture['stderr_sha256'],hashlib.sha256(stderr.encode()).hexdigest())
+        self.assertEqual((self.directory/'rust-driver-closure.log').read_bytes(),
+          stdout.encode()+b'\n'+stderr.encode())
+        self.assertEqual(json.loads(proc.stdout),{'exact':[True,None,'é']})
+
+    def test_rust_timeout_retains_output_and_explicit_failed_identity_before_raise(self):
+        argv = self.command('import sys,time; print("partial stdout",flush=True); print("partial stderr",file=sys.stderr,flush=True); time.sleep(30)')
+        sources = {'scripts/check-async-driver-refinement':'a'*64}
+        tools = {'rustc':{'version':'fixture-pinned'},'cargo':{'version':'fixture-pinned'}}
+        real_capture = runner.run_rust_case
+        def short_capture(command, **kwargs):
+            return real_capture(command,timeout=0.3,**kwargs)
+        with patch.object(runner,'TASK_SCRATCH',self.directory/'scratch'), \
+             patch.object(runner,'source_identity',return_value=sources), \
+             patch.object(runner,'rust_identity',return_value=tools), \
+             patch.object(runner,'rendered_command',return_value=argv), \
+             patch.object(runner,'reusable_case',return_value=False), \
+             patch.object(runner,'case_sources',return_value=sources), \
+             patch.object(runner,'refresh_graphs'), \
+             patch.object(runner,'case_evidence') as parser, \
+             patch.object(runner,'run_rust_case',side_effect=short_capture):
+            with self.assertRaisesRegex(runner.c.Invalid,'no semantic result'):
+                runner.build_inputs(argparse.Namespace(output_dir=self.directory,case='driver-closure'))
+        parser.assert_not_called()
+        journal = json.loads((self.directory/'provenance.json').read_text())
+        row = journal['cases']['driver-closure']
+        self.assertFalse(journal['complete'])
+        self.assertEqual(journal['rust_toolchain'],tools)
+        self.assertEqual(journal['source_sha256'],sources)
+        self.assertEqual((row['argv'],row['input_sha256']),(argv,sources))
+        self.assertEqual((row['accepted'],row['test_count'],row['result_class']),
+          (False,0,'failed_command'))
+        self.assertTrue(row['output_capture']['timed_out'])
+        self.assertEqual(row['output_capture']['timeout_seconds'],0.3)
+        self.assertGreaterEqual(row['elapsed_seconds'],0.3)
+        self.assertLess(row['exit_code'],0)
+        log = self.directory/'rust-driver-closure.log'
+        self.assertEqual(row['log_sha256'],runner.c.sha(log))
+        self.assertIn(b'partial stdout',log.read_bytes())
+        self.assertIn(b'partial stderr',log.read_bytes())
+        self.assertEqual(journal['graphs'],{})
+
+    def test_rust_capture_output_bound_and_spawn_failure_cannot_pass(self):
+        with patch.object(runner,'rust_capture_limit',return_value=31):
+            proc,_,capture = self.capture('import sys; sys.stdout.write("x"*5000); sys.stdout.flush()')
+        self.assertTrue(capture['output_limit_exceeded'])
+        self.assertIsNotNone(capture['failure'])
+        self.assertLessEqual((self.directory/'rust-driver-closure.log').stat().st_size,32)
+        with patch.object(runner,'TASK_SCRATCH',self.directory/'scratch'):
+            proc,_,capture = runner.run_rust_case([str(self.directory/'absent-command')],
+              env=os.environ.copy(),log=self.directory/'rust-driver-closure.log')
+        self.assertEqual(proc.returncode,127)
+        self.assertIsNotNone(capture['failure'])
+
+    @unittest.skipUnless(os.name == 'posix','owned process sessions require POSIX')
+    def test_rust_timeout_terminates_owned_child_even_after_parent_exit(self):
+        code = ('import subprocess,sys; child=subprocess.Popen([sys.executable,"-c",'
+          '"import time; time.sleep(30)"]); print(child.pid,flush=True)')
+        proc,_,capture = self.capture(code,timeout=0.3)
+        self.assertTrue(capture['timed_out'])
+        child = int(proc.stdout.strip())
+        # A reparented dead child can briefly remain a zombie. It must never
+        # remain runnable after the entire owned session has been killed.
+        state = ''
+        for _ in range(20):
+            state = subprocess.run(['ps','-o','stat=','-p',str(child)],capture_output=True,text=True,check=False).stdout.strip()
+            if not state or state.startswith('Z'): break
+            time.sleep(0.025)
+        self.assertTrue(not state or state.startswith('Z'),f'owned child remains live: {state}')
 
 
 class InvocationTrust(OwnedScratch):

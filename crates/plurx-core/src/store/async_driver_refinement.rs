@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1741,8 +1742,22 @@ pub(super) struct OracleState {
 
 // A cache is bound to one migrated fixture/source/mutation identity for its
 // entire lifetime. Keys compare full canonical bytes and exact input values.
+// Host-only measurements: never exported as Store state, edge or identity.
+#[derive(Default)]
+struct OracleDiagnostics {
+    hits: usize,
+    misses: usize,
+    replay_depth_total: usize,
+    replay_depth_max: usize,
+    replay: Duration,
+    requested_apply: Duration,
+    requested_checks: Duration,
+    rollback: Duration,
+}
+
 pub(super) struct Oracle {
     fixture: Fixture,
+    diagnostics: OracleDiagnostics,
     pub(super) states: Vec<OracleState>,
     pub(super) edges: Vec<OracleEdge>,
     index: HashMap<String, StoreHandle>,
@@ -1768,6 +1783,7 @@ impl Oracle {
         let schema = schema_bindings(&fixture).await;
         Ok(Self {
             fixture,
+            diagnostics: OracleDiagnostics::default(),
             states: vec![OracleState {
                 canonical: key.clone(),
                 episode,
@@ -1921,6 +1937,14 @@ impl Oracle {
         sources
     }
 
+    pub(super) fn diagnostic_summary(&self) -> Value {
+        let d = &self.diagnostics;
+        json!({"hits":d.hits,"misses":d.misses,
+            "replay_depth_total":d.replay_depth_total,"replay_depth_max":d.replay_depth_max,
+            "replay_ms":d.replay.as_millis(),"requested_apply_ms":d.requested_apply.as_millis(),
+            "requested_checks_ms":d.requested_checks.as_millis(),"rollback_ms":d.rollback.as_millis()})
+    }
+
     pub(super) async fn apply(
         &mut self,
         handle: StoreHandle,
@@ -1964,9 +1988,17 @@ impl Oracle {
             return Err("OracleInputDomain: demanded input is outside exact D".into());
         }
         if let Some(edge) = self.cache.get(&(handle, input.clone())) {
+            self.diagnostics.hits = self.diagnostics.hits.saturating_add(1);
             return Ok(*edge);
         }
+        self.diagnostics.misses = self.diagnostics.misses.saturating_add(1);
+        let replay_started = Instant::now();
         let trace = self.trace(handle);
+        self.diagnostics.replay_depth_total = self
+            .diagnostics
+            .replay_depth_total
+            .saturating_add(trace.len());
+        self.diagnostics.replay_depth_max = self.diagnostics.replay_depth_max.max(trace.len());
         let fixture = &self.fixture;
         let parent = &self.states[handle];
         fixture
@@ -2005,8 +2037,19 @@ impl Oracle {
             if actions(fixture, &episode).await != parent.inputs {
                 return Err("OracleInputDomain: materialized D differs from stored D".into());
             }
+            self.diagnostics.replay = self
+                .diagnostics
+                .replay
+                .saturating_add(replay_started.elapsed());
             let before = parent.canonical.clone();
-            let applied = apply(fixture, &mut episode, input, true).await?;
+            let requested_started = Instant::now();
+            let applied = apply(fixture, &mut episode, input, true).await;
+            self.diagnostics.requested_apply = self
+                .diagnostics
+                .requested_apply
+                .saturating_add(requested_started.elapsed());
+            let applied = applied?;
+            let checks_started = Instant::now();
             let result = applied.result;
             let next = canonical(fixture, &episode).await;
             if matches!(
@@ -2027,6 +2070,10 @@ impl Oracle {
             let view = projection(fixture, &episode, self.states.len(), &next).await;
             let inputs = actions(fixture, &episode).await;
             let invariant = invariants(fixture, &episode).await;
+            self.diagnostics.requested_checks = self
+                .diagnostics
+                .requested_checks
+                .saturating_add(checks_started.elapsed());
             Ok((
                 next,
                 episode.clone(),
@@ -2040,6 +2087,7 @@ impl Oracle {
             ))
         }
         .await;
+        let rollback_started = Instant::now();
         // Every Result failure restores the real writer and checks Init; an
         // actual SQL panic also aborts the test and can never publish closure.
         fixture
@@ -2052,6 +2100,10 @@ impl Oracle {
         if canonical(fixture, &Episode::initial()).await != self.states[0].canonical {
             return Err("RollbackRoundTrip: materialization rollback changed Init".into());
         }
+        self.diagnostics.rollback = self
+            .diagnostics
+            .rollback
+            .saturating_add(rollback_started.elapsed());
         let (
             next,
             successor,

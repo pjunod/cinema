@@ -87,6 +87,15 @@ bound; a bounded exact-size check decides whether output fits. Exceeding any
 limit leaves the result incomplete. Feasibility under these unchanged limits
 is unknown.
 
+Rust case output is captured into bounded separate streams and retained in the
+existing `rust-*.log` members. On timeout, provenance records the exact failed
+command, elapsed time and partial-stream hashes with `accepted=false` before
+raising. The 1800-second deadline and artifact limits remain unchanged. Product
+stderr reports bounded host-only progress and cumulative phase timings; these
+counters are outside the product certificate and do not establish closure.
+The cheap diagnostic-bound unit runs before the product case, alongside the
+four codec units. Runtime attribution and full feasibility remain unmeasured.
+
 `tlc/receipt.json` separates complete positive configurations from named
 counterexamples. It binds generated tables, models, configurations, commands,
 tools, and input provenance. The qualification inventory and TLC receipt keep

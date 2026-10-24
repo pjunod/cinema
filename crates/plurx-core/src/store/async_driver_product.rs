@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::background_jobs::JOB_LEASE_MS;
 use plurx_worker_control::library_driver::{Driver as RealDriver, Reply as RealReply, WorkOutcome};
@@ -2603,12 +2604,25 @@ impl ProductState {
 struct WirePools {
     values: Vec<Value>,
     value_index: HashMap<String, usize>,
+    value_elapsed: Duration,
+    worker_elapsed: Duration,
+    key_elapsed: Duration,
     workers: Vec<Value>,
     worker_values: Vec<Worker>,
     worker_index: HashMap<String, usize>,
 }
 impl WirePools {
     fn value<T: Serialize>(&mut self, value: &T, budget: &mut Budget) -> Result<usize, String> {
+        let started = Instant::now();
+        let result = self.value_inner(value, budget);
+        self.value_elapsed = self.value_elapsed.saturating_add(started.elapsed());
+        result
+    }
+    fn value_inner<T: Serialize>(
+        &mut self,
+        value: &T,
+        budget: &mut Budget,
+    ) -> Result<usize, String> {
         let value = serde_json::to_value(value).map_err(|e| format!("ProductWire: {e}"))?;
         let key = canonical(&value);
         // HashMap's full String equality resolves collisions; SHA is not an identity key.
@@ -2622,6 +2636,12 @@ impl WirePools {
         Ok(id)
     }
     fn worker(&mut self, worker: &Worker, budget: &mut Budget) -> Result<usize, String> {
+        let started = Instant::now();
+        let result = self.worker_inner(worker, budget);
+        self.worker_elapsed = self.worker_elapsed.saturating_add(started.elapsed());
+        result
+    }
+    fn worker_inner(&mut self, worker: &Worker, budget: &mut Budget) -> Result<usize, String> {
         let logical = serde_json::to_value(worker).map_err(|e| format!("ProductWire: {e}"))?;
         require(
             logical.as_object().map(|v| v.len()) == Some(WORKER_COLUMNS.len()),
@@ -2659,6 +2679,17 @@ impl WirePools {
         Ok(id)
     }
     fn key(
+        &mut self,
+        context: usize,
+        value: &Valuation,
+        budget: &mut Budget,
+    ) -> Result<ProductKey, String> {
+        let started = Instant::now();
+        let result = self.key_inner(context, value, budget);
+        self.key_elapsed = self.key_elapsed.saturating_add(started.elapsed());
+        result
+    }
+    fn key_inner(
         &mut self,
         context: usize,
         value: &Valuation,
@@ -2718,6 +2749,7 @@ fn serialized_size<T: Serialize>(value: &T, limit: usize) -> Result<usize, Strin
 }
 #[derive(Default)]
 struct Budget {
+    charge_elapsed: Duration,
     bytes: usize,
     stores: usize,
     oracle_edges: usize,
@@ -2726,6 +2758,17 @@ struct Budget {
 }
 impl Budget {
     fn charge<T: Serialize>(
+        &mut self,
+        component: &'static str,
+        value: &T,
+        framing: usize,
+    ) -> Result<(), String> {
+        let started = Instant::now();
+        let result = self.charge_inner(component, value, framing);
+        self.charge_elapsed = self.charge_elapsed.saturating_add(started.elapsed());
+        result
+    }
+    fn charge_inner<T: Serialize>(
         &mut self,
         component: &'static str,
         value: &T,
@@ -2853,9 +2896,66 @@ fn cutoff(snapshot: Cutoff<'_>, reason: &str, action: Option<&Action>) {
         json!({"complete":false,"bound":reason.split(':').next().unwrap_or("ResourceError"),"reason":sql::diagnostic_action(encoded(&json!({"reason":reason}))),"context":context.id,"store_states":oracle.states.len(),"store_edges":oracle.edges.len(),"product_states":states.len(),"expanded":expanded,"pending":queue.len(),"serialized_output_estimate":budget.bytes,"attempted_wire_component_bytes":budget.component_bytes,"attempted_wire_component_records":budget.component_records,"predecessor":from,"predecessor_sha256":states[from].hash,"rejected_action":action.map(|a|sql::diagnostic_action(encoded(a))),"oracle_predecessor_sha256":digest(oracle.states[states[from].key.sql].canonical.as_bytes()),"oracle_successor_sha256":oracle.failure.as_ref().and_then(|v|v.get("successor_sha256")),"trace_tail":tail,"trace_complete":states[cursor].parent.is_none()})
     );
 }
-async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, String> {
+// Bounded host diagnostics only; never a field in valuations, pools or certificate.
+const DIAGNOSTIC_RECORDS: usize = 128;
+const DIAGNOSTIC_RECORD_BYTES: usize = 8192;
+struct RuntimeDiagnostics {
+    started: Instant,
+    last_progress: Instant,
+    records: usize,
+    candidates: Duration,
+    successors: Duration,
+    valuations: Duration,
+    hashing: Duration,
+}
+impl RuntimeDiagnostics {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            last_progress: now,
+            records: 0,
+            candidates: Duration::ZERO,
+            successors: Duration::ZERO,
+            valuations: Duration::ZERO,
+            hashing: Duration::ZERO,
+        }
+    }
+    fn record(&mut self, phase: &str, facts: Value) -> Option<String> {
+        if self.records >= DIAGNOSTIC_RECORDS {
+            return None;
+        }
+        self.records += 1;
+        let value =
+            json!({"phase":phase,"elapsed_ms":self.started.elapsed().as_millis(),"facts":facts});
+        let text = serde_json::to_string(&value).ok()?;
+        if text.len() + "async_product_runtime=".len() < DIAGNOSTIC_RECORD_BYTES {
+            Some(text)
+        } else {
+            Some(encoded(
+                &json!({"phase":"diagnostic_record_omitted","reason":"record_byte_bound"}),
+            ))
+        }
+    }
+    fn emit(&mut self, phase: &str, facts: Value) {
+        if let Some(text) = self.record(phase, facts) {
+            // A closed diagnostic pipe must not change exploration.
+            let _ = writeln!(std::io::stderr().lock(), "async_product_runtime={text}");
+        }
+    }
+}
+async fn close_product(
+    driver: &Driver,
+    driver_bytes: &[u8],
+    runtime: &mut RuntimeDiagnostics,
+) -> Result<Value, String> {
+    runtime.emit("oracle_initialization", json!({}));
     let contexts = contexts();
     let mut oracle = Oracle::new(None).await?;
+    runtime.emit(
+        "oracle_initialized",
+        json!({"store_states":oracle.states.len(),"store_edges":oracle.edges.len()}),
+    );
     let semantic = semantic_bindings()?;
     let mut budget = Budget::default();
     budget.charge(
@@ -2888,10 +2988,13 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
         let initial_key = pools.key(context_id, &initial, &mut budget)?;
         let initial_id = states.len();
         index.insert(initial_key, initial_id);
+        let hash_started = Instant::now();
+        let initial_hash = digest(canonical(&product_payload(context, &initial)).as_bytes());
+        runtime.hashing = runtime.hashing.saturating_add(hash_started.elapsed());
         states.push(ProductState {
             key: initial_key,
             real_drivers: initial.real_drivers,
-            hash: digest(canonical(&product_payload(context, &initial)).as_bytes()),
+            hash: initial_hash,
             parent: None,
         });
         budget.charge("product_states", &states[initial_id].record(), 1)?;
@@ -2901,8 +3004,32 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
         let mut expanded = 0;
         let edge_start = edges.len();
         let demand_start = demands_out.len();
+        macro_rules! progress {
+            ($phase:expr, $active:expr) => {
+                runtime.emit($phase, json!({"context":context.id,"expanded":expanded,
+                    "context_states":context_states.len(),"pending":queue.len(),"active":$active,
+                    "product_states":states.len(),"product_edges":edges.len(),"demands":demands_out.len(),
+                    "store_states":oracle.states.len(),"store_edges":oracle.edges.len(),
+                    "values":pools.values.len(),"workers":pools.workers.len(),
+                    "budget_bytes":budget.bytes,"component_bytes":budget.component_bytes,"component_records":budget.component_records,
+                    "oracle":oracle.diagnostic_summary(),"timing_scope":"cumulative_since_test_entry",
+                    "timing_ms":{"new_state_hash":runtime.hashing.as_millis(),"candidates":runtime.candidates.as_millis(),"successors":runtime.successors.as_millis(),
+                        "valuation_decode":runtime.valuations.as_millis(),"pool_value_inclusive":pools.value_elapsed.as_millis(),
+                        "pool_worker_inclusive":pools.worker_elapsed.as_millis(),"pool_key_inclusive":pools.key_elapsed.as_millis(),
+                        "record_accounting":budget.charge_elapsed.as_millis()}}));
+            };
+        }
+        progress!("context_enter", 0);
         while let Some(from) = queue.pop_front() {
+            if expanded == 0 || runtime.last_progress.elapsed() >= Duration::from_secs(30) {
+                progress!("expansion", 1);
+                runtime.last_progress = Instant::now();
+            }
+            let valuation_started = Instant::now();
             let value = states[from].valuation(&pools)?;
+            runtime.valuations = runtime
+                .valuations
+                .saturating_add(valuation_started.elapsed());
             macro_rules! checked_output {
                 ($operation:expr) => {
                     match $operation {
@@ -2932,6 +3059,7 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                 };
             }
             // Complete structural candidate collection precedes every oracle lookup.
+            let candidate_started = Instant::now();
             let candidates = enumerate_candidates(context, &value, driver, &oracle)?;
             let classified = candidates
                 .into_iter()
@@ -2940,6 +3068,9 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     Ok((spec, exclusion))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            runtime.candidates = runtime
+                .candidates
+                .saturating_add(candidate_started.elapsed());
             let mut demands = Vec::new();
             for (spec, exclusion) in classified {
                 let edge = if exclusion.is_none() {
@@ -3168,7 +3299,11 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     edge: Some(id),
                 });
             }
+            let successor_started = Instant::now();
             let steps = successors(context, &value, driver, &oracle, &demands)?;
+            runtime.successors = runtime
+                .successors
+                .saturating_add(successor_started.elapsed());
             let mut planned = Vec::new();
             let mut pairs = BTreeMap::<usize, BTreeSet<String>>::new();
             let mut branch_pairs = HashSet::new();
@@ -3178,10 +3313,13 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     *to
                 } else {
                     let id = states.len();
+                    let hash_started = Instant::now();
+                    let hash = digest(canonical(&product_payload(context, &step.value)).as_bytes());
+                    runtime.hashing = runtime.hashing.saturating_add(hash_started.elapsed());
                     let state = ProductState {
                         key,
                         real_drivers: step.value.real_drivers,
-                        hash: digest(canonical(&product_payload(context, &step.value)).as_bytes()),
+                        hash,
                         parent: Some((from, step.branch.clone())),
                     };
                     charge_output!("product_states", &state.record());
@@ -3229,6 +3367,7 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
             enabled.push(row);
             expanded += 1;
         }
+        progress!("context_exit", 0);
         by_context.insert(context.id.into(),json!({"state_count":context_states.len(),"edge_count":edges.len()-edge_start,"demand_count":demands_out.len()-demand_start,"frontier_count":0}));
         descriptors.push(json!({"id":context.id,"model":"AsyncDriverRefinement","stable_success":context.stable,"mutation":context.mutation,"witness":false,"initial":initial_id,"states":context_states}));
     }
@@ -3238,6 +3377,9 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
     ] {
         descriptors.push(json!({"id":id,"model":"BoundaryControls","stable_success":false,"mutation":mutation,"witness":false,"initial":null,"states":[]}));
     }
+    runtime.emit("closure_complete", json!({"oracle":oracle.diagnostic_summary(),"product_states":states.len(),"product_edges":edges.len(),"demands":demands_out.len()}));
+    runtime.emit("assembly_start", json!({}));
+    let assembly_started = Instant::now();
     let coverage = json!({"complete":true,"no_skipped_demands":true,"store_state_count":oracle.states.len(),"store_edge_count":oracle.edges.len(),"product_state_count":states.len(),"product_edge_count":edges.len(),"demand_count":demands_out.len(),"by_context":by_context});
     // Release traversal-only lookup/typed caches before assembling the wire.
     drop(index);
@@ -3265,7 +3407,17 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
     bundle["enabledness"] = Value::Array(enabled);
     bundle["coverage"] = coverage;
     drop(oracle);
+    runtime.emit(
+        "assembly_complete",
+        json!({"duration_ms":assembly_started.elapsed().as_millis()}),
+    );
+    runtime.emit("exact_size_start", json!({}));
+    let size_started = Instant::now();
     let exact_bytes = serialized_size(&bundle, BUNDLE_BYTES)?;
+    runtime.emit(
+        "exact_size_complete",
+        json!({"duration_ms":size_started.elapsed().as_millis(),"exact_bytes":exact_bytes}),
+    );
     require(
         exact_bytes <= budget.bytes,
         "ProductResourceEstimate: compact accounting omitted output bytes",
@@ -3294,13 +3446,18 @@ fn driver_input() -> Result<(Driver, Vec<u8>), String> {
 #[tokio::test]
 #[ignore = "requires source-bound driver input; run scripts/check-async-driver-refinement"]
 async fn actual_sql_two_worker_product_is_closed() {
+    let mut runtime = RuntimeDiagnostics::new();
+    runtime.emit("test_enter", json!({}));
     let (driver, bytes) = driver_input().expect("source-bound driver inventory");
-    let bundle = close_product(&driver, &bytes)
+    runtime.emit("driver_loaded", json!({"driver_bytes":bytes.len()}));
+    let bundle = close_product(&driver, &bytes, &mut runtime)
         .await
         .expect("exact selected two-worker product closure");
     let path =
         std::env::var("PLURX_ASYNC_PRODUCT_BUNDLE").expect("PLURX_ASYNC_PRODUCT_BUNDLE required");
     let path = Path::new(&path);
+    runtime.emit("write_start", json!({}));
+    let write_started = Instant::now();
     let partial = path.with_extension("json.partial");
     let file = std::fs::File::create(&partial).expect("create incomplete product output");
     let mut writer = ByteLimit {
@@ -3312,6 +3469,10 @@ async fn actual_sql_two_worker_product_is_closed() {
     writer.flush().expect("flush complete product bundle");
     drop(writer);
     std::fs::rename(&partial, path).expect("publish complete product bundle");
+    runtime.emit(
+        "write_complete",
+        json!({"duration_ms":write_started.elapsed().as_millis()}),
+    );
     eprintln!("async_product_coverage={}", bundle["coverage"]);
 }
 
@@ -4582,4 +4743,46 @@ async fn actual_queued_eligibility_progress_witness() {
         .await
         .expect("claim at stored eligibility");
     assert_eq!(oracle.edges[claim].result, "claimed");
+}
+
+#[test]
+fn product_runtime_diagnostic_records_are_bounded() {
+    let mut diagnostics = RuntimeDiagnostics::new();
+    let mut pools = WirePools::default();
+    let mut budget = Budget::default();
+    let value = wire_fixture_valuation();
+    let key_before = pools
+        .key(0, &value, &mut budget)
+        .expect("valid fixture key");
+    let values_before = pools.values.clone();
+    let workers_before = pools.workers.clone();
+    let bytes_before = budget.bytes;
+    let oversized = diagnostics
+        .record(
+            "fixture",
+            json!({"oversized":"x".repeat(DIAGNOSTIC_RECORD_BYTES)}),
+        )
+        .expect("bounded diagnostic record");
+    assert!(oversized.len() <= DIAGNOSTIC_RECORD_BYTES);
+    assert_eq!(
+        serde_json::from_str::<Value>(&oversized).expect("diagnostic JSON")["phase"],
+        "diagnostic_record_omitted"
+    );
+    for _ in 1..DIAGNOSTIC_RECORDS {
+        let text = diagnostics
+            .record("expansion", json!({"expanded":42}))
+            .expect("bounded diagnostic record");
+        assert!(text.len() <= DIAGNOSTIC_RECORD_BYTES);
+        let row: Value = serde_json::from_str(&text).expect("diagnostic JSON");
+        assert_eq!(row["facts"]["expanded"], 42);
+        assert!(row.get("accepted").is_none());
+    }
+    assert!(diagnostics.record("write_complete", json!({})).is_none());
+    let key_after = pools
+        .key(0, &value, &mut budget)
+        .expect("valid fixture key");
+    assert!(key_before == key_after);
+    assert_eq!(pools.values, values_before);
+    assert_eq!(pools.workers, workers_before);
+    assert_eq!(budget.bytes, bytes_before);
 }

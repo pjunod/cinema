@@ -2,6 +2,7 @@
   "status": "selected two-worker product and actual-SQL source boundaries defined; runtime execution deferred until final review; compiler results are recorded separately",
   "core_lib_feature": "hiqlite-contract-tests",
   "core_tests": [
+    "store::async_driver_product::product_runtime_diagnostic_records_are_bounded",
     "store::async_driver_product::product_wire_pools_preserve_exact_types_order_and_complex_worker_values",
     "store::async_driver_product::product_wire_compact_keys_are_bijective_with_full_logical_payloads",
     "store::async_driver_product::product_wire_byte_accounting_and_stream_writer_fail_closed",
