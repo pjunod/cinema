@@ -9,10 +9,10 @@ Evidence remains bound to its recorded source.
 
 | Phase | Retained evidence | Open for promotion |
 |---|---|---|
-| A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Native459 P7/P8 HDR1000 after reviewed repair91cbe is running; earlier media evidence retains its source. |
-| B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Eight new Rust460 cases passed on91cbe; native/current-candidate qualification remains; physical-device acceptance remains separate. |
-| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. Official CPU screen448 rendered48 4K RGB16 frames in21.6s,2.22fps. GPU456/461 produced48 4K RGB16 outputs with observed CUDA; warm startup.172s, steady10.32fps misses24fps. | Full CM4/L8 rendering and creative accuracy; tested CLI backend misses live throughput. No vendor contact authorized. |
-| F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Retain valid-L6 SDR evidence; new unknown-L6 source-minimum cases require focused verification. |
+| A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Native459 P7/P8 HDR1000 PASS on91cbe; earlier evidence keeps its source. Current-candidate promotion remains. |
+| B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Eight new Rust460 cases PASS on91cbe; physical-device acceptance remains separate. |
+| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. Official CPU screen448 rendered48 4K RGB16 frames in21.6s,2.22fps. GPU456/461 produced48 4K RGB16 outputs with observed CUDA; warm startup.172s, steady10.32fps misses24fps. | Full CM4/L8 accuracy needs a source-backed contract or supported real-time integration; tested CLI misses throughput. No vendor contact. |
+| F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Valid-L6 SDR passes retained; unknown-L6 source-minimum focused460 cases PASS. |
 
 Effort3cc264068 integrated#1216/#1269:78 regression fields, gate5889 8/8.
 On4499, compiler428 and fast lane5904 (9/9) passed, retaining2044 Python
@@ -30,8 +30,9 @@ probe identities. It leaves raw probe documents intact and resolves one target
 before policy freeze. Unknown-L6 SDR consumes only the mastering minimum;
 valid-L6 SDR and master remain unsampled. The same review398 closed both repair
 findings445. Source91cbe passed Rust1.97.1 fmt/check/Clippy/link/list457 and all
-eight focused460 cases once. Native459 now runs only the failed/unrun P7/P8
-HDR1000 cells; no current native HDR pass is implied.
+eight focused460 cases once. Native459 P7/P8 HDR1000 each pass once, with
+true queue/outer0,17983 valid L1/zero holes and four48-frame720p windows.
+Only failed/unrun HDR cells ran; earlier SDR passes remain attributed to4499.
 
 Root chose HDR/SDR delivery under standing authority. E stays unfinished,
 `creative_trims_applied:false` / “L1 only”; A–F is not complete. Retain passes at
