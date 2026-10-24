@@ -303,7 +303,7 @@ git diff --check
 [interlace]: INTERLACE-IN-THE-MEDIA-CONTRACT.md
 [interlace-fixtures]: ../../tests/playback/interlace-fixtures.sh
 [transcode]: ../../crates/plurx-core/src/transcode/mod.rs
-[decode-facts]: ../../crates/plurxd/src/decode_facts.rs
+[decode-facts]: ../../crates/plurx-core/src/process/fixed_probe.rs
 [live-surround]: LIVE-TV-DIRECT-PLAY-AND-SURROUND.md
 [geometry]: ../../crates/plurx-core/src/playback/geometry.rs
 [dv-findings]: DV-DELIVERY-FINDINGS.md

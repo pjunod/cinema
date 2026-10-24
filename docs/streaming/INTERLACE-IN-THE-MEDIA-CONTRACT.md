@@ -63,7 +63,7 @@ by anything below.
   in the raw `-show_streams` document (`raw_json`, kept as
   `files.probe_json`), so existing rows already hold it — the review's
   "no blanket rescan is needed" is correct.
-- [`decode_facts.rs:3343`](../../crates/plurxd/src/decode_facts.rs) — the
+- [`decode_facts.rs:3343`](../../crates/plurx-core/src/process/fixed_probe.rs) — the
   held-descriptor probe's list:
   `stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type`.
   No `field_order`. `CacheKey` (`:52-57`) has no probe-schema member.

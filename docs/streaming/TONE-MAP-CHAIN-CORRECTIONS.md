@@ -162,7 +162,7 @@ itself (Matroska `MasteringMetadata`, MP4 `mdcv`/`clli`) exposes it at
 stream level. So a backfill from `probe_json` alone recovers the peak only
 for container-tagged files; SEI-only files need one bounded frame probe.
 
-[`decode_facts.rs:3343`](../../crates/plurxd/src/decode_facts.rs) — the
+[`decode_facts.rs:3343`](../../crates/plurx-core/src/process/fixed_probe.rs) — the
 held-descriptor probe's `-show_entries` list names
 `stream_side_data=side_data_type` only; `DecodeFacts`
 ([`decode.rs:653-674`](../../crates/plurx-core/src/transcode/decode.rs))

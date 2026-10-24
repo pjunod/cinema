@@ -548,10 +548,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # Planning, the quality catalog and the HDR cadence projection all
         # describe FFmpeg's 0:v:0. The HDR projection is a third consumer of
         # the same facts rule, not a new selection or provenance identity.
-        daemon_facts = (ROOT / "crates/plurxd/src/decode_facts.rs").read_text(
+        daemon_facts = (ROOT / "crates/plurx-core/src/process/fixed_probe.rs").read_text(
             encoding="utf-8"
         )
-        self.assertIn("pub(crate) fn legacy_ordinal_facts(", daemon_facts)
+        self.assertIn("pub fn legacy_ordinal_facts(", daemon_facts)
         consumers = {
             # `planning_facts` is the one selection both the restricted plan and a
             # rolling start (`resolve_movie_plan_from_probe`) build from.

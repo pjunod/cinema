@@ -58,7 +58,7 @@ still be reconciled at implementation time.
 |---|---|
 | Index argv | [Core transcode](../../crates/plurx-core/src/transcode/mod.rs): `copy_index_pipe_args_with_input`, currently `-map 0:v:0? -an -sn` |
 | Pipe and completion | [fragindex.rs](../../crates/plurxd/src/fragindex.rs): `IndexPass`, `build_with_args`, `index_stream_with_progress` |
-| Selected-stream facts | [decode_facts.rs](../../crates/plurxd/src/decode_facts.rs): existing stream ordinal resolution; FFmpeg counts attached pictures in `v:0` |
+| Selected-stream facts | [decode_facts.rs](../../crates/plurx-core/src/process/fixed_probe.rs): existing stream ordinal resolution; FFmpeg counts attached pictures in `v:0` |
 | Held-source access | [fragment_index_cluster.rs](../../crates/plurxd/src/fragment_index_cluster.rs): attestation and file handles; [ffmpeg.rs](../../crates/plurxd/src/ffmpeg.rs): held-source probing and bounded child output |
 | Scheduling and result policy | [state.rs](../../crates/plurxd/src/state.rs): `index_file_budget`, `fragment_index_requested_video_options`, local and cluster index workers |
 | Shared contracts | [segplan.rs](../../crates/plurx-core/src/segplan.rs): `IndexRefusal`, `FragmentIndexOutcome`; [queue Store API](../../crates/plurx-core/src/store/fragment_index_cluster.rs): job/request identity and retry constants |

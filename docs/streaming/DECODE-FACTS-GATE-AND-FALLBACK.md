@@ -39,7 +39,7 @@ the tree that sharpen it:
   provenance" is exactly right, and today the change is invisible.
 - The executed parser image is a **sealed memfd**
   (`memfd_create` + `F_SEAL_SEAL|SHRINK|GROW|WRITE`,
-  [`decode_facts.rs:2373-2388`](../../crates/plurxd/src/decode_facts.rs)),
+  [`decode_facts.rs:2373-2388`](../../crates/plurx-core/src/process/fixed_probe.rs)),
   and `build_digest` is computed from it at startup. A warm lookup's
   three full-content hashes therefore do not protect fact correctness
   (the image cannot change); they enforce a *policy* — refuse to keep
@@ -66,7 +66,7 @@ Re-verify at build time; lines from `88a3957a`.
 
 ### 2.1 Bounds and gates
 
-[`crates/plurxd/src/decode_facts.rs:24-43`](../../crates/plurxd/src/decode_facts.rs):
+[`crates/plurx-core/src/process/fixed_probe.rs:24-43`](../../crates/plurx-core/src/process/fixed_probe.rs):
 
 ```rust
 const MAX_PROBE_STDOUT_BYTES: usize = 256 * 1024;

@@ -156,7 +156,7 @@ class KnownRedContractTest(unittest.TestCase):
         # adds a loopback-only synthetic acceptance server. Bind their identities
         # and environment reasons rather than silently admitting unknown ignores.
         additional_fixture_reasons = {
-            "crates/plurxd/src/decode_facts/tests.rs::decode_facts::tests::" + name:
+            "crates/plurx-core/src/process/fixed_probe/tests.rs::process::fixed_probe::tests::" + name:
                 "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"
             for name in (
                 "namespace_probe_executes_bound_source_and_denies_secondary_images",

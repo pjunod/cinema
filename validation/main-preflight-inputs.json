@@ -1879,6 +1879,7 @@
         "crates/plurxd/src/transcode/rolling/retention.rs",
         "crates/plurxd/src/transcode/ladder.rs",
         "crates/plurxd/src/transcode/test_support.rs",
+        "crates/plurx-core/src/process/fixed_probe.rs",
         "crates/plurxd/src/decode_facts.rs"
       ],
       "reason": "Reviewed exact method read sites plus actual common setup closure."

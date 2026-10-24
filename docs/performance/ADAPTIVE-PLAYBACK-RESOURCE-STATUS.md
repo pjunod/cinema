@@ -1,43 +1,43 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete. Source checkpoint
-`a7dbfdab549549bd288a42ad33f0dd2167207dc9` includes direct-source admission,
-original positional jobs, finite final-owner settlement, Store losing-attempt
-closure and the typed current-schema admission fix. Bounded Linux restart
-recovery now closes exact daemon-local direct obligations only after native
-same-boot/PID-namespace exit proof, under the held installation lock. Source
-obligations close before their shared read domain; uncertain/non-direct holds
-remain unchanged. The user explicitly approved this bounded recovery change.
+`20cf2f48afb3c0a028e01691e11e7ffb2f4fa284` includes direct-source admission,
+finite final-owner settlement, bounded Linux direct restart recovery, a dormant
+worker owner with exact cleanup, advisory finite history and worker-incarnation
+snapshots. The existing descriptor-bound probe and GOP-aware copy parser now
+live in core; copy retirement retains the original reader task. These moves
+prepare custody integration and do not by themselves admit planning or copy.
 
 Exact committed Linux core+daemon all-target compilation, including cluster
-fixtures, passed with pinned Rust 1.97.1 in 192.266 seconds; source stable, log
-SHA-256 `50793751802732012a09f09ba972ab6652c624ed69fe342a5267e7568f9a1bdc`.
-The prior 716 check failed on four compiler issues; 21d failed on one missing
-private command arm. Those failures and their corrections remain recorded in
-the durable compiler evidence. These are compilation results only. All
-behavioral tests remain NOT RUN; strict Clippy and final review are pending.
+fixtures, passed with pinned Rust 1.97.1 in 221.382 seconds; source stable, log
+SHA-256 `61456b840e2579a7c8cd0c47d563b0fa0b695e9d80cd816d6ebf23b61aea61b0`.
+The host all-target check also passed in 91.809 seconds before the checkpoint.
+Earlier failed compiler attempts and their repairs remain in durable evidence.
+These are compilation results only. Behavioral tests remain NOT RUN; strict
+Clippy, final review and qualification are pending.
 
 **Owner:** direct Codex harness `/root`, sole integrator, committer and PR owner.
-GPT-6 Sol owns the bounded worker and pipeline integrations; GPT-6 Luna supplies
-mechanical helpers, snapshot compatibility and compiler repairs. Work stays on
-`effort/adaptive-playback-resources`, draft PR #1248. The former Hermes writer
-remains stopped and its heartbeat paused.
+Three GPT-6 Sol agents own planning/probe custody, copy publication and the
+worker protocol. GPT-6 Luna completed bounded compatibility/compiler work.
+Work stays on `effort/adaptive-playback-resources`, draft PR #1248. The former
+Hermes writer remains stopped and its heartbeat paused.
 
-**Current work:** additional source for a dormant exact-owner worker builder,
-charged worker-entry lifetime, finite advisory history diagnostics and worker
-incarnation snapshots is uncommitted and awaiting host recheck after two mechanical compiler fixes.
-The Store registry/endpoints and origin placement remain unfinished. The legacy
-encoding planner still opens/probes its source before finite reservation; that
-planning-stage ownership gap is explicit and is not covered by the dormant
-builder. Other copy/rolling pipelines still require their actual writer and
-scratch owners to enter the same accounting lifecycle.
+**Current work:** admit the source/FFprobe/FFmpeg planning stage before native
+acquisition; retain its original child, pipe and collection jobs through known
+closure, and keep resolved metadata charged through its actual aliases. Copy
+work adds exact mutable-playlist publication and its native sink. Worker work
+adds the fixed pending-owner registry and Store Prepare/Adopt/cancel/status
+protocol. These changes remain uncommitted and are outside the source pin above.
+Origin placement, remaining pipelines, live policy and operations are unfinished.
 
-All V1–V5 and R1/M0–M7 remain OPEN. Full selective recovery, remaining pipelines,
-live policy and operations integration remain incomplete. Final actual Fable 5.1
-adversarial review/fixes precede once-only affected behavioral qualification,
-fast lane and authorized merge. Obsolete recovered-cache eviction remains
-unimplemented after automatic approval review rejected that destructive change.
-No deployment or rejected destructive action has occurred.
+All V1–V5 and R1/M0–M7 remain OPEN. Final actual Fable 5.1 adversarial review and
+fixes precede once-only affected behavioral qualification, fast lane and the
+authorized merge. Bounded direct restart recovery has explicit user approval:
+closure requires the held installation lock and positive same-boot/PID-namespace
+old-daemon exit proof; uncertain cases retain their holds. Separate obsolete
+recovered-cache eviction remains unimplemented, awaiting user approval after
+automatic review rejected that cleanup. No deployment or rejected destructive
+action has occurred.
 
 Normative [plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md),
 [acceptance](ADAPTIVE-PLAYBACK-RESOURCE-ACCEPTANCE.md) and
