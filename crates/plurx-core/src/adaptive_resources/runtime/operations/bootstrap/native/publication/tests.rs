@@ -83,6 +83,7 @@ fn publication(io_uuid: Uuid, payload: Vec<u8>) -> Publication {
         join_id: id(),
         copy_id: id(),
         output: OutputKey::Init,
+        prior_playlist: None,
         logical_end,
         payload_capacity,
         content_binding: "fixture-only content binding".into(),
