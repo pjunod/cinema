@@ -1,7 +1,8 @@
 # Adaptive playback — finite delivery closure
 
 **Status:** open · implementation incomplete. Source checkpoint
-`b131d5b40c912b8f6190818d4dc1bc60fa96e6d2` includes direct-source admission,
+`40b17aee30d3d4e2c6b399e0bf61edb384a9171c` includes original background-job
+claim binding before source opens, direct-source admission,
 finite final-owner settlement, bounded Linux direct restart recovery, a dormant
 worker owner with exact cleanup, advisory finite history and worker-incarnation
 snapshots. The existing descriptor-bound probe and GOP-aware copy parser now
@@ -10,13 +11,11 @@ playlist revisions now bind the exact prior file and charge old/new overlap. The
 prepare custody integration and do not by themselves admit planning or copy.
 
 Exact committed Linux core+daemon all-target compilation, including cluster
-fixtures, passed with pinned Rust 1.97.1 in 192.398 seconds; source stable, log
-SHA-256 `83aa755a878f55672f4fc1ca13b6fc51c5cf0ee3427c81be2e61560a67063a8f`.
-The host all-target check also passed in 91.809 seconds before the checkpoint.
-A missing immutable-publication fixture field was repaired. The next two large
-test-target compiler processes were killed by the 8 GiB container limit; a
-one-job, 12 GiB retry passed on identical source. All attempts are preserved.
-These are compilation results only. Behavioral tests remain NOT RUN; strict
+fixtures, passed with pinned Rust 1.97.1 in 357.769 seconds; source stable, log
+SHA-256 `8142517da04e51dddd441c827a19cf4839c2769e16471df065f833f375064fb4`.
+This checkpoint contains the standalone durable-claim fix; it excludes the large
+uncommitted P/M, copy and static-output integration. Earlier compiler failures
+and successful receipts are retained. Behavioral tests remain NOT RUN; strict
 Clippy, final review and qualification are pending.
 
 **Owner:** direct Codex harness `/root`, sole integrator, committer and PR owner.
@@ -41,25 +40,37 @@ being implemented. The lifetime segment-name/index bound is distinct from the
 resident file/byte window; nominal segment duration does not prove either count.
 There is no completed or qualified new ordinary route in this dirty slice.
 
-A compile-only immutable snapshot, `3b69bc73e82fbe98161dd5d5bb4b317b633a77c5`,
-failed Linux core/daemon all-target checking in 43.101 seconds (log SHA-256
-`785941032e522973416199879b1538770262fc36add5d21e8558be6ce9cdd50d`).
-Five ordinary integration errors were repaired afterward. The deliberately
-unimplemented planning settlement method remains a compile blocker; current
-edits extend beyond that snapshot. A host all-target check passed earlier in
-109.896 seconds, without covering Linux-only code. Neither result qualifies
-the current source. Static API and functionality-map failures were repaired
-and their failed scopes passed; behavioral tests remain NOT RUN.
+The latest compile-only Linux integration snapshot,
+`4967d342ca3b49f7a68ab38fc1d438ad05b5ac53`, failed in 50.311 seconds (log
+SHA-256 `cf15c067c8f3f3d9cbeb69669b2779bc4061d90da16b1a6c6ec01e7e9001941b`).
+It reported five ordinary integration errors, repaired afterward, and four
+references to the deliberately unimplemented planning settlement method. The
+same archived source failed host checking in 162.741 seconds on a Linux-only
+field reference; that reference was also repaired afterward. Current source
+extends beyond both diagnostic snapshots and has no successful qualification.
+The failed static API and functionality-map scopes were repaired and passed.
 
-Native audit also found original partial-launch handles could be discarded,
-pipe/pidfd closure was implicit, and signal delivery could be mistaken for
-process-group exit. Their original-owner paths are being repaired before any
-settlement relies on them. Positive engine settlement and compact P-to-M book
-accounting remain unimplemented pending their separate explicit approvals after
-automatic review rejected those boundaries. Accepted client runway now clamps
-to verified contiguous production; trial readiness still refuses on incomplete
-all-owner inventory or unknown native bounds and cannot grant a trial. Other
-pipelines, live policy and operations remain open.
+Native failure paths now retain original probe/engine child, job, pipe, pidfd
+and image owners for cancellation-safe cleanup on existing maintenance. Positive
+root evidence requires actual group absence and checked original descriptor
+closure. FFmpeg planning now pins its main image across version/dependency
+observation and hashing; dynamic-library pathname observations remain weaker
+than proof of the actual loaded library set. These source changes are unrun.
+Rolling control retains its original actor task and joins after rich aliases
+drain. Its complete mailbox/command allocation profile remains unfinished.
+
+Static background output adds a separately counted bounded manifest and uses
+existing finite R-to-S custody and counted reads. Its selected manual software
+route and same-fence publication reconciliation are being integrated; automatic
+candidate and failure/unknown handoffs remain unfinished. No static pipeline is
+claimed accepted. Planning diagnostics expose retained owners and cleanup
+counts without presenting unavailable inventory as empty.
+
+Positive engine settlement and compact P-to-M book accounting remain
+unimplemented pending their separate explicit approvals after automatic review
+rejected those boundaries. Accepted client runway clamps to verified contiguous
+production, but incomplete all-owner inventory or unknown native bounds cannot
+authorize a trial. Other pipelines, live policy and operations remain open.
 
 All V1–V5 and R1/M0–M7 remain OPEN. Final actual Fable 5.1 adversarial review and
 fixes precede once-only affected behavioral qualification, fast lane and the
