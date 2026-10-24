@@ -2,7 +2,7 @@
 
 **Status:** built; source-bound focused client checks pass; physical-device acceptance remains open.
 
-Build: 273
+Build: 274
 Issue: #1216
 
 This source follow-up adds typed SDR display-target processing reports and
