@@ -21,6 +21,7 @@ pub mod auth;
 pub mod cluster;
 pub mod config;
 pub mod content_analysis;
+pub mod copy_segmenter;
 pub mod diagnostics;
 pub mod domain;
 pub mod dvr;

@@ -101,6 +101,7 @@ impl TranscodeManager {
             rolling_collection: None,
             rolling_artifact: Some(Arc::clone(&artifact)),
             copy_output_measurement: std::sync::Mutex::new(None),
+            copy_reader_task: Mutex::new(CopyReaderTask::default()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
             actor_prepublication_producer: Arc::new(AtomicBool::new(false)),

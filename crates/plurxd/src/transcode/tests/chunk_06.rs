@@ -385,6 +385,7 @@
             rolling_collection: None,
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
+        copy_reader_task: Mutex::new(CopyReaderTask::default()),
             actor_managed_response_publication: actor_managed_prepublication,
             actor_managed_prepublication_process: actor_managed_prepublication,
             actor_prepublication_producer: Arc::new(AtomicBool::new(actor_managed_prepublication)),

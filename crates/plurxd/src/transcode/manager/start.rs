@@ -1507,6 +1507,7 @@ impl TranscodeManager {
             rolling_collection,
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
+            copy_reader_task: Mutex::new(CopyReaderTask::default()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
             actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
@@ -2254,6 +2255,7 @@ impl TranscodeManager {
             rolling_collection,
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
+            copy_reader_task: Mutex::new(CopyReaderTask::default()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
             actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
@@ -2491,7 +2493,7 @@ impl TranscodeManager {
                 )
                 .with_starved_signal(Arc::clone(&self.scratch_starved))
             });
-            spawn_copy_reader_owner(
+            if let Err(reason) = spawn_copy_reader_owner(
                 Arc::clone(&session),
                 stdout,
                 dir.clone(),
@@ -2500,7 +2502,13 @@ impl TranscodeManager {
                 file.clone(),
                 video_options,
                 grants,
-            );
+            )
+            .await
+            {
+                fail_prepublication_transaction(&session, reason.clone()).await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
         }
         tracing::info!(
             target: "plurxd::transcode",

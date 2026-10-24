@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) enum CopyReaderTask {
+    #[default]
+    Empty,
+    Pending(tokio::task::JoinHandle<()>),
+    Joined,
+    Failed,
+}
+
 pub(super) struct Session {
     pub(super) dir: PathBuf,
     /// Process-local response incarnation. The bearer session id can be reused
@@ -15,6 +24,9 @@ pub(super) struct Session {
     pub(super) copy_output_measurement: std::sync::Mutex<
         Option<Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
     >,
+    /// The original copy stdout owner is installed before its task can poll.
+    /// Retirement joins this task, not just the scratch writer barrier.
+    pub(super) copy_reader_task: Mutex<CopyReaderTask>,
     /// True for every rolling generation whose response publication is
     /// admitted by the actor. Producer recovery may still remain compatibility
     /// owned; response ownership does not imply prepublication retry policy.
@@ -524,6 +536,33 @@ impl SessionHooks for SessionTestHooks {
 
     fn after_retention_batch(&self) -> crate::seam_hooks::HookFuture<'static> {
         self.retention_batch.hold()
+    }
+}
+
+impl Session {
+    /// Join the original registered copy stdout owner. A timed-out waiter
+    /// leaves its JoinHandle in this session for the same retirement owner to
+    /// retry; it never turns a writer counter into task-completion proof.
+    pub(super) async fn join_copy_reader_owner(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
+        let mut registered = self.copy_reader_task.lock().await;
+        match &mut *registered {
+            CopyReaderTask::Empty | CopyReaderTask::Joined => Ok(()),
+            CopyReaderTask::Failed => Err("copy reader task failed".to_owned()),
+            CopyReaderTask::Pending(task) => match tokio::time::timeout_at(deadline, task).await {
+                Ok(Ok(())) => {
+                    *registered = CopyReaderTask::Joined;
+                    Ok(())
+                }
+                Ok(Err(error)) => {
+                    *registered = CopyReaderTask::Failed;
+                    Err(format!("copy reader task join failed: {error}"))
+                }
+                Err(_) => Err("copy reader task join timed out".to_owned()),
+            },
+        }
     }
 }
 

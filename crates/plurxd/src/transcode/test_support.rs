@@ -732,6 +732,7 @@ fn test_session_with_optional_child(
         rolling_collection: None,
         rolling_artifact: None,
         copy_output_measurement: std::sync::Mutex::new(None),
+        copy_reader_task: Mutex::new(CopyReaderTask::default()),
         actor_managed_response_publication: false,
         actor_managed_prepublication_process: false,
         actor_prepublication_producer: Arc::new(AtomicBool::new(false)),

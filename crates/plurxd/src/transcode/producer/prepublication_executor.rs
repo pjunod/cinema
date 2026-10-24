@@ -582,7 +582,7 @@ async fn publish_copy_reader_outcome(
 }
 
 #[allow(clippy::too_many_arguments)] // one copy producer's worth of identity
-pub(super) fn spawn_copy_reader_owner(
+pub(super) async fn spawn_copy_reader_owner(
     session: Arc<Session>,
     stdout: tokio::process::ChildStdout,
     dir: PathBuf,
@@ -599,8 +599,18 @@ pub(super) fn spawn_copy_reader_owner(
     source: plurx_core::domain::MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
     grants: Option<crate::copyseg::WriteGrants>,
-) {
-    tokio::spawn(async move {
+) -> Result<(), String> {
+    let registry_owner = Arc::clone(&session);
+    let mut registered = registry_owner.copy_reader_task.lock().await;
+    if !matches!(&*registered, CopyReaderTask::Empty) {
+        return Err("copy reader already registered for this session".to_owned());
+    }
+    let (enter, admitted) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        // Registration of this original task precedes its first native read.
+        if admitted.await.is_err() {
+            return;
+        }
         // The outer owner retains the pipe until the actor has accepted the
         // typed reader fact. Structural `Unsupported` deliberately stops
         // reading early; dropping stdout before classification lets ffmpeg's
@@ -733,6 +743,12 @@ pub(super) fn spawn_copy_reader_owner(
         }
         drop(stdout);
     });
+    *registered = CopyReaderTask::Pending(task);
+    drop(registered);
+    enter
+        .send(())
+        .map_err(|_| "registered copy reader stopped before entry".to_owned())?;
+    Ok(())
 }
 
 /// Explicitly observational: these numbers are not an artifact/candidate

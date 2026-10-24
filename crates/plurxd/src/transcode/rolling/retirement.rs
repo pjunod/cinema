@@ -727,11 +727,20 @@ async fn own_prepublication_cleanup(
         // this lock would block the global reaper and every explicit stop.
         let cleanup = {
             let _transition = session.child_transition.lock().await;
-            let cleanup = terminate_current_prepublication_child(&session).await;
-            if cleanup.is_ok() {
-                finish_prepublication_cleanup_after_reap(&session).await;
-                session.prepublication_cleanup_active.store(false, Release);
+            terminate_current_prepublication_child(&session).await
+        };
+        let cleanup = if cleanup.is_ok() {
+            let deadline = tokio::time::Instant::now() + ROLLING_SCRATCH_WRITER_SETTLE;
+            match session.join_copy_reader_owner(deadline).await {
+                Ok(()) => {
+                    let _transition = session.child_transition.lock().await;
+                    finish_prepublication_cleanup_after_reap(&session).await;
+                    session.prepublication_cleanup_active.store(false, Release);
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
+        } else {
             cleanup
         };
         match cleanup {
@@ -911,6 +920,20 @@ async fn own_rolling_retirement(
         };
         match cleanup {
             Ok(()) => {
+                // The scratch writer barrier covers writes, while this joins
+                // the actual outer stdout owner and its retained pipe. A
+                // timeout leaves the same JoinHandle registered for retry.
+                let reader_deadline = tokio::time::Instant::now() + ROLLING_SCRATCH_WRITER_SETTLE;
+                if let Err(error) = session.join_copy_reader_owner(reader_deadline).await {
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        session = %session_log_id(&session_id),
+                        %error,
+                        "copy reader remains held during retirement"
+                    );
+                    tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+                    continue;
+                }
                 // The child is reaped, but a copy reader may still be
                 // draining its pipe. Fence new writers, wait for the ones
                 // already registered, then measure once and convert the
