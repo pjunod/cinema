@@ -25,7 +25,7 @@ remains stopped and its heartbeat paused.
 
 **Current work:** additional source for a dormant exact-owner worker builder,
 charged worker-entry lifetime, finite advisory history diagnostics and worker
-incarnation snapshots is uncommitted and undergoing integrated host compilation.
+incarnation snapshots is uncommitted and awaiting host recheck after two mechanical compiler fixes.
 The Store registry/endpoints and origin placement remain unfinished. The legacy
 encoding planner still opens/probes its source before finite reservation; that
 planning-stage ownership gap is explicit and is not covered by the dormant
