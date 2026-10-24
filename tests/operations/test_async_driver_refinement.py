@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import importlib.machinery
 import json
+import io
 import hashlib
 import re
 from pathlib import Path
@@ -300,13 +301,13 @@ class ProductCoverageContracts(unittest.TestCase):
             with self.subTest(status=status),self.assertRaises(checker.Invalid): checker.validate_source_boundaries(bad)
         with self.assertRaises(checker.Invalid): checker.validate_source_boundaries({**expected,'extra':{}})
         schema = checker.read_json(checker.PACKAGE/'product-schema.json')
-        self.assertEqual(schema['schema_version'],3)
+        self.assertEqual(schema['schema_version'],4)
         self.assertEqual(schema['source_boundaries'],expected)
 
     def test_wire_schema_and_semantic_source_drift_fail_closed(self):
         schema = checker.read_json(checker.PACKAGE/'product-schema.json')
         checker.validate_product_schema(schema)
-        for key,value in (('main_contexts',{}),('fair_families',[]),('resource_policy',{}),('store_state_additions',['raw'])):
+        for key,value in (('main_contexts',{}),('fair_families',[]),('resource_policy',{}),('store_state_additions',['raw']),('wire_columns',{}),('wire_value_ref_fields',{}),('wire_reference_pools',{}),('wire_nullable_reference_fields',{})):
             bad = copy.deepcopy(schema); bad[key] = value
             with self.subTest(field=key),self.assertRaisesRegex(checker.Invalid,'schema .* drift'):
                 checker.validate_product_schema(bad)
@@ -334,6 +335,193 @@ class ProductCoverageContracts(unittest.TestCase):
         bad = copy.deepcopy(s); bad['now'] = 1
         with self.assertRaisesRegex(checker.Invalid,'episode/projection disagreement'):
             checker.validate_raw_store(bad)
+
+
+def product_wire_fixture(states=None,edges=None,demands=None,enabledness=None):
+    """Hand-built schema4 parser fixture, never a generated/complete relation."""
+    states = copy.deepcopy(states if states is not None else [product_predecessor('base')])
+    contexts = [{'id':name} for name in dict.fromkeys(p['context'] for p in states)]
+    values,workers,value_ids,worker_ids = [],[],{},{}
+    def intern(value):
+        encoded = checker.canonical(value)
+        if encoded not in value_ids:
+            value_ids[encoded] = len(values);values.append(copy.deepcopy(value))
+        return value_ids[encoded]
+    def worker_ref(worker):
+        row = [intern(worker[field]) if field in checker.WORKER_VALUE_REFS else worker[field]
+            for field in checker.WORKER_COLUMNS]
+        encoded = checker.canonical(row)
+        if encoded not in worker_ids:
+            worker_ids[encoded] = len(workers);workers.append(row)
+        return worker_ids[encoded]
+    def context_ref(name): return next(i for i,c in enumerate(contexts) if c['id'] == name)
+    rows = []
+    for p in states:
+        encoded = checker.canonical(checker.product_payload(p))
+        rows.append([context_ref(p['context']),p['sql'],worker_ref(p['w'][0]),worker_ref(p['w'][1]),
+            intern(p['available']),intern(p['completed']),p['mono_now_ms'],intern(p['wall_anchors']),
+            intern(p['mono_anchors']),intern(p['claim_loss_keys']),hashlib.sha256(encoded.encode()).hexdigest()])
+    edge_rows = [[e['from'],e['to'],intern(e['branch']),e['oracle_edge'],e['resolution_edge'],
+        e['read_edge'],e['cleanup_edge'],intern(e['fair_actions'])] for e in edges or []]
+    demand_rows = [[context_ref(d['context']),d['from'],d['oracle_from'],intern(d['branch']),d['role'],
+        intern(d['input']),d['oracle_edge'],intern(d['exclusion'])] for d in demands or []]
+    enabled_rows = [[r['state'],intern(r['actions'])] for r in enabledness or []]
+    store = product_domain_fixture()
+    for job in store['jobs']: job.update(active=False,reservation_count=0)
+    raw = {'rows':{name:[] for name in checker.SNAPSHOT_TABLES},'episode':{
+        'now':store['now'],**store['budgets'],'tokens':store['captured_tokens'],'leases':store['captured_leases'],
+        'claim_snapshots':[]}}
+    raw['rows']['background_jobs'] = [['00000000-0000-4000-8000-000000000010',29999,30000]]
+    # Whitespace is intentional: identity hashes original canonical_json bytes.
+    text = json.dumps(raw,sort_keys=True,indent=1)
+    store.update(id=0,cutoffs=[],canonical_json=text,canonical_sha256=hashlib.sha256(text.encode()).hexdigest())
+    wire = {key:None for key in checker.PRODUCT_KEYS}
+    wire.update(schema_version=4,scope='selected_two_worker_product',value_pool=values,worker_pool=workers,
+        contexts=contexts,product_states=rows,product_edges=edge_rows,demands=demand_rows,enabledness=enabled_rows,
+        store={'initial':0,'states':[store],'edges':[]})
+    return wire
+
+
+class CompactProductWireContracts(unittest.TestCase):
+    """Lossless transport/helper fixtures; no SQL graph, staging or theorem claim."""
+    def test_compact_rows_roundtrip_exact_values_hashes_and_shared_workers(self):
+        p = product_predecessor('base');q = product_predecessor('stable');q['id'] = 1
+        for state in (p,q):
+            state['mono_now_ms'] = 29999;state['mono_anchors'] = [29999,30000]
+            state['w'][0]['ordinary']['payload'] = {'raw_id':'raw-job-α','truth':True,'integer':1,'none':None,
+                'historical_token':{'revision':1,'lease_expires_ms':30000}}
+        branch = {'family':'Reply','worker':0,'choice':{'lost':False}}
+        edge = dict(zip(('from','to','branch','oracle_edge','resolution_edge','read_edge','cleanup_edge','fair_actions'),
+            (0,1,branch,None,None,None,None,['Reply/0'])))
+        demand = {'context':'base','from':0,'oracle_from':0,'branch':branch,'role':'apply',
+            'input':{'op':'resolve','job':0,'token':0},'oracle_edge':None,'exclusion':None}
+        wire = product_wire_fixture([p,q],[edge],[demand],[{'state':0,'actions':['Reply/0']}])
+        logical = checker.decode_product(wire)
+        self.assertIsInstance(logical['product_states'],checker.LogicalRows)
+        for expected,actual in zip((p,q),logical['product_states']):
+            self.assertEqual(checker.canonical(checker.product_payload(actual)),checker.canonical(checker.product_payload(expected)))
+            self.assertEqual(actual['canonical_sha256'],hashlib.sha256(checker.canonical(checker.product_payload(expected)).encode()).hexdigest())
+        self.assertIs(logical['product_states'][0]['w'][0],logical['product_states'][1]['w'][0])
+        self.assertEqual(list(logical['product_edges']),[edge]);self.assertEqual(list(logical['demands']),[demand])
+        self.assertEqual(list(logical['enabledness']),[{'state':0,'actions':['Reply/0']}])
+        with self.assertRaises(IndexError): logical['product_states'][-3]
+        self.assertNotIn('raw',wire['store']['states'][0])
+        checker.validate_raw_store(logical['store']['states'][0])
+        self.assertEqual(logical['store']['states'][0]['canonical_json'],wire['store']['states'][0]['canonical_json'])
+
+    def test_invalid_shapes_references_duplicates_and_legacy_are_refused(self):
+        branch = {'family':'Reply','worker':0,'choice':{'lost':False}}
+        edge = {'from':0,'to':0,'branch':branch,'oracle_edge':None,'resolution_edge':None,
+            'read_edge':None,'cleanup_edge':None,'fair_actions':[]}
+        demand = {'context':'base','from':0,'oracle_from':0,'branch':branch,'role':'apply',
+            'input':{'op':'resolve','job':0,'token':0},'oracle_edge':None,'exclusion':None}
+        baseline = product_wire_fixture(edges=[edge],demands=[demand],enabledness=[{'state':0,'actions':[]}])
+        changes = [lambda w:w.update(schema_version=3),lambda w:w['value_pool'].append(copy.deepcopy(w['value_pool'][0])),
+            lambda w:w['worker_pool'].append(copy.deepcopy(w['worker_pool'][0])),
+            lambda w:w['product_states'][0].pop(),lambda w:w['worker_pool'][0].pop(),
+            lambda w:w['product_states'].__setitem__(0,{}),lambda w:w['store']['states'][0].update(raw={})]
+        for cell in (False,True,-1,len(baseline['value_pool']),None,'0'):
+            changes.append(lambda w,cell=cell:w['product_states'][0].__setitem__(4,cell))
+        for cell in (False,-1,len(baseline['worker_pool']),None):
+            changes.append(lambda w,cell=cell:w['product_states'][0].__setitem__(2,cell))
+        for cell in (False,-1,len(baseline['contexts']),None):
+            changes.append(lambda w,cell=cell:w['product_states'][0].__setitem__(0,cell))
+        for name,ref_column in (('product_edges',2),('demands',3),('enabledness',1)):
+            changes.append(lambda w,name=name:w[name][0].pop())
+            changes.append(lambda w,name=name,ref_column=ref_column:w[name][0].__setitem__(ref_column,False))
+        changes.append(lambda w:w['worker_pool'][0].__setitem__(checker.WORKER_COLUMNS.index('ordinary'),None))
+        changes.append(lambda w:w['store']['states'][0].update(canonical_json='{"rows":{},"rows":{}}'))
+        for change in changes:
+            wire = copy.deepcopy(baseline);change(wire)
+            with self.subTest(change=change),self.assertRaises(checker.Invalid): checker.decode_product(wire)
+        # Python bool/int equality must never alias exact dictionary values.
+        wire = copy.deepcopy(baseline);wire['value_pool'].extend([True,1,False,0])
+        checker.decode_product(wire)
+        for text in ('{"a":0,"a":1}','{"n":NaN}','{"n":Infinity}'):
+            with self.subTest(text=text),self.assertRaises(checker.Invalid): checker.strict_json(text)
+
+    def test_mutated_shared_values_canonical_bytes_and_hashes_do_not_alias(self):
+        wire = product_wire_fixture();logical = checker.decode_product(wire);original = copy.deepcopy(logical['product_states'][0])
+        wire['value_pool'][wire['product_states'][0][4]][0] = False
+        changed = checker.decode_product(wire)['product_states'][0]
+        self.assertNotEqual(changed['canonical_sha256'],hashlib.sha256(checker.canonical(checker.product_payload(changed)).encode()).hexdigest())
+        index = checker.ExactPayloadIndex([original])
+        index[checker.canonical(checker.product_payload(original))] = 0
+        self.assertNotIn(checker.canonical(checker.product_payload(changed)),index)
+        store = copy.deepcopy(logical['store']['states'][0]);store['canonical_json'] += ' '
+        with self.assertRaisesRegex(checker.Invalid,'preimage hash'): checker.validate_raw_store(store)
+        store = copy.deepcopy(logical['store']['states'][0]);store['raw']['episode']['now'] += 1
+        with self.assertRaisesRegex(checker.Invalid,'canonical preimage'): checker.validate_raw_store(store)
+
+    def test_derived_store_raw_keeps_global_tlc_numeric_refusal(self):
+        wire = product_wire_fixture();wire['source_boundaries'] = copy.deepcopy(checker.SOURCE_BOUNDARIES)
+        store = wire['store']['states'][0];raw = json.loads(store['canonical_json'])
+        raw['rows']['background_jobs'][0][1] = 2**31
+        store['canonical_json'] = checker.canonical(raw)
+        store['canonical_sha256'] = hashlib.sha256(store['canonical_json'].encode()).hexdigest()
+        with self.assertRaisesRegex(checker.Invalid,'UnsupportedTlcNumericDomain: decoded Store canonical JSON'):
+            checker.validate_product(wire,fixture(),verify_sources=False)
+
+    def test_digest_collisions_compare_full_logical_preimages(self):
+        p = product_predecessor();q = copy.deepcopy(p);q['available'][0] = False;q['id'] = 1
+        encoded = [checker.canonical(checker.product_payload(x)) for x in (p,q)]
+        collision = mock.Mock();collision.digest.return_value = b'one bucket'
+        with mock.patch.object(checker.hashlib,'sha256',return_value=collision):
+            index = checker.ExactPayloadIndex([p,q])
+            index[encoded[0]] = 0;index[encoded[1]] = 1
+            self.assertEqual(index[encoded[0]],0);self.assertEqual(index[encoded[1]],1)
+            missing = copy.deepcopy(p);missing['mono_now_ms'] = 1
+            self.assertNotIn(checker.canonical(checker.product_payload(missing)),index)
+
+    def test_compact_full_pair_fairness_stutter_and_missing_candidates_fail_closed(self):
+        p = product_predecessor('base');q = copy.deepcopy(p);q['available'][0] = False;q['id'] = 1
+        branch = {'family':'ClaimApply','worker':0,'choice':{}}
+        candidates = [(branch,checker.product_payload(q),0,{'ClaimApply/0','ClaimWin/0'},None,None,None),
+            ({**branch,'family':'WorkSuccess'},checker.product_payload(q),1,{'ExternalReturn/0'},None,None,None),
+            ({**branch,'family':'RetireSample'},checker.product_payload(p),None,{'RetireLocal/0'},None,None,None)]
+        direct = {checker.canonical(checker.product_payload(x)):x['id'] for x in (p,q)}
+        expected = checker.product_pair_obligations(p,candidates,direct)
+        wire = product_wire_fixture([p,q],expected[0],[],[expected[1]])
+        wire['store']['edges'] = [{},{}]  # Parser-only identities for these two synthetic candidate annotations.
+        logical = checker.decode_product(wire);index = checker.ExactPayloadIndex(logical['product_states'])
+        for state in logical['product_states']: index[checker.canonical(checker.product_payload(state))] = state['id']
+        self.assertEqual(checker.product_pair_obligations(logical['product_states'][0],candidates,index),expected)
+        checker.require_exact_inventory(list(logical['product_edges']),expected[0],'pair coverage')
+        actions_ref = wire['product_edges'][0][7];wire['value_pool'][actions_ref].remove('ClaimWin/0')
+        with self.assertRaisesRegex(checker.Invalid,'complete independent enumeration'):
+            checker.require_exact_inventory(list(checker.decode_product(wire)['product_edges']),expected[0],'pair coverage')
+        for actual in (expected[0][:-1],expected[0]+[expected[0][0]]):
+            with self.assertRaises(checker.Invalid): checker.require_exact_inventory(actual,expected[0],'pair coverage')
+        missing = checker.ExactPayloadIndex(logical['product_states']);missing[checker.canonical(checker.product_payload(p))] = 0
+        with self.assertRaisesRegex(checker.Invalid,'MissingProductSuccessor'):
+            checker.product_pair_obligations(p,candidates,missing)
+
+    def test_streamed_tables_share_exact_key_and_enforce_utf8_byte_boundary(self):
+        wire = product_wire_fixture();wire['value_pool'].append({'unused certificate-only key':{}})
+        text = checker.tables(fixture(),wire)
+        self.assertNotIn('unused certificate-only key',text)
+        self.assertEqual(checker.decode_product(wire)['value_pool'][-1],{'unused certificate-only key':{}})
+        self.assertIn('GeneratedProductKey(p) == <<p.context,p.sql,p.workers,p.available,p.completed,p.mono_now_ms,p.wall_anchors,p.mono_anchors,p.claim_loss_keys>>',text)
+        self.assertIn('GeneratedProductKey(ProductStates[1]) :> 0',text)
+        self.assertIn('workers |-> <<GeneratedWorkers[r[3]+1],GeneratedWorkers[r[4]+1]>>',text)
+        self.assertNotIn('ProductKey(ProductStates[',text.replace('GeneratedProductKey(ProductStates[',''))
+        stream = io.StringIO()
+        self.assertEqual(checker.bounded_table_write(stream,iter(['α','x']),3),3)
+        self.assertEqual(stream.getvalue(),'αx')
+        stream = io.StringIO()
+        with self.assertRaisesRegex(checker.Invalid,'SourceTables byte bound'):
+            checker.bounded_table_write(stream,iter(['α','x']),2)
+        self.assertEqual(stream.getvalue(),'α')
+        # Scratch lives inside the workflow-owned test directory established by runner.
+        runner.TASK_SCRATCH.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runner.TASK_SCRATCH) as temp:
+            path = Path(temp)/'SourceTables.tla'
+            checker.write_tables(path,fixture(),wire,len(text.encode()))
+            self.assertEqual(path.read_text(),text)
+            with self.assertRaisesRegex(checker.Invalid,'SourceTables byte bound'):
+                checker.write_tables(path,fixture(),wire,len(text.encode())-1)
+            self.assertFalse(path.with_name(path.name+'.partial').exists())
+            self.assertEqual(path.read_text(),text)
 
 
 class ActualOrdinaryContracts(unittest.TestCase):

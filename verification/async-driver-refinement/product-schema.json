@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "scope": "selected_two_worker_product",
   "kind": "closed_wire_vocabulary_not_acceptance",
   "root_fields": [
@@ -18,7 +18,9 @@
     "semantic_bindings",
     "source_bindings",
     "source_boundaries",
-    "store"
+    "store",
+    "value_pool",
+    "worker_pool"
   ],
   "main_contexts": {
     "base": {
@@ -169,7 +171,6 @@
     "capacity"
   ],
   "store_state_additions": [
-    "raw",
     "canonical_json"
   ],
   "source_policy": "exact core and semantic registries; raw driver input digest; full Store canonical identity; independent semantics",
@@ -188,5 +189,170 @@
   "global_fair_actions": [
     "EligibilityAdvance/global",
     "ClaimRecoveryWake/global"
-  ]
+  ],
+  "wire_columns": {
+    "worker": [
+      "accepted",
+      "adapter_reply",
+      "admission",
+      "afterSample",
+      "attempt",
+      "call",
+      "cancelling",
+      "claim_issued_mono_ms",
+      "claim_recovery",
+      "claim_request",
+      "claim_request_now_ms",
+      "claim_snapshot",
+      "ctrl",
+      "driver_settlement",
+      "dropped",
+      "faultUsed",
+      "firstSample",
+      "inner",
+      "job",
+      "joined",
+      "lease",
+      "localToken",
+      "local_deadline_mono_ms",
+      "ordinary",
+      "original",
+      "outcome",
+      "queue_lost",
+      "readLock",
+      "reply",
+      "resolveSample",
+      "resolved",
+      "retire",
+      "sample",
+      "stage",
+      "started",
+      "token",
+      "workStarted"
+    ],
+    "product_state": [
+      "context_index",
+      "sql",
+      "worker0_ref",
+      "worker1_ref",
+      "available_ref",
+      "completed_ref",
+      "mono_now_ms",
+      "wall_anchors_ref",
+      "mono_anchors_ref",
+      "claim_loss_keys_ref",
+      "canonical_sha256"
+    ],
+    "product_edge": [
+      "from",
+      "to",
+      "branch_ref",
+      "oracle_edge",
+      "resolution_edge",
+      "read_edge",
+      "cleanup_edge",
+      "fair_actions_ref"
+    ],
+    "demand": [
+      "context_index",
+      "from",
+      "oracle_from",
+      "branch_ref",
+      "role",
+      "input_ref",
+      "oracle_edge",
+      "exclusion_ref"
+    ],
+    "enabledness": [
+      "state",
+      "actions_ref"
+    ]
+  },
+  "wire_value_ref_fields": {
+    "worker": [
+      "adapter_reply",
+      "claim_recovery",
+      "claim_request",
+      "claim_snapshot",
+      "driver_settlement",
+      "ordinary"
+    ],
+    "product_state": [
+      "available_ref",
+      "completed_ref",
+      "wall_anchors_ref",
+      "mono_anchors_ref",
+      "claim_loss_keys_ref"
+    ],
+    "product_edge": [
+      "branch_ref",
+      "fair_actions_ref"
+    ],
+    "demand": [
+      "branch_ref",
+      "input_ref",
+      "exclusion_ref"
+    ],
+    "enabledness": [
+      "actions_ref"
+    ]
+  },
+  "wire_reference_pools": {
+    "worker": {
+      "adapter_reply": "value_pool",
+      "claim_recovery": "value_pool",
+      "claim_request": "value_pool",
+      "claim_snapshot": "value_pool",
+      "driver_settlement": "value_pool",
+      "ordinary": "value_pool"
+    },
+    "product_state": {
+      "context_index": "contexts",
+      "sql": "store.states",
+      "worker0_ref": "worker_pool",
+      "worker1_ref": "worker_pool",
+      "available_ref": "value_pool",
+      "completed_ref": "value_pool",
+      "wall_anchors_ref": "value_pool",
+      "mono_anchors_ref": "value_pool",
+      "claim_loss_keys_ref": "value_pool"
+    },
+    "product_edge": {
+      "from": "product_states",
+      "to": "product_states",
+      "branch_ref": "value_pool",
+      "oracle_edge": "store.edges",
+      "resolution_edge": "store.edges",
+      "read_edge": "store.edges",
+      "cleanup_edge": "store.edges",
+      "fair_actions_ref": "value_pool"
+    },
+    "demand": {
+      "context_index": "contexts",
+      "from": "product_states",
+      "oracle_from": "store.states",
+      "branch_ref": "value_pool",
+      "input_ref": "value_pool",
+      "oracle_edge": "store.edges",
+      "exclusion_ref": "value_pool"
+    },
+    "enabledness": {
+      "state": "product_states",
+      "actions_ref": "value_pool"
+    }
+  },
+  "wire_nullable_reference_fields": {
+    "worker": [],
+    "product_state": [],
+    "product_edge": [
+      "oracle_edge",
+      "resolution_edge",
+      "read_edge",
+      "cleanup_edge"
+    ],
+    "demand": [
+      "oracle_edge"
+    ],
+    "enabledness": []
+  }
 }

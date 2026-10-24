@@ -760,13 +760,14 @@ def validate_provenance(path,driver_path,product_path):
     return p
 
 def prepare(args):
+    c.require(Path(args.product_bundle).stat().st_size <= c.BUNDLE_MAX_BYTES,'product bundle byte bound exceeded')
     driver,product = c.read_json(args.driver_graph),c.read_json(args.product_bundle)
     ranks = c.validate_driver(driver)
     facts = c.validate_product(product,driver,driver_sha256=c.sha(args.driver_graph))
     c.require(facts.get('source_boundaries') == PRODUCT_SOURCE_BOUNDARIES,
               'product source-boundary status mismatch')
     out = args.output_dir.resolve(); out.mkdir(parents=True,exist_ok=True)
-    (out/'SourceTables.tla').write_text(c.tables(driver,product))
+    c.write_tables(out/'SourceTables.tla',driver,product)
     for model in ('AsyncDriverRefinement.tla','BoundaryControls.tla'):
         shutil.copyfile(PACKAGE/model,out/model)
     for name in c.CONFIGS:
@@ -781,6 +782,10 @@ def prepare(args):
       'graph_sha256':{'driver':c.sha(args.driver_graph),'product':c.sha(args.product_bundle)},
       'source_sha256':source_identity(),'generated_table_sha256':c.sha(out/'SourceTables.tla')}
     write(out/'inventory.json',inventory)
+    retained = {path.resolve() for path in out.rglob('*') if path.is_file()}
+    retained.update(Path(path).resolve() for path in (args.driver_graph,args.product_bundle))
+    c.require(sum(path.stat().st_size for path in retained) <= c.ARTIFACT_MAX_BYTES,
+              'aggregate artifact byte bound exceeded')
     return out,inventory
 
 def formal_toolchain(cache):
