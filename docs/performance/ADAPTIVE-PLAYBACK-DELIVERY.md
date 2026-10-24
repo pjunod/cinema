@@ -25,18 +25,41 @@ worker protocol. GPT-6 Luna completed bounded compatibility/compiler work.
 Work stays on `effort/adaptive-playback-resources`, draft PR #1248. The former
 Hermes writer remains stopped and its heartbeat paused.
 
-**Current work:** P/M now has source-written pure atomic admission, original
-probe/engine task registration before first poll, measured catalog/report
-capacities, an application alias fence and cleanup on the existing maintenance
-cadence. The worker registry registers that original P owner before awaiting,
-retains exact post-R failure cleanup, and counts the request/snapshot/handoff.
-Copy adds owner-preserving playlist/segment responses and admitted allocation
-with original no-entry cleanup. These edits remain uncommitted and uncompiled;
-no new ordinary route is claimed complete. The positive engine settlement
-boundary awaits explicit user approval after automatic review rejection.
-An incomplete retained-book measurement was also rejected; it was not applied,
-and a fully compacted ownership shape is being designed before any P refund.
-Origin placement, remaining pipelines, live policy and operations are unfinished.
+**Current work:** the uncommitted P/M integration registers original native
+jobs before polling, retains the planning owner through fresh-document parsing
+and recipe validation, and keeps compact worker Close records charged through
+the durable Close. M4/M5 now carry the original claim and route incarnations
+separately, validate the exact preview, and reconcile ambiguous adoption with
+the same operation and deadline. A shared node-capacity observation retains its
+original worker across cancelled waits and refreshes capacity before P.
+
+The copy integration separates produced inventory from actor-selected served
+playlist revisions, retains charged response backing through HTTP, and uses
+original registered prefix-removal operations and producer backpressure. Its
+ordinary R/session bridge and complete application allocation profile are still
+being implemented. The lifetime segment-name/index bound is distinct from the
+resident file/byte window; nominal segment duration does not prove either count.
+There is no completed or qualified new ordinary route in this dirty slice.
+
+A compile-only immutable snapshot, `3b69bc73e82fbe98161dd5d5bb4b317b633a77c5`,
+failed Linux core/daemon all-target checking in 43.101 seconds (log SHA-256
+`785941032e522973416199879b1538770262fc36add5d21e8558be6ce9cdd50d`).
+Five ordinary integration errors were repaired afterward. The deliberately
+unimplemented planning settlement method remains a compile blocker; current
+edits extend beyond that snapshot. A host all-target check passed earlier in
+109.896 seconds, without covering Linux-only code. Neither result qualifies
+the current source. Static API and functionality-map failures were repaired
+and their failed scopes passed; behavioral tests remain NOT RUN.
+
+Native audit also found original partial-launch handles could be discarded,
+pipe/pidfd closure was implicit, and signal delivery could be mistaken for
+process-group exit. Their original-owner paths are being repaired before any
+settlement relies on them. Positive engine settlement and compact P-to-M book
+accounting remain unimplemented pending their separate explicit approvals after
+automatic review rejected those boundaries. Accepted client runway now clamps
+to verified contiguous production; trial readiness still refuses on incomplete
+all-owner inventory or unknown native bounds and cannot grant a trial. Other
+pipelines, live policy and operations remain open.
 
 All V1–V5 and R1/M0–M7 remain OPEN. Final actual Fable 5.1 adversarial review and
 fixes precede once-only affected behavioral qualification, fast lane and the
