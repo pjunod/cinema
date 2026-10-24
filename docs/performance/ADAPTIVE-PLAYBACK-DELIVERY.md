@@ -1,43 +1,48 @@
 # Adaptive playback — finite delivery closure
 
-**Status:** open · implementation incomplete. Published source checkpoints
-`269923bb7` and `ee8cc4674` add bounded client payload partitions and indexed
-custody history. The corrected source checkpoint `26633a1a9d75e2631d52cbb1799e40ee10c99115`
-passed pinned Rust 1.97.1 native Linux daemon all-target compilation, including
-cluster fixtures, in 231.509 seconds (archive SHA-256
-`64edbf1ce91945e20f35cc31c5c606961f2e639a8705bf646c4e1d0f6b088227`, log
-SHA-256 `7ecb186feef175f59dd8d7d97cf3b974e0d22414c8ae827f87b44a0a440d8a46`,
-task receipt `direct-linux-26633a1a9d75-RESULT.json`). This retry
-compiled the daemon and its core dependency; it was not a core test-target
-PASS. The earlier host all-target core+daemon+cluster-fixture compilation
-passed in 112.938 seconds (log SHA-256
-`652e173afdea2098959099136202d057432d664592079b11efa659730a68bbeb`); host
-checks exclude Linux-only test bodies. Authored behavioral tests have not run.
-Candidate S now retains
-the selected path's enforced immutable, client, response and native partitions
-after known retirement; strict S<R memory-return behavior remains unrun. All
-V1–V5 and R1/M0–M7 remain OPEN. Independent final Fable review, qualification,
-fast lane and merge have not run. Draft PR #1248 carries the live owner/state.
-Primary owner: direct Codex harness
-(`/root`; actual model unspecified), sole integration writer. Work remains on
-`effort/adaptive-playback-resources`, draft PR #1248. This is a delivery
-breakdown of the existing
-[approved M0–M7 plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md#10-delivery-sequence--integrate-one-effort-prove-each-seam),
-not new design, feature scope, a framework or another review gate.
-The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md) retains pins.
+**Status:** open · implementation incomplete. Source checkpoint
+`a7dbfdab549549bd288a42ad33f0dd2167207dc9` includes direct-source admission,
+original positional jobs, finite final-owner settlement, Store losing-attempt
+closure and the typed current-schema admission fix. Bounded Linux restart
+recovery now closes exact daemon-local direct obligations only after native
+same-boot/PID-namespace exit proof, under the held installation lock. Source
+obligations close before their shared read domain; uncertain/non-direct holds
+remain unchanged. The user explicitly approved this bounded recovery change.
 
-The current integration extends bounded reader/demand tables and transient
-control-clone reservations. HTTP terminal/error chunks retain their actual
-slot until the final `Bytes` alias drops; cancellation does not return credit
-early. Custody v6 streams the full operation history and validates indexed
-family/asset-operation membership while retaining bidirectional comparisons
-for old SQL rows; it adds no family/history count cap. Candidate S narrows its
-memory reservation only to enforced retained partitions after known retirement;
-the strict S<R behavior is still unrun. Direct-source adapter and root
-diagnostic-event edits remain uncommitted and are not covered by the native
-receipt above. Other pipelines, full memory limits, partial startup, cold
-cache/restart and client-state growth remain outside this selected path. No
-authored behavioral test has run.
+Exact committed Linux core+daemon all-target compilation, including cluster
+fixtures, passed with pinned Rust 1.97.1 in 192.266 seconds; source stable, log
+SHA-256 `50793751802732012a09f09ba972ab6652c624ed69fe342a5267e7568f9a1bdc`.
+The prior 716 check failed on four compiler issues; 21d failed on one missing
+private command arm. Those failures and their corrections remain recorded in
+the durable compiler evidence. These are compilation results only. All
+behavioral tests remain NOT RUN; strict Clippy and final review are pending.
+
+**Owner:** direct Codex harness `/root`, sole integrator, committer and PR owner.
+GPT-6 Sol owns the bounded worker and pipeline integrations; GPT-6 Luna supplies
+mechanical helpers, snapshot compatibility and compiler repairs. Work stays on
+`effort/adaptive-playback-resources`, draft PR #1248. The former Hermes writer
+remains stopped and its heartbeat paused.
+
+**Current work:** additional source for a dormant exact-owner worker builder,
+charged worker-entry lifetime, finite advisory history diagnostics and worker
+incarnation snapshots is uncommitted and undergoing integrated host compilation.
+The Store registry/endpoints and origin placement remain unfinished. The legacy
+encoding planner still opens/probes its source before finite reservation; that
+planning-stage ownership gap is explicit and is not covered by the dormant
+builder. Other copy/rolling pipelines still require their actual writer and
+scratch owners to enter the same accounting lifecycle.
+
+All V1–V5 and R1/M0–M7 remain OPEN. Full selective recovery, remaining pipelines,
+live policy and operations integration remain incomplete. Final actual Fable 5.1
+adversarial review/fixes precede once-only affected behavioral qualification,
+fast lane and authorized merge. Obsolete recovered-cache eviction remains
+unimplemented after automatic approval review rejected that destructive change.
+No deployment or rejected destructive action has occurred.
+
+The [approved plan](ADAPTIVE-PLAYBACK-RESOURCE-PLAN.md#10-delivery-sequence--integrate-one-effort-prove-each-seam)
+remains normative; this ledger tracks actual caller integration and remaining
+closure. The [source/evidence ledger](ADAPTIVE-PLAYBACK-RESOURCE-STATUS.md)
+retains source pins and historical receipt limits.
 
 ## Authoritative first ordinary VOD source checklist
 
