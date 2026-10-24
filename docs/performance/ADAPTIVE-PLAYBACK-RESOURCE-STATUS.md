@@ -1,18 +1,21 @@
 # Adaptive playback resources — implementation and evidence ledger
 
 **Status:** open · implementation incomplete. Source checkpoint
-`20cf2f48afb3c0a028e01691e11e7ffb2f4fa284` includes direct-source admission,
+`b131d5b40c912b8f6190818d4dc1bc60fa96e6d2` includes direct-source admission,
 finite final-owner settlement, bounded Linux direct restart recovery, a dormant
 worker owner with exact cleanup, advisory finite history and worker-incarnation
 snapshots. The existing descriptor-bound probe and GOP-aware copy parser now
-live in core; copy retirement retains the original reader task. These moves
+live in core. Copy retirement joins the original reader before admission release;
+playlist revisions now bind the exact prior file and charge old/new overlap. These changes
 prepare custody integration and do not by themselves admit planning or copy.
 
 Exact committed Linux core+daemon all-target compilation, including cluster
-fixtures, passed with pinned Rust 1.97.1 in 221.382 seconds; source stable, log
-SHA-256 `61456b840e2579a7c8cd0c47d563b0fa0b695e9d80cd816d6ebf23b61aea61b0`.
+fixtures, passed with pinned Rust 1.97.1 in 192.398 seconds; source stable, log
+SHA-256 `83aa755a878f55672f4fc1ca13b6fc51c5cf0ee3427c81be2e61560a67063a8f`.
 The host all-target check also passed in 91.809 seconds before the checkpoint.
-Earlier failed compiler attempts and their repairs remain in durable evidence.
+A missing immutable-publication fixture field was repaired. The next two large
+test-target compiler processes were killed by the 8 GiB container limit; a
+one-job, 12 GiB retry passed on identical source. All attempts are preserved.
 These are compilation results only. Behavioral tests remain NOT RUN; strict
 Clippy, final review and qualification are pending.
 
