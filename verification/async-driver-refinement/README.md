@@ -1,21 +1,29 @@
 # Async driver refinement — a selected two-worker product
 
-**Status: schema 4 wire implemented; feasibility and proof pending.** The
-wire preserves the logical product through lossless shared dictionaries and
-fixed Worker rows, but no completed schema 4 product or TLC receipt exists.
-Run 5911 stopped at the schema 3 conservative serialized-output estimate; that
-incomplete historical result is not a semantic counterexample or acceptance.
-The claim remains a complete finite product for two selected workers
-over the declared input domain, using a source-bound Store oracle. Ordinary
-settlement transfer is modeled from the selected production adapter and Store
-path, including payload, captured and request times, local guards, validation
-outcomes, and queued eligibility. The bundle and inventory mark this boundary
-`pending`; only a complete accepted receipt may report `closed_bounded` for
-the selected normal-clock product. This is not a full Rust/Tokio/cluster trace
-theorem.
+**Status: schema 5 literal agreed; implementation, feasibility, and proof
+pending.** The schema 5 wire contract preserves the complete logical schema 4
+product while factoring derived hashes, predecessor data, and exact Store
+canonical bytes. The integrated producer, decoder, TLA emitter, and SQL prefix
+materialization still require implementation, focused tests, and final source
+review. No complete schema 5 product or TLC receipt exists.
+
+The schema 4 diagnostic run on candidate `5127c4b` reached its checked resource
+cutoff: the conservative serialized estimate was 268,435,462 bytes, six bytes
+over the 268,435,456-byte bundle limit. The run is incomplete, not a semantic
+counterexample or acceptance. Run 5911's earlier schema 3 estimate was also
+incomplete historical evidence. The selected claim remains a complete finite
+product for two workers over the declared input domain, using a source-bound
+Store oracle. Ordinary settlement transfer is modeled from the selected
+production adapter and Store path, including payload, captured and request
+times, local guards, validation outcomes, and queued eligibility. The bundle
+and inventory mark this boundary `pending`; only a complete accepted receipt
+may report `closed_bounded` for the selected normal-clock product. This is not
+a full Rust/Tokio/cluster trace theorem.
 
 Companion to [CONTRACT.md](CONTRACT.md), which defines the claim, independent
-coverage checks, fairness, controls, and limits. The source schema is
+coverage checks, fairness, controls, and limits. Its [schema 5 wire section](CONTRACT.md#schema-5-factors-exact-wire-data-without-changing-the-logical-product)
+defines the agreed encoding and fragment checks; the [Store-oracle section](CONTRACT.md#the-store-oracle-reuses-only-verified-materialized-prefixes)
+defines the pending prefix-materialization obligation. The source schema is
 [product-schema.json](product-schema.json); [store-tests.json](store-tests.json)
 owns the exact Rust test registry. The checker binds the production driver
 graph, product schema, TLA modules, and eleven configurations before generating
@@ -79,9 +87,14 @@ raw logs, and graph identities. Rust closure is limited to the selected
 two-worker product and its explicitly enumerated demands. It does not claim
 arbitrary Store-D closure. The 20,000 cap counts distinct exact Store states
 across all seven main contexts, including capacity-only successors. There is
-no product-node cap. Schema 4's exact compact JSON bundle and generated
+no product-node cap. Schema 5's exact compact JSON bundle and generated
 `SourceTables.tla` member each remain bounded by 256 MiB; the total retained
-and extracted artifact remains bounded by 512 MiB. The conservative
+and extracted artifact remains bounded by 512 MiB. Each canonical fragment
+node also has a 268,435,456-byte decoded UTF-8 limit. That per-node limit is an
+operational decompression guard; it is not mathematically implied by the
+compact wire limit. Check it, with overflow-safe lengths, for every node
+including unused nodes. A violation rejects the certificate as incomplete and
+does not remove a state or narrow the input domain. The conservative
 serialized-component estimate is a byte-budget estimate, not an RSS or heap
 bound; a bounded exact-size check decides whether output fits. Exceeding any
 limit leaves the result incomplete. Feasibility under these unchanged limits
@@ -93,8 +106,14 @@ command, elapsed time and partial-stream hashes with `accepted=false` before
 raising. The 1800-second deadline and artifact limits remain unchanged. Product
 stderr reports bounded host-only progress and cumulative phase timings; these
 counters are outside the product certificate and do not establish closure.
-The cheap diagnostic-bound unit runs before the product case, alongside the
-four codec units. Runtime attribution and full feasibility remain unmeasured.
+The bounded diagnostic run measured host elapsed time only for its Mac arm64
+invocation; at the last periodic record, cumulative Oracle replay was 923.317
+seconds, pool-key construction 226.232 seconds, and new-state hashing 95.105
+seconds. Pool-worker and pool-value timers are nested inside pool-key timing;
+do not add them. The run stopped at the six-byte resource overage above. These
+measurements do not predict Linux throughput, and schema 5 fit and replay
+savings remain unknown. Focused schema 5 codec and prefix-reuse fixtures are
+required before another expensive product attempt.
 
 `tlc/receipt.json` separates complete positive configurations from named
 counterexamples. It binds generated tables, models, configurations, commands,

@@ -1,5 +1,5 @@
 {
-  "status": "selected two-worker product and actual-SQL source boundaries defined; runtime execution deferred until final review; compiler results are recorded separately",
+  "status": "schema 5 literal agreed for the selected two-worker product and actual-SQL source boundaries; implementation, runtime execution, feasibility, and proof remain pending final review; compiler results are recorded separately",
   "core_lib_feature": "hiqlite-contract-tests",
   "core_tests": [
     "store::async_driver_product::product_runtime_diagnostic_records_are_bounded",
@@ -7,6 +7,10 @@
     "store::async_driver_product::product_wire_compact_keys_are_bijective_with_full_logical_payloads",
     "store::async_driver_product::product_wire_byte_accounting_and_stream_writer_fail_closed",
     "store::async_driver_product::product_wire_store_export_omits_only_redundant_raw",
+    "store::async_driver_product::product_schema5_fragment_dag_preserves_original_canonical_bytes_and_bounds",
+    "store::async_driver_product::product_schema5_grouped_descriptors_and_derived_digests_preserve_full_values",
+    "store::async_driver_refinement::oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock",
+    "store::async_driver_refinement::oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback",
     "store::async_driver_refinement::two_node_same_root_claim_refusal_and_atomic_last_request_retirement",
     "store::async_driver_refinement::reply_loss_keeps_application_and_exact_claim_reconciliation_distinct",
     "store::async_driver_refinement::renewal_and_completion_application_before_reply_reconcile_authoritatively",

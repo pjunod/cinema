@@ -1,17 +1,19 @@
 # Contract — what the selected product can establish
 
 Companion to [README.md](README.md), which gives commands and receipt paths.
-**Status: schema 4 wire implemented; feasibility and qualification pending.**
-No completed schema 4 product or TLC receipt exists. The schema 3 run 5911
-stopped at its conservative serialized-output estimate; it is incomplete
-historical evidence, not a semantic counterexample or acceptance result. This
-claim replaces the unrestricted Store-D traversal with a complete finite
-product for the selected two-worker protocol. The narrowing is part of the
-claim, not a performance optimization. Ordinary settlement payload and time
-transfer is represented from the selected production adapter and Store path.
-Its bundle boundary remains `pending`; a completed accepted receipt may mark
-it `closed_bounded` only for the selected normal-clock product. No full
-Rust/Tokio/cluster trace theorem is claimed.
+**Status: schema 5 literal agreed; implementation, feasibility, and
+qualification pending.** No complete schema 5 product or TLC receipt exists.
+The schema 4 diagnostic run on candidate `5127c4b` stopped at the checked
+serialized-output estimate of 268,435,462 bytes, six bytes over the unchanged
+268,435,456-byte bundle limit. This incomplete result is not a semantic
+counterexample or acceptance; the earlier schema 3 run 5911 is also historical
+and incomplete. This claim replaces the unrestricted Store-D traversal with a
+complete finite product for the selected two-worker protocol. The narrowing is
+part of the claim, not a performance optimization. Ordinary settlement
+payload and time transfer is represented from the selected production adapter
+and Store path. Its bundle boundary remains `pending`; a completed accepted
+receipt may mark it `closed_bounded` only for the selected normal-clock
+product. No full Rust/Tokio/cluster trace theorem is claimed.
 
 ## D is a concrete bounded input protocol
 
@@ -24,9 +26,14 @@ exhaustion is outside D because the attempt limit is reached first. There
 are no new arrivals or cyclic demand. The 20,000 cap counts distinct exact
 Store identities across the union of all seven main contexts, including
 capacity-only oracle successors. Reaching it aborts generation. There is no
-product-node cap; the schema 4 compact product bundle and generated
+product-node cap; the schema 5 compact product bundle and generated
 `SourceTables.tla` member are each bounded by 256 MiB, and the total retained
-and extracted artifact remains bounded by 512 MiB. A byte or Store-state
+and extracted artifact remains bounded by 512 MiB. Each canonical-fragment
+node is additionally limited to 268,435,456 decoded UTF-8 bytes. This is an
+operational decompression guard, not a consequence mathematically implied by
+the compact wire limit. Checked decoded lengths apply before expansion and to
+unused nodes too. Exceeding the node guard rejects the whole certificate/run as
+incomplete; it does not remove a state or narrow D. A byte or Store-state
 resource failure cannot emit a complete relation. Feasibility under these
 unchanged limits remains unknown.
 
@@ -113,47 +120,135 @@ schema, both TLA modules, and all eleven configurations. Its raw Store rows
 and canonical full state identities preserve the Rust replay boundary. There
 is no inferred product-state ceiling from the 20,000 Store-state cap.
 
-## Schema 4 shares wire data without changing the logical product
+## Schema 5 factors exact wire data without changing the logical product
 
-Schema 4 stores repeated exact JSON values in `value_pool` and fixed-width,
-37-column Worker rows in `worker_pool`. The six Worker references are `claim_snapshot`,
-`claim_request`, `claim_recovery`, `driver_settlement`, `adapter_reply`, and
-`ordinary`; the value is still present when it is JSON `null`. Product-state,
-edge, demand, and enabledness rows use the columns and reference targets
-declared in `product-schema.json`. That registry defines the exact row order;
-it is checked against the reader's closed contract rather than used to alter
-semantics.
+Schema 5 changes representation, not the selected product. It preserves every
+schema 4 logical state, branch, demand, edge, ID, raw time, context, canonical
+digest, full-pair fairness set, and enabledness value. The decoder and
+independent checker must expose the same logical data and preserve the existing
+TLA transition relation and fairness formulas.
 
-Every reference is a zero-based integer of the required type and in range;
-booleans do not count as integers. The reader rejects wrong row widths or
-types, dangling references, duplicate pool values, and changed canonical
-bytes or hashes. Pool indexes are wire positions, not semantic identities.
-Interning compares complete canonical values, including JSON types and array
-order, and resolves hash collisions by comparing the full values. Rust keeps
-pools immutable and append-stable, uses compact references only for an exact
-state key, and retains the original `real_drivers` payload.
-`canonical_sha256` remains the hash of the old full logical product payload;
-Store identity still hashes its original `canonical_json` bytes.
+**Product states and digests.** `product_states` retains the first ten schema 4
+columns in their existing order: `context_index`, `sql`, `worker0_ref`,
+`worker1_ref`, `available_ref`, `completed_ref`, `mono_now_ms`,
+`wall_anchors_ref`, `mono_anchors_ref`, and `claim_loss_keys_ref`. The per-row
+`canonical_sha256` is omitted from this wire row only after the producer derives
+and verifies the original digest over the same full `PRODUCT_VALUE_FIELDS`
+payload, including context. The root field `product_digest_sequence_sha256` is
+lowercase SHA-256 over the concatenation, in positional state-ID order, of each
+original digest's 32 raw bytes. There are no separators. The consumer derives
+each original digest independently and checks the aggregate. This is a
+transport cross-check, not transition validation. State uniqueness and lookup
+continue to use full logical equality, never digest identity.
 
-The Python reader resolves shared entries lazily as independent checks consume
-the logical values. Candidate generation, exact successor equality, demands,
-reachability, pair fairness, enabledness, and witness checks still operate on
-the complete decoded product. Generated `SourceTables.tla` reconstructs the
-same logical `ProductStates`, `ProductIndex`, `ProductEdges`, `ProductOutgoing`,
-and `ProductEnabled` values. It builds exact index keys from decoded states
-and shares repeated expressions; the schema change does not alter logical
-constants, `Next`, fairness, or the independent transition relation.
+**Edges, demands, and enabledness.** `product_edges` has exactly one source
+list per state. Each occurrence is `[to, edge_descriptor_ref]`; the descriptor
+contains, in order, `branch_ref`, `oracle_edge`, `resolution_edge`,
+`read_edge`, `cleanup_edge`, and `fair_actions_ref`. Flattening the source
+lists by state ID and then occurrence order preserves the old edge IDs and
+order. `demands` likewise has one list per source state, containing scalar
+references to `demand_descriptors` with fields `oracle_from`, `branch_ref`,
+`role`, `input_ref`, `oracle_edge`, and `exclusion_ref`. The source ID is the
+outer list index; context comes from that source state's exact context. The
+explicit `oracle_from` remains. Flattening preserves old demand IDs and order.
+`enabledness` contains one action-set `value_pool` reference per state.
 
-The 256 MiB product-bundle limit counts exact compact JSON bytes, including
-pools, references, framing, and metadata. The `SourceTables.tla` member has
-its own unchanged 256 MiB limit, and retained/extracted artifact bytes remain
-bounded by 512 MiB. Existing host-memory, JVM, and timeout limits also remain
-unchanged. Conservative serialized-component accounting is a byte estimate,
-not a claimed RSS or heap bound; a bounded exact serialization check decides
-whether the output fits. Run 5911's schema 3 estimate was 268,436,757 bytes
-against a 268,435,456-byte limit, with 74,293 product states, 26,397 expanded,
-and 47,895 pending. That cutoff is historical and incomplete, not a
-counterexample. Schema 4's fit and the proof remain pending.
+The `contexts` object retains all old metadata except its redundant `states`
+arrays. Logical membership is derived by filtering the complete ordered state
+list by exact `context_index`; boundary contexts remain empty and initial IDs
+remain explicit. Preserve edge and demand occurrences during decoding so the
+independent inventory can reject duplicates. Exact descriptor/value pool
+entries reject duplicates. Every reference has the required nonnegative integer
+type and range; booleans are not integers. Validate exact shapes, list lengths,
+nullable references, and numeric domains for unused pools and descriptors too.
+
+**Store rows and canonical fragments.** `store.states` keeps positional IDs
+and the agreed nine-field tuple:
+`now`, `jobs_ref`, `domain_ref`, `captured_tokens_ref`,
+`captured_leases_ref`, `budgets_ref`, `cutoffs_ref`, `canonical_sha256`, and
+`canonical_fragment_ref`. The projection references name whole exact values in
+the shared `value_pool`; they do not introduce nested representation refs.
+Each Store root still represents the exact original `canonical_json` bytes and
+its original Store hash.
+
+`canonical_fragments` is an acyclic ordered dictionary. A leaf is
+`["leaf", text]`, where `text` preserves an exact UTF-8 substring of the
+original canonical document; a concat node is `["concat", [earlier_refs...]]`.
+Leaves need not be balanced JSON values, but each leaf must contain complete
+JSON lexical tokens and JSON whitespace. Strings, numbers, and `true`, `false`,
+and `null` may not split across leaves. Do not split escape sequences or
+numbers. JSON whitespace is space, tab, CR, or LF, not arbitrary Unicode
+whitespace. Reject malformed token adjacency such as `00` or `truefalse`;
+scalar tokens must be separated by JSON whitespace or structural punctuation
+`[]{}:,`, both within each leaf and at every concat join. Check token syntax
+and boundaries for every node, including unused nodes, using recursively
+computed leading and trailing metadata without expanding the DAG. Fragment IDs must point backward;
+shapes, reference types, duplicate tagged nodes, empty leaves, concat nodes
+with at least two children, and checked decoded UTF-8 lengths are strict. Numeric tokens remain JSON integers
+inside the signed-32 TLC domain; fractional and exponent spellings are refused
+even when their mathematical value is integral.
+
+Before accepting each Store state, the producer reconstructs and compares its
+exact canonical bytes with the existing source value. The consumer streams
+fragment traversal, materializes at most the current canonical document, then
+strictly parses the complete root with duplicate-key refusal, checks its
+original byte/hash identity, and runs every existing projection, identity,
+numeric, input-domain, refusal, and invariant check. Shared Store projections
+must be whole exact values, including episode counters, token histories,
+snapshots, and captured requests; no field is discarded.
+
+The per-node 268,435,456-byte decoded limit is a separate operational
+decompression guard. It is not mathematically implied by the 256 MiB compact
+wire limit. A violation rejects the complete certificate/run as incomplete;
+it never removes a state or input or narrows D. Producer nodes are spans of a
+single original canonical document, not a concatenation of all Store documents.
+Existing 20,000 Store-state, 256 MiB bundle and `SourceTables.tla`, 512 MiB
+retained/extracted artifact, 1,800-second timeout, and host/JVM limits are
+unchanged. A conservative estimate is not RSS or heap; exact final bytes decide
+whether output fits. Feasibility remains unknown.
+
+**Python and TLA views.** Lazy logical views must preserve full-payload
+collision checks, per-predecessor expected inventories, reachability, and
+pair-fairness validation without allocating one Python object per expanded
+edge. The emitter shares `GeneratedProductEdgeFairness` and grouped
+`GeneratedProductEdgeRows`, then reconstructs the same logical `ProductEdges`,
+per-source `ProductOutgoing`, and `ProductEnabled` sets. Executable TLA modules,
+`Next`, and fairness formulas do not change. Compact text does not guarantee
+small TLC runtime values; inspect actual expression evaluation as well as
+member bytes. Splitting the bundle or TLA member cannot evade their individual
+256 MiB limits or the aggregate 512 MiB artifact limit.
+
+## The Store oracle reuses only verified materialized prefixes
+
+A private fixture connection may retain savepoints along the currently
+materialized original root trace. On a miss, find the longest common prefix
+with the demanded parent's original trace, roll back and release only deeper
+savepoints, restore the exact independently owned `Episode` saved at the
+prefix, and replay the missing suffix using the existing actual Store apply
+path. Keep each successfully checked prefix action under its own savepoint. The
+Rust builder reports a positive same-writer-connection audit; integrated
+source review and differential fixtures must still establish materialization
+equivalence before an expensive product attempt.
+Before the demanded operation, require the parent's full canonical bytes, exact
+domain inputs, and invariants to match. Run that operation under a child
+savepoint; retain all current result, projection, refusal, fence, and invariant
+checks; then restore and verify the parent. Existing exact `(StoreHandle,
+Action)` cache hits keep their existing meaning.
+
+Reused prefix checks are evidence for an unchanged private database snapshot;
+SQL operations and checks skipped by reusing that prefix did not execute again.
+The materialization-equivalence obligation must be reviewed and tested
+explicitly. The fixture must use the same private Store writer connection and
+that connection must not implicitly commit or release held savepoints. Never
+restore with handwritten table inserts, omit triggers or hidden database
+state, use a modeled operation, share the fixture with concurrent actors, or
+silently fall back after a rollback, savepoint, or prefix mismatch. Cleanup
+restores and verifies the original root after normal runs and paired
+mutations. Any restore failure invalidates the run. Preserve original
+first-parent traces, traversal order, Store IDs, all captured `Episode` fields,
+and each node's actual `real_drivers`; keep savepoints proportional to current
+trace depth, without capping the trace or retaining one database image per
+Store state. This design changes neither the public API nor the product domain.
 
 ## Initial claim recovery and timer service
 
