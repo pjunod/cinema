@@ -1,6 +1,6 @@
 # Apple runners — the M4 primary and M3 Max standby
 
-**Status:** live · **Updated:** 2026-09-30
+**Status:** live · **Updated:** 2026-10-23
 
 Companion to [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (what Apple
 CI verifies) and [RUNNER-DISK.md](RUNNER-DISK.md) (runner disk maintenance).
@@ -10,16 +10,17 @@ This document owns Apple runner preference, outage detection and installation.
 
 | Role | Forgejo runner | Host | Account | Toolchain |
 |---|---|---|---|---|
-| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a` |
-| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.0, `27A266a` |
+| Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a`; awaiting 27.1 upgrade |
+| Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.1, `27A9275` |
 
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.
-Forgejo matches labels; those last two labels describe the roles and do not
-make its scheduler prefer one runner. The
+Apple workflows additionally require `xcode-27.1`. Only the backup currently
+provides that label; the primary must complete its Xcode upgrade before it
+can receive the label and resume Apple jobs. Forgejo matches labels; the role
+labels do not make its scheduler prefer one runner. The
 [standby controller](../../deploy/apple-runner/plurx-apple-standby) enforces
-preference by starting the backup daemon only during an outage. Apple jobs
-continue to request the common label set.
+preference by starting the backup daemon only during an outage. Apple jobs request the common labels plus the exact toolchain label.
 
 The controller probes the primary over existing `pjunod` SSH access, with
 strict host-key verification and no interactive authentication. The
