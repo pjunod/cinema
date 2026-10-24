@@ -25,6 +25,21 @@ pub(crate) struct PreparedAttemptRendition {
     installed: bool,
 }
 
+/// The exact existing finite-closing owner, retained independently of the
+/// rich attempt entry. Store may record a losing attempt as closed only after
+/// this original owner reports a known native and journal close.
+#[cfg(target_os = "linux")]
+pub(crate) struct PreparedAttemptCleanup {
+    closing: Arc<FiniteClosingOwner>,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedAttemptCleanup {
+    pub(crate) fn known_closed(&self) -> bool {
+        self.closing.known_closed.load(Acquire)
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl PreparedAttemptRendition {
     pub(crate) fn key(&self) -> &str {
@@ -39,6 +54,19 @@ impl PreparedAttemptRendition {
 
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         self.key.capacity().checked_add(std::mem::size_of::<Self>())
+    }
+
+    /// The registered M4 task takes this one-shot fence before it keeps the
+    /// pending owner across peer replies. Its final Drop must follow the
+    /// actual charged registry entry and coordinator future, whether the
+    /// attempt is adopted or moved to the compact closing selector.
+    pub(crate) fn take_application_lease(
+        &mut self,
+    ) -> Result<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease, String>
+    {
+        self.application_lease
+            .take()
+            .ok_or_else(|| "adaptive application lease was already transferred".into())
     }
 
     pub(crate) async fn prepare_worker_binding(
@@ -91,7 +119,9 @@ impl PreparedAttemptRendition {
         Ok(())
     }
 
-    fn launch_abandoned_cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+    fn launch_abandoned_cleanup(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Arc<FiniteClosingOwner>>> {
         if self.installed {
             return None;
         }
@@ -111,19 +141,29 @@ impl PreparedAttemptRendition {
         // The original charged owner is moved into a detached existing
         // finite-closing registration. Dropping the waiter cannot discard it.
         Some(tokio::spawn(async move {
-            shared
-                .retain_unattached_finite(&key, Some(Arc::clone(&rendition)), output, producer)
+            let closing = shared
+                .retain_unattached_finite_with_handle(
+                    &key,
+                    Some(Arc::clone(&rendition)),
+                    output,
+                    producer,
+                )
                 .await;
             drop(gate);
             drop(rendition);
             drop(lease);
+            closing
         }))
     }
 
-    pub(crate) async fn abandon(mut self) {
-        if let Some(task) = self.launch_abandoned_cleanup() {
-            let _ = task.await;
-        }
+    pub(crate) async fn abandon(mut self) -> Result<PreparedAttemptCleanup, String> {
+        let task = self
+            .launch_abandoned_cleanup()
+            .ok_or("adaptive attempt no longer owns a dormant rendition")?;
+        let closing = task
+            .await
+            .map_err(|error| format!("registering adaptive finite cleanup: {error}"))?;
+        Ok(PreparedAttemptCleanup { closing })
     }
 }
 
@@ -1710,6 +1750,19 @@ impl Shared {
         output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
         producer: Arc<super::finite_software::FiniteSoftwareProducer>,
     ) {
+        let _ = self
+            .retain_unattached_finite_with_handle(key, rich, output, producer)
+            .await;
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn retain_unattached_finite_with_handle(
+        self: &Arc<Shared>,
+        key: &str,
+        rich: Option<Arc<Rendition>>,
+        output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+        producer: Arc<super::finite_software::FiniteSoftwareProducer>,
+    ) -> Arc<FiniteClosingOwner> {
         let closing = Arc::new(FiniteClosingOwner {
             rich: Mutex::new(rich),
             output: Mutex::new(Some(output)),
@@ -1731,7 +1784,8 @@ impl Shared {
                 }
             }
         }
-        let _task = self.spawn_finite_closing(key.to_owned(), closing);
+        let _task = self.spawn_finite_closing(key.to_owned(), Arc::clone(&closing));
+        closing
     }
 
     #[cfg(target_os = "linux")]

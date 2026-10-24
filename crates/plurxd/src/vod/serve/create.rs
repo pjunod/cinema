@@ -23,6 +23,29 @@ impl PreparedAdaptiveRecipe {
     pub(crate) fn key(&self) -> &str {
         &self.key
     }
+
+    /// Serialize the locally selected route in the format all existing route
+    /// readers and recovery paths understand. This is a Store equality fact,
+    /// not an authority to acquire a source or prove physical closure.
+    pub(crate) fn selected_recipe_json(
+        &self,
+        envelope: &crate::media_sessions::RemoteStartRequest,
+    ) -> Result<String, String> {
+        if !envelope.is_valid()
+            || envelope.request.file_id != self.recipe.file.id
+            || envelope.source_size != self.recipe.file.size
+            || envelope.source_mtime != self.recipe.file.mtime
+            || !finite_software::selected_recipe(&self.recipe, false, false)
+            || rendition_key(&self.recipe, &self.identity) != self.key
+        {
+            return Err("adaptive selected route differs from its local finite recipe".into());
+        }
+        let json = serde_json::to_string(envelope)
+            .map_err(|error| format!("serializing adaptive selected route: {error}"))?;
+        plurx_core::store::adaptive_resource_attempts::selected_recipe_digest(&json)
+            .map_err(|error| format!("adaptive selected route exceeds Store bounds: {error}"))?;
+        Ok(json)
+    }
 }
 
 /// Private publication/storage identity; the canonical recipe remains the

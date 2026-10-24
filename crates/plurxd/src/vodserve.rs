@@ -1500,6 +1500,8 @@ pub(crate) mod finite_software;
 #[path = "vod/shared.rs"]
 mod shared;
 #[cfg(target_os = "linux")]
+pub(crate) use shared::PreparedAttemptCleanup;
+#[cfg(target_os = "linux")]
 pub(crate) use shared::PreparedAttemptRendition;
 // split: end vod-shared
 
