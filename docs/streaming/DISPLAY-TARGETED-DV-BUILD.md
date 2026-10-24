@@ -3,23 +3,21 @@
 **Status:** #1216 and batched #1269 merged into `effort/display-targeted-dv`; HDR/SDR promotion qualification and E creative accuracy remain open · **Updated:** 2026-10-23 · **Owner:** direct GPT/root (promotion #1271 and qualification) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
-The matrix is the current source-bound qualification record. Later commits do
-not transfer historical execution results to a new source head.
+Evidence remains bound to its recorded source.
 
 ## Current qualification — source-bound evidence through F
 
 | Phase | Retained evidence | Open for promotion |
 |---|---|---|
-| A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Current-source P7/P8 HDR1000 after the frame-MDCV repair; earlier media evidence retains its source. |
-| B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Repair-specific behavior and current-candidate qualification; physical-device acceptance remains separate. |
-| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. Official CPU screen448 rendered48 4K RGB16 frames in21.6s,2.22fps. A separate CUDA-capable node is available for offline reference/QC. | Full CM4/L8 rendering and creative accuracy; GPU feasibility is being checked. No vendor contact authorized. |
+| A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Native459 P7/P8 HDR1000 after reviewed repair91cbe is running; earlier media evidence retains its source. |
+| B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Eight new Rust460 cases passed on91cbe; native/current-candidate qualification remains; physical-device acceptance remains separate. |
+| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. Official CPU screen448 rendered48 4K RGB16 frames in21.6s,2.22fps. GPU456/461 produced48 4K RGB16 outputs with observed CUDA; warm startup.172s, steady10.32fps misses24fps. | Full CM4/L8 rendering and creative accuracy; tested CLI backend misses live throughput. No vendor contact authorized. |
 | F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Retain valid-L6 SDR evidence; new unknown-L6 source-minimum cases require focused verification. |
 
-A/#1216 and integration#1269 landed in the effort at3cc264068, with78 regression
-fields and all8 compile-gate jobs passing. Source4499 passed Rust1.97.1
-fmt/check/Clippy/link/list428 and all9 fast-lane5904 jobs. The latter retains2044
-Python positives; successful unchanged cases are not replayed. Helper404 retains
-its original a764 build attribution, with13 unchanged inputs adopted explicitly.
+Effort3cc264068 integrated#1216/#1269:78 regression fields, gate5889 8/8.
+On4499, compiler428 and fast lane5904 (9/9) passed, retaining2044 Python
+positives. Helper404 keeps its original a764 build attribution and13-input
+adoption. Successful unchanged cases are not replayed.
 
 Native418 rejected freshly published title facts because normalization omitted
 the app-owned enrichment. Repair4499 excludes precisely that typed key while
@@ -31,16 +29,16 @@ bounded selected-stream frame sidecar, sealed to the held descriptor, source and
 probe identities. It leaves raw probe documents intact and resolves one target
 before policy freeze. Unknown-L6 SDR consumes only the mastering minimum;
 valid-L6 SDR and master remain unsampled. The same review398 closed both repair
-findings445; compilation and focused execution are pending, not implied passes.
+findings445. Source91cbe passed Rust1.97.1 fmt/check/Clippy/link/list457 and all
+eight focused460 cases once. Native459 now runs only the failed/unrun P7/P8
+HDR1000 cells; no current native HDR pass is implied.
 
-Root chose HDR/SDR delivery under standing authority to use judgment while away.
-E remains unfinished, with truthful `creative_trims_applied:false` and “L1 only”;
-this does not complete A–F. Retain source-bound passes and retry only failed or
-materially invalidated cases. Main1eb117839 was an ancestor at the last check.
-Promotion-test policy reconciliation remains pending: user fast-lane/selective
-reruns versus full manual effort promotion. No merge or validator waiver is
-inferred. Physical-display and full-app FEL EOF acceptance remain separate;
-bounded source qualification proves neither.
+Root chose HDR/SDR delivery under standing authority. E stays unfinished,
+`creative_trims_applied:false` / “L1 only”; A–F is not complete. Retain passes at
+their sources; retry failed or materially invalidated cases only. Main1eb117839
+was an ancestor. User fast-lane/selective policy versus full manual promotion
+awaits reconciliation; no merge or validator waiver is inferred. Physical-display
+and full-app FEL EOF acceptance remain outside bounded excerpt qualification.
 
 ## PR B implementation checkpoint
 
