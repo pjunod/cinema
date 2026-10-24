@@ -6,6 +6,8 @@
 mod codec;
 pub(crate) mod codec_v2;
 #[cfg(target_os = "linux")]
+mod direct_exit;
+#[cfg(target_os = "linux")]
 pub(crate) mod recovery;
 mod schema;
 mod storage;
@@ -564,6 +566,11 @@ struct QueuedOperation {
     command: Command,
 }
 enum Command {
+    #[cfg(target_os = "linux")]
+    ClosePreviousDirect {
+        claim: direct_exit::Claim,
+        exit: recovery::PositivePreviousOwnerExit,
+    },
     #[cfg(target_os = "linux")]
     RecoverRetainedS {
         proof: crate::adaptive_resources::runtime::recovery::NativeRetainedSImportProof,

@@ -74,6 +74,8 @@ impl PendingOperation {
 fn obligations(command: &Command) -> Vec<Uuid> {
     match command {
         #[cfg(target_os = "linux")]
+        Command::ClosePreviousDirect { claim, .. } => vec![claim.obligation],
+        #[cfg(target_os = "linux")]
         Command::RecoverRetainedS { proof, .. } => vec![proof.obligation_id()],
         #[cfg(target_os = "linux")]
         Command::RecoverActiveR { proof } => vec![proof.obligation_id()],
@@ -107,6 +109,11 @@ impl CustodyJournal {
         transaction::validate_owner(&options.owner)?;
         let mut storage = storage::Storage::open(&options)?;
         let snapshot = transaction::snapshot(&storage.connection, &storage.witness)?;
+        // The installation lock remains held. Daemon-only direct descriptors
+        // and threads cannot outlive a positively exited owner. Close their
+        // original rows before restoring any current runtime accounting.
+        #[cfg(target_os = "linux")]
+        let snapshot = direct_exit::close_previous(&mut storage, &options, snapshot)?;
         #[cfg(target_os = "linux")]
         let recovery_candidates = snapshot
             .retained_assets
@@ -191,6 +198,7 @@ impl CustodyJournal {
             })?;
             recovery_candidates_r.push((claim, root_exit));
         }
+        #[cfg(not(target_os = "linux"))]
         transaction::register_owner(&mut storage.connection, &options.owner)?;
         storage.verify()?;
         let journal_id = storage.witness.journal_id;

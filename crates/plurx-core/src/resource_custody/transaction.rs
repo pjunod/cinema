@@ -1,5 +1,6 @@
 //! Atomic write-ahead transitions and strict full-accounting reconstruction.
 mod assets;
+mod direct_exit;
 mod inventory;
 mod membership;
 mod recovery;
@@ -935,6 +936,17 @@ pub(super) fn fingerprint(command: &Command) -> Result<String, CustodyError> {
             value
         }
         #[cfg(target_os = "linux")]
+        Command::ClosePreviousDirect { claim, exit } => serde_json::json!({
+            "close_previous_direct_v1": {
+                "obligation": claim.obligation,
+                "graph": claim.graph,
+                "owner": exit.owner_id(),
+                "closing_owner": exit.closing_owner_id(),
+                "prior_operation": claim.prior_operation,
+                "prior_sequence": claim.prior_sequence,
+            }
+        }),
+        #[cfg(target_os = "linux")]
         Command::RecoverRetainedS { proof, exit } => serde_json::json!({
             "recover_retained_s_v1": {
                 "journal": proof.journal_id(),
@@ -1070,6 +1082,10 @@ pub(super) fn execute(
                 change(&tx, &storage.witness, owner, key, mutation)?
             }
             #[cfg(target_os = "linux")]
+            Command::ClosePreviousDirect { claim, exit } => {
+                direct_exit::close(&tx, &storage.witness, owner, operation.id, claim, exit)?
+            }
+            #[cfg(target_os = "linux")]
             Command::RecoverRetainedS { proof, exit } => {
                 recovery::adopt(&tx, &storage.witness, owner, operation.id, proof, exit)?
             }
@@ -1116,7 +1132,9 @@ pub(super) fn execute(
     #[cfg(target_os = "linux")]
     if matches!(
         operation.command,
-        Command::RecoverRetainedS { .. } | Command::RecoverActiveR { .. }
+        Command::RecoverRetainedS { .. }
+            | Command::RecoverActiveR { .. }
+            | Command::ClosePreviousDirect { .. }
     ) {
         snapshot(&storage.connection, &storage.witness).map_err(|mut error| {
             error.certainty = CommitCertainty::Unknown;
@@ -1124,6 +1142,16 @@ pub(super) fn execute(
         })?;
     }
     match (&operation.command, disk_result) {
+        #[cfg(target_os = "linux")]
+        (Command::ClosePreviousDirect { claim, .. }, DiskResult::Changed(ack))
+            if ack.operation_id == operation.id
+                && ack.obligation_id == claim.obligation
+                && ack.graph_id == claim.graph
+                && ack.phase == Phase::Settled
+                && ack.sequence > claim.prior_sequence =>
+        {
+            Ok(OperationResult::Changed(ack))
+        }
         #[cfg(target_os = "linux")]
         (Command::RecoverRetainedS { proof, .. }, DiskResult::RecoveredSAdoption(ack))
             if ack.operation_id == operation.id

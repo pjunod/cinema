@@ -155,6 +155,7 @@ pub(super) fn load(
                 let operation = match record {
                     v2::SettlementDocument::NeverArmed(record) => record.operation_id,
                     v2::SettlementDocument::Physical(record) => record.operation_id,
+                    v2::SettlementDocument::DirectDaemonExit(record) => record.operation_id,
                 };
                 let recorded: Vec<u8> = connection.query_row(
                     "SELECT last_operation_id FROM obligations WHERE obligation_id=?1",
@@ -164,6 +165,10 @@ pub(super) fn load(
                 if operation.uuid() != codec::uuid_from_bytes(&recorded)? {
                     return Err(codec::invalid());
                 }
+            }
+            if let Some(v2::SettlementDocument::DirectDaemonExit(record)) = &settlement {
+                v2::validate_direct_daemon_exit(&manifest, record)?;
+                super::direct_exit::validate_audit(connection, id, &manifest, record)?;
             }
             if let Some(v2::SettlementDocument::NeverArmed(record)) = &settlement {
                 if record.owner_id != manifest.owner_id

@@ -261,3 +261,118 @@ async fn one_byte_chunks_consume_full_configured_slot_cardinality() {
         ResourceVector::default()
     );
 }
+
+/// Runs a real short-lived daemon fixture in this test binary. process::exit
+/// deliberately skips Rust Drop, leaving the journal's original holds while
+/// the kernel closes the actual source descriptor and read-thread domain.
+#[test]
+fn restart_closes_only_positive_old_direct_domains_and_validates_close_history() {
+    const CHILD_ROOT: &str = "PLURX_DIRECT_EXIT_FIXTURE_ROOT";
+    if let Some(path) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(path);
+        let runtime = actual_runtime(&root);
+        let source = root.join("source.bin");
+        std::fs::write(&source, b"actual old daemon descriptor").unwrap();
+        let (owner, _application) = runtime
+            .prepare_direct_source(local_request(source, 42, 1), deadline())
+            .expect("real admitted source and execution domain");
+        assert_eq!(runtime.recovered.obligations.len(), 0);
+        let executor = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        executor.block_on(async {
+            let owner = Arc::new(owner);
+            owner
+                .open(deadline())
+                .await
+                .expect("actual original source FD");
+            let gate = DirectSourceReadGate::new();
+            owner.install_read_gate(Arc::clone(&gate)).unwrap();
+            let body = owner.begin_body().unwrap();
+            let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+            let reader = Arc::clone(&owner);
+            let _waiter =
+                tokio::spawn(async move { reader.read_at(&body, 0, 1, permit, deadline()).await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !gate.entered() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("original registered native read is running at daemon exit");
+            std::process::exit(99);
+        });
+        unreachable!("fixture exit skips all native and application Drop");
+    }
+    for current_boot_known in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "adaptive_resources::runtime::direct_source::tests::restart_closes_only_positive_old_direct_domains_and_validates_close_history", "--nocapture"])
+            .env(CHILD_ROOT, root.path())
+            .status().expect("actual old daemon subprocess");
+        assert_eq!(status.code(), Some(99));
+        let mut current =
+            super::super::daemon_owner("fixture-node".into(), "fixture-cluster".into());
+        if !current_boot_known {
+            current.os_boot = crate::resource_custody::BootIdentity::Unknown {
+                reason: "fixture current boot observation unavailable".into(),
+            };
+        }
+        let (journal, recovered) = crate::resource_custody::CustodyJournal::open(
+            super::super::tests::options(root.path(), current, InstallationContext::Existing),
+        )
+        .expect("strict original journal reconstruction");
+        if !current_boot_known {
+            assert_eq!(
+                recovered.obligations.len(),
+                2,
+                "unknown boot retains source and CPU domain"
+            );
+            assert!(recovered.total.peak_memory_bytes > 0);
+            assert!(recovered.total.cpu_ns_per_second > 0);
+            drop(journal);
+            continue;
+        }
+        assert!(recovered.obligations.is_empty());
+        assert_eq!(recovered.total, ResourceVector::default());
+        drop(journal);
+        let db =
+            rusqlite::Connection::open(root.path().join("resource-custody/obligations.sqlite3"))
+                .unwrap();
+        let (obligation, encoded): (Vec<u8>, String) = db
+            .query_row(
+                "SELECT obligation_id,settlement_json FROM obligations ORDER BY sequence LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let mut audit: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let prior = audit["prior_sequence"].as_i64().unwrap();
+        audit["prior_sequence"] = serde_json::json!(prior + 1);
+        let corrupted = serde_json::to_string(&audit).unwrap();
+        db.execute(
+            "UPDATE obligations SET settlement_json=?2 WHERE obligation_id=?1",
+            rusqlite::params![obligation, corrupted],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE members SET proof_json=?2 WHERE obligation_id=?1",
+            rusqlite::params![obligation, corrupted],
+        )
+        .unwrap();
+        drop(db);
+        let mut next = super::super::daemon_owner("fixture-node".into(), "fixture-cluster".into());
+        next.owner_id = Uuid::new_v4();
+        assert!(
+            crate::resource_custody::CustodyJournal::open(super::super::tests::options(
+                root.path(),
+                next,
+                InstallationContext::Existing,
+            ))
+            .is_err(),
+            "rewritten close history cannot become a valid empty reconstruction"
+        );
+    }
+}

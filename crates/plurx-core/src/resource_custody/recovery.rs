@@ -77,6 +77,9 @@ impl PositivePreviousOwnerExit {
     pub(crate) fn owner_id(&self) -> Uuid {
         self.old_owner.owner_id
     }
+    pub(crate) fn closing_owner_id(&self) -> Uuid {
+        self.current_owner.owner_id
+    }
     pub(crate) fn matches(
         &self,
         recovered: &RecoverySnapshot,

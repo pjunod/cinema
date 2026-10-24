@@ -17,10 +17,69 @@ pub(crate) struct NeverArmed {
 pub(crate) enum NeverArmedKind {
     PreparedNeverArmed,
 }
+/// Audit of one daemon-only direct domain's extinction. The private native
+/// exit capability is consumed by the dedicated journal command; this record
+/// can never authorize a current-runtime close or accounting refund.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DirectDaemonExit {
+    pub version: u32,
+    pub kind: DirectDaemonExitKind,
+    pub owner_id: Id,
+    pub graph_id: Id,
+    pub operation_id: Id,
+    pub closing_owner_id: Id,
+    pub prior_operation_id: Id,
+    pub prior_sequence: i64,
+    pub prior_phase: crate::resource_custody::Phase,
+    pub member_id: Id,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DirectDaemonExitKind {
+    DirectDaemonDomainExtinctV1,
+}
+
+/// Only these immutable plans own exclusively daemon-local descriptors and
+/// threads. Other graphs can have surviving children and require their own
+/// positive native closure, even when the old daemon exited.
+pub(crate) fn direct_daemon_scope(manifest: &Manifest) -> Result<Option<Id>, CustodyError> {
+    validate_manifest(manifest)?;
+    match manifest.members.as_slice() {
+        [MemberPlan::DirectSourceV1 { source, slot }]
+            if slot.owned_by.is_none() && slot.depends_on.is_empty() =>
+        {
+            // validate_manifest checks the sole DaemonSourceCell copy, its
+            // original owner/graph/member, and absence of inherited copies.
+            Ok(Some(source.read_domain_obligation_id))
+        }
+        [MemberPlan::DirectReadDomainV1 { .. }] => Ok(None),
+        _ => Err(codec::invalid()),
+    }
+}
+
+pub(crate) fn validate_direct_daemon_exit(
+    manifest: &Manifest,
+    record: &DirectDaemonExit,
+) -> Result<(), CustodyError> {
+    direct_daemon_scope(manifest)?;
+    if record.version != 2
+        || record.owner_id != manifest.owner_id
+        || record.graph_id != manifest.graph_id
+        || record.closing_owner_id == record.owner_id
+        || record.prior_sequence <= 0
+        || manifest.members[0].member_id() != record.member_id.uuid()
+    {
+        return Err(codec::invalid());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SettlementDocument {
     Physical(Settlement),
     NeverArmed(NeverArmed),
+    DirectDaemonExit(DirectDaemonExit),
 }
 pub(crate) fn decode_settlement(json: &str) -> Result<SettlementDocument, CustodyError> {
     #[derive(Deserialize)]
@@ -29,6 +88,13 @@ pub(crate) fn decode_settlement(json: &str) -> Result<SettlementDocument, Custod
     }
     match codec::decode::<Discriminator>(json)?.kind.as_deref() {
         None => Ok(SettlementDocument::Physical(codec::decode(json)?)),
+        Some("direct_daemon_domain_extinct_v1") => {
+            let value: DirectDaemonExit = codec::decode(json)?;
+            if value.version != 2 {
+                return Err(codec::invalid());
+            }
+            Ok(SettlementDocument::DirectDaemonExit(value))
+        }
         Some("prepared_never_armed") => {
             let value: NeverArmed = codec::decode(json)?;
             if value.version != 2 {
