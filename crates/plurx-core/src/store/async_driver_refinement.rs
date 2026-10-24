@@ -641,6 +641,34 @@ pub(super) struct ClaimSnapshot {
     pub(super) token_capture: JobToken,
 }
 
+impl std::hash::Hash for ClaimSnapshot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.job.hash(state);
+        self.raw_job_id.hash(state);
+        self.failed_attempts.hash(state);
+        self.claim_id.hash(state);
+        let JobToken {
+            job_id,
+            node_id,
+            boot_id,
+            claim_id,
+            fence,
+            revision,
+            lease_expires_ms,
+        } = &self.token_capture;
+        (
+            job_id,
+            node_id,
+            boot_id,
+            claim_id,
+            fence,
+            revision,
+            lease_expires_ms,
+        )
+            .hash(state);
+    }
+}
+
 fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1749,6 +1777,8 @@ struct OracleDiagnostics {
     misses: usize,
     replay_depth_total: usize,
     replay_depth_max: usize,
+    replay_performed: usize,
+    replay_saved: usize,
     replay: Duration,
     requested_apply: Duration,
     requested_checks: Duration,
@@ -1758,6 +1788,9 @@ struct OracleDiagnostics {
 pub(super) struct Oracle {
     fixture: Fixture,
     diagnostics: OracleDiagnostics,
+    prefix: Vec<(Action, Episode)>,
+    root_savepoint: bool,
+    materialization_failed: bool,
     pub(super) states: Vec<OracleState>,
     pub(super) edges: Vec<OracleEdge>,
     index: HashMap<String, StoreHandle>,
@@ -1784,6 +1817,9 @@ impl Oracle {
         Ok(Self {
             fixture,
             diagnostics: OracleDiagnostics::default(),
+            prefix: Vec::new(),
+            root_savepoint: false,
+            materialization_failed: false,
             states: vec![OracleState {
                 canonical: key.clone(),
                 episode,
@@ -1804,9 +1840,7 @@ impl Oracle {
         &mut self,
         mutation: TriggerMutation,
     ) -> Result<(), String> {
-        if canonical(&self.fixture, &Episode::initial()).await != self.states[0].canonical {
-            return Err("PairedFixture: baseline did not restore seeded identity".into());
-        }
+        self.restore_root().await?;
         self.mutation = install_mutation(&self.fixture, mutation).await;
         self.schema = schema_bindings(&self.fixture).await;
         self.states.truncate(1);
@@ -1843,7 +1877,7 @@ impl Oracle {
     }
 
     pub(super) fn export_product_state(&self, handle: StoreHandle) -> Value {
-        // Schema4 derives raw by strictly parsing these exact canonical bytes.
+        // Logical export preserves original bytes; schema5 packs exact fragments.
         // The standalone Store export keeps its existing redundant raw view.
         let state = &self.states[handle];
         let mut view = state.view.clone();
@@ -1937,10 +1971,123 @@ impl Oracle {
         sources
     }
 
+    pub(super) async fn restore_root(&mut self) -> Result<(), String> {
+        if self.materialization_failed {
+            return Err("MaterializationPoisoned: prior restore failed".into());
+        }
+        let result = async {
+            if self.root_savepoint {
+                self.fixture
+                    .store
+                    .async_refinement_control(
+                        "ROLLBACK TO async_product_root; RELEASE async_product_root;".into(),
+                    )
+                    .await
+                    .map_err(|e| format!("RootRollback: {e}"))?;
+            }
+            if canonical(&self.fixture, &Episode::initial()).await != self.states[0].canonical
+                || actions(&self.fixture, &Episode::initial()).await != self.states[0].inputs
+            {
+                return Err("RootRollback: Init canonical/input mismatch".into());
+            }
+            invariants(&self.fixture, &Episode::initial()).await?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            self.materialization_failed = true;
+        } else {
+            self.prefix.clear();
+            self.root_savepoint = false;
+        }
+        result
+    }
+
+    async fn materialize(&mut self, trace: &[Action]) -> Result<Episode, String> {
+        if self.materialization_failed {
+            return Err("MaterializationPoisoned: prior failure".into());
+        }
+        let result = async {
+            if !self.root_savepoint {
+                self.fixture
+                    .store
+                    .async_refinement_control("SAVEPOINT async_product_root;".into())
+                    .await
+                    .map_err(|e| format!("RootSavepoint: {e}"))?;
+                self.root_savepoint = true;
+            }
+            let common = self
+                .prefix
+                .iter()
+                .zip(trace)
+                .take_while(|((old, _), new)| old == *new)
+                .count();
+            self.diagnostics.replay_saved = self.diagnostics.replay_saved.saturating_add(common);
+            if common < self.prefix.len() {
+                let point = if common == 0 {
+                    "async_product_root".into()
+                } else {
+                    format!("async_product_prefix_{common}")
+                };
+                // ROLLBACK TO retains the named checkpoint and discards every
+                // deeper checkpoint. Its owned Episode is restored separately.
+                self.fixture
+                    .store
+                    .async_refinement_control(format!("ROLLBACK TO {point};"))
+                    .await
+                    .map_err(|e| format!("PrefixRollback: {e}"))?;
+                self.prefix.truncate(common);
+            }
+            let mut episode = self
+                .prefix
+                .last()
+                .map(|(_, ep)| ep.clone())
+                .unwrap_or_else(Episode::initial);
+            for action in &trace[common..] {
+                let before = canonical(&self.fixture, &episode).await;
+                let result = apply(&self.fixture, &mut episode, action, true)
+                    .await?
+                    .result;
+                let after = canonical(&self.fixture, &episode).await;
+                if matches!(
+                    result.as_str(),
+                    "refused"
+                        | "cancelled"
+                        | "expired_or_pruned"
+                        | "held"
+                        | "validation_error_yield_time"
+                        | "validation_error_retry_time"
+                ) && before != after
+                {
+                    return Err(
+                        "FailedCasAtomicity: replay refusal changed full canonical state".into(),
+                    );
+                }
+                invariants(&self.fixture, &episode).await?;
+                let depth = self.prefix.len() + 1;
+                self.fixture
+                    .store
+                    .async_refinement_control(format!("SAVEPOINT async_product_prefix_{depth};"))
+                    .await
+                    .map_err(|e| format!("PrefixSavepoint: {e}"))?;
+                self.prefix.push((action.clone(), episode.clone()));
+                self.diagnostics.replay_performed =
+                    self.diagnostics.replay_performed.saturating_add(1);
+            }
+            Ok(episode)
+        }
+        .await;
+        if result.is_err() {
+            self.materialization_failed = true;
+        }
+        result
+    }
+
     pub(super) fn diagnostic_summary(&self) -> Value {
         let d = &self.diagnostics;
         json!({"hits":d.hits,"misses":d.misses,
             "replay_depth_total":d.replay_depth_total,"replay_depth_max":d.replay_depth_max,
+            "replay_performed":d.replay_performed,"replay_saved":d.replay_saved,
             "replay_ms":d.replay.as_millis(),"requested_apply_ms":d.requested_apply.as_millis(),
             "requested_checks_ms":d.requested_checks.as_millis(),"rollback_ms":d.rollback.as_millis()})
     }
@@ -1950,6 +2097,9 @@ impl Oracle {
         handle: StoreHandle,
         input: &Action,
     ) -> Result<usize, String> {
+        if self.materialization_failed {
+            return Err("MaterializationPoisoned: prior failure".into());
+        }
         let contextual = match input {
             Action::OrdinarySettle {
                 job,
@@ -1999,35 +2149,28 @@ impl Oracle {
             .replay_depth_total
             .saturating_add(trace.len());
         self.diagnostics.replay_depth_max = self.diagnostics.replay_depth_max.max(trace.len());
+        let mut episode = self.materialize(&trace).await?;
         let fixture = &self.fixture;
         let parent = &self.states[handle];
+        // A checked prefix is still required to match the complete demanded
+        // parent before any requested SQL operation can run.
+        if canonical(fixture, &episode).await != parent.canonical
+            || actions(fixture, &episode).await != parent.inputs
+        {
+            self.materialization_failed = true;
+            return Err("MaterializationRoundTrip: parent canonical/input mismatch".into());
+        }
+        invariants(fixture, &episode).await?;
         fixture
             .store
-            .async_refinement_control("SAVEPOINT async_product_materialize;".into())
+            .async_refinement_control("SAVEPOINT async_product_demand;".into())
             .await
-            .map_err(|error| format!("MaterializationSavepoint: {error}"))?;
-        let mut episode = Episode::initial();
+            .map_err(|e| {
+                self.materialization_failed = true;
+                format!("DemandSavepoint: {e}")
+            })?;
+        let parent_episode = episode.clone();
         let evaluated: Result<_, String> = async {
-            for action in &trace {
-                let before = canonical(fixture, &episode).await;
-                let result = apply(fixture, &mut episode, action, true).await?.result;
-                let after = canonical(fixture, &episode).await;
-                if matches!(
-                    result.as_str(),
-                    "refused"
-                        | "cancelled"
-                        | "expired_or_pruned"
-                        | "held"
-                        | "validation_error_yield_time"
-                        | "validation_error_retry_time"
-                ) && before != after
-                {
-                    return Err(
-                        "FailedCasAtomicity: replay refusal changed full canonical state".into(),
-                    );
-                }
-                invariants(fixture, &episode).await?;
-            }
             if canonical(fixture, &episode).await != parent.canonical {
                 return Err(
                     "MaterializationRoundTrip: replay changed canonical concrete rows/tokens"
@@ -2088,18 +2231,25 @@ impl Oracle {
         }
         .await;
         let rollback_started = Instant::now();
-        // Every Result failure restores the real writer and checks Init; an
+        // Every Result failure restores the real writer and checks its exact parent; an
         // actual SQL panic also aborts the test and can never publish closure.
         fixture
             .store
             .async_refinement_control(
-                "ROLLBACK TO async_product_materialize; RELEASE async_product_materialize;".into(),
+                "ROLLBACK TO async_product_demand; RELEASE async_product_demand;".into(),
             )
             .await
-            .map_err(|error| format!("RollbackRoundTrip: {error}"))?;
-        if canonical(fixture, &Episode::initial()).await != self.states[0].canonical {
-            return Err("RollbackRoundTrip: materialization rollback changed Init".into());
+            .map_err(|error| {
+                self.materialization_failed = true;
+                format!("RollbackRoundTrip: {error}")
+            })?;
+        if canonical(fixture, &parent_episode).await != parent.canonical
+            || actions(fixture, &parent_episode).await != parent.inputs
+        {
+            self.materialization_failed = true;
+            return Err("RollbackRoundTrip: demand rollback changed parent".into());
         }
+        invariants(fixture, &parent_episode).await?;
         self.diagnostics.rollback = self
             .diagnostics
             .rollback
@@ -2892,6 +3042,7 @@ async fn actual_initial_claim_recovery_queries_preserve_dispatch_and_read_rows()
         oracle.states[from].canonical,
         oracle.states[oracle.edges[fresh].to].canonical
     );
+    oracle.restore_root().await.expect("verified Init teardown");
 }
 
 #[test]
@@ -2948,4 +3099,126 @@ fn state_cap_diagnostic_is_bounded_and_marks_partial_trace() {
         oversized["encoded_bytes"].as_u64().expect("length") > CAP_DIAGNOSTIC_ACTION_BYTES as u64
     );
     assert_eq!(oversized["sha256"].as_str().expect("digest").len(), 64);
+}
+
+#[tokio::test]
+async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock() {
+    let mut oracle = Oracle::new(None)
+        .await
+        .expect("private actual SQLite fixture");
+    let claim = Action::Claim { job: 0, node: 0 };
+    let first = oracle.apply(0, &claim).await.expect("initial claim");
+    let claimed = oracle.edges[first].to;
+    assert_eq!(oracle.edges[first].result, "claimed");
+    let cases = [
+        (claimed, Action::ReadClaimJob { job: 0 }),
+        (claimed, Action::Claim { job: 0, node: 1 }),
+        (0, Action::Claim { job: 1, node: 0 }),
+        (claimed, Action::ClockAdvance { now: NOW + 1 }),
+        (claimed, Action::Resolve { job: 0, token: 0 }),
+    ];
+    let mut saw_refusal = false;
+    for (from, input) in cases {
+        oracle.restore_root().await.expect("baseline Init");
+        oracle.cache.remove(&(from, input.clone()));
+        let baseline = oracle
+            .apply(from, &input)
+            .await
+            .expect("full root replay transition");
+        let edge = serde_json::to_value(&oracle.edges[baseline]).expect("baseline exact edge");
+        let state = oracle.export_state(oracle.edges[baseline].to);
+        saw_refusal |= oracle.edges[baseline].result == "refused";
+        let performed = oracle.diagnostics.replay_performed;
+        oracle.cache.remove(&(from, input.clone()));
+        let reused = oracle
+            .apply(from, &input)
+            .await
+            .expect("retained prefix transition");
+        assert_eq!(
+            serde_json::to_value(&oracle.edges[reused]).expect("reused exact edge"),
+            edge
+        );
+        assert_eq!(oracle.export_state(oracle.edges[reused].to), state);
+        assert_eq!(
+            oracle.diagnostics.replay_performed, performed,
+            "same parent must not replay prefix"
+        );
+        assert_eq!(
+            canonical(&oracle.fixture, &oracle.states[from].episode).await,
+            oracle.states[from].canonical
+        );
+    }
+    assert!(saw_refusal);
+    assert!(oracle.diagnostics.replay_saved > 0);
+    // A deeper retained prefix must roll back to a nonzero LCP and restore
+    // the historical clock and captured-token Episode, not just durable rows.
+    let clock = oracle
+        .apply(claimed, &Action::ClockAdvance { now: NOW + 1 })
+        .await
+        .expect("clock state");
+    let clocked = oracle.edges[clock].to;
+    oracle
+        .apply(clocked, &Action::ReadClaimJob { job: 1 })
+        .await
+        .expect("deeper clock prefix");
+    assert_eq!(oracle.prefix.last().expect("deep prefix").1.now, NOW + 1);
+    oracle
+        .cache
+        .remove(&(claimed, Action::ReadClaimJob { job: 1 }));
+    oracle
+        .apply(claimed, &Action::ReadClaimJob { job: 1 })
+        .await
+        .expect("historical captured Episode");
+    assert_eq!(oracle.prefix.last().expect("historical prefix").1.now, NOW);
+    assert_eq!(
+        oracle.prefix.last().expect("historical prefix").1.tokens,
+        oracle.states[claimed].episode.tokens
+    );
+    oracle.cache.remove(&(0, Action::ReadClaimJob { job: 1 }));
+    oracle
+        .apply(0, &Action::ReadClaimJob { job: 1 })
+        .await
+        .expect("LCP rollback to root");
+    oracle
+        .restore_root()
+        .await
+        .expect("normal verified teardown");
+}
+
+#[tokio::test]
+async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
+    let mut oracle = Oracle::new(None).await.expect("actual SQLite fixture");
+    let init = oracle.states[0].canonical.clone();
+    let action = Action::Claim { job: 0, node: 0 };
+    let first = oracle.apply(0, &action).await.expect("claim");
+    let parent = oracle.edges[first].to;
+    oracle
+        .apply(parent, &Action::ReadClaimJob { job: 0 })
+        .await
+        .expect("retained nonroot prefix");
+    assert!(!oracle.prefix.is_empty());
+    oracle
+        .begin_paired_mutation(TriggerMutation::CompletionRetirement)
+        .await
+        .expect("verified Init before schema mutation");
+    assert!(oracle.prefix.is_empty());
+    assert!(!oracle.root_savepoint);
+    assert_eq!(oracle.states.len(), 1);
+    assert_eq!(canonical(&oracle.fixture, &Episode::initial()).await, init);
+    oracle
+        .apply(0, &action)
+        .await
+        .expect("actual operation after schema mutation");
+    oracle
+        .fixture
+        .store
+        .async_refinement_control("RELEASE async_product_root;".into())
+        .await
+        .expect("deliberate fixture savepoint loss");
+    assert!(oracle.restore_root().await.is_err());
+    assert!(oracle.materialization_failed);
+    assert!(
+        oracle.apply(0, &action).await.is_err(),
+        "a prior cached edge cannot hide failed restore"
+    );
 }
