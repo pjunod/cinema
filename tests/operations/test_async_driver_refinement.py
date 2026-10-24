@@ -384,6 +384,107 @@ def product_wire_fixture(states=None,edges=None,demands=None,enabledness=None):
 
 class CompactProductWireContracts(unittest.TestCase):
     """Lossless transport/helper fixtures; no SQL graph, staging or theorem claim."""
+    @staticmethod
+    def successor_rows(candidates):
+        return [(branch,checker.canonical(payload),edge,sorted(fair),resolution,read,cleanup)
+            for branch,payload,edge,fair,resolution,read,cleanup in candidates]
+
+    @staticmethod
+    def local_successors(state,driver,store):
+        # Synthetic annotations cover unrelated Store branches; these are local
+        # Next/codec fixtures, never actual-SQL graph or qualification evidence.
+        demands = checker.expected_product_demands(state,driver,store)
+        actions = {checker.canonical(d['input']):d['input'] for d in demands
+            if d['role'] == 'apply' and d['exclusion'] is None}
+        store['edges'] = [{'from':state['sql'],'to':state['sql'],'action':action,
+            'result':{'clock_advance':'advanced','acquire_domain':'acquired','remove_owner':'removed'}[action['op']]}
+            for action in actions.values()]
+        oracle = {(edge['from'],checker.canonical(edge['action'])):i for i,edge in enumerate(store['edges'])}
+        return checker.expected_product_successors(state,driver,store,oracle)
+
+    def test_equal_pooled_workers_claim_send_changes_only_selected_occurrence(self):
+        driver = fixture();store = {'states':[product_domain_fixture()],'edges':[]}
+        state = product_predecessor('base')
+        # Reach the reported shape through real independent Admission transitions:
+        # both workers select job0 before either ClaimApply.
+        for worker in (0,1):
+            choices = self.local_successors(state,driver,store)
+            selected = next(row for row in choices if row[0] ==
+                {'family':'Admission','worker':worker,'choice':{'job':0}})
+            state = {'id':0,**selected[1]}
+        tree = json.loads(checker.canonical(state))
+        self.assertEqual(tree['w'][0],tree['w'][1])
+        self.assertIsNot(tree['w'][0],tree['w'][1])
+        wire = product_wire_fixture([tree]);before = checker.canonical(wire)
+        pooled = checker.decode_product(wire)['product_states'][0]
+        self.assertIs(pooled['w'][0],pooled['w'][1])
+        self.assertIs(pooled['completed'],pooled['claim_loss_keys'])
+        expected = self.local_successors(tree,driver,store)
+        actual = self.local_successors(pooled,driver,store)
+        self.assertEqual(self.successor_rows(actual),self.successor_rows(expected))
+        sent = next(row[1] for row in actual if row[0] == {'family':'ClaimSend','worker':0,'choice':{}})
+        self.assertEqual(sent['w'][0]['call'],'sent');self.assertEqual(sent['w'][1]['call'],'ready')
+        self.assertEqual(sent['w'][1],tree['w'][1])
+        self.assertIsNot(sent['w'][0],sent['w'][1])
+        self.assertIsNot(sent['w'][0]['ordinary'],sent['w'][1]['ordinary'])
+        self.assertIsNot(sent['completed'],sent['claim_loss_keys'])
+        sent['completed'].append(0)
+        self.assertEqual(sent['claim_loss_keys'],[])
+        self.assertEqual(pooled['completed'],[])
+        self.assertEqual(checker.canonical(wire),before)
+
+    def test_distinct_pooled_workers_ordinary_step_detaches_nested_values(self):
+        driver = fixture();driver['states'][0]['pending'] = 'SettleYield'
+        state = product_predecessor('stable');store_state = product_domain_fixture();store_state['now'] = 1000
+        for n,worker in enumerate(state['w']):
+            worker.update(stage='driver',call='sent',ctrl=0,job=n,token=0,localToken=True,
+                attempt='C'+str(n),started=True,local_deadline_mono_ms=30000,
+                driver_settlement={'kind':'yield','not_before_ms':6000})
+            worker['ordinary'] = {**copy.deepcopy(checker.ORDINARY),'phase':'check_lost',
+                'payload':{'kind':'yield','not_before_ms':6000,'error_code':None,'checkpoint':None}}
+            store_state['captured_tokens'][n] = [{'job_id':'raw-job-'+str(n),'node_id':('node-a','node-b')[n],
+                'boot_id':'B','claim_id':'C'+str(n),'fence':1,'revision':1,'lease_expires_ms':31000}]
+        store = {'states':[store_state],'edges':[]}
+        checker.anchor_payload(state,store)
+        tree = json.loads(checker.canonical(state))
+        wire = product_wire_fixture([tree]);before = checker.canonical(wire)
+        pooled = checker.decode_product(wire)['product_states'][0]
+        self.assertIsNot(pooled['w'][0],pooled['w'][1])
+        self.assertIs(pooled['w'][0]['ordinary'],pooled['w'][1]['ordinary'])
+        expected = self.local_successors(tree,driver,store)
+        actual = self.local_successors(pooled,driver,store)
+        self.assertEqual(self.successor_rows(actual),self.successor_rows(expected))
+        advanced = next(row[1] for row in actual if row[0] ==
+            {'family':'OrdinaryLocal','worker':0,'choice':{'phase':'check_lost'}})
+        self.assertEqual(advanced['w'][0]['ordinary']['phase'],'check_deadline')
+        self.assertEqual(advanced['w'][1],tree['w'][1])
+        self.assertEqual(pooled['w'][0]['ordinary']['phase'],'check_lost')
+        self.assertIsNot(advanced['w'][0]['ordinary']['payload'],advanced['w'][1]['ordinary']['payload'])
+        advanced['w'][0]['ordinary']['payload']['not_before_ms'] = 7000
+        self.assertEqual(advanced['w'][1]['ordinary']['payload']['not_before_ms'],6000)
+        self.assertEqual(pooled['w'][0]['ordinary']['payload']['not_before_ms'],6000)
+        self.assertEqual(checker.canonical(wire),before)
+
+    def test_unused_and_certificate_only_floats_fail_global_numeric_preflight(self):
+        for value in (1.5,1e100,{'certificate_only':{'nested':[1.5]}},{'certificate_only':[1e100]}):
+            wire = product_wire_fixture();wire['source_boundaries'] = copy.deepcopy(checker.SOURCE_BOUNDARIES)
+            wire['value_pool'].append(value)
+            with self.subTest(value=value),self.assertRaisesRegex(checker.Invalid,'UnsupportedTlcNumericDomain: model input.value_pool'):
+                checker.validate_product(wire,fixture(),verify_sources=False)
+        ordinary = {'phase':'check_lost','payload':{'kind':'yield','not_before_ms':6000,'error_code':None,'checkpoint':None}}
+        self.assertIsNone(checker.certify_tlc_numbers({'ordinary':ordinary,'bounds':[checker.TLC_INT_MIN,checker.TLC_INT_MAX],
+            'bools':[False,True],'none':None,'string':'1.5'}))
+
+    def test_finite_floats_in_derived_store_raw_fail_global_numeric_preflight(self):
+        for value in (1.5,1e100,{'nested':[1.5]}):
+            wire = product_wire_fixture();wire['source_boundaries'] = copy.deepcopy(checker.SOURCE_BOUNDARIES)
+            store = wire['store']['states'][0];raw = json.loads(store['canonical_json'])
+            raw['rows']['background_jobs'][0][1] = value
+            store['canonical_json'] = checker.canonical(raw)
+            store['canonical_sha256'] = hashlib.sha256(store['canonical_json'].encode()).hexdigest()
+            with self.subTest(value=value),self.assertRaisesRegex(checker.Invalid,'UnsupportedTlcNumericDomain: decoded Store canonical JSON'):
+                checker.validate_product(wire,fixture(),verify_sources=False)
+
     def test_compact_rows_roundtrip_exact_values_hashes_and_shared_workers(self):
         p = product_predecessor('base');q = product_predecessor('stable');q['id'] = 1
         for state in (p,q):

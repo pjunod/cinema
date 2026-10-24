@@ -1,6 +1,5 @@
 """Closed registries and graph import. Importing a graph is inventory, not proof."""
 from __future__ import annotations
-import copy
 import hashlib
 import json
 import io
@@ -182,6 +181,20 @@ def sha(path):
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',',':'), ensure_ascii=False, allow_nan=False)
+
+def logical_copy(value):
+    """Copy logical JSON occurrences without deepcopy's alias-preserving memo.
+
+    Decoder pools are borrowed read-only values. A semantic transition owns a
+    separate mutable tree at every occurrence, even when equal workers, nested
+    payloads, or arrays refer to the same pooled object in its predecessor.
+    Only transient predecessors/assigned fields are copied; pools stay shared.
+    """
+    if isinstance(value,dict): return {key:logical_copy(item) for key,item in value.items()}
+    if isinstance(value,list): return [logical_copy(item) for item in value]
+    if isinstance(value,tuple): return tuple(logical_copy(item) for item in value)
+    return value
+
 
 def canonical_measure(value):
     """Exact canonical byte length/hash without duplicating a potentially 256MiB bundle."""
@@ -401,7 +414,7 @@ def retry_delay_ms(raw_job_id,failed_attempts):
 def settlement_after_reply(previous,pending,adapter_reply):
     tag = adapter_reply['tag']
     if tag != 'DomainRefused' and pending not in {'ReleaseRefused','ReleaseInterrupted','ReleaseRetry'}:
-        return copy.deepcopy(previous) if tag == 'Done' else None
+        return logical_copy(previous) if tag == 'Done' else None
     kind = 'retry' if pending == 'ReleaseRetry' else 'yield'
     delay = adapter_reply['retry_delay_ms'] if kind == 'retry' else 1000 if pending == 'ReleaseInterrupted' else 5000
     return {'kind':kind,'not_before_ms':sat_add(adapter_reply['now_ms'],delay)}
@@ -436,6 +449,8 @@ def certify_tlc_numbers(value,label='model input'):
     """Pinned TLC uses signed-int values. Reject globally; never truncate D."""
     if type(value) is int:
         require(TLC_INT_MIN <= value <= TLC_INT_MAX, 'UnsupportedTlcNumericDomain: '+label)
+    elif type(value) is float:
+        raise Invalid('UnsupportedTlcNumericDomain: '+label+' (non-integer JSON number)')
     elif isinstance(value,dict):
         for key,item in value.items(): certify_tlc_numbers(item,label+'.'+str(key))
     elif isinstance(value,(list,tuple)):
@@ -571,7 +586,7 @@ def supported_recovery_read(job,request,token):
 
 def recovered_snapshot(job,index):
     return {'job':index,'raw_job_id':job['id'],'failed_attempts':job['failed_attempts'],
-            'claim_id':job['token']['claim_id'],'token_capture':copy.deepcopy(job['token'])}
+            'claim_id':job['token']['claim_id'],'token_capture':logical_copy(job['token'])}
 
 
 def classify_product_input(p,driver,store,action):
@@ -688,7 +703,7 @@ def expected_product_demands(p, driver, store):
 
 def ordinary_successors(p,s,store,n,w,put,lookup):
     o = w['ordinary']; phase = o['phase']
-    def change(q,**fields): q['w'][n]['ordinary'].update(fields)
+    def change(q,**fields): q['w'][n]['ordinary'].update(logical_copy(fields))
     if phase == 'waiting_lock':
         put('OrdinaryLock',n,{},lambda q:change(q,phase='check_lost'))
     elif phase in {'check_lost','check_deadline','take_token','sample','finish'}:
@@ -755,7 +770,7 @@ def expected_product_successors(p,driver,store,oracle):
     def reply_allowed(n,tag):
         return any(e['from'] == p['w'][n]['ctrl'] and e['reply'] == tag for e in driver['edges'])
     def put(family,n,choice,change,edge=None,resolution=None,read=None,cleanup=None):
-        q = copy.deepcopy(product_payload(p))
+        q = logical_copy(product_payload(p))
         change(q)
         anchor_payload(q,store)
         members = set()
@@ -788,11 +803,11 @@ def expected_product_successors(p,driver,store,oracle):
     def local_branch(family,n,tag,choice=None):
         if reply_allowed(n,tag): put(family,n,choice or {},lambda q:local(q,n,tag))
     for n,w in enumerate(p['w']):
-        def update(q, **fields): q['w'][n].update(fields)
+        def update(q, **fields): q['w'][n].update(logical_copy(fields))
         if w['stage'] == 'idle' and p['available'][n]:
             for j,job in enumerate(s['jobs']):
                 if job['state'] == 'queued' and not job['request_done'] and job['not_before_ms'] <= s['now'] and (not stable or j == n):
-                    def admit(q,j=j): q['w'][n] = {**copy.deepcopy(IDLE),'stage':'claim','job':j,'admission':True}
+                    def admit(q,j=j): q['w'][n] = {**logical_copy(IDLE),'stage':'claim','job':j,'admission':True}
                     put('Admission',n,{'job':j},admit)
         if w['stage'] == 'claim':
             if w['call'] == 'ready': put('ClaimSend',n,{},lambda q:update(q,call='sent'))
@@ -804,8 +819,8 @@ def expected_product_successors(p,driver,store,oracle):
                         q['sql'] = e['to']; tokens = store['states'][e['to']]['captured_tokens'][w['job']]
                         update(q,call='applied',reply='Claimed' if success else 'Refused',
                             token=len(tokens)-1 if success else -1,attempt=tokens[-1]['claim_id'] if success else '',
-                            claim_snapshot=copy.deepcopy(e['claim_snapshot']) if success else None,
-                            claim_request=copy.deepcopy(e['claim_request']),claim_issued_mono_ms=p['mono_now_ms'],
+                            claim_snapshot=logical_copy(e['claim_snapshot']) if success else None,
+                            claim_request=logical_copy(e['claim_request']),claim_issued_mono_ms=p['mono_now_ms'],
                             claim_request_now_ms=s['now'],
                             local_deadline_mono_ms=mono_deadline(p['mono_now_ms'],tokens[-1]['lease_expires_ms'],s['now']) if success else None)
                     put('ClaimApply',n,{},claimed,i)
@@ -851,7 +866,7 @@ def expected_product_successors(p,driver,store,oracle):
                 def claim_return(q):
                     if w['reply'] == 'Claimed' and p['mono_now_ms'] < w['local_deadline_mono_ms']:
                         update(q,stage='driver',ctrl=0,call='ready',started=True,localToken=True)
-                    else: q['w'][n] = copy.deepcopy(IDLE)
+                    else: q['w'][n] = logical_copy(IDLE)
                 put('ClaimReturn',n,{},claim_return)
         if w['stage'] != 'driver':
             # Availability is independent of the local stage and stable premise.
@@ -864,8 +879,8 @@ def expected_product_successors(p,driver,store,oracle):
                 update(q,call='sent',readLock=pending == 'PollWork',accepted=False,adapter_reply=None)
                 if pending in ORDINARY_PENDING:
                     require(w['driver_settlement'] is not None, 'ordinary dispatch without saved Driver payload')
-                    payload = {**w['driver_settlement'],'error_code':'library_execution_failed' if pending == 'SettleRetry' else None,'checkpoint':None}
-                    update(q,ordinary={**copy.deepcopy(ORDINARY),'phase':'waiting_lock','payload':payload})
+                    payload = {**logical_copy(w['driver_settlement']),'error_code':'library_execution_failed' if pending == 'SettleRetry' else None,'checkpoint':None}
+                    update(q,ordinary={**logical_copy(ORDINARY),'phase':'waiting_lock','payload':payload})
             put('Dispatch',n,{},dispatch)
         if w['call'] == 'sent':
             if pending in SQL_PENDING:
@@ -961,7 +976,7 @@ def expected_product_successors(p,driver,store,oracle):
                             admission=False if pending == 'DropAdmission' or mutation == 'drop-before-join' and pending == 'CancelWork' else w['admission'])
                     put('DriverReturn',n,{},returned)
         can_recycle = not stable or w['dropped'] and not s['jobs'][w['job']]['request_done'] and s['budgets']['claims'][w['job']] < 2
-        if d['terminal'] and can_recycle: put('Recycle',n,{},lambda q:q['w'].__setitem__(n,copy.deepcopy(IDLE)))
+        if d['terminal'] and can_recycle: put('Recycle',n,{},lambda q:q['w'].__setitem__(n,logical_copy(IDLE)))
         if not stable and w['started'] and not w['dropped'] and not w['queue_lost']:
             put('QueueLossSignal',n,{},lambda q:update(q,queue_lost=True))
         family = 'RemoveAvailability' if p['available'][n] else 'MakeAvailable'
@@ -1120,7 +1135,7 @@ def validate_store(g, verify_sources=True, *, product=False):
         if 'disposition' in a: require(a['disposition'] in range(4), 'unknown disposition')
         if op == 'clock_advance':
             require(a['now'] > before['now'] and integer(a['now'],0,I64_MAX) and after['now'] == a['now'], 'clock input/projection mismatch')
-            expected_raw = copy.deepcopy(before['raw']);expected_raw['episode']['now'] = a['now']
+            expected_raw = logical_copy(before['raw']);expected_raw['episode']['now'] = a['now']
             require(after['raw'] == expected_raw, 'clock changed non-clock canonical data')
         if op == 'ordinary_settle':
             validate_payload({key:a[key] for key in ('kind','not_before_ms','error_code','checkpoint')})
@@ -1270,7 +1285,7 @@ def decode_product(wire):
     """Validate schema4 transport and expose the original exact logical values.
 
     Pool values and workers are shared, never mutated by this view. Independent
-    successor generation already deep-copies each predecessor before updates.
+    successor generation copies logical occurrences before every update.
     """
     exact_keys(wire,PRODUCT_KEYS,'product bundle')
     require(type(wire['schema_version']) is int and wire['schema_version'] == 4 and
@@ -1722,7 +1737,7 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
         for w in p['w']:
             validate_worker(w,store['states'][p['sql']],driver)
             if w['claim_recovery']['phase'] != 'off': require(claim_loss_key(w) in keys, 'ambiguous episode forgot persistent fault key')
-        require(anchor_payload(copy.deepcopy(product_payload(p)),store) == product_payload(p), 'missing exact current source anchor')
+        require(anchor_payload(logical_copy(product_payload(p)),store) == product_payload(p), 'missing exact current source anchor')
         encoded = canonical(product_payload(p))
         require(p['canonical_sha256'] == hashlib.sha256(encoded.encode()).hexdigest(), 'product canonical preimage mismatch')
         require(encoded not in by_payload, 'duplicate exact product valuation')
@@ -1730,7 +1745,7 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
     for name,ids in per_context.items():
         context = contexts[name]
         require(context['states'] == ids, 'context state partition differs')
-        initial = {'context':name,'sql':store['initial'],'w':[copy.deepcopy(IDLE),copy.deepcopy(IDLE)],'available':[True,True],
+        initial = {'context':name,'sql':store['initial'],'w':[logical_copy(IDLE),logical_copy(IDLE)],'available':[True,True],
             'completed':[j for j,job in enumerate(store['states'][store['initial']]['jobs']) if job['request_done']],
             'mono_now_ms':0,'wall_anchors':[],'mono_anchors':[],'claim_loss_keys':[]}
         initial = anchor_payload(initial,store)
@@ -1785,9 +1800,8 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
 
 
 def rejection_controls(driver,store):
-    import copy
     mutations = []
-    broken = copy.deepcopy(driver); broken['edges'][0]['to'] = len(driver['states'])
+    broken = logical_copy(driver); broken['edges'][0]['to'] = len(driver['states'])
     mutations.append(('missing-driver-target',lambda: validate_driver(broken),'missing/outside edge target'))
     require(isinstance(store.get('source_bindings'),dict) and store['source_bindings'],
             'source-hash-drift control requires nonempty source bindings')
@@ -1810,7 +1824,7 @@ def rejection_controls(driver,store):
             predecessor,driver,store['store'],missing_oracle),'MissingProductOracleEdge'))
     else:
         mutations.append(('source-hash-drift',lambda: validate_store(bad_store),'Store source hash mismatch'))
-        missing = copy.deepcopy(store)
+        missing = logical_copy(store)
         require(any(e['from'] == e['to'] for e in missing['edges']),
                 'missing-store-input control requires a self edge')
         index = next(i for i,e in enumerate(missing['edges']) if e['from'] == e['to'])
