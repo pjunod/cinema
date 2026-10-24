@@ -270,7 +270,7 @@ jobs:
     name: effort Apple compile
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true' || needs.scope.outputs.desktop_macos == 'true'
-    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27]
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-27.1]
     timeout-minutes: 10
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

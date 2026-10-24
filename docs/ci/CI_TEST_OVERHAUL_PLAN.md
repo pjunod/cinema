@@ -307,7 +307,7 @@ broad command's `--list` output. One assertion should produce one set of
 runner-minutes.
 
 For Apple changes, T1 begins on the private-repository lab runner selected by
-`[self-hosted, macOS, ARM64, lab, apple, xcode-27]`. The M4 MacBook Air is
+`[self-hosted, macOS, ARM64, lab, apple, xcode-27.1]`. The M4 MacBook Air is
 primary and the M3 Max MacBook Pro is standby, as described in
 [APPLE-RUNNER-FAILOVER.md](APPLE-RUNNER-FAILOVER.md).
 It verifies Xcode 27.1 build 27A9275, the iOS 27.1 and tvOS 27.0 SDKs, iOS 26.5
