@@ -93,6 +93,9 @@ chacha20poly1305 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zeroize = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+wasmtime = { version = "=49.0.2", default-features = false, features = ["std", "runtime", "cranelift"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Wdk_Foundation",
@@ -122,6 +125,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # statement rather than one per item. Tests only — resolver 2 keeps a
 # dev-dependency's features out of the shipped build.
 rusqlite = { workspace = true, features = ["trace"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+wat = "=1.261.0"
 
 [lints]
 workspace = true

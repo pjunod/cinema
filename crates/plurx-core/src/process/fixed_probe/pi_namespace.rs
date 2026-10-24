@@ -32,7 +32,7 @@ fn unsupported_landlock(error: Option<i32>) -> bool {
 }
 
 pub(super) fn required(mode: ProbeLaunchMode) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixtures"))]
     if mode == ProbeLaunchMode::ProductionNamespace {
         return true;
     }
@@ -107,11 +107,11 @@ pub(super) fn configure(
     source_fd: Option<std::os::fd::RawFd>,
     arg0: &Path,
     arguments: &[OsString],
-    class: crate::process_control::ChildClass,
+    class: crate::process::ChildClass,
     deadline: std::time::Instant,
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     let bootstrap_path = PathBuf::from("/proc/self/exe");
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixtures"))]
     let bootstrap_path = if mode == ProbeLaunchMode::ProductionNamespace {
         PathBuf::from(
             std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").ok_or_else(|| {
@@ -184,7 +184,7 @@ pub(super) fn configure(
         .arg(namespace_ids.join(","))
         .arg(arg0)
         .args(arguments);
-    crate::process_control::priority::apply(command, class);
+    crate::process::priority::apply(command, class);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;

@@ -1,9 +1,63 @@
+/// Test fixtures that exercise capability-style path walks must start below a
+/// canonical root. Darwin exposes its per-user temporary directory through
+/// `/var`, a system symlink to `/private/var`, which the production no-follow
+/// walker intentionally refuses.
+#[cfg(test)]
+fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
+    let root = std::fs::canonicalize(std::env::temp_dir())?;
+    tempfile::tempdir_in(root)
+}
+
+/// Create an executable test fixture (a script standing in for FFmpeg, a
+/// tool, a probe) that this process can execute at once.
+///
+/// Writing it here with `std::fs::write` and then executing it races every
+/// other test thread: a child forked anywhere in this process while the write
+/// descriptor is open inherits it, and until that child reaches `exec` (which
+/// closes it, being close-on-exec) the kernel refuses to execute the file with
+/// `ETXTBSY` ("Text file busy"). On a loaded runner that window is long enough
+/// to hit. So this process never opens the file for writing at all: a `/bin/sh`
+/// child writes it and sets its mode, and the only writable descriptor lives
+/// and dies in that child's process tree before this returns.
+#[cfg(all(test, unix))]
+fn write_test_executable(path: impl AsRef<std::path::Path>, contents: impl AsRef<[u8]>, mode: u32) {
+    use std::io::Write;
+
+    let path = path.as_ref();
+    let mut writer = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod \"$2\" \"$1\"")
+        .arg("write_test_executable")
+        .arg(path)
+        .arg(format!("{mode:o}"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn a writer for {}: {error}", path.display()));
+    writer
+        .stdin
+        .take()
+        .expect("writer stdin")
+        .write_all(contents.as_ref())
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    let output = writer
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("wait for the writer of {}: {error}", path.display()));
+    assert!(
+        output.status.success(),
+        "writing {} failed: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 use super::*;
 
 #[cfg(target_os = "macos")]
 #[test]
 fn invalid_parser_initialization_removes_the_immutable_snapshot() {
-    let root = crate::test_tempdir().expect("private source root");
+    let root = test_tempdir().expect("private source root");
     let snapshots = root.path().join("snapshots");
     std::fs::create_dir(&snapshots).expect("private snapshot directory");
     let artifact = root.path().join("invalid.wasm");
@@ -23,7 +77,7 @@ fn invalid_parser_initialization_removes_the_immutable_snapshot() {
 #[cfg(target_os = "macos")]
 #[test]
 fn successful_snapshot_drop_removes_the_immutable_file() {
-    let root = crate::test_tempdir().expect("private source root");
+    let root = test_tempdir().expect("private source root");
     let snapshots = root.path().join("snapshots");
     std::fs::create_dir(&snapshots).expect("private snapshot directory");
     let artifact = root.path().join("native-fixture");
@@ -74,7 +128,7 @@ fn idet_verdict_uses_the_final_multi_frame_summary_and_a_strict_ninety_percent_b
 async fn descriptor_bound_idet_overrules_misflag_and_confirms_interlace() {
     let ffmpeg = std::env::var("PLURX_FFMPEG").expect("PLURX_FFMPEG");
     let ffprobe = std::env::var("PLURX_FFPROBE").expect("PLURX_FFPROBE");
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let identity = DecodeProbeIdentity::discover_fixture(&ffprobe)
         .await
         .expect("probe identity");
@@ -91,7 +145,7 @@ async fn descriptor_bound_idet_overrules_misflag_and_confirms_interlace() {
             "testsrc2=size=640x360:rate=60000/1001:duration=4",
             "tinterlace=mode=interleave_top,setfield=tff",
             InterlaceVerdict::FlagConfirmed,
-            ScanType::Interlaced(plurx_core::domain::FieldOrder::TffCoded),
+            ScanType::Interlaced(crate::domain::FieldOrder::TffCoded),
         ),
     ];
     for (name, source, filter, expected_verdict, expected_scan) in fixtures {
@@ -134,10 +188,10 @@ async fn descriptor_bound_idet_overrules_misflag_and_confirms_interlace() {
 #[tokio::test]
 async fn unknown_hevc_scan_is_refined_once_without_fresh_document_cache_downgrade() {
     use std::io::{Seek, SeekFrom};
-    let root = crate::test_tempdir().expect("HEVC scan fixture setup and refinement");
+    let root = test_tempdir().expect("HEVC scan fixture setup and refinement");
     let probe = root.path().join("ffprobe-hevc-scan");
     let mut header: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../plurx-core/tests/fixtures/hevc-progressive-configuration.json"
+        "../../../tests/fixtures/hevc-progressive-configuration.json"
     ))
     .expect("HEVC scan fixture setup and refinement");
     header["streams"][0]["index"] = serde_json::json!(4);
@@ -251,7 +305,7 @@ fn both_planning_routes_select_one_stream_through_one_rule() {
     let catalog = DecodeCatalogMetadata::new(
         Some("dolby_vision"),
         Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
-        plurx_core::domain::DolbyVisionFacts {
+        crate::domain::DolbyVisionFacts {
             profile: Some(8),
             level: Some(6),
             bl_compat_id: Some(1),
@@ -262,7 +316,7 @@ fn both_planning_routes_select_one_stream_through_one_rule() {
     .expect("catalog facts");
 
     let identity = |byte: char| {
-        plurx_core::transcode::DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64))
+        crate::transcode::DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64))
             .expect("identity")
     };
     // The bound route's identity and the stored route's identity differ by
@@ -297,7 +351,7 @@ fn both_planning_routes_select_one_stream_through_one_rule() {
 /// (The exec-ordering test in `process::priority` shows both outcomes.)
 #[test]
 fn the_child_priority_is_registered_before_the_probe_execs_from_pre_exec() {
-    let source = include_str!("../decode_facts.rs");
+    let source = include_str!("../fixed_probe.rs");
     let configure = source
         .find("fn configure_probe_execution(")
         .expect("configure_probe_execution");
@@ -340,7 +394,7 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
         panic!("unterminated body for {needle}")
     }
 
-    let source = include_str!("../decode_facts.rs");
+    let source = include_str!("../fixed_probe.rs");
     for item in [
         "command.pre_exec(move ||",
         "fn is_production(self)",
@@ -396,7 +450,7 @@ fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_form
 
 #[cfg(unix)]
 fn executable(path: &std::path::Path, body: &str) {
-    crate::write_test_executable(path, body, 0o700);
+    write_test_executable(path, body, 0o700);
 }
 
 #[cfg(target_os = "linux")]
@@ -760,7 +814,7 @@ void probe_main(unsigned long *stack) {
 #[cfg(unix)]
 #[test]
 fn qualified_probe_identity_refuses_indirect_wrappers() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let wrapper = root.path().join("ffprobe-wrapper");
     executable(&wrapper, "#!/bin/sh\nexec /usr/bin/ffprobe \"$@\"\n");
     let wrapper = std::fs::File::open(wrapper).expect("open wrapper");
@@ -803,7 +857,7 @@ fn qualified_probe_identity_refuses_indirect_wrappers() {
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 #[tokio::test]
 async fn production_discovery_refuses_unsupported_unix_within_its_deadline() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("native-looking-ffprobe");
     executable(
         &probe,
@@ -821,7 +875,7 @@ async fn production_discovery_refuses_unsupported_unix_within_its_deadline() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn production_discovery_requires_the_packaged_capability_parser() {
-    let root = crate::test_tempdir().expect("package");
+    let root = test_tempdir().expect("package");
     let probe = root.path().join("ffprobe");
     executable(&probe, "#!/bin/sh\ntouch \"$0.executed\"\n");
     let result = DecodeProbeIdentity::discover(probe.to_str().expect("path")).await;
@@ -834,7 +888,7 @@ async fn production_discovery_requires_the_packaged_capability_parser() {
 #[cfg(target_os = "linux")]
 #[test]
 fn self_contained_elf_has_no_external_parser_dependency() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let artifact = root.path().join("static-ffprobe");
     let mut elf = vec![0_u8; 64 + 56];
     elf[..4].copy_from_slice(b"\x7fELF");
@@ -857,7 +911,7 @@ fn self_contained_elf_has_no_external_parser_dependency() {
 #[cfg(target_os = "linux")]
 #[test]
 fn executable_classification_is_bound_to_the_sealed_snapshot() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let artifact = root.path().join("mutable-probe");
     let mut elf = vec![0_u8; 64 + 56];
     elf[..4].copy_from_slice(b"\x7fELF");
@@ -916,7 +970,7 @@ fn sealed_snapshot_refuses_in_place_mutation() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn production_probe_executes_sealed_bytes_and_collects_bound_json() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -948,7 +1002,7 @@ async fn namespace_probe_executes_bound_source_and_denies_secondary_images() {
         std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some(),
         "provide the exact compiled daemon bootstrap"
     );
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     for mode in 0..=3 {
         let probe = root.path().join(format!("namespace-probe-{mode}"));
         build_static_probe(&probe, mode);
@@ -984,7 +1038,7 @@ async fn namespace_probe_executes_bound_source_and_denies_secondary_images() {
 #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
 async fn namespace_probe_hides_parent_files_and_reaps_descendants() {
     assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let marker = root.path().join("parent-private-marker");
     std::fs::write(&marker, b"must not enter probe namespace").expect("parent marker");
     for mode in [7, 8] {
@@ -1028,7 +1082,7 @@ async fn namespace_probe_hides_parent_files_and_reaps_descendants() {
 #[ignore = "requires a compiled daemon in PLURX_TEST_NAMESPACE_BOOTSTRAP and unprivileged user namespaces"]
 async fn namespace_probe_cancellation_kills_started_descendants() {
     assert!(std::env::var_os("PLURX_TEST_NAMESPACE_BOOTSTRAP").is_some());
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("cancellable-namespace-probe");
     build_static_probe(&probe, 9);
     let identity = DecodeProbeIdentity::discover_with_mode(
@@ -1089,7 +1143,7 @@ async fn namespace_probe_cancellation_kills_started_descendants() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn production_bootstrap_eintr_retries_share_the_absolute_deadline() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let mut identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1121,7 +1175,7 @@ async fn production_bootstrap_eintr_retries_share_the_absolute_deadline() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn persistent_bootstrap_eintr_expires_and_reclaims_supervisor_ownership() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1176,7 +1230,7 @@ async fn persistent_bootstrap_eintr_expires_and_reclaims_supervisor_ownership() 
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn persistent_steady_response_eintr_cannot_wedge_detached_cleanup() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("second-exec-static-ffprobe");
     build_static_probe(&probe, 2);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1245,7 +1299,7 @@ async fn persistent_steady_response_eintr_cannot_wedge_detached_cleanup() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("second-exec-stop-static-ffprobe");
     build_static_probe(&probe, 2);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1296,7 +1350,7 @@ async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn production_probe_allows_only_the_initial_bound_exec() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     for (mode, name) in [
         (1, "path-launcher"),
         (2, "direct-and-proc-memfd-launcher"),
@@ -1313,7 +1367,7 @@ async fn production_probe_allows_only_the_initial_bound_exec() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn production_probe_descendants_cannot_leave_the_kill_domain() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("session-escape-probe");
     build_static_probe(&probe, 4);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1343,7 +1397,7 @@ async fn production_probe_descendants_cannot_leave_the_kill_domain() {
 async fn production_probe_cannot_export_the_bound_source_descriptor() {
     use std::os::fd::{AsRawFd, FromRawFd as _};
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("fd-export-probe");
     build_static_probe(&probe, 5);
     let mut identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1389,7 +1443,7 @@ async fn production_probe_cannot_export_the_bound_source_descriptor() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn pidfd_open_failure_detaches_bounded_version_cleanup() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1431,7 +1485,7 @@ async fn pidfd_open_failure_detaches_bounded_version_cleanup() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn delayed_supervisor_handshake_obeys_the_version_deadline() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1467,7 +1521,7 @@ async fn delayed_supervisor_handshake_obeys_the_version_deadline() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn failed_listener_receive_cannot_leak_or_deadlock_spawn() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1500,7 +1554,7 @@ async fn failed_listener_receive_cannot_leak_or_deadlock_spawn() {
 async fn pidfd_read_failure_retains_source_ownership_until_reap() {
     use std::io::{Seek, SeekFrom};
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 6);
     let mut identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1577,7 +1631,7 @@ async fn pidfd_read_failure_retains_source_ownership_until_reap() {
 #[cfg(unix)]
 #[tokio::test]
 async fn blocked_source_identity_returns_deadline_without_releasing_probe_ownership() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("ffprobe-test");
     executable(
         &probe,
@@ -1630,7 +1684,7 @@ async fn blocked_source_identity_returns_deadline_without_releasing_probe_owners
 #[cfg(unix)]
 #[tokio::test]
 async fn decode_fact_source_shipped_shape() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("ffprobe-test");
     executable(
         &probe,
@@ -1679,7 +1733,7 @@ async fn decode_fact_source_shipped_shape() {
 async fn production_probe_refuses_an_executable_source_fd() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = root.path().join("static-ffprobe");
     build_static_probe(&probe, 0);
     let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1720,7 +1774,7 @@ fn process_group_termination_is_consumed_exactly_once() {
 #[cfg(unix)]
 #[tokio::test]
 async fn facts_are_collected_from_the_held_descriptor_and_cached_by_build() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"bound source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open media"));
@@ -1781,7 +1835,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
 async fn flagged_source_runs_idet_on_the_same_descriptor_before_releasing_its_offset_lane() {
     use std::io::{Seek, SeekFrom};
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"bound interlace source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open media"));
@@ -1863,7 +1917,7 @@ printf '%s\n' '{document}'
 async fn fresh_source_document_and_decoder_facts_share_one_stream_probe() {
     use std::io::{Seek, SeekFrom};
     for field_order in ["progressive", "tt"] {
-        let root = crate::test_tempdir().expect("document fixture");
+        let root = test_tempdir().expect("document fixture");
         let probe = full_document_probe_fixture(root.path(), field_order);
         let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("path"))
             .await
@@ -1926,7 +1980,7 @@ async fn fresh_source_document_and_decoder_facts_share_one_stream_probe() {
         assert_eq!(document["format"]["format_name"], "matroska");
         assert_eq!(document["chapters"].as_array().expect("chapters").len(), 1);
         assert_eq!(
-            plurx_core::scan::probe::reporter_of(&document),
+            crate::scan::probe::reporter_of(&document),
             Some("ffprobe version document-fixture")
         );
         assert!(
@@ -1989,7 +2043,7 @@ async fn fresh_source_document_and_decoder_facts_share_one_stream_probe() {
 #[tokio::test]
 async fn source_verification_keeps_decoder_refinement_failures_separate() {
     for missing_stream in [false, true] {
-        let root = crate::test_tempdir().expect("document failure fixture");
+        let root = test_tempdir().expect("document failure fixture");
         let probe = full_document_probe_fixture(root.path(), "tt");
         let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("path"))
             .await
@@ -2046,7 +2100,7 @@ async fn source_verification_keeps_decoder_refinement_failures_separate() {
 #[tokio::test]
 async fn prepared_source_document_refuses_changed_source_and_probe_before_refinement() {
     for replace_probe in [false, true] {
-        let root = crate::test_tempdir().expect("document identity fixture");
+        let root = test_tempdir().expect("document identity fixture");
         let probe = full_document_probe_fixture(root.path(), "tt");
         let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("path"))
             .await
@@ -2097,7 +2151,7 @@ async fn prepared_source_document_refuses_changed_source_and_probe_before_refine
 async fn cancelling_idet_reaps_the_second_child_before_returning_the_offset_lane() {
     use std::io::{Seek, SeekFrom};
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"cancelled interlace source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open media"));
@@ -2158,7 +2212,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
 #[cfg(unix)]
 #[tokio::test]
 async fn legacy_selection_binds_attached_art_and_catalog_to_the_resolved_absolute_stream() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"multi-video source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open media"));
@@ -2191,7 +2245,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"mjpeg",
     let catalog = DecodeCatalogMetadata::new(
         Some("dolby_vision"),
         Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
-        plurx_core::domain::DolbyVisionFacts {
+        crate::domain::DolbyVisionFacts {
             profile: Some(8),
             level: Some(6),
             bl_compat_id: Some(1),
@@ -2242,7 +2296,7 @@ async fn missing_probe_identity_is_refused_before_fact_collection() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_replaced_probe_cannot_reuse_cached_facts() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open"));
@@ -2306,7 +2360,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
 #[cfg(unix)]
 #[tokio::test]
 async fn warm_starts_within_a_generation_hash_no_probe_content() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = generation_probe_fixture(root.path());
     let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
         .await
@@ -2368,7 +2422,7 @@ async fn warm_starts_within_a_generation_hash_no_probe_content() {
 #[cfg(unix)]
 #[tokio::test]
 async fn generation_boundary_forces_a_content_hash() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = generation_probe_fixture(root.path());
     let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
         .await
@@ -2398,7 +2452,7 @@ async fn generation_boundary_forces_a_content_hash() {
 async fn same_size_in_place_mutation_is_caught_within_one_lookup() {
     use std::os::unix::fs::FileExt;
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let probe = generation_probe_fixture(root.path());
     let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
         .await
@@ -2427,7 +2481,7 @@ async fn same_size_in_place_mutation_is_caught_within_one_lookup() {
 #[cfg(unix)]
 #[tokio::test]
 async fn transient_path_swap_cannot_change_the_executable_object() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = std::fs::File::open(&media).expect("open source");
@@ -2488,7 +2542,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn snapshot_path_swap_cannot_change_the_executable_object() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = std::fs::File::open(&media).expect("open source");
@@ -2542,7 +2596,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
 #[cfg(unix)]
 #[tokio::test]
 async fn source_is_revalidated_after_post_probe_build_validation() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open source"));
@@ -2606,7 +2660,7 @@ touch "$PLURX_TEST_PROBE_PATH.done"
 #[cfg(unix)]
 #[tokio::test]
 async fn metrics_count_each_phase_once() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let probe = root.path().join("ffprobe-test");
@@ -2755,7 +2809,7 @@ async fn caller_deadline_detaches_cleanup_without_releasing_its_ownership() {
 #[cfg(unix)]
 #[tokio::test]
 async fn concurrent_same_key_misses_spawn_one_probe() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open"));
@@ -2806,7 +2860,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
 #[cfg(unix)]
 #[tokio::test]
 async fn cancellation_while_waiting_for_probe_admission_is_bounded() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let first_media = root.path().join("first.bin");
     let second_media = root.path().join("second.bin");
     std::fs::write(&first_media, b"first").expect("first media");
@@ -2877,7 +2931,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
 async fn running_cancellation_reaps_before_restoring_and_releasing_the_source() {
     use std::io::{Seek, SeekFrom};
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"0123456789").expect("media");
     let mut opened = std::fs::File::open(&media).expect("open source");
@@ -2948,7 +3002,7 @@ wait
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn normal_completion_kills_descendants_before_reaping_the_group_leader() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = Arc::new(std::fs::File::open(media).expect("open source"));
@@ -2985,7 +3039,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
 #[cfg(unix)]
 #[tokio::test]
 async fn source_lease_wait_is_charged_to_the_probe_deadline() {
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let media = root.path().join("media.bin");
     std::fs::write(&media, b"source").expect("media");
     let source = Arc::new(std::fs::File::open(&media).expect("open source"));
@@ -3040,7 +3094,7 @@ fn crossed_source_and_executable_fds_are_duplicated_before_assignment() {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
-    let root = crate::test_tempdir().expect("tempdir");
+    let root = test_tempdir().expect("tempdir");
     let source_path = root.path().join("source");
     let executable_path = root.path().join("executable");
     std::fs::write(&source_path, b"bound-source\n").expect("source bytes");
