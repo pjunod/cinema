@@ -490,6 +490,56 @@
         watchdog_session_with_publication(dir, child, cached, false)
     }
 
+    #[tokio::test]
+    async fn copy_reader_timeout_retains_the_original_task_until_it_really_joins() {
+        let dir = crate::test_tempdir().expect("reader ownership root");
+        let session = watchdog_session(dir.path(), None, false);
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, released_rx) = tokio::sync::oneshot::channel::<()>();
+        let original = tokio::spawn(async move {
+            let _ = entered.send(());
+            let _ = released_rx.await;
+        });
+        *session.copy_reader_task.lock().await = CopyReaderTask::Pending(original);
+        entered_rx.await.expect("original reader entered");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1);
+        assert!(session.join_copy_reader_owner(deadline).await.is_err());
+        assert!(matches!(
+            &*session.copy_reader_task.lock().await,
+            CopyReaderTask::Pending(_)
+        ));
+        release.send(()).expect("same reader still waits for release");
+        session
+            .join_copy_reader_owner(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("original reader joined");
+        assert!(matches!(
+            &*session.copy_reader_task.lock().await,
+            CopyReaderTask::Joined
+        ));
+    }
+
+    #[tokio::test]
+    async fn panicked_copy_reader_cannot_authorize_scratch_handoff() {
+        let dir = crate::test_tempdir().expect("failed reader root");
+        let session = watchdog_session(dir.path(), None, false);
+        let original = tokio::spawn(async { panic!("actual copy reader failed") });
+        *session.copy_reader_task.lock().await = CopyReaderTask::Pending(original);
+        assert!(session
+            .join_copy_reader_owner(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .is_err());
+        assert!(matches!(
+            &*session.copy_reader_task.lock().await,
+            CopyReaderTask::Failed
+        ));
+        assert!(session
+            .join_copy_reader_owner(tokio::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .is_err());
+    }
+
     fn reserve_test_admissions(session: &Session, admissions: &Admissions) {
         *session.hw_slot.lock().expect("hw slot mutex") = Some(
             admissions

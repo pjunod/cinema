@@ -41,6 +41,7 @@ pub(crate) struct DirectoryPlanV2 {
 pub(crate) enum OutputNamingV1 {
     FilmSegmentV1,
     FiniteVodMetadataV2 { encoded_process: bool },
+    CopyRollingV1,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +56,7 @@ pub(crate) struct OutputNamesV1 {
 pub(crate) enum OutputKey {
     Init,
     Segment { index: u32 },
+    Playlist,
     IdentityMetadata,
     EncodedProcessMetadata,
 }
@@ -65,6 +67,7 @@ impl OutputNamesV1 {
             OutputKey::Segment { index } => {
                 *index >= self.first_segment && u64::from(*index) < self.segment_end_exclusive
             }
+            OutputKey::Playlist => matches!(self.naming, OutputNamingV1::CopyRollingV1),
             OutputKey::IdentityMetadata => {
                 matches!(self.naming, OutputNamingV1::FiniteVodMetadataV2 { .. })
             }
@@ -273,6 +276,16 @@ pub(crate) enum AssetIoV1 {
     PublishMetadata {
         slot_id: FileSlotId,
         output: OutputKey,
+        logical_end: u64,
+        payload_capacity: u64,
+        copy_id: Id,
+    },
+    /// Replace only the fixed rolling playlist after exact old-object
+    /// validation. The old and new storage footprints overlap while armed.
+    ReplacePlaylist {
+        prior_file_id: Id,
+        expected_native_object: NativeObject,
+        slot_id: FileSlotId,
         logical_end: u64,
         payload_capacity: u64,
         copy_id: Id,

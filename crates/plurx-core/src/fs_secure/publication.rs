@@ -25,6 +25,7 @@ pub struct PublicationIo {
     path: Option<PathBuf>,
     temporary_name: CString,
     destination_name: CString,
+    replacement: Option<ExpectedPublishedObject>,
     payload: Vec<u8>,
     logical_end: u64,
     directory: Option<File>,
@@ -36,6 +37,16 @@ pub struct PublicationIo {
     acquired: Option<FileObservation>,
     published: bool,
     payload_released: bool,
+}
+
+/// Exact prior native object selected by the journal fold. These numbers are
+/// only a negative check against the actual held directory; they are not a
+/// closure receipt or permission to publish without the original arm.
+#[derive(Clone, Copy, Debug)]
+pub struct ExpectedPublishedObject {
+    pub device: u64,
+    pub inode: u64,
+    pub mount_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +86,7 @@ fn invalid(message: &'static str) -> io::Error {
 pub struct PublicationRequest {
     temporary_name: CString,
     destination_name: CString,
+    replacement: Option<ExpectedPublishedObject>,
     payload: Vec<u8>,
     logical_end: u64,
 }
@@ -105,12 +117,36 @@ impl PublicationRequest {
         Self::validated(name, payload, io_id)
     }
 
+    /// The rolling copy playlist has one fixed canonical name. Its later
+    /// revisions use a separate replacement operation with an exact prior
+    /// native identity; this constructor permits only the first publication.
+    pub fn for_playlist_operation(payload: Vec<u8>, io_id: uuid::Uuid) -> io::Result<Self> {
+        if io_id.is_nil() {
+            return Err(invalid("playlist publication requires a nonnil operation"));
+        }
+        Self::validated("index.m3u8", payload, io_id)
+    }
+
+    pub fn for_playlist_replacement(
+        payload: Vec<u8>,
+        io_id: uuid::Uuid,
+        prior: ExpectedPublishedObject,
+    ) -> io::Result<Self> {
+        let mut request = Self::for_playlist_operation(payload, io_id)?;
+        if prior.device == 0 || prior.inode == 0 || prior.mount_id == 0 {
+            return Err(invalid("playlist replacement requires exact prior native identity"));
+        }
+        request.replacement = Some(prior);
+        Ok(request)
+    }
+
     fn validated(name: &str, payload: Vec<u8>, io_id: uuid::Uuid) -> io::Result<Self> {
         let logical_end = u64::try_from(payload.len()).map_err(io::Error::other)?;
         Ok(Self {
             temporary_name: CString::new(format!(".{name}.{io_id}.tmp"))
                 .expect("canonical name and UUID contain no NUL"),
             destination_name: CString::new(name).expect("canonical name contains no NUL"),
+            replacement: None,
             payload,
             logical_end,
         })
@@ -159,6 +195,7 @@ impl PublicationIo {
             path,
             temporary_name: request.temporary_name,
             destination_name: request.destination_name,
+            replacement: request.replacement,
             payload: request.payload,
             logical_end: request.logical_end,
             directory,
@@ -408,10 +445,78 @@ impl PublicationIo {
         if !same {
             return Err(io::Error::other("publication temporary alias changed"));
         }
-        rename_noreplace(directory, &self.temporary_name, &self.destination_name)?;
+        if let Some(expected) = self.replacement {
+            verify_prior_playlist(directory, &self.destination_name, expected)?;
+            // The fixed trusted-software profile excludes another mutator of
+            // this child between exact descriptor-relative check and rename.
+            // A failed/ambiguous rename stays in the original native cell.
+            let result = unsafe {
+                libc::renameat(
+                    directory.as_raw_fd(),
+                    self.temporary_name.as_ptr(),
+                    directory.as_raw_fd(),
+                    self.destination_name.as_ptr(),
+                )
+            };
+            if result != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        } else {
+            rename_noreplace(directory, &self.temporary_name, &self.destination_name)?;
+        }
         self.published = true;
+        if self.replacement.is_some() {
+            // A failed sync after the atomic swap is an uncertain publication:
+            // the native cell and both charged objects stay held for replay.
+            directory.sync_all()?;
+        }
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn verify_prior_playlist(
+    directory: &File,
+    name: &CStr,
+    expected: ExpectedPublishedObject,
+) -> io::Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::statx>::zeroed();
+    let result = unsafe {
+        libc::statx(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_BASIC_STATS | libc::STATX_MNT_ID,
+            stat.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stat = unsafe { stat.assume_init() };
+    let device = unsafe { libc::makedev(stat.stx_dev_major, stat.stx_dev_minor) };
+    if stat.stx_mask & libc::STATX_MNT_ID == 0
+        || stat.stx_mode & libc::S_IFMT as u16 != libc::S_IFREG as u16
+        || device != expected.device
+        || stat.stx_ino != expected.inode
+        || stat.stx_mnt_id != expected.mount_id
+        || stat.stx_nlink != 1
+    {
+        return Err(io::Error::other("prior playlist native identity changed"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_prior_playlist(
+    _directory: &File,
+    _name: &CStr,
+    _expected: ExpectedPublishedObject,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "playlist replacement requires Linux mount identity",
+    ))
 }
 
 #[cfg(target_os = "linux")]

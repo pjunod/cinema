@@ -185,6 +185,38 @@ impl ScratchFold {
                             return Err(codec::invalid());
                         }
                     }
+                    AssetIoV1::ReplacePlaylist {
+                        prior_file_id,
+                        expected_native_object,
+                        slot_id,
+                        logical_end,
+                        payload_capacity,
+                        copy_id,
+                    } => {
+                        let old = self.file(*prior_file_id)?;
+                        if self.state.directory.is_none()
+                            || old.published != Some(OutputKey::Playlist)
+                            || old.temporary
+                            || !old.held_copy_ids.is_empty()
+                            || old.native_object != *expected_native_object
+                            || self.readers.iter().any(|reader| reader.file_id == *prior_file_id)
+                            || slot_id.0 != *io_id
+                            || *logical_end == 0
+                            || *logical_end > plan.limits.one_io_payload_bytes
+                            || *logical_end > plan.limits.one_file_logical_bytes
+                            || *payload_capacity < *logical_end
+                            || self.copy_exists(*copy_id)
+                            || self.files.iter().any(|file| file.slot_id == *slot_id)
+                            || self
+                                .files
+                                .iter()
+                                .filter(|file| file.published == Some(OutputKey::Playlist))
+                                .count()
+                                != 1
+                        {
+                            return Err(codec::invalid());
+                        }
+                    }
                     AssetIoV1::RemoveOwned {
                         file_id,
                         expected_native_object,
@@ -337,6 +369,75 @@ impl ScratchFold {
                             }
                             NativeOutcomeV1::NeverEntered => return Err(codec::invalid()),
                         }
+                        self.files.push(f.clone());
+                        self.state.directory_synced = false;
+                    }
+                    (
+                        AssetIoV1::ReplacePlaylist {
+                            prior_file_id,
+                            expected_native_object,
+                            slot_id,
+                            logical_end,
+                            payload_capacity: _,
+                            copy_id,
+                        },
+                        AssetObservationV1::File {
+                            observed: f,
+                            content_binding,
+                        },
+                    ) => {
+                        let old = self.file(*prior_file_id)?;
+                        if old.published != Some(OutputKey::Playlist)
+                            || old.native_object != *expected_native_object
+                            || matches!(outcome, NativeOutcomeV1::NeverEntered)
+                            || f.file_id != operation_id
+                            || f.slot_id != *slot_id
+                            || f.creation_io_id != *io_id
+                            || f.native_object.file_type != FileType::Regular
+                            || &f.native_object.filesystem_domain != plan.filesystem_domain
+                            || f.logical_len > *logical_end
+                            || f.held_copy_ids.len() > 1
+                            || f.held_copy_ids.iter().any(|id| *id != *copy_id)
+                            || f.charged_bytes < plan.limits.storage_for(*logical_end)?
+                            || self.files.iter().any(|file| {
+                                file.file_id == f.file_id || file.slot_id == f.slot_id
+                            })
+                        {
+                            return Err(codec::invalid());
+                        }
+                        f.native_object.validate()?;
+                        f.reported_allocated_bytes.validate()?;
+                        if let NativeValue::Known { value } = f.reported_allocated_bytes {
+                            if f.charged_bytes < value.max(f.logical_len) {
+                                return Err(codec::invalid());
+                            }
+                        }
+                        if matches!(outcome, NativeOutcomeV1::Completed) {
+                            if f.temporary
+                                || f.published != Some(OutputKey::Playlist)
+                                || f.logical_len != *logical_end
+                                || content_binding.is_none()
+                            {
+                                return Err(codec::invalid());
+                            }
+                            codec::long_text(content_binding.as_ref().ok_or_else(codec::invalid)?)?;
+                            let index = self
+                                .files
+                                .iter()
+                                .position(|file| file.file_id == *prior_file_id)
+                                .ok_or_else(codec::invalid)?;
+                            self.files.remove(index);
+                        } else if (!f.temporary && f.published.is_none())
+                            || f.published.as_ref().is_some_and(|key| *key != OutputKey::Playlist)
+                            || content_binding.is_some()
+                        {
+                            return Err(codec::invalid());
+                        } else {
+                            self.state.lifecycle = ScratchLifecycleV1::RetirementUncertain;
+                        }
+                        // On an uncertain rename, both exact objects remain
+                        // charged. No subsequent replacement may use this
+                        // ambiguous output until native reconciliation.
                         self.files.push(f.clone());
                         self.state.directory_synced = false;
                     }
@@ -505,6 +606,11 @@ impl ScratchFold {
                     ..
                 }
                 | AssetIoV1::PublishMetadata {
+                    logical_end,
+                    payload_capacity,
+                    ..
+                }
+                | AssetIoV1::ReplacePlaylist {
                     logical_end,
                     payload_capacity,
                     ..

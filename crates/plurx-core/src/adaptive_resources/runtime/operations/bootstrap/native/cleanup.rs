@@ -76,6 +76,7 @@ fn basename(output: OutputKey) -> Result<CString, OperationError> {
     let name = match output {
         OutputKey::Init => "init.mp4".to_owned(),
         OutputKey::Segment { index } => format!("seg{index:05}.m4s"),
+        OutputKey::Playlist => "index.m3u8".to_owned(),
         OutputKey::IdentityMetadata => "identity.json".to_owned(),
         OutputKey::EncodedProcessMetadata => "encoded-process".to_owned(),
     };

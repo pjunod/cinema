@@ -912,11 +912,7 @@ async fn own_rolling_retirement(
     loop {
         let cleanup = {
             let _transition = session.child_transition.lock().await;
-            let cleanup = terminate_current_prepublication_child(&session).await;
-            if cleanup.is_ok() {
-                finish_rolling_retirement_after_reap(&session).await;
-            }
-            cleanup
+            terminate_current_prepublication_child(&session).await
         };
         match cleanup {
             Ok(()) => {
@@ -934,6 +930,7 @@ async fn own_rolling_retirement(
                     tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
                     continue;
                 }
+                finish_rolling_retirement_after_reap(&session).await;
                 // The child is reaped, but a copy reader may still be
                 // draining its pipe. Fence new writers, wait for the ones
                 // already registered, then measure once and convert the

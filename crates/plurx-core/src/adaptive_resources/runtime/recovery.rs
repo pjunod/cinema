@@ -396,6 +396,7 @@ fn filename(output: OutputKey) -> String {
     match output {
         OutputKey::Init => "init.mp4".into(),
         OutputKey::Segment { index } => crate::fmp4::segment_name(u64::from(index)),
+        OutputKey::Playlist => "index.m3u8".into(),
         OutputKey::IdentityMetadata => "identity.json".into(),
         OutputKey::EncodedProcessMetadata => "encoded-process".into(),
     }
@@ -665,6 +666,7 @@ impl NodeResourceRuntime {
                     OutputKey::Init => init = file.logical_len > 0,
                     OutputKey::IdentityMetadata => identity = file.logical_len > 0,
                     OutputKey::EncodedProcessMetadata => marker = true,
+                    OutputKey::Playlist => return Err(unavailable()),
                     OutputKey::Segment { index } => {
                         if index >= segment_count
                             || file.logical_len == 0

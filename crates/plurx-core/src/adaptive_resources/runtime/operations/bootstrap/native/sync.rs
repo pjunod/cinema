@@ -135,6 +135,7 @@ fn name(key: &OutputKey) -> String {
     match key {
         OutputKey::Init => "init.mp4".into(),
         OutputKey::Segment { index } => format!("seg{index:05}.m4s"),
+        OutputKey::Playlist => "index.m3u8".into(),
         OutputKey::IdentityMetadata => "identity.json".into(),
         OutputKey::EncodedProcessMetadata => "encoded-process".into(),
     }

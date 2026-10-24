@@ -1,7 +1,7 @@
 //! The original native publisher under the SAME bootstrap/journal custodian.
 //! Nothing exported here is a receipt constructor or a pathname fallback.
 use super::*;
-use crate::fs_secure::publication::{PublicationIo, PublicationRequest};
+use crate::fs_secure::publication::{ExpectedPublishedObject, PublicationIo, PublicationRequest};
 use sha2::{Digest, Sha256};
 use v2::scratch::{
     AssetEventV1, AssetIoV1, AssetObservationV1, FileObservedV1, FileSlotId, NativeOutcomeV1,
@@ -14,6 +14,7 @@ pub(in crate::adaptive_resources::runtime::operations) struct Publication {
     join_id: v2::Id,
     copy_id: v2::Id,
     output: OutputKey,
+    prior_playlist: Option<v2::Id>,
     logical_end: u64,
     payload_capacity: u64,
     content_binding: String,
@@ -137,6 +138,27 @@ impl Publication {
     }
 }
 
+fn expected_playlist_object(
+    object: &v2::NativeObject,
+) -> Result<ExpectedPublishedObject, OperationError> {
+    let (
+        v2::NativeValue::Known { value: device },
+        v2::NativeValue::Known { value: inode },
+        v2::NativeValue::Known { value: mount_id },
+    ) = (&object.device, &object.inode, &object.mount_id)
+    else {
+        return Err(OperationError::State);
+    };
+    if object.file_type != v2::FileType::Regular {
+        return Err(OperationError::State);
+    }
+    Ok(ExpectedPublishedObject {
+        device: *device,
+        inode: *inode,
+        mount_id: *mount_id,
+    })
+}
+
 impl NodeResourceRuntime {
     /// Synchronous payload adoption: no async argument can drop the sole live
     /// child, native job, or accepted payload before runtime registration.
@@ -198,6 +220,30 @@ impl NodeResourceRuntime {
             .as_ref()
             .ok_or(OperationError::State)?
             .state();
+        let prior_playlist = if output == OutputKey::Playlist {
+            let mut matches = bootstrap
+                .fold
+                .as_ref()
+                .ok_or(OperationError::State)?
+                .files()
+                .iter()
+                .filter(|file| file.published == Some(OutputKey::Playlist));
+            let first = matches.next();
+            if matches.next().is_some() {
+                return Err(OperationError::State);
+            }
+            first.map(|file| {
+                if state.asset.totals.readers != 0 || !file.held_copy_ids.is_empty() {
+                    return Err(OperationError::State);
+                }
+                Ok((
+                    file.file_id,
+                    expected_playlist_object(&file.native_object)?,
+                ))
+            }).transpose()?
+        } else {
+            None
+        };
         if state.bootstrap.phase != BootstrapPhase::SinkReady
             || state.asset.lifecycle != v2::scratch::ScratchLifecycleV1::Open
             || state.asset.totals.pending_jobs != 0
@@ -222,6 +268,7 @@ impl NodeResourceRuntime {
         let name = match output {
             OutputKey::Init => "init.mp4".to_owned(),
             OutputKey::Segment { index } => format!("seg{index:05}.m4s"),
+            OutputKey::Playlist => "index.m3u8".to_owned(),
             OutputKey::IdentityMetadata => "identity.json".to_owned(),
             OutputKey::EncodedProcessMetadata => "encoded-process".to_owned(),
         };
@@ -230,12 +277,17 @@ impl NodeResourceRuntime {
             output,
             OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
         );
-        let request_for = if metadata {
-            PublicationRequest::for_metadata_operation
+        let validated = if matches!(output, OutputKey::Playlist) {
+            if let Some((_, old)) = prior_playlist {
+                PublicationRequest::for_playlist_replacement(Vec::new(), io_id.uuid(), old)?
+            } else {
+                PublicationRequest::for_playlist_operation(Vec::new(), io_id.uuid())?
+            }
+        } else if metadata {
+            PublicationRequest::for_metadata_operation(&name, Vec::new(), io_id.uuid())?
         } else {
-            PublicationRequest::for_operation
+            PublicationRequest::for_operation(&name, Vec::new(), io_id.uuid())?
         };
-        let validated = request_for(&name, Vec::new(), io_id.uuid())?;
         // Concrete Rust-owned cells and actual heap capacities. Runtime task
         // allocator/DB projection overhead still require their node-baseline
         // accounting; this calculation is not a whole-host physical quota.
@@ -282,14 +334,29 @@ impl NodeResourceRuntime {
             return Err(OperationError::State);
         }
         drop(validated);
-        let request = request_for(&name, std::mem::take(payload), io_id.uuid())
-            .expect("same already-validated name/id and bounded payload length");
+        let request = if matches!(output, OutputKey::Playlist) {
+            if let Some((_, old)) = prior_playlist {
+                PublicationRequest::for_playlist_replacement(
+                    std::mem::take(payload),
+                    io_id.uuid(),
+                    old,
+                )
+            } else {
+                PublicationRequest::for_playlist_operation(std::mem::take(payload), io_id.uuid())
+            }
+        } else if metadata {
+            PublicationRequest::for_metadata_operation(&name, std::mem::take(payload), io_id.uuid())
+        } else {
+            PublicationRequest::for_operation(&name, std::mem::take(payload), io_id.uuid())
+        }
+        .expect("same already-validated name/id and bounded payload length");
         bootstrap.publication = Some(Publication {
             io_id,
             observe_id,
             join_id,
             copy_id,
             output,
+            prior_playlist: prior_playlist.map(|(id, _)| id),
             logical_end: len,
             payload_capacity: capacity,
             content_binding,
@@ -364,7 +431,24 @@ impl NodeResourceRuntime {
             {
                 return Err(OperationError::State);
             }
-            let operation = if matches!(
+            let operation = if let Some(prior_file_id) = publication.prior_playlist {
+                let old = bootstrap
+                    .fold
+                    .as_ref()
+                    .ok_or(OperationError::State)?
+                    .files()
+                    .iter()
+                    .find(|file| file.file_id == prior_file_id)
+                    .ok_or(OperationError::State)?;
+                AssetIoV1::ReplacePlaylist {
+                    prior_file_id,
+                    expected_native_object: old.native_object.clone(),
+                    slot_id: FileSlotId(publication.io_id),
+                    logical_end: publication.logical_end,
+                    payload_capacity: publication.payload_capacity,
+                    copy_id: publication.copy_id,
+                }
+            } else if matches!(
                 publication.output,
                 OutputKey::IdentityMetadata | OutputKey::EncodedProcessMetadata
             ) {
