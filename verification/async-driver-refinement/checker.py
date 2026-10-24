@@ -1668,6 +1668,7 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
     validate_semantic_bindings(g['semantic_bindings'],verify_sources)
     exact_keys(g['store'], {'initial','states','edges'}, 'imported oracle relation')
     store = g['store']
+    certify_tlc_numbers((len(g['value_pool'])+1,len(g['worker_pool'])+1,len(g['contexts'])+1),'wire pool index/count arithmetic')
     certify_tlc_numbers((len(g['product_states'])+1,len(g['product_edges'])+1,len(driver['states'])+1,len(driver['edges'])+1),'model index/count arithmetic')
     oracle_graph = {'schema_version':1,'scope':'imported_oracle','initial':store['initial'],
        'states':store['states'],'edges':store['edges'],'domain':g['domain'],'source_bindings':g['source_bindings'],

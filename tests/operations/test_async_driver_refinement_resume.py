@@ -199,6 +199,36 @@ class ReuseIdentities(OwnedScratch):
                 output = f'test {test_name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
                 evidence = runner.case_evidence(name,output,0)
                 self.assertEqual(evidence,{'test_count':1,'result_class':result_class})
+    def test_product_wire_units_precede_closure_once_with_exact_current_sources(self):
+        expected = {
+          'product_wire_pools_preserve_exact_types_order_and_complex_worker_values',
+          'product_wire_compact_keys_are_bijective_with_full_logical_payloads',
+          'product_wire_byte_accounting_and_stream_writer_fail_closed',
+          'product_wire_store_export_omits_only_redundant_raw',
+        }
+        self.assertEqual(runner.PRODUCT_WIRE_TESTS,expected)
+        order = list(runner.CASES)
+        source = 'crates/plurx-core/src/store/async_driver_product.rs'
+        sources = {source:'a'*64,**{path:'b'*64 for path in adapter.INVOCATION_PATHS}}
+        for short in expected:
+            name = 'store-'+short;test_name = 'store::async_driver_product::'+short
+            with self.subTest(name=name):
+                argv = runner.CASES[name]
+                self.assertLess(order.index(name),order.index('graph-product'))
+                self.assertEqual(sum(test_name in command for command in runner.CASES.values()),1)
+                self.assertEqual(argv,runner.CORE+[test_name,'--','--exact','--nocapture'])
+                self.assertNotIn('--ignored',argv)
+                self.assertNotIn(name,runner.DRIVER_INPUT_CASES | runner.IGNORED_INPUT_CASES)
+                self.assertEqual(runner.case_scope(name),'store')
+                bound = runner.case_sources(name,sources,out=self.directory)
+                self.assertEqual(bound,sources)
+                changed = dict(sources);changed[source] = 'c'*64
+                self.assertNotEqual(bound,runner.case_sources(name,changed,out=self.directory))
+                output = f'test {test_name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
+                self.assertEqual(runner.case_evidence(name,output,0),{'test_count':1,'result_class':short})
+                for invalid in (output.replace('1 passed','0 passed'),output.replace(test_name,'another::test'),output+output):
+                    with self.assertRaises(runner.c.Invalid): runner.case_evidence(name,invalid,0)
+
     def test_ordinary_settlement_boundary_closes_only_in_complete_receipt(self):
         partial = runner.settlement_receipt_boundary(False)
         complete = runner.settlement_receipt_boundary(True)

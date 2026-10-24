@@ -53,6 +53,16 @@ CORE = CARGO+['test','--locked','--offline','-p','plurx-core','--lib','--feature
 LEAF = CARGO+['test','--locked','--offline','-p','plurx-worker-control','--test','library_driver']
 DAEMON = CARGO+['test','--locked','--offline','-p','plurxd','--bin','plurxd']
 STORE_TESTS = c.read_json(PACKAGE/'store-tests.json')
+PRODUCT_WIRE_TESTS = {
+ 'product_wire_pools_preserve_exact_types_order_and_complex_worker_values',
+ 'product_wire_compact_keys_are_bijective_with_full_logical_payloads',
+ 'product_wire_byte_accounting_and_stream_writer_fail_closed',
+ 'product_wire_store_export_omits_only_redundant_raw',
+}
+PRODUCT_WIRE_CASES = [case for case in STORE_TESTS['core_tests'] if case.rsplit('::',1)[-1] in PRODUCT_WIRE_TESTS]
+c.require(len(PRODUCT_WIRE_CASES) == len(PRODUCT_WIRE_TESTS) and
+ {case.rsplit('::',1)[-1] for case in PRODUCT_WIRE_CASES} == PRODUCT_WIRE_TESTS,
+ 'product wire regression registry incomplete or duplicated')
 ACTUAL_SETTLEMENT_TESTS = {
  'actual_ordinary_settlement_payload_and_time_conformance',
  'actual_ordinary_local_guard_and_response_conformance',
@@ -92,6 +102,7 @@ CASES = {
  'driver-payload': LEAF+['numeric_payload_does_not_select_control_edges','--','--exact','--nocapture'],
  'driver-executor': LEAF+['production_executor_consumes_real_environment_replies_in_order','--','--exact','--nocapture'],
  'driver-selector': LEAF+['selector_ready_work_precedes_ready_tick_and_preserves_loss_priority','--','--exact','--nocapture'],
+ **{'store-'+case.rsplit('::',1)[-1]:CORE+[case,'--','--exact','--nocapture'] for case in PRODUCT_WIRE_CASES},
  'graph-product': CORE+[STORE_TESTS['product_test'],'--','--exact','--nocapture'],
  'control-C4': CORE+[STORE_TESTS['product_controls']['C4'],'--','--exact','--nocapture'],
  'control-C9': CORE+[STORE_TESTS['product_controls']['C9'],'--','--exact','--nocapture'],
@@ -148,6 +159,11 @@ def case_evidence(name, output, code):
         c.require(re.findall(r'test result: ok\. (\d+) passed; 0 failed;',output) == ['1'],
                   f'{name}: requires exactly one selected Rust test')
     facts = {'test_count':1,'result_class':'focused_rust_regression'}
+    if name.removeprefix('store-') in PRODUCT_WIRE_TESTS:
+        selected_name = CASES[name][CASES[name].index('--')-1]
+        c.require(re.findall(r'^test '+re.escape(selected_name)+r' \.\.\. ok$',output,re.MULTILINE) ==
+                  ['test '+selected_name+' ... ok'],'product wire regression exact named pass missing')
+        facts['result_class'] = name.removeprefix('store-')
     if name == 'graph-product': facts['result_class'] = 'actual_sql_two_worker_product'
     retry_policy_results = {
       'driver-retry-policy-bases':'retry_policy::tests::retry_bases_preserve_attempt_thresholds',
