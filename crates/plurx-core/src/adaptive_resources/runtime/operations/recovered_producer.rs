@@ -200,29 +200,30 @@ impl NodeResourceRuntime {
         }
         // Validate both capabilities under their sole locks before native
         // take. On a failed take the compact positive domain remains stored.
-        let mut domains = self
-            .recovered_r_domains
-            .lock()
-            .map_err(|_| OperationError::State)?;
-        let domain = match domains.entry(role.durable_tag) {
-            std::collections::btree_map::Entry::Occupied(entry) => entry,
-            std::collections::btree_map::Entry::Vacant(_) => return Err(OperationError::State),
+        let (native, domain) = {
+            let mut domains = self
+                .recovered_r_domains
+                .lock()
+                .map_err(|_| OperationError::State)?;
+            let domain = match domains.entry(role.durable_tag) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry,
+                std::collections::btree_map::Entry::Vacant(_) => return Err(OperationError::State),
+            };
+            if domain.get().root_member_id() != authority.root_member_id()
+                || domain.get().pid() != authority.root_pid()
+                || domain.get().creation_marker() != authority.root_creation_marker()
+                || role.binding != authority.binding()
+                || member != authority.scratch_member_id()
+            {
+                return Err(OperationError::State);
+            }
+            let native = role
+                .bootstrap
+                .get_mut(&member)
+                .ok_or(OperationError::State)?
+                .take_producer_close(role.binding, member)?;
+            (native, domain.remove())
         };
-        if domain.get().root_member_id() != authority.root_member_id()
-            || domain.get().pid() != authority.root_pid()
-            || domain.get().creation_marker() != authority.root_creation_marker()
-            || role.binding != authority.binding()
-            || member != authority.scratch_member_id()
-        {
-            return Err(OperationError::State);
-        }
-        let native = role
-            .bootstrap
-            .get_mut(&member)
-            .ok_or(OperationError::State)?
-            .take_producer_close(role.binding, member)?;
-        let domain = domain.remove();
-        drop(domains);
         let closure = RecoveredRClosure::from_validated_native(native, domain);
         let receipt = PhysicalCloseReceipt::from_recovered_r(closure);
         let key = TransitionKey {

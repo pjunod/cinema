@@ -263,9 +263,8 @@ impl TranscodeManager {
         ticket: Option<SharedTicket>,
     ) -> Result<(), DirectSourceError> {
         let ticket = ticket.expect("registered local direct retirement");
+        let mut ticket = ticket.lock().await;
         ticket
-            .lock()
-            .await
             .finish_retirement(Instant::now() + Duration::from_secs(305))
             .await
     }

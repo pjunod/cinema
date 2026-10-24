@@ -424,7 +424,7 @@ impl TranscodeManager {
     /// before dropping its rich actor and application lease. Only then may a
     /// compact private core ticket perform typed resource settlement/refund.
     #[cfg(target_os = "linux")]
-    pub(super) fn reconcile_source_direct_tasks(self: &Arc<Self>) {
+    pub(crate) fn reconcile_source_direct_tasks(self: &Arc<Self>) {
         enum Transition {
             None,
             ToSettling {
