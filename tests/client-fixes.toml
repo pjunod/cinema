@@ -1,6 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1274: restore the portrait iPhone guide despite the legacy schedule preference.
+[[fixes]]
+id = "apple.iphone-live-guide-grid"
+commits = ["0eec6b8e1e9eb6380a122c101aa7f7602dc52ef6"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".frame(width: geometry.size.width, height: headerHeight, alignment: .topLeading)"
+test = "clients/apple/UITests/LibraryRowsNavigationTests.swift"
+test_anchor = "testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePreference"
+
 # PR #1265: physical Select commits the native tvOS timeline preview.
 [[fixes]]
 id = "apple.tv-timeline-native-select"
