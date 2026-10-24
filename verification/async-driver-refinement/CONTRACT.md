@@ -1,10 +1,11 @@
 # Contract — what the selected product can establish
 
 Companion to [README.md](README.md), which gives commands and receipt paths.
-**Status: implementation integrated, unqualified.** The candidate has no new Rust test,
-control, or model-checker result. The earlier unrestricted Store-D closure
-hit its historical state cap; it remains a failed historical run, not an
-acceptance result. This claim replaces that traversal with a complete finite
+**Status: schema 4 wire implemented; feasibility and qualification pending.**
+No completed schema 4 product or TLC receipt exists. The schema 3 run 5911
+stopped at its conservative serialized-output estimate; it is incomplete
+historical evidence, not a semantic counterexample or acceptance result. This
+claim replaces the unrestricted Store-D traversal with a complete finite
 product for the selected two-worker protocol. The narrowing is part of the
 claim, not a performance optimization. Ordinary settlement payload and time
 transfer is represented from the selected production adapter and Store path.
@@ -23,9 +24,11 @@ exhaustion is outside D because the attempt limit is reached first. There
 are no new arrivals or cyclic demand. The 20,000 cap counts distinct exact
 Store identities across the union of all seven main contexts, including
 capacity-only oracle successors. Reaching it aborts generation. There is no
-product-node cap; the product bundle is bounded by 256 MiB and the total
-artifact by 512 MiB. A byte/state resource failure cannot emit a complete
-relation.
+product-node cap; the schema 4 compact product bundle and generated
+`SourceTables.tla` member are each bounded by 256 MiB, and the total retained
+and extracted artifact remains bounded by 512 MiB. A byte or Store-state
+resource failure cannot emit a complete relation. Feasibility under these
+unchanged limits remains unknown.
 
 All source integer values and raw generated job IDs remain concrete. Clock
 steps use exact retained wall/monotonic authority, payload, eligibility and
@@ -107,9 +110,50 @@ are existential witnesses, not closure of unrestricted Store use.
 The product bundle binds the exact driver-graph bytes, the Rust source
 registry, compiled and installed schema identities, checker and product
 schema, both TLA modules, and all eleven configurations. Its raw Store rows
-and canonical full state identities preserve the Rust replay boundary. The
-256 MiB bundle and 512 MiB artifact bounds are the existing limits; there is
-no inferred product-state ceiling from the 20,000 Store-state cap.
+and canonical full state identities preserve the Rust replay boundary. There
+is no inferred product-state ceiling from the 20,000 Store-state cap.
+
+## Schema 4 shares wire data without changing the logical product
+
+Schema 4 stores repeated exact JSON values in `value_pool` and fixed-width,
+37-column Worker rows in `worker_pool`. The six Worker references are `claim_snapshot`,
+`claim_request`, `claim_recovery`, `driver_settlement`, `adapter_reply`, and
+`ordinary`; the value is still present when it is JSON `null`. Product-state,
+edge, demand, and enabledness rows use the columns and reference targets
+declared in `product-schema.json`. That registry defines the exact row order;
+it is checked against the reader's closed contract rather than used to alter
+semantics.
+
+Every reference is a zero-based integer of the required type and in range;
+booleans do not count as integers. The reader rejects wrong row widths or
+types, dangling references, duplicate pool values, and changed canonical
+bytes or hashes. Pool indexes are wire positions, not semantic identities.
+Interning compares complete canonical values, including JSON types and array
+order, and resolves hash collisions by comparing the full values. Rust keeps
+pools immutable and append-stable, uses compact references only for an exact
+state key, and retains the original `real_drivers` payload.
+`canonical_sha256` remains the hash of the old full logical product payload;
+Store identity still hashes its original `canonical_json` bytes.
+
+The Python reader resolves shared entries lazily as independent checks consume
+the logical values. Candidate generation, exact successor equality, demands,
+reachability, pair fairness, enabledness, and witness checks still operate on
+the complete decoded product. Generated `SourceTables.tla` reconstructs the
+same logical `ProductStates`, `ProductIndex`, `ProductEdges`, `ProductOutgoing`,
+and `ProductEnabled` values. It builds exact index keys from decoded states
+and shares repeated expressions; the schema change does not alter logical
+constants, `Next`, fairness, or the independent transition relation.
+
+The 256 MiB product-bundle limit counts exact compact JSON bytes, including
+pools, references, framing, and metadata. The `SourceTables.tla` member has
+its own unchanged 256 MiB limit, and retained/extracted artifact bytes remain
+bounded by 512 MiB. Existing host-memory, JVM, and timeout limits also remain
+unchanged. Conservative serialized-component accounting is a byte estimate,
+not a claimed RSS or heap bound; a bounded exact serialization check decides
+whether the output fits. Run 5911's schema 3 estimate was 268,436,757 bytes
+against a 268,435,456-byte limit, with 74,293 product states, 26,397 expanded,
+and 47,895 pending. That cutoff is historical and incomplete, not a
+counterexample. Schema 4's fit and the proof remain pending.
 
 ## Initial claim recovery and timer service
 

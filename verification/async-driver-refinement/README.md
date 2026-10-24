@@ -1,10 +1,11 @@
 # Async driver refinement — a selected two-worker product
 
-**Status: implementation integrated, unqualified.** The product design and wire contract are
-defined, but this candidate has no new Rust, control, or model-checker results.
-The earlier arbitrary Store-D closure hit its historical state cap; that
-failed run is retained as receipt history and is not an acceptance result. The
-replacement claim is a complete finite product for two selected workers
+**Status: schema 4 wire implemented; feasibility and proof pending.** The
+wire preserves the logical product through lossless shared dictionaries and
+fixed Worker rows, but no completed schema 4 product or TLC receipt exists.
+Run 5911 stopped at the schema 3 conservative serialized-output estimate; that
+incomplete historical result is not a semantic counterexample or acceptance.
+The claim remains a complete finite product for two selected workers
 over the declared input domain, using a source-bound Store oracle. Ordinary
 settlement transfer is modeled from the selected production adapter and Store
 path, including payload, captured and request times, local guards, validation
@@ -78,13 +79,18 @@ raw logs, and graph identities. Rust closure is limited to the selected
 two-worker product and its explicitly enumerated demands. It does not claim
 arbitrary Store-D closure. The 20,000 cap counts distinct exact Store states
 across all seven main contexts, including capacity-only successors. There is
-no new product-node cap. The bundle remains bounded by 256 MiB and the total
-artifact by 512 MiB; exceeding a bound leaves the result incomplete.
+no product-node cap. Schema 4's exact compact JSON bundle and generated
+`SourceTables.tla` member each remain bounded by 256 MiB; the total retained
+and extracted artifact remains bounded by 512 MiB. The conservative
+serialized-component estimate is a byte-budget estimate, not an RSS or heap
+bound; a bounded exact-size check decides whether output fits. Exceeding any
+limit leaves the result incomplete. Feasibility under these unchanged limits
+is unknown.
 
 `tlc/receipt.json` separates complete positive configurations from named
 counterexamples. It binds generated tables, models, configurations, commands,
-tools, and input provenance. `inventory.json` and `tlc/receipt.json` carry
-`inventory.json` carries `ordinary_settlement_payload_transfer: "pending"`.
+tools, and input provenance. The qualification inventory and TLC receipt keep
+`ordinary_settlement_payload_transfer` pending until accepted evidence exists.
 A partial TLC receipt also remains pending. A complete accepted receipt records
 `closed_bounded` only after the source-bound actual-settlement cases, causal
 controls, product validation, and all eleven configurations pass. The receipt
