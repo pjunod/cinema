@@ -168,5 +168,14 @@ test('Resource ownership keeps unknown task and memory peaks distinct from reser
   assert.match(html,/Unreconciled custody remains held/);
   assert.doesNotMatch(html,/type="checkbox"|disabled|>0<|NaN/);
   assert.match(h.systemResourceOwnershipCard({resource_ownership:{state:'accounting_unavailable',unreconciled_custody:null,accounting:null}}),/Accounting is unknown/);
+  const fenced=h.systemResourceOwnershipCard({resource_ownership:{state:'available',unreconciled_custody:true,accounting:{held:1,unknown_held:1,used:{peak_memory_bytes:4096},capacity:{},native_overage_fenced:true}}});
+  assert.match(fenced,/owned operation exceeded its reserved resources/);
+  assert.match(fenced,/custody and extra charge remain held/);
+  assert.match(fenced,/counted direct reads/);
+  assert.doesNotMatch(fenced,/type="checkbox"|NaN/);
+  const planning=h.systemResourceOwnershipCard({resource_ownership:{state:'available',accounting:{held:1,unknown_held:0,used:{peak_memory_bytes:8192},capacity:{},planning_metadata_held:1,planning_metadata_reserved_bytes:{state:'known',value:8192}}}});
+  assert.match(planning,/Planning metadata: 1 held roles/);
+  assert.match(planning,/8192 reserved bytes \(included above\)/);
+  assert.match(planning,/cleanup records stay charged/);
   assert.equal(h.systemResourceOwnershipCard({}), '');
 });
