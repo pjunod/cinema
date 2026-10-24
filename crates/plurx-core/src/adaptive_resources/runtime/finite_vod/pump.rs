@@ -21,9 +21,9 @@ use tokio::{io::AsyncReadExt, sync::mpsc};
 #[cfg(target_os = "linux")]
 mod telemetry;
 #[cfg(target_os = "linux")]
-pub(in crate::adaptive_resources::runtime) use telemetry::history_basis;
-#[cfg(target_os = "linux")]
 use telemetry::FiniteTelemetry;
+#[cfg(target_os = "linux")]
+pub(in crate::adaptive_resources::runtime) use telemetry::{history_basis, HistoryBasis};
 
 /// Planning data only. Its fields cannot carry callbacks or native close facts.
 pub struct SoftwareAvcPumpPlan {

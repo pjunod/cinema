@@ -204,6 +204,9 @@ impl NodeResourceRuntime {
             .and_then(|bytes| {
                 bytes.checked_add(role.response_budget.as_ref()?.metadata_limit_bytes().ok()?)
             })
+            .and_then(|bytes| {
+                bytes.checked_add(role.finite_app.as_ref()?.application_limit_bytes()?)
+            })
             .ok_or(OperationError::State)?;
         let retained_handles = u64::from(
             full.state

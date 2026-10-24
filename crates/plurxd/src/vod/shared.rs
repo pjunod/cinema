@@ -13,6 +13,135 @@ pub(super) struct FiniteClosingOwner {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) struct PreparedAttemptRendition {
+    shared: Arc<Shared>,
+    key: String,
+    rendition: Option<Arc<Rendition>>,
+    build_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    // Last: the original core charge stays live until every rich field above
+    // and the detached abandoned-owner transfer have been destroyed.
+    application_lease:
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
+    installed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedAttemptRendition {
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub(crate) fn rendition(&self) -> &Arc<Rendition> {
+        self.rendition
+            .as_ref()
+            .expect("prepared attempt owns its rendition")
+    }
+
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.key.capacity().checked_add(std::mem::size_of::<Self>())
+    }
+
+    pub(crate) async fn prepare_worker_binding(
+        &self,
+        deadline: Instant,
+    ) -> Result<(String, String), String> {
+        let producer = self
+            .rendition()
+            .dir
+            .finite_producer()
+            .expect("adaptive attempt has its original producer");
+        let prepared = producer.prepare_adaptive_inputs(deadline).await?;
+        let output = self
+            .rendition()
+            .dir
+            .finite_output()
+            .expect("adaptive attempt has its output selector");
+        let output = output
+            .output_digest()
+            .map_err(|error| format!("binding finite attempt output: {error}"))?;
+        Ok((hex::encode(prepared), hex::encode(output)))
+    }
+
+    /// The committed Store Adopt is the only caller that may publish this
+    /// already charged rendition and start its original driver.
+    pub(crate) async fn install_after_adoption(&mut self) -> Result<(), String> {
+        if self.installed {
+            return Ok(());
+        }
+        let rendition = Arc::clone(self.rendition());
+        if self
+            .shared
+            .finite_closing
+            .lock()
+            .await
+            .contains_key(&self.key)
+        {
+            return Err("finite rendition cleanup remains in progress".into());
+        }
+        {
+            let mut renditions = self.shared.renditions.lock().await;
+            if renditions.contains_key(&self.key) {
+                return Err("adaptive rendition key already has an owner".into());
+            }
+            renditions.insert(self.key.clone(), Arc::clone(&rendition));
+        }
+        self.installed = true;
+        let _driver = spawn_driver(Arc::clone(&self.shared), rendition);
+        self.build_guard.take();
+        Ok(())
+    }
+
+    fn launch_abandoned_cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        if self.installed {
+            return None;
+        }
+        let rendition = self.rendition.take()?;
+        let output = rendition
+            .dir
+            .finite_output()
+            .expect("adaptive attempt built one finite output");
+        let producer = rendition
+            .dir
+            .finite_producer()
+            .expect("adaptive attempt built a fresh finite producer");
+        let shared = Arc::clone(&self.shared);
+        let key = std::mem::take(&mut self.key);
+        let gate = self.build_guard.take();
+        let lease = self.application_lease.take();
+        // The original charged owner is moved into a detached existing
+        // finite-closing registration. Dropping the waiter cannot discard it.
+        Some(tokio::spawn(async move {
+            shared
+                .retain_unattached_finite(&key, Some(Arc::clone(&rendition)), output, producer)
+                .await;
+            drop(gate);
+            drop(rendition);
+            drop(lease);
+        }))
+    }
+
+    pub(crate) async fn abandon(mut self) {
+        if let Some(task) = self.launch_abandoned_cleanup() {
+            let _ = task.await;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PreparedAttemptRendition {
+    fn drop(&mut self) {
+        if self.installed || self.rendition.is_none() {
+            return;
+        }
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = self.launch_abandoned_cleanup();
+        }
+        // Without an executor, the core runtime retains the full unresolved
+        // obligation. Dropping Rust selectors grants no native-close proof.
+    }
+}
+
+#[cfg(target_os = "linux")]
 struct FiniteClosingRun(Arc<FiniteClosingOwner>);
 
 #[cfg(target_os = "linux")]
@@ -500,6 +629,57 @@ impl Shared {
             None,
         )
         .await
+    }
+
+    /// Build one selected finite software owner without publishing it to the
+    /// serving map or starting its producer. The caller has already installed
+    /// its bounded attempt slot and must retain this object until known Adopt
+    /// or transfer it to exact finite cleanup.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_adaptive_attempt(
+        self: &Arc<Shared>,
+        key: String,
+        identity: SourceIdentity,
+        index: Option<FragmentIndex>,
+        recipe: Recipe,
+        duration_ms: i64,
+        settings: &VodSettings,
+        application_owner_bytes: usize,
+    ) -> Result<PreparedAttemptRendition, String> {
+        let build_guard = self.rendition_build_gate(&key).lock_owned().await;
+        if self.finite_closing.lock().await.contains_key(&key)
+            || self.renditions.lock().await.contains_key(&key)
+        {
+            return Err("adaptive rendition key already has an owner".into());
+        }
+        if !super::finite_software::selected(&key, &recipe, false, false) {
+            return Err("adaptive attempt requires selected finite software AVC".into());
+        }
+        let plan = self
+            .stored_plan(&key, &identity, &index, &recipe, duration_ms)
+            .await?;
+        if plan.is_empty() {
+            return Err("adaptive attempt has no immutable segment plan".into());
+        }
+        let (rendition, application_lease) = super::finite_software::build_attempt(
+            self,
+            &key,
+            index,
+            recipe,
+            plan,
+            settings,
+            application_owner_bytes,
+        )
+        .await?;
+        Ok(PreparedAttemptRendition {
+            shared: Arc::clone(self),
+            key,
+            rendition: Some(rendition),
+            build_guard: Some(build_guard),
+            application_lease: Some(application_lease),
+            installed: false,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

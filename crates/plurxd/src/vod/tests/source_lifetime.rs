@@ -283,7 +283,7 @@ async fn source_deferred_rendition_preparation_creates_no_visible_demand_or_chil
     let mut prepared = VodRecipeRequest::from(&req);
     prepared.encoding = Some(Arc::clone(&encoding));
     let (attachment, _) = serve
-        .resolve_rendition(&mut prepared, &file, &settings(), None, None)
+        .resolve_rendition(&mut prepared, &file, &settings(), None, None, None)
         .await
         .expect("actual prepared rendition");
     let rendition = Arc::clone(&attachment.rendition);

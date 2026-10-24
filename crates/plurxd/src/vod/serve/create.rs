@@ -9,6 +9,22 @@ struct PreparedVodRecipe {
     incoming_logical: Option<crate::vodserve::retained_manifest::LogicalOutput>,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct PreparedAdaptiveRecipe {
+    key: String,
+    identity: SourceIdentity,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    duration_ms: i64,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedAdaptiveRecipe {
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+}
+
 /// Private publication/storage identity; the canonical recipe remains the
 /// source of candidate identity and the stored full-title plan.
 fn processed_instance_key(canonical_key: &str, incarnation: &str, nonce: [u8; 16]) -> String {
@@ -157,6 +173,7 @@ impl VodServe {
                 settings,
                 None,
                 Some(Arc::clone(&allowance)),
+                None,
             )
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
@@ -262,6 +279,7 @@ impl VodServe {
                 release_fence: None,
                 serving_admission: None,
                 viewer: None,
+                expected_attempt: None,
             },
         )
         .await
@@ -290,6 +308,7 @@ impl VodServe {
                 release_fence: None,
                 serving_admission: Some(serving_admission),
                 viewer: None,
+                expected_attempt: None,
             },
         )
         .await
@@ -316,6 +335,7 @@ impl VodServe {
                 release_fence: None,
                 serving_admission: Some(serving_admission),
                 viewer: Some(viewer),
+                expected_attempt: None,
             },
         )
         .await
@@ -340,6 +360,39 @@ impl VodServe {
                 release_fence: None,
                 serving_admission: None,
                 viewer: Some(viewer),
+                expected_attempt: None,
+            },
+        )
+        .await
+    }
+
+    /// Attach the already installed original adaptive attempt after its
+    /// exact Store Adopt. The selected rendition is pinned by Arc identity;
+    /// a changed key or lost owner refuses before any replacement build.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn try_create_adopted_attempt<'a>(
+        &self,
+        req: VodRecipeRequest<'a>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        serving_admission: VodServingAdmission,
+        viewer: crate::state::PlaybackViewerDemand,
+        pending: &'a shared::PreparedAttemptRendition,
+    ) -> Result<VodStart, String> {
+        self.try_create_with_release_fence(
+            req,
+            file,
+            settings,
+            attribution,
+            session_id,
+            VodCreateFences {
+                release_fence: None,
+                serving_admission: Some(serving_admission),
+                viewer: Some(viewer),
+                expected_attempt: Some(pending.rendition()),
             },
         )
         .await
@@ -369,6 +422,7 @@ impl VodServe {
                 release_fence: Some(release_fence),
                 serving_admission: None,
                 viewer: None,
+                expected_attempt: None,
             },
         )
         .await
@@ -434,6 +488,7 @@ impl VodServe {
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
         private_preparation: Option<Arc<super::copy_preparation::PreparationAllowance>>,
+        expected_attempt: Option<&Arc<Rendition>>,
     ) -> Result<
         (
             RenditionAttachment,
@@ -526,6 +581,29 @@ impl VodServe {
                 },
             )
         };
+        if let Some(expected) = expected_attempt {
+            if expected.key != key || expected.closed.load(Acquire) {
+                return Err(
+                    "adopted adaptive rendition no longer matches its selected recipe".into(),
+                );
+            }
+            let gate = self.shared.rendition_build_gate(&key).lock_owned().await;
+            let cached = self.shared.renditions.lock().await;
+            if !cached
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+            {
+                return Err("adopted adaptive rendition is no longer the original owner".into());
+            }
+            drop(cached);
+            return Ok((
+                RenditionAttachment {
+                    rendition: Arc::clone(expected),
+                    _build_guard: gate,
+                },
+                incoming_logical,
+            ));
+        }
         let attachment = self
             .shared
             .attach_rendition_with_storage(
@@ -554,6 +632,74 @@ impl VodServe {
                 )
             })?;
         Ok((attachment, incoming_logical))
+    }
+
+    /// Resolve the ordinary selected recipe without admitting any native
+    /// owner. The caller can now destroy its request/catalogue DTO before
+    /// reserving the producer role; only this exact recipe moves forward.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn resolve_adaptive_recipe(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+    ) -> Result<PreparedAdaptiveRecipe, String> {
+        if prepared.root_admission.is_some() {
+            return Err("adaptive finite attempt cannot borrow a predecessor root".into());
+        }
+        let PreparedVodRecipe {
+            identity: _,
+            index,
+            recipe,
+            duration_ms,
+            incoming_logical: _,
+        } = self.prepare_recipe(prepared, file, settings, None).await?;
+        if !finite_software::selected_recipe(&recipe, false, false) {
+            return Err("adaptive attempt requires selected finite software AVC".into());
+        }
+        let identity = recipe
+            .encoding
+            .as_ref()
+            .expect("selected recipe has a frozen encoding")
+            .finite_software_identity(&recipe.file, duration_ms as f64 / 1_000.0)?;
+        let key = rendition_key(&recipe, &identity);
+        Ok(PreparedAdaptiveRecipe {
+            key,
+            identity,
+            index,
+            recipe,
+            duration_ms,
+        })
+    }
+
+    /// This second phase is entered only by the original registered attempt
+    /// task, after request-only DTOs have been released. It keeps the result
+    /// dormant until the Store's exact Adopt is known committed.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn build_adaptive_recipe(
+        &self,
+        prepared: PreparedAdaptiveRecipe,
+        settings: &VodSettings,
+        application_owner_bytes: usize,
+    ) -> Result<shared::PreparedAttemptRendition, String> {
+        let PreparedAdaptiveRecipe {
+            key,
+            identity,
+            index,
+            recipe,
+            duration_ms,
+        } = prepared;
+        self.shared
+            .prepare_adaptive_attempt(
+                key,
+                identity,
+                index,
+                recipe,
+                duration_ms,
+                settings,
+                application_owner_bytes,
+            )
+            .await
     }
 
     /// Select the output once for this attachment. New capture and issued
@@ -1249,6 +1395,7 @@ impl VodServe {
                         settings,
                         fences.viewer.as_ref(),
                         None,
+                        None,
                     )
                     .await?
                     .0;
@@ -1286,6 +1433,7 @@ impl VodServe {
                         settings,
                         fences.viewer.as_ref(),
                         None,
+                        None,
                     )
                     .await?
                     .0;
@@ -1296,7 +1444,14 @@ impl VodServe {
             None => None,
         };
         let (attachment, incoming_logical) = self
-            .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
+            .resolve_rendition(
+                &mut prepared,
+                file,
+                settings,
+                fences.viewer.as_ref(),
+                None,
+                fences.expected_attempt,
+            )
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
         drop(attachment);
@@ -2183,6 +2338,7 @@ impl VodServe {
             VodCreateFences {
                 release_fence: None,
                 serving_admission: None,
+                expected_attempt: None,
                 viewer: Some(crate::state::PlaybackViewerDemand {
                     principal: pending.assignment.binding().principal().clone(),
                     playback_id: pending.request.playback_id.clone(),
@@ -2304,6 +2460,7 @@ impl VodServe {
         let fences = VodCreateFences {
             release_fence: None,
             serving_admission: None,
+            expected_attempt: None,
             viewer: None,
         };
         let prepared = Box::pin(self.prepare_source_rendition(

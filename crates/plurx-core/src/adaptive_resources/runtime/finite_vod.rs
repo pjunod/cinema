@@ -28,6 +28,8 @@ use super::*;
 use crate::adaptive_resources::{FamilyDemand, FamilyRole, FamilyRoleDemand, WorkloadDemand};
 use crate::resource_custody::codec_v2 as v2;
 use crate::resource_custody::{Adapter, MemberKind, PlannedMember, RecoveryMethod};
+#[cfg(target_os = "linux")]
+use crate::resource_history::{CostPhase, CostSummary, HistoryKey};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use v2::scratch::bootstrap::*;
@@ -81,6 +83,7 @@ pub struct FiniteSourceRequest {
     pub scanner_mtime: i64,
 }
 
+pub use super::finite_lifetime::FiniteApplicationLease;
 use super::response_memory::ResponseBudget;
 pub use super::response_memory::{
     FiniteClientSlot, FiniteClientStateLease, FiniteMetadataLease, FiniteResponseBuffer,
@@ -123,16 +126,40 @@ pub struct SoftwareVodRequest {
     pub segment_count: u32,
     pub encoded_process_marker: bool,
     pub demand: WorkloadDemand,
+    /// One rich daemon worker/attempt entry and its original future. This is
+    /// a separate lifetime slot from Rendition metadata and response bodies.
+    pub application_owner_bytes: u64,
     pub output: FiniteOutputLimits,
 }
 
 impl SoftwareVodRequest {
+    /// Add the caller's concrete rich worker/future slot before reservation.
+    /// A later caller-supplied byte count never authorizes native work or
+    /// weakens the original hard vector; actual allocation must take its one
+    /// matching runtime lease after prepare and fit within this amount.
+    pub fn charge_application_owner_bytes(&mut self, bytes: usize) -> Result<(), FiniteVodError> {
+        let bytes = u64::try_from(bytes).map_err(|_| invalid())?;
+        if bytes == 0 || self.application_owner_bytes != 0 {
+            return Err(invalid());
+        }
+        let Metric::Known(resources) = &mut self.demand.resources else {
+            return Err(invalid());
+        };
+        let increased = resources
+            .peak_memory_bytes
+            .checked_add(bytes)
+            .ok_or_else(invalid)?;
+        resources.peak_memory_bytes = increased;
+        self.application_owner_bytes = bytes;
+        Ok(())
+    }
     /// Known requested allocations only. The additional producer peak is
     /// explicitly unknown and serialized by the runtime's memory claim.
     pub fn known_memory_component(
         command: &SoftwareAvcCommand,
         producer: &SoftwareAvcPumpPlan,
         output: &FiniteOutputLimits,
+        application_owner_bytes: u64,
     ) -> std::io::Result<u64> {
         let retained_structure =
             super::operations::finite_retirement::finite_retained_structural_bytes(
@@ -150,6 +177,7 @@ impl SoftwareVodRequest {
             .and_then(|bytes| bytes.checked_add(output.response_memory_bytes))
             .and_then(|bytes| bytes.checked_add(output.bootstrap_memory_bytes))
             .and_then(|bytes| bytes.checked_add(output.retained_metadata_bytes))
+            .and_then(|bytes| bytes.checked_add(application_owner_bytes))
             .and_then(|bytes| bytes.checked_add(output.client_state_bytes))
             .and_then(|bytes| bytes.checked_add(retained_structure))
             .and_then(|bytes| bytes.checked_add(64 * 1024))
@@ -300,8 +328,26 @@ pub struct SoftwareVodOwner {
     encoded_process_marker: bool,
     events: Option<tokio::sync::mpsc::Receiver<SoftwareVodEvent>>,
     control: Arc<FiniteControl>,
+    #[cfg(target_os = "linux")]
+    history_basis: Option<pump::HistoryBasis>,
+    #[cfg(target_os = "linux")]
+    history_family: crate::adaptive_resources::FamilyIdentity,
+    #[cfg(target_os = "linux")]
+    history_units: u32,
     // Last: drop every rich field before announcing application release.
     app_guard: Arc<super::finite_lifetime::FiniteAppGuard>,
+}
+
+/// Exact recipe/mix prior for operator and placement diagnostics only. Neither
+/// phase supplies a hard resource, startup, cleanup or trial bound.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+pub struct FiniteHistoryHint {
+    pub startup: Option<CostSummary>,
+    pub steady: Option<CostSummary>,
+    pub startup_recent: bool,
+    pub steady_recent: bool,
+    pub durable_units: u32,
 }
 
 /// A bounded selection of the same custodian, not an exported File/Arc<File>.
@@ -428,6 +474,14 @@ fn finite_directory_path(
 }
 
 impl FiniteOutput {
+    /// Equality check for the original planned output in a prepared finite
+    /// graph. It does not assert native acquisition or publication.
+    pub fn output_digest(&self) -> Result<[u8; 32], FiniteVodError> {
+        self.runtime
+            .finite_worker_binding_digests(&self.preparation, 0, self.member)
+            .map(|(_, output)| output)
+            .map_err(Into::into)
+    }
     /// Requested heap unique to the shared directory selector. Additional
     /// FiniteOutput clones share this allocation; their inline frames are
     /// counted by their callers. The path is immutable for its whole lifetime.
@@ -687,6 +741,61 @@ impl NodeResourceRuntime {
 }
 
 impl SoftwareVodOwner {
+    /// Read the exact current ledger mixture and matching bounded history.
+    /// A missing/stale mix or clock never becomes zero-cost evidence.
+    #[cfg(target_os = "linux")]
+    pub fn history_hint(&self) -> Option<FiniteHistoryHint> {
+        let basis = self.history_basis?;
+        let mix = self
+            .runtime
+            .ledger
+            .actual_history_mix_for(self.history_family)
+            .ok()?;
+        let startup_key = basis.with_mix(mix);
+        let steady_key = HistoryKey {
+            phase: CostPhase::Steady,
+            ..startup_key
+        };
+        let now = Instant::now();
+        let unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
+        let mut history = self.runtime.history.lock().ok()?;
+        let recent_startup = history.recent(startup_key, now);
+        let recent_steady = history.recent(steady_key, now);
+        let startup =
+            recent_startup.or_else(|| unix_ms.and_then(|at| history.prior(startup_key, at)));
+        let steady = recent_steady.or_else(|| unix_ms.and_then(|at| history.prior(steady_key, at)));
+        Some(FiniteHistoryHint {
+            startup,
+            steady,
+            startup_recent: recent_startup.is_some(),
+            steady_recent: recent_steady.is_some(),
+            durable_units: self.history_units,
+        })
+    }
+    /// Take the one precharged application entry/future slot. This must happen
+    /// before constructing the rich daemon payload; a second take is refused.
+    /// The lease's final Drop follows destruction of that payload and blocks
+    /// terminal refund independently of native and journal closure.
+    pub fn take_application_lease(
+        &self,
+        requested_bytes: usize,
+    ) -> Result<FiniteApplicationLease, FiniteVodError> {
+        self.runtime
+            .finite_app_state(&self.preparation, 0)?
+            .take_application_lease(requested_bytes)
+            .ok_or_else(invalid)
+    }
+    /// Stable same-preparation identity for the selected Store worker record.
+    /// This is a negative equality check, never physical or admission proof.
+    pub fn prepared_handle_digest(&self) -> Result<[u8; 32], FiniteVodError> {
+        self.runtime
+            .finite_worker_binding_digests(&self.preparation, 0, self.scratch_member)
+            .map(|(prepared, _)| prepared)
+            .map_err(Into::into)
+    }
     /// Requested dynamic heap retained by this owner through R. Source specs
     /// are only taken from their slots, so this value cannot grow after
     /// construction. The directory Arc payload is counted once by the output.
@@ -728,6 +837,18 @@ impl SoftwareVodOwner {
                 self.runtime
                     .queue_source_open(&self.preparation, 0, *member, spec)?;
             }
+        }
+        Ok(())
+    }
+    /// Resolve and acquire every original input, including the verified
+    /// executable member, while leaving output and root entry dormant. A
+    /// repeated call reuses the same registered source cells and operation IDs.
+    pub async fn prepare_inputs(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
+        self.prepare(deadline).await?;
+        for member in &self.source_members {
+            self.runtime
+                .acquire_prepared_source(&self.preparation, 0, *member, deadline)
+                .await?;
         }
         Ok(())
     }
@@ -781,12 +902,7 @@ impl SoftwareVodOwner {
     /// Core opens its own prearmed source/output cells and launches only the
     /// immutable compiled software recipe. No child, raw pipe or callback leaves.
     pub async fn start(&mut self, deadline: Instant) -> Result<(), FiniteVodError> {
-        self.prepare(deadline).await?;
-        for member in &self.source_members {
-            self.runtime
-                .acquire_prepared_source(&self.preparation, 0, *member, deadline)
-                .await?;
-        }
+        self.prepare_inputs(deadline).await?;
         self.open_output(deadline).await?;
         self.runtime
             .start_finite_vod(&self.preparation, 0, deadline)
@@ -1004,10 +1120,13 @@ impl NodeResourceRuntime {
             .ok_or_else(invalid)?;
         let response_memory = request.output.response_memory_bytes;
         let response_limit = usize::try_from(response_memory).map_err(|_| invalid())?;
+        let application_owner_limit =
+            usize::try_from(request.application_owner_bytes).map_err(|_| invalid())?;
         let total_memory = SoftwareVodRequest::known_memory_component(
             &request.command,
             &request.producer,
             &request.output,
+            request.application_owner_bytes,
         )?;
         if resources.peak_memory_bytes < total_memory
             || response_memory == 0
@@ -1318,7 +1437,8 @@ impl NodeResourceRuntime {
             }
         };
         self.install_finite_response_budget(&preparation, 0, response_budget)?;
-        let app_state = super::finite_lifetime::FiniteAppState::new();
+        let app_state =
+            super::finite_lifetime::FiniteAppState::with_application_limit(application_owner_limit);
         let app_guard = app_state.new_guard().ok_or_else(invalid)?;
         let output = FiniteOutput {
             runtime: Arc::clone(self),
@@ -1362,6 +1482,12 @@ impl NodeResourceRuntime {
             encoded_process_marker: request.encoded_process_marker,
             events: Some(events),
             control,
+            #[cfg(target_os = "linux")]
+            history_basis,
+            #[cfg(target_os = "linux")]
+            history_family: family,
+            #[cfg(target_os = "linux")]
+            history_units: request.segment_count,
             app_guard,
         })
     }

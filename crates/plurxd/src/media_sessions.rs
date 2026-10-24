@@ -41,6 +41,17 @@ pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
 pub(crate) const PREPARE_PATH: &str = "/internal/cluster/media/sessions/prepare";
 pub(crate) const ACTIVATE_PATH: &str = "/internal/cluster/media/sessions/activate";
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
+/// Versioned physical-attempt worker protocol. Store rows remain the
+/// authority for phase and identity; these bodies carry no native proof.
+pub(crate) const ADAPTIVE_ATTEMPT_PREPARE_PATH: &str =
+    "/internal/cluster/media/adaptive-attempts/prepare";
+pub(crate) const ADAPTIVE_ATTEMPT_ADOPT_PATH: &str =
+    "/internal/cluster/media/adaptive-attempts/adopt";
+pub(crate) const ADAPTIVE_ATTEMPT_CANCEL_PATH: &str =
+    "/internal/cluster/media/adaptive-attempts/cancel";
+pub(crate) const ADAPTIVE_ATTEMPT_STATUS_PATH: &str =
+    "/internal/cluster/media/adaptive-attempts/status";
+pub(crate) const ADAPTIVE_ATTEMPT_VERSION: u16 = 1;
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
 pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control";
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
@@ -1541,6 +1552,65 @@ pub(crate) struct RemoteStartResponse {
     try_from = "RemotePrepareRequestWire",
     into = "RemotePrepareRequestWire"
 )]
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptPrepareV1 {
+    pub version: u16,
+    pub claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
+    pub recipe: RemoteStartRequest,
+}
+
+#[cfg(target_os = "linux")]
+impl AdaptiveAttemptPrepareV1 {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.version == ADAPTIVE_ATTEMPT_VERSION
+            && self.recipe.is_valid()
+            && self.claim.binding.key == self.claim.key.request
+            && self.recipe.incarnation_id == self.claim.key.route_incarnation_id.to_string()
+            && self.recipe.principal == self.claim.binding.principal
+            && self.recipe.request.request_id.as_deref()
+                == Some(self.claim.binding.key.request_id.as_str())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptPreparedV1 {
+    pub version: u16,
+    pub worker: plurx_core::store::adaptive_resource_attempts::WorkerBinding,
+    /// Exact bounded canonical worker recipe used by Store Adopt.
+    pub selected_recipe_json: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptAdoptV1 {
+    pub version: u16,
+    pub adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptCancelV1 {
+    pub version: u16,
+    pub fence: plurx_core::store::adaptive_resource_attempts::AttemptFence,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveAttemptStatusV1 {
+    pub version: u16,
+    pub binding: plurx_core::store::adaptive_resource_attempts::RequestBinding,
+    pub key: plurx_core::store::adaptive_resource_attempts::AttemptKey,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RemotePrepareRequest {
     pub protocol_version: i64,
     pub incarnation_id: String,

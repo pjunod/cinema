@@ -184,6 +184,26 @@ pub(crate) struct MediaNodeSnapshot {
     /// Durable resource admission; distinct from the removed protocol-4 relay.
     #[serde(default)]
     pub live_tv_resource_processing: bool,
+    /// Advisory M5 identity for worker preparation. This reports the actual
+    /// local runtime owner and serving generation; it is never a capacity
+    /// permit or a native reservation. This snapshot is returned only after
+    /// the authenticated internal-peer request check in `internal_media`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_worker_quote: Option<AdaptiveWorkerQuote>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdaptiveWorkerQuote {
+    pub version: u16,
+    pub owner_id: uuid::Uuid,
+    pub serving_generation: u64,
+}
+
+impl AdaptiveWorkerQuote {
+    pub(crate) fn valid(&self) -> bool {
+        self.version == 1 && !self.owner_id.is_nil()
+    }
 }
 
 /// Separate additive protocol: old workers return 404 rather than parsing a
@@ -1782,6 +1802,21 @@ async fn fetch_offer(
 
 pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     let runtime = state.transcode.media_node_runtime().await;
+    #[cfg(target_os = "linux")]
+    let adaptive_worker_quote = {
+        let serving = state.serving.state();
+        state
+            .resource_runtime
+            .as_ref()
+            .filter(|_| serving.ready && !state.membership.local_maintenance_active())
+            .map(|runtime| AdaptiveWorkerQuote {
+                version: 1,
+                owner_id: runtime.owner().owner_id,
+                serving_generation: serving.loss_generation,
+            })
+    };
+    #[cfg(not(target_os = "linux"))]
+    let adaptive_worker_quote = None;
     let scratch_pressure =
         capacity_pressure(runtime.scratch_bytes_free, runtime.scratch_target_bytes);
     let workload_pressure = count_pressure(runtime.active_sessions, runtime.session_pressure_limit);
@@ -1821,6 +1856,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         live_tv_processing: false,
         live_tv_resource_processing: state.serving.is_ready()
             && !state.membership.local_maintenance_active(),
+        adaptive_worker_quote,
     }
 }
 
@@ -2441,6 +2477,7 @@ mod tests {
             .remove("retained_output_receipts");
         let restored: MediaNodeSnapshot = serde_json::from_value(wire).expect("old advertisement");
         assert!(!restored.retained_output_receipts);
+        assert_eq!(restored.adaptive_worker_quote, None);
         let now = tokio::time::Instant::now();
         pool.snapshots.write().await.insert(
             "worker".to_owned(),
@@ -2500,7 +2537,40 @@ mod tests {
             io: MediaIoObservation::default(),
             live_tv_processing: false,
             live_tv_resource_processing: true,
+            adaptive_worker_quote: None,
         }
+    }
+
+    #[test]
+    fn adaptive_worker_quote_requires_version_one_and_non_nil_owner() {
+        let valid = AdaptiveWorkerQuote {
+            version: 1,
+            owner_id: uuid::Uuid::new_v4(),
+            serving_generation: 0,
+        };
+        assert!(valid.valid());
+
+        let unsupported = AdaptiveWorkerQuote {
+            version: 2,
+            ..valid.clone()
+        };
+        assert!(!unsupported.valid());
+        let nil_owner = AdaptiveWorkerQuote {
+            owner_id: uuid::Uuid::nil(),
+            ..valid
+        };
+        assert!(!nil_owner.valid());
+    }
+
+    #[test]
+    fn adaptive_worker_quote_wire_rejects_unknown_fields() {
+        let wire = serde_json::json!({
+            "version": 1,
+            "owner_id": uuid::Uuid::new_v4(),
+            "serving_generation": 0,
+            "capacity_permit": true
+        });
+        assert!(serde_json::from_value::<AdaptiveWorkerQuote>(wire).is_err());
     }
 
     #[test]
@@ -3098,6 +3168,7 @@ mod tests {
                     io: MediaIoObservation::default(),
                     live_tv_processing: false,
                     live_tv_resource_processing: true,
+                    adaptive_worker_quote: None,
                 },
                 expires_at: tokio::time::Instant::now() + SNAPSHOT_EXPIRY,
             },

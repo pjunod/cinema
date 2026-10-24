@@ -3,8 +3,8 @@
 //! the daemon manifest is only a serving index, never settlement authority.
 use super::*;
 use plurx_core::adaptive_resources::runtime::finite_vod::{
-    FiniteClientStateLease, FiniteFile, FiniteMetadataLease, FiniteWriterOutcome,
-    SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
+    FiniteApplicationLease, FiniteClientStateLease, FiniteFile, FiniteMetadataLease,
+    FiniteWriterOutcome, SoftwareVodControl, SoftwareVodEvent, SoftwareVodOwner,
 };
 use plurx_core::transcode::{DecodeBackend, Encoder};
 use std::sync::atomic::AtomicU8;
@@ -92,6 +92,23 @@ impl FiniteSoftwareProducer {
         std::mem::size_of::<Self>()
             .checked_add(2 * std::mem::size_of::<usize>())?
             .checked_add(owner_heap)
+    }
+
+    /// Resolve and observe the original media and held executable before a
+    /// Store Prepared result. This does not enter the output root or launch a
+    /// producer; a later winner starts the same already observed cells.
+    pub(crate) async fn prepare_adaptive_inputs(
+        &self,
+        deadline: Instant,
+    ) -> Result<[u8; 32], String> {
+        let mut owner = self.owner.lock().await;
+        owner
+            .prepare_inputs(deadline)
+            .await
+            .map_err(|error| format!("opening finite attempt inputs: {error}"))?;
+        owner
+            .prepared_handle_digest()
+            .map_err(|error| format!("binding finite attempt owner: {error}"))
     }
 
     pub(super) fn begin_driver(self: &Arc<Self>) -> FiniteDriverCompletion {
@@ -287,7 +304,9 @@ fn attach_metadata_partitions(
         *value.demand_since.get_mut().expect("finite demand lock") = demands;
         let actual = value
             .requested_retained_metadata_bytes()
-            .ok_or("finite rendition metadata capacity could not be measured")?;
+            .ok_or("finite rendition metadata capacity could not be measured")?
+            .checked_add(projected_driver_future_bytes())
+            .ok_or("finite driver frame capacity overflowed")?;
         value
             .finite_metadata_lease
             .as_ref()
@@ -304,6 +323,24 @@ fn attach_metadata_partitions(
     }
 }
 
+/// The selected path starts exactly one `run` task. Ask the compiler for its
+/// concrete future layout without constructing a dummy owner or entering it.
+/// Tokio's private task allocation/header and allocator rounding are separate
+/// from this application-owned future frame.
+pub(super) fn projected_driver_future_bytes() -> usize {
+    fn frame_bytes<F: std::future::Future<Output = ()>>(
+        _: fn(
+            Arc<Shared>,
+            Arc<Rendition>,
+            Arc<FiniteSoftwareProducer>,
+            FiniteDriverCompletion,
+        ) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+    frame_bytes(run)
+}
+
 pub(super) async fn build(
     shared: &Arc<Shared>,
     key: &str,
@@ -312,6 +349,47 @@ pub(super) async fn build(
     plan: SegmentPlan,
     settings: &VodSettings,
 ) -> Result<Arc<Rendition>, String> {
+    build_inner(shared, key, index, recipe, plan, settings, None)
+        .await
+        .map(|(rendition, _)| rendition)
+}
+
+/// An adaptive attempt retains a separate precharged application owner until
+/// its original worker entry and future have actually been destroyed.
+pub(super) async fn build_attempt(
+    shared: &Arc<Shared>,
+    key: &str,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    plan: SegmentPlan,
+    settings: &VodSettings,
+    application_owner_bytes: usize,
+) -> Result<(Arc<Rendition>, FiniteApplicationLease), String> {
+    let (rendition, lease) = build_inner(
+        shared,
+        key,
+        index,
+        recipe,
+        plan,
+        settings,
+        Some(application_owner_bytes),
+    )
+    .await?;
+    Ok((
+        rendition,
+        lease.expect("attempt build takes its application lease"),
+    ))
+}
+
+async fn build_inner(
+    shared: &Arc<Shared>,
+    key: &str,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    plan: SegmentPlan,
+    settings: &VodSettings,
+    application_owner_bytes: Option<usize>,
+) -> Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String> {
     let runtime = shared
         .resource_runtime
         .as_ref()
@@ -336,6 +414,9 @@ pub(super) async fn build(
         .recovered_software_output(key, &media_file_id, &object_version, segment_count)
         .await
         .map_err(|error| format!("recovered finite software output is unresolved: {error}"))?;
+    if application_owner_bytes.is_some() && recovered.is_some() {
+        return Err("adaptive attempt requires a fresh finite producer owner".into());
+    }
     if let Some(output) = recovered {
         let projected_metadata = projected_metadata
             .checked_add(
@@ -431,6 +512,7 @@ pub(super) async fn build(
         // A failed recovered fit leaves the original protected S unchanged;
         // this daemon metadata owner and its lease simply fall away.
         return attach_metadata_partitions(rendition, metadata_lease, client_lease)
+            .map(|rendition| (rendition, None))
             .map_err(|(error, _rendition)| error);
     }
     // Read coherent saved intent before acquisition. Automatic/absent retain
@@ -476,7 +558,7 @@ pub(super) async fn build(
             "finite software admission refused: no unspent hard CPU budget",
         ));
     }
-    let request = finite_profile::compile(
+    let mut request = finite_profile::compile(
         shared,
         key,
         &recipe,
@@ -486,10 +568,16 @@ pub(super) async fn build(
         capacity,
         software_pool_threads,
     )?;
+    if let Some(bytes) = application_owner_bytes {
+        request
+            .charge_application_owner_bytes(bytes)
+            .map_err(|error| format!("charging adaptive attempt owner: {error}"))?;
+    }
     // No selected source/root/marker has been opened. Core synchronously
     // reserves the complete role and retains its prepare operation before return.
+    let admission_deadline = Instant::now() + settings.materialize_budget;
     let owner = runtime
-        .prepare_software_vod(request, Instant::now() + settings.materialize_budget)
+        .prepare_software_vod(request, admission_deadline)
         .map_err(|error| {
             if let Some(refusal) = error.admission_refusal() {
                 crate::transcode::vod_refusal_error(
@@ -500,6 +588,51 @@ pub(super) async fn build(
                 format!("preparing finite software VOD: {error}")
             }
         })?;
+    if let Some(hint) = owner.history_hint() {
+        use plurx_core::resource_policy::{assess_finite_observed_service, FiniteObservedService};
+        let observed = assess_finite_observed_service(
+            hint.startup,
+            hint.steady,
+            hint.durable_units,
+            admission_deadline.saturating_duration_since(Instant::now()),
+        );
+        match observed {
+            FiniteObservedService::PriorAboveRemaining(duration) => {
+                tracing::info!(target: "plurxd::vodserve", rendition = %key,
+                    observed_service_ms = duration.as_millis(),
+                    startup_recent = hint.startup_recent,
+                    steady_recent = hint.steady_recent,
+                    "exact-mix prior exceeds the remaining local materialization window; hard admission remains authoritative");
+            }
+            FiniteObservedService::PriorWithinRemaining(duration) => {
+                tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+                    observed_service_ms = duration.as_millis(),
+                    startup_recent = hint.startup_recent,
+                    steady_recent = hint.steady_recent,
+                    "exact-mix prior is advisory; startup and cleanup remain unbounded");
+            }
+            FiniteObservedService::Unknown => {}
+        }
+    }
+    let application_lease = if let Some(bytes) = application_owner_bytes {
+        match owner.take_application_lease(bytes) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                let output = owner.output();
+                shared
+                    .retain_unattached_finite(
+                        key,
+                        None,
+                        output,
+                        Arc::new(FiniteSoftwareProducer::new(owner)),
+                    )
+                    .await;
+                return Err(format!("taking adaptive attempt owner lease: {error}"));
+            }
+        }
+    } else {
+        None
+    };
     let output = owner.output();
     // The original producer reservation is already charged. Measure its
     // retained application allocations before reserving metadata or building
@@ -562,7 +695,7 @@ pub(super) async fn build(
         IdentityState::default(),
     );
     match attach_metadata_partitions(rendition, metadata_lease, client_lease) {
-        Ok(rendition) => Ok(rendition),
+        Ok(rendition) => Ok((rendition, application_lease)),
         Err((error, rendition)) => {
             let producer = rendition
                 .dir

@@ -224,7 +224,7 @@ pub(super) fn compile(
             .to_owned(),
     )
     .map_err(|error| format!("planning the finite software writer: {error}"))?;
-    let known_memory = SoftwareVodRequest::known_memory_component(&command, &pump, &output)
+    let known_memory = SoftwareVodRequest::known_memory_component(&command, &pump, &output, 0)
         .map_err(|error| format!("sizing the finite software memory component: {error}"))?;
 
     let source_count = if recipe.file.audio_streams.is_empty() {
@@ -281,6 +281,7 @@ pub(super) fn compile(
         segment_count: segments,
         encoded_process_marker: true,
         demand,
+        application_owner_bytes: 0,
         output,
     };
     // Complete the SAME metadata profile before core admission. Runtime
@@ -299,6 +300,9 @@ pub(super) fn compile(
             .and_then(|bytes| bytes.checked_add(output_heap))
             .and_then(|bytes| {
                 bytes.checked_add(super::finite_metadata::closing_owner_heap_bytes(key.len())?)
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(super::finite_software::projected_driver_future_bytes())
             })
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or("finite application metadata projection overflows")?;

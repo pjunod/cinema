@@ -1001,6 +1001,9 @@ struct VodCreateFences<'a> {
     release_fence: Option<VodReleaseFence<'a>>,
     serving_admission: Option<VodServingAdmission>,
     viewer: Option<crate::state::PlaybackViewerDemand>,
+    // Installed only by the private adaptive-attempt entrypoint after its
+    // exact Store Adopt. Resolution may select this Arc, never build another.
+    expected_attempt: Option<&'a Arc<Rendition>>,
 }
 
 impl VodServingAdmission {
@@ -1476,6 +1479,8 @@ mod vod_serve_control;
 mod vod_serve_create;
 #[cfg(test)]
 pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
+#[cfg(target_os = "linux")]
+pub(crate) use vod_serve_create::PreparedAdaptiveRecipe;
 pub(crate) use vod_serve_create::ReservedSourceVodRendition;
 #[path = "vod/serve/delivery.rs"]
 mod vod_serve_delivery;
@@ -1494,6 +1499,8 @@ mod finite_profile;
 pub(crate) mod finite_software;
 #[path = "vod/shared.rs"]
 mod shared;
+#[cfg(target_os = "linux")]
+pub(crate) use shared::PreparedAttemptRendition;
 // split: end vod-shared
 
 // split: begin vod-driver

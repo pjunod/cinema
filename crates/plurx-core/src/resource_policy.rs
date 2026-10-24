@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::process::observation::Metric;
+use crate::resource_history::CostSummary;
 use crate::resource_observation::{ServiceUnit, ServiceWindow, WorkPhase, WorkSample};
 
 const PEER_FLOOR: Duration = Duration::from_secs(3);
@@ -15,6 +16,54 @@ const FRESHNESS: Duration = Duration::from_secs(15);
 const COOLDOWN: Duration = Duration::from_secs(60);
 const STABILITY: Duration = Duration::from_secs(30);
 const MAX_PROTECTED: usize = 100;
+
+/// Comparison of previously observed durable-unit service windows with this
+/// request's remaining deadline. It is advisory: process startup, native
+/// peaks, future scenes and cleanup are not bounded by these summaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FiniteObservedService {
+    Unknown,
+    PriorWithinRemaining(Duration),
+    PriorAboveRemaining(Duration),
+}
+
+pub fn assess_finite_observed_service(
+    startup: Option<CostSummary>,
+    steady: Option<CostSummary>,
+    durable_units: u32,
+    remaining: Duration,
+) -> FiniteObservedService {
+    let Some(startup) = startup else {
+        return FiniteObservedService::Unknown;
+    };
+    if durable_units == 0 || startup.samples == 0 || startup.max_elapsed_ns_per_unit == 0 {
+        return FiniteObservedService::Unknown;
+    }
+    let rest = durable_units - 1;
+    let steady_ns = if rest == 0 {
+        0
+    } else {
+        let Some(steady) = steady else {
+            return FiniteObservedService::Unknown;
+        };
+        if steady.samples == 0 || steady.max_elapsed_ns_per_unit == 0 {
+            return FiniteObservedService::Unknown;
+        }
+        steady.max_elapsed_ns_per_unit
+    };
+    let Some(observed_ns) = steady_ns
+        .checked_mul(u64::from(rest))
+        .and_then(|ns| ns.checked_add(startup.max_elapsed_ns_per_unit))
+    else {
+        return FiniteObservedService::Unknown;
+    };
+    let observed = Duration::from_nanos(observed_ns);
+    if observed > remaining {
+        FiniteObservedService::PriorAboveRemaining(observed)
+    } else {
+        FiniteObservedService::PriorWithinRemaining(observed)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -456,6 +505,41 @@ impl GrowthState {
 mod tests {
     use super::*;
     use crate::process::observation::UnknownReason;
+
+    #[test]
+    fn finite_history_advice_never_fills_missing_phase_or_overflow_with_zero() {
+        let startup = CostSummary {
+            samples: 1,
+            max_cpu_ns_per_unit: 0,
+            max_elapsed_ns_per_unit: 2_000_000_000,
+            max_observed_resident_bytes: 1,
+            last_unix_ms: 1,
+        };
+        assert_eq!(
+            assess_finite_observed_service(Some(startup), None, 2, Duration::from_secs(10)),
+            FiniteObservedService::Unknown
+        );
+        assert_eq!(
+            assess_finite_observed_service(
+                Some(startup),
+                Some(CostSummary {
+                    max_elapsed_ns_per_unit: u64::MAX,
+                    ..startup
+                }),
+                3,
+                Duration::from_secs(10),
+            ),
+            FiniteObservedService::Unknown
+        );
+        assert_eq!(
+            assess_finite_observed_service(Some(startup), Some(startup), 3, Duration::from_secs(5)),
+            FiniteObservedService::PriorAboveRemaining(Duration::from_secs(6))
+        );
+        assert_eq!(
+            assess_finite_observed_service(Some(startup), Some(startup), 3, Duration::from_secs(7)),
+            FiniteObservedService::PriorWithinRemaining(Duration::from_secs(6))
+        );
+    }
 
     fn budget(now: Instant) -> TrialBudget {
         TrialBudget {

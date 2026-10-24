@@ -6,6 +6,7 @@ use crate::adaptive_resources::physical_graph::finite_vod::{
     GraphFiniteVodTask,
 };
 use crate::adaptive_resources::runtime::finite_vod::{pump::SoftwarePump, SoftwareAvcCommand};
+use sha2::{Digest, Sha256};
 use std::process::Stdio;
 
 pub(super) struct FiniteLaunch {
@@ -106,6 +107,66 @@ impl FiniteTaskDisposition {
 }
 
 impl NodeResourceRuntime {
+    /// Store-side negative equality for the exact prepared finite graph and
+    /// its original planned output. These hashes are not native identity,
+    /// physical proof, a reservation or publication authority.
+    pub(in crate::adaptive_resources::runtime) fn finite_worker_binding_digests(
+        &self,
+        owner: &OwnedPreparation,
+        index: usize,
+        output_member: Uuid,
+    ) -> Result<([u8; 32], [u8; 32]), OperationError> {
+        self.validate_preparation(owner)?;
+        let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
+        if !bundle.installed || !bundle.prepare.acknowledged || bundle.id != owner.id {
+            return Err(OperationError::State);
+        }
+        let role = bundle.roles.get(index).ok_or(OperationError::State)?;
+        let handle = role.handle.as_ref().ok_or(OperationError::State)?;
+        let finite = role.finite_vod.as_ref().ok_or(OperationError::State)?;
+        let members = role.typed_members.as_ref().ok_or(OperationError::State)?;
+        let mut output_asset = None;
+        for member in members {
+            if let v2::MemberPlan::ScratchAssetsV3 { slot, plan } = member {
+                if slot.member_id.uuid() == output_member
+                    && output_asset.replace(plan.asset_id.uuid()).is_some()
+                {
+                    return Err(OperationError::State);
+                }
+            }
+        }
+        let output_asset = output_asset.ok_or(OperationError::State)?;
+        let mut prepared = Sha256::new();
+        prepared.update(b"plurx-finite-prepared-handle-v1");
+        for id in [
+            self.recovered.journal_id,
+            self.recovered.installation_id,
+            self.owner.owner_id,
+            handle.obligation_id(),
+            handle.graph_id(),
+            owner.id,
+            finite.root_member,
+            finite.task_member,
+            finite.acquisition_id,
+        ] {
+            prepared.update(id.as_bytes());
+        }
+        let mut output = Sha256::new();
+        output.update(b"plurx-finite-planned-output-v1");
+        for id in [
+            self.recovered.journal_id,
+            self.recovered.installation_id,
+            self.owner.owner_id,
+            handle.obligation_id(),
+            handle.graph_id(),
+            output_member,
+            output_asset,
+        ] {
+            output.update(id.as_bytes());
+        }
+        Ok((prepared.finalize().into(), output.finalize().into()))
+    }
+
     /// Recheck the captured dependency and reporter versions off the async
     /// worker. This is a recipe-drift fence; it cannot prove native custody.
     async fn validate_finite_engine_snapshot(
