@@ -1,9 +1,9 @@
 //! Exact selected two-worker product producer. The independent checker/TLA
 //! validate its certificate; this producer's adjacency is never an oracle.
-//! Schema 3 retains actual lifecycle payloads, raw retry identity and separate
+//! Schema 4 losslessly shares actual lifecycle payloads, raw retry identity and separate
 //! wall/monotonic samples. Qualification remains pending reviewed execution.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use super::background_jobs::JOB_LEASE_MS;
@@ -449,7 +449,7 @@ impl ClaimRecovery {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct ClaimLossKey {
     job: usize,
     node: usize,
@@ -2496,33 +2496,265 @@ fn memberships(step: &Step, value: &Valuation, context: &Context, oracle: &Oracl
     labels.into_iter().collect()
 }
 
-struct ProductState {
+const WORKER_COLUMNS: [&str; 37] = [
+    "accepted",
+    "adapter_reply",
+    "admission",
+    "afterSample",
+    "attempt",
+    "call",
+    "cancelling",
+    "claim_issued_mono_ms",
+    "claim_recovery",
+    "claim_request",
+    "claim_request_now_ms",
+    "claim_snapshot",
+    "ctrl",
+    "driver_settlement",
+    "dropped",
+    "faultUsed",
+    "firstSample",
+    "inner",
+    "job",
+    "joined",
+    "lease",
+    "localToken",
+    "local_deadline_mono_ms",
+    "ordinary",
+    "original",
+    "outcome",
+    "queue_lost",
+    "readLock",
+    "reply",
+    "resolveSample",
+    "resolved",
+    "retire",
+    "sample",
+    "stage",
+    "started",
+    "token",
+    "workStarted",
+];
+const WORKER_VALUE_REFS: [&str; 6] = [
+    "claim_snapshot",
+    "claim_request",
+    "claim_recovery",
+    "driver_settlement",
+    "adapter_reply",
+    "ordinary",
+];
+
+/// IDs are append-stable references to exact values, never semantic quotients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ProductKey {
     context: usize,
-    value: Valuation,
+    sql: StoreHandle,
+    workers: [usize; 2],
+    available: usize,
+    completed: usize,
+    mono_now_ms: i64,
+    wall_anchors: usize,
+    mono_anchors: usize,
+    claim_loss_keys: usize,
+}
+struct ProductState {
+    key: ProductKey,
+    real_drivers: [Option<RealDriver>; 2],
     hash: String,
     parent: Option<(usize, Branch)>,
 }
+impl ProductState {
+    fn record(&self) -> Value {
+        let k = self.key;
+        json!([
+            k.context,
+            k.sql,
+            k.workers[0],
+            k.workers[1],
+            k.available,
+            k.completed,
+            k.mono_now_ms,
+            k.wall_anchors,
+            k.mono_anchors,
+            k.claim_loss_keys,
+            self.hash
+        ])
+    }
+    fn valuation(&self, pools: &WirePools) -> Result<Valuation, String> {
+        let k = self.key;
+        Ok(Valuation {
+            sql: k.sql,
+            w: [
+                pools.worker_values[k.workers[0]].clone(),
+                pools.worker_values[k.workers[1]].clone(),
+            ],
+            available: pools.decode(k.available)?,
+            completed: pools.decode(k.completed)?,
+            mono_now_ms: k.mono_now_ms,
+            wall_anchors: pools.decode(k.wall_anchors)?,
+            mono_anchors: pools.decode(k.mono_anchors)?,
+            claim_loss_keys: pools.decode(k.claim_loss_keys)?,
+            real_drivers: self.real_drivers,
+        })
+    }
+}
+
+#[derive(Default)]
+struct WirePools {
+    values: Vec<Value>,
+    value_index: HashMap<String, usize>,
+    workers: Vec<Value>,
+    worker_values: Vec<Worker>,
+    worker_index: HashMap<String, usize>,
+}
+impl WirePools {
+    fn value<T: Serialize>(&mut self, value: &T, budget: &mut Budget) -> Result<usize, String> {
+        let value = serde_json::to_value(value).map_err(|e| format!("ProductWire: {e}"))?;
+        let key = canonical(&value);
+        // HashMap's full String equality resolves collisions; SHA is not an identity key.
+        if let Some(id) = self.value_index.get(&key) {
+            return Ok(*id);
+        }
+        budget.charge("value_pool", &value, 1)?;
+        let id = self.values.len();
+        self.values.push(value);
+        self.value_index.insert(key, id);
+        Ok(id)
+    }
+    fn worker(&mut self, worker: &Worker, budget: &mut Budget) -> Result<usize, String> {
+        let logical = serde_json::to_value(worker).map_err(|e| format!("ProductWire: {e}"))?;
+        require(
+            logical.as_object().map(|v| v.len()) == Some(WORKER_COLUMNS.len()),
+            "ProductWire: Worker fields changed",
+        )?;
+        let mut row = Vec::with_capacity(WORKER_COLUMNS.len());
+        for column in WORKER_COLUMNS {
+            let value = logical
+                .get(column)
+                .ok_or("ProductWire: missing Worker column")?;
+            if WORKER_VALUE_REFS.contains(&column) {
+                row.push(json!(self.value(value, budget)?));
+            } else {
+                require(
+                    !value.is_array() && !value.is_object(),
+                    "ProductWire: non-scalar Worker cell",
+                )?;
+                row.push(value.clone());
+            }
+        }
+        let row = Value::Array(row);
+        let key = canonical(&row);
+        if let Some(id) = self.worker_index.get(&key) {
+            require(
+                self.worker_values[*id] == *worker,
+                "ProductWire: unequal Worker alias",
+            )?;
+            return Ok(*id);
+        }
+        budget.charge("worker_pool", &row, 1)?;
+        let id = self.workers.len();
+        self.workers.push(row);
+        self.worker_values.push(worker.clone());
+        self.worker_index.insert(key, id);
+        Ok(id)
+    }
+    fn key(
+        &mut self,
+        context: usize,
+        value: &Valuation,
+        budget: &mut Budget,
+    ) -> Result<ProductKey, String> {
+        Ok(ProductKey {
+            context,
+            sql: value.sql,
+            workers: [
+                self.worker(&value.w[0], budget)?,
+                self.worker(&value.w[1], budget)?,
+            ],
+            available: self.value(&value.available, budget)?,
+            completed: self.value(&value.completed, budget)?,
+            mono_now_ms: value.mono_now_ms,
+            wall_anchors: self.value(&value.wall_anchors, budget)?,
+            mono_anchors: self.value(&value.mono_anchors, budget)?,
+            claim_loss_keys: self.value(&value.claim_loss_keys, budget)?,
+        })
+    }
+    fn decode<T: serde::de::DeserializeOwned>(&self, id: usize) -> Result<T, String> {
+        serde_json::from_value(self.values[id].clone()).map_err(|e| format!("ProductWire: {e}"))
+    }
+}
+
+struct ByteLimit<W> {
+    inner: W,
+    bytes: usize,
+    limit: usize,
+}
+impl<W: Write> Write for ByteLimit<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next = self.bytes.checked_add(bytes.len()).ok_or_else(|| {
+            std::io::Error::other("ProductResourceLimit: byte accounting overflow")
+        })?;
+        if next > self.limit {
+            return Err(std::io::Error::other(
+                "ProductResourceLimit: exact serialized output exceeds byte bound; incomplete",
+            ));
+        }
+        let written = self.inner.write(bytes)?;
+        self.bytes += written;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+fn serialized_size<T: Serialize>(value: &T, limit: usize) -> Result<usize, String> {
+    let mut writer = ByteLimit {
+        inner: std::io::sink(),
+        bytes: 0,
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|e| format!("ProductResourceLimit: {e}"))?;
+    Ok(writer.bytes)
+}
+#[derive(Default)]
 struct Budget {
     bytes: usize,
     stores: usize,
     oracle_edges: usize,
+    component_bytes: BTreeMap<&'static str, usize>,
+    component_records: BTreeMap<&'static str, usize>,
 }
 impl Budget {
-    fn charge<T: Serialize>(&mut self, value: &T, slack: usize) -> Result<(), String> {
+    fn charge<T: Serialize>(
+        &mut self,
+        component: &'static str,
+        value: &T,
+        framing: usize,
+    ) -> Result<(), String> {
+        let bytes = serialized_size(value, BUNDLE_BYTES)?
+            .checked_add(framing)
+            .ok_or("ProductResourceEstimate: byte accounting overflow; incomplete")?;
         self.bytes = self
             .bytes
-            .checked_add(encoded(value).len())
-            .and_then(|n| n.checked_add(slack))
+            .checked_add(bytes)
             .ok_or("ProductResourceEstimate: byte accounting overflow; incomplete")?;
-        require(self.bytes<=BUNDLE_BYTES,"ProductResourceEstimate: conservative serialized output estimate exceeds 256MiB; incomplete")
+        let total = self.component_bytes.entry(component).or_default();
+        *total = total
+            .checked_add(bytes)
+            .ok_or("ProductResourceEstimate: component byte overflow")?;
+        let count = self.component_records.entry(component).or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or("ProductResourceEstimate: component count overflow")?;
+        require(self.bytes <= BUNDLE_BYTES, "ProductResourceEstimate: conservative serialized output estimate exceeds 256MiB; incomplete")
     }
     fn oracle(&mut self, oracle: &Oracle) -> Result<(), String> {
         while self.stores < oracle.states.len() {
-            self.charge(&oracle.export_state(self.stores), 2)?;
+            self.charge("store_states", &oracle.export_product_state(self.stores), 1)?;
             self.stores += 1;
         }
         while self.oracle_edges < oracle.edges.len() {
-            self.charge(&oracle.edges[self.oracle_edges], 2)?;
+            self.charge("store_edges", &oracle.edges[self.oracle_edges], 1)?;
             self.oracle_edges += 1;
         }
         Ok(())
@@ -2531,11 +2763,27 @@ impl Budget {
 fn product_payload(context: &Context, value: &Valuation) -> Value {
     json!({"context":context.id,"sql":value.sql,"w":value.w,"available":value.available,"completed":value.completed,"mono_now_ms":value.mono_now_ms,"wall_anchors":value.wall_anchors,"mono_anchors":value.mono_anchors,"claim_loss_keys":value.claim_loss_keys})
 }
-fn product_record(id: usize, state: &ProductState, contexts: &[Context]) -> Value {
-    let mut record = product_payload(&contexts[state.context], &state.value);
-    record["id"] = json!(id);
-    record["canonical_sha256"] = json!(state.hash);
-    record
+fn metadata_envelope(
+    oracle: &Oracle,
+    semantic: &BTreeMap<String, String>,
+    driver_bytes: &[u8],
+    contexts: &[Context],
+) -> Value {
+    // Max-width counts/IDs conservatively reserve all metadata/framing. Every
+    // subsequently appended array entry and context member is charged separately.
+    let mut descriptors = Vec::new();
+    let mut by_context = serde_json::Map::new();
+    for context in contexts {
+        descriptors.push(json!({"id":context.id,"model":"AsyncDriverRefinement","stable_success":context.stable,"mutation":context.mutation,"witness":false,"initial":usize::MAX,"states":[]}));
+        by_context.insert(context.id.into(), json!({"state_count":usize::MAX,"edge_count":usize::MAX,"demand_count":usize::MAX,"frontier_count":usize::MAX}));
+    }
+    for (id, mutation) in [
+        ("boundary_local_revocation", "local-revocation"),
+        ("boundary_unknown_rollback", "unknown-as-rollback"),
+    ] {
+        descriptors.push(json!({"id":id,"model":"BoundaryControls","stable_success":false,"mutation":mutation,"witness":false,"initial":null,"states":[]}));
+    }
+    json!({"schema_version":4,"scope":"selected_two_worker_product","source_boundaries":{"ordinary_settlement_payload_transfer":{"status":"pending","domain":"selected_two_worker_normal_clock"}},"fixture_identity":oracle.fixture_identity(),"driver_graph_sha256":digest(driver_bytes),"source_bindings":oracle.source_bindings(),"semantic_bindings":semantic,"schema_bindings":oracle.schema,"domain":sql::domain_metadata(),"store":{"initial":0,"states":[],"edges":[]},"contexts":descriptors,"value_pool":[],"worker_pool":[],"product_states":[],"product_edges":[],"demands":[],"enabledness":[],"coverage":{"complete":false,"no_skipped_demands":false,"store_state_count":usize::MAX,"store_edge_count":usize::MAX,"product_state_count":usize::MAX,"product_edge_count":usize::MAX,"demand_count":usize::MAX,"by_context":by_context}})
 }
 fn semantic_bindings() -> Result<BTreeMap<String, String>, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2602,22 +2850,23 @@ fn cutoff(snapshot: Cutoff<'_>, reason: &str, action: Option<&Action>) {
     // Failure-only: never serialize the full frontier, rows or canonical keys.
     eprintln!(
         "async_product_cutoff={}",
-        json!({"complete":false,"bound":reason.split(':').next().unwrap_or("ResourceError"),"reason":sql::diagnostic_action(encoded(&json!({"reason":reason}))),"context":context.id,"store_states":oracle.states.len(),"store_edges":oracle.edges.len(),"product_states":states.len(),"expanded":expanded,"pending":queue.len(),"serialized_output_estimate":budget.bytes,"estimated_retained_bytes":budget.bytes.saturating_mul(3),"predecessor":from,"predecessor_sha256":states[from].hash,"rejected_action":action.map(|a|sql::diagnostic_action(encoded(a))),"oracle_predecessor_sha256":digest(oracle.states[states[from].value.sql].canonical.as_bytes()),"oracle_successor_sha256":oracle.failure.as_ref().and_then(|v|v.get("successor_sha256")),"trace_tail":tail,"trace_complete":states[cursor].parent.is_none()})
+        json!({"complete":false,"bound":reason.split(':').next().unwrap_or("ResourceError"),"reason":sql::diagnostic_action(encoded(&json!({"reason":reason}))),"context":context.id,"store_states":oracle.states.len(),"store_edges":oracle.edges.len(),"product_states":states.len(),"expanded":expanded,"pending":queue.len(),"serialized_output_estimate":budget.bytes,"attempted_wire_component_bytes":budget.component_bytes,"attempted_wire_component_records":budget.component_records,"predecessor":from,"predecessor_sha256":states[from].hash,"rejected_action":action.map(|a|sql::diagnostic_action(encoded(a))),"oracle_predecessor_sha256":digest(oracle.states[states[from].key.sql].canonical.as_bytes()),"oracle_successor_sha256":oracle.failure.as_ref().and_then(|v|v.get("successor_sha256")),"trace_tail":tail,"trace_complete":states[cursor].parent.is_none()})
     );
 }
 async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, String> {
     let contexts = contexts();
     let mut oracle = Oracle::new(None).await?;
     let semantic = semantic_bindings()?;
-    let mut budget = Budget {
-        bytes: 0,
-        stores: 0,
-        oracle_edges: 0,
-    };
-    budget.charge(&json!({"domain":sql::domain_metadata(),"schema_bindings":oracle.schema,"source_bindings":oracle.source_bindings(),"semantic_bindings":semantic}),16_384)?;
+    let mut budget = Budget::default();
+    budget.charge(
+        "metadata",
+        &metadata_envelope(&oracle, &semantic, driver_bytes, &contexts),
+        0,
+    )?;
+    let mut pools = WirePools::default();
     budget.oracle(&oracle)?;
     let mut states = Vec::<ProductState>::new();
-    let mut index = HashMap::<String, usize>::new();
+    let mut index = HashMap::<ProductKey, usize>::new();
     let mut edges = Vec::<Value>::new();
     let mut demands_out = Vec::<Value>::new();
     let mut enabled = Vec::<Value>::new();
@@ -2636,44 +2885,50 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
             real_drivers: [None, None],
         };
         retain_anchors(&mut initial, &oracle);
-        let initial_key = canonical(&product_payload(context, &initial));
+        let initial_key = pools.key(context_id, &initial, &mut budget)?;
         let initial_id = states.len();
-        index.insert(initial_key.clone(), initial_id);
+        index.insert(initial_key, initial_id);
         states.push(ProductState {
-            context: context_id,
-            value: initial,
-            hash: digest(initial_key.as_bytes()),
+            key: initial_key,
+            real_drivers: initial.real_drivers,
+            hash: digest(canonical(&product_payload(context, &initial)).as_bytes()),
             parent: None,
         });
-        budget.charge(
-            &product_record(initial_id, &states[initial_id], &contexts),
-            32,
-        )?;
+        budget.charge("product_states", &states[initial_id].record(), 1)?;
+        budget.charge("context_membership", &initial_id, 1)?;
         let mut queue = VecDeque::from([initial_id]);
         let mut context_states = vec![initial_id];
         let mut expanded = 0;
         let edge_start = edges.len();
         let demand_start = demands_out.len();
         while let Some(from) = queue.pop_front() {
-            let value = states[from].value.clone();
-            macro_rules! charge_output {
-                ($record:expr, $slack:expr) => {
-                    if let Err(reason) = budget.charge($record, $slack) {
-                        cutoff(
-                            Cutoff {
-                                context,
-                                from,
-                                states: &states,
-                                queue: &queue,
-                                expanded,
-                                oracle: &oracle,
-                                budget: &budget,
-                            },
-                            &reason,
-                            None,
-                        );
-                        return Err(reason);
+            let value = states[from].valuation(&pools)?;
+            macro_rules! checked_output {
+                ($operation:expr) => {
+                    match $operation {
+                        Ok(value) => value,
+                        Err(reason) => {
+                            cutoff(
+                                Cutoff {
+                                    context,
+                                    from,
+                                    states: &states,
+                                    queue: &queue,
+                                    expanded,
+                                    oracle: &oracle,
+                                    budget: &budget,
+                                },
+                                &reason,
+                                None,
+                            );
+                            return Err(reason);
+                        }
                     }
+                };
+            }
+            macro_rules! charge_output {
+                ($component:expr, $record:expr) => {
+                    checked_output!(budget.charge($component, $record, 1))
                 };
             }
             // Complete structural candidate collection precedes every oracle lookup.
@@ -2730,8 +2985,23 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     );
                     return Err(reason);
                 }
-                let record = json!({"context":context.id,"from":from,"branch":{"family":spec.family,"worker":spec.worker},"role":spec.role,"oracle_from":spec.oracle_from,"input":spec.input,"oracle_edge":edge,"exclusion":exclusion});
-                charge_output!(&record, 2);
+                let branch_ref = checked_output!(pools.value(
+                    &json!({"family":spec.family,"worker":spec.worker}),
+                    &mut budget
+                ));
+                let input_ref = checked_output!(pools.value(&spec.input, &mut budget));
+                let exclusion_ref = checked_output!(pools.value(&exclusion, &mut budget));
+                let record = json!([
+                    context_id,
+                    from,
+                    spec.oracle_from,
+                    branch_ref,
+                    spec.role,
+                    input_ref,
+                    edge,
+                    exclusion_ref
+                ]);
+                charge_output!("demands", &record);
                 demands_out.push(record);
                 demands.push(Demand { spec, edge });
             }
@@ -2794,8 +3064,22 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     }
                 };
                 budget.oracle(&oracle)?;
-                let record = json!({"context":context.id,"from":from,"branch":{"family":spec.family,"worker":null},"role":"apply","oracle_from":oracle_from,"input":input,"oracle_edge":id,"exclusion":null});
-                charge_output!(&record, 2);
+                let branch_ref = checked_output!(
+                    pools.value(&json!({"family":spec.family,"worker":null}), &mut budget)
+                );
+                let input_ref = checked_output!(pools.value(&input, &mut budget));
+                let exclusion_ref = checked_output!(pools.value(&Value::Null, &mut budget));
+                let record = json!([
+                    context_id,
+                    from,
+                    oracle_from,
+                    branch_ref,
+                    "apply",
+                    input_ref,
+                    id,
+                    exclusion_ref
+                ]);
+                charge_output!("demands", &record);
                 demands_out.push(record);
                 demands.push(Demand {
                     spec,
@@ -2863,9 +3147,21 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                     }
                 };
                 budget.oracle(&oracle)?;
-                let record = json!({"context":context.id,"from":from,"branch":{"family":family,"worker":n},
-                    "role":"apply","oracle_from":oracle_from,"input":input,"oracle_edge":id,"exclusion":null});
-                charge_output!(&record, 2);
+                let branch_ref =
+                    checked_output!(pools.value(&json!({"family":family,"worker":n}), &mut budget));
+                let input_ref = checked_output!(pools.value(&input, &mut budget));
+                let exclusion_ref = checked_output!(pools.value(&Value::Null, &mut budget));
+                let record = json!([
+                    context_id,
+                    from,
+                    oracle_from,
+                    branch_ref,
+                    "apply",
+                    input_ref,
+                    id,
+                    exclusion_ref
+                ]);
+                charge_output!("demands", &record);
                 demands_out.push(record);
                 demands.push(Demand {
                     spec,
@@ -2877,18 +3173,19 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
             let mut pairs = BTreeMap::<usize, BTreeSet<String>>::new();
             let mut branch_pairs = HashSet::new();
             for step in steps {
-                let key = canonical(&product_payload(context, &step.value));
+                let key = checked_output!(pools.key(context_id, &step.value, &mut budget));
                 let to = if let Some(to) = index.get(&key) {
                     *to
                 } else {
                     let id = states.len();
                     let state = ProductState {
-                        context: context_id,
-                        value: step.value.clone(),
-                        hash: digest(key.as_bytes()),
+                        key,
+                        real_drivers: step.value.real_drivers,
+                        hash: digest(canonical(&product_payload(context, &step.value)).as_bytes()),
                         parent: Some((from, step.branch.clone())),
                     };
-                    charge_output!(&product_record(id, &state, &contexts), 32);
+                    charge_output!("product_states", &state.record());
+                    charge_output!("context_membership", &id);
                     index.insert(key, id);
                     states.push(state);
                     queue.push_back(id);
@@ -2911,12 +3208,24 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
                 if from != to {
                     actions.extend(fair.iter().cloned());
                 }
-                let record = json!({"from":from,"to":to,"branch":step.branch,"oracle_edge":step.edge,"resolution_edge":step.resolution_edge,"read_edge":step.read_edge,"cleanup_edge":step.cleanup_edge,"fair_actions":fair});
-                charge_output!(&record, 2);
+                let branch_ref = checked_output!(pools.value(&step.branch, &mut budget));
+                let fair_ref = checked_output!(pools.value(&fair, &mut budget));
+                let record = json!([
+                    from,
+                    to,
+                    branch_ref,
+                    step.edge,
+                    step.resolution_edge,
+                    step.read_edge,
+                    step.cleanup_edge,
+                    fair_ref
+                ]);
+                charge_output!("product_edges", &record);
                 edges.push(record);
             }
-            let row = json!({"state":from,"actions":actions});
-            charge_output!(&row, 2);
+            let actions_ref = checked_output!(pools.value(&actions, &mut budget));
+            let row = json!([from, actions_ref]);
+            charge_output!("enabledness", &row);
             enabled.push(row);
             expanded += 1;
         }
@@ -2930,12 +3239,41 @@ async fn close_product(driver: &Driver, driver_bytes: &[u8]) -> Result<Value, St
         descriptors.push(json!({"id":id,"model":"BoundaryControls","stable_success":false,"mutation":mutation,"witness":false,"initial":null,"states":[]}));
     }
     let coverage = json!({"complete":true,"no_skipped_demands":true,"store_state_count":oracle.states.len(),"store_edge_count":oracle.edges.len(),"product_state_count":states.len(),"product_edge_count":edges.len(),"demand_count":demands_out.len(),"by_context":by_context});
-    let bundle = json!({"schema_version":3,"scope":"selected_two_worker_product","source_boundaries":{"ordinary_settlement_payload_transfer":{"status":"pending","domain":"selected_two_worker_normal_clock"}},"fixture_identity":oracle.fixture_identity(),"driver_graph_sha256":digest(driver_bytes),"source_bindings":oracle.source_bindings(),"semantic_bindings":semantic,"schema_bindings":oracle.schema,"domain":sql::domain_metadata(),"store":{"initial":0,"states":oracle.export_states(),"edges":oracle.edges},"contexts":descriptors,"product_states":states.iter().enumerate().map(|(id,state)|product_record(id,state,&contexts)).collect::<Vec<_>>(),"product_edges":edges,"demands":demands_out,"enabledness":enabled,"coverage":coverage});
-    let bundle = oracle.normalize(&bundle);
+    // Release traversal-only lookup/typed caches before assembling the wire.
+    drop(index);
+    drop(pools.value_index);
+    drop(pools.worker_index);
+    drop(pools.worker_values);
+    let state_rows = states
+        .into_iter()
+        .map(|state| state.record())
+        .collect::<Vec<_>>();
+    let store_rows = (0..oracle.states.len())
+        .map(|id| oracle.export_product_state(id))
+        .collect::<Vec<_>>();
+    let mut bundle = metadata_envelope(&oracle, &semantic, driver_bytes, &contexts);
+    // Move already encoded rows rather than cloning all output through json!.
+    bundle["store"]["states"] = Value::Array(store_rows);
+    bundle["store"]["edges"] = serde_json::to_value(std::mem::take(&mut oracle.edges))
+        .map_err(|e| format!("ProductWire: {e}"))?;
+    bundle["contexts"] = Value::Array(descriptors);
+    bundle["value_pool"] = Value::Array(pools.values);
+    bundle["worker_pool"] = Value::Array(pools.workers);
+    bundle["product_states"] = Value::Array(state_rows);
+    bundle["product_edges"] = Value::Array(edges);
+    bundle["demands"] = Value::Array(demands_out);
+    bundle["enabledness"] = Value::Array(enabled);
+    bundle["coverage"] = coverage;
+    drop(oracle);
+    let exact_bytes = serialized_size(&bundle, BUNDLE_BYTES)?;
     require(
-        encoded(&bundle).len() <= BUNDLE_BYTES,
-        "ProductResourceLimit: exact serialized bundle exceeds 256MiB; incomplete",
+        exact_bytes <= budget.bytes,
+        "ProductResourceEstimate: compact accounting omitted output bytes",
     )?;
+    eprintln!(
+        "async_product_wire={}",
+        json!({"exact_bytes":exact_bytes,"conservative_bytes":budget.bytes,"component_bytes":budget.component_bytes,"component_records":budget.component_records})
+    );
     Ok(bundle)
 }
 
@@ -2962,10 +3300,306 @@ async fn actual_sql_two_worker_product_is_closed() {
         .expect("exact selected two-worker product closure");
     let path =
         std::env::var("PLURX_ASYNC_PRODUCT_BUNDLE").expect("PLURX_ASYNC_PRODUCT_BUNDLE required");
-    let encoded = encoded(&bundle);
-    assert!(encoded.len() <= BUNDLE_BYTES);
-    std::fs::write(path, encoded).expect("write complete product bundle");
+    let path = Path::new(&path);
+    let partial = path.with_extension("json.partial");
+    let file = std::fs::File::create(&partial).expect("create incomplete product output");
+    let mut writer = ByteLimit {
+        inner: std::io::BufWriter::new(file),
+        bytes: 0,
+        limit: BUNDLE_BYTES,
+    };
+    serde_json::to_writer(&mut writer, &bundle).expect("bounded complete product serialization");
+    writer.flush().expect("flush complete product bundle");
+    drop(writer);
+    std::fs::rename(&partial, path).expect("publish complete product bundle");
     eprintln!("async_product_coverage={}", bundle["coverage"]);
+}
+
+fn wire_fixture_valuation() -> Valuation {
+    Valuation {
+        sql: 0,
+        w: [Worker::idle(), Worker::idle()],
+        available: [true, true],
+        completed: vec![],
+        mono_now_ms: 0,
+        wall_anchors: vec![1_000],
+        mono_anchors: vec![],
+        claim_loss_keys: vec![],
+        real_drivers: [None, None],
+    }
+}
+
+#[test]
+fn product_wire_pools_preserve_exact_types_order_and_complex_worker_values() {
+    let mut pools = WirePools::default();
+    let mut budget = Budget::default();
+    let values = [
+        json!(null),
+        json!(false),
+        json!(0),
+        json!(true),
+        json!(1),
+        json!(29_999),
+        json!(30_000),
+        json!("raw-job-λ"),
+        json!([true, 0]),
+        json!([0, true]),
+        json!({"b":2,"a":1}),
+    ];
+    let mut ids = HashSet::new();
+    for value in &values {
+        let id = pools
+            .value(value, &mut budget)
+            .expect("valid source-bound wire fixture");
+        assert!(ids.insert(id));
+        assert_eq!(&pools.values[id], value);
+        let bytes = budget.bytes;
+        assert_eq!(
+            pools
+                .value(value, &mut budget)
+                .expect("valid source-bound wire fixture"),
+            id
+        );
+        assert_eq!(
+            budget.bytes, bytes,
+            "equal values must not be charged twice"
+        );
+    }
+    assert_eq!(
+        pools
+            .value(&json!({"a":1,"b":2}), &mut budget)
+            .expect("valid source-bound wire fixture"),
+        pools
+            .value(&values[10], &mut budget)
+            .expect("valid source-bound wire fixture")
+    );
+    let mut worker = Worker::idle();
+    worker.claim_snapshot = Some(sql::ClaimSnapshot {
+        job: 0,
+        raw_job_id: "00000000-0000-4000-8000-000000000001".into(),
+        failed_attempts: 3,
+        claim_id: "00000000-0000-4000-8000-000000000010".into(),
+        token_capture: super::background_jobs::JobToken {
+            job_id: "00000000-0000-4000-8000-000000000001".into(),
+            node_id: "node-a".into(),
+            boot_id: "00000000-0000-4000-8000-000000000002".into(),
+            claim_id: "00000000-0000-4000-8000-000000000010".into(),
+            fence: 1,
+            revision: 2,
+            lease_expires_ms: 30_000,
+        },
+    });
+    worker.claim_request = Some(json!({"raw_job_id":"job-λ","now_ms":29_999,"deadline_ms":30_000}));
+    worker.claim_recovery = ClaimRecovery {
+        phase: "waiting".into(),
+        wake_mono_ms: Some(29_999),
+    };
+    worker.driver_settlement = Some(SavedSettlement {
+        kind: "retry".into(),
+        not_before_ms: 30_000,
+    });
+    worker.adapter_reply = Some(AdapterReply {
+        tag: "WorkFailed".into(),
+        now_ms: Some(29_999),
+        retry_delay_ms: Some(1),
+    });
+    worker.ordinary.payload = Some(OrdinaryPayload {
+        kind: "retry".into(),
+        not_before_ms: 30_000,
+        error_code: Some("raw-error".into()),
+        checkpoint: Some(json!({"b":true,"a":0})),
+    });
+    worker.ordinary.captured_token = Some(1);
+    worker.ordinary.request_now_ms = Some(29_999);
+    for worker in [Worker::idle(), worker] {
+        let id = pools
+            .worker(&worker, &mut budget)
+            .expect("valid source-bound wire fixture");
+        let row = pools.workers[id]
+            .as_array()
+            .expect("valid source-bound wire fixture");
+        let decoded = WORKER_COLUMNS
+            .iter()
+            .zip(row)
+            .map(|(column, cell)| {
+                let value = if WORKER_VALUE_REFS.contains(column) {
+                    pools.values[cell.as_u64().expect("valid source-bound wire fixture") as usize]
+                        .clone()
+                } else {
+                    cell.clone()
+                };
+                ((*column).into(), value)
+            })
+            .collect::<serde_json::Map<_, _>>();
+        assert_eq!(
+            Value::Object(decoded),
+            serde_json::to_value(&worker).expect("valid source-bound wire fixture")
+        );
+        assert_eq!(row.len(), 37);
+        assert_eq!(
+            pools
+                .worker(&worker, &mut budget)
+                .expect("valid source-bound wire fixture"),
+            id
+        );
+    }
+}
+
+#[test]
+fn product_wire_compact_keys_are_bijective_with_full_logical_payloads() {
+    let mut pools = WirePools::default();
+    let mut budget = Budget::default();
+    let original = wire_fixture_valuation();
+    let mut fixtures = vec![(0, original.clone()), (1, original.clone())];
+    let mut changed = original.clone();
+    changed.sql = 1;
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.w[0].job = 1;
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.w[1].attempt = "raw-attempt".into();
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.available[0] = false;
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.completed.push(0);
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.mono_now_ms = 1;
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.wall_anchors.push(1_001);
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.mono_anchors.push(29_999);
+    fixtures.push((0, changed));
+    let mut changed = original.clone();
+    changed.claim_loss_keys.push(ClaimLossKey {
+        job: 0,
+        node: 0,
+        claim_id: "raw-claim".into(),
+    });
+    fixtures.push((0, changed));
+    fixtures.push((0, original.clone()));
+    let contexts = contexts();
+    let mut checked = Vec::new();
+    for (context, value) in fixtures {
+        let logical = canonical(&product_payload(&contexts[context], &value));
+        let key = pools
+            .key(context, &value, &mut budget)
+            .expect("valid source-bound wire fixture");
+        let state = ProductState {
+            key,
+            real_drivers: value.real_drivers,
+            hash: digest(logical.as_bytes()),
+            parent: None,
+        };
+        let restored = state
+            .valuation(&pools)
+            .expect("valid source-bound wire fixture");
+        assert_eq!(
+            canonical(&product_payload(&contexts[context], &restored)),
+            logical
+        );
+        assert_eq!(state.record()[10], json!(digest(logical.as_bytes())));
+        for (previous_key, previous_logical) in &checked {
+            assert_eq!(*previous_key == key, previous_logical == &logical);
+        }
+        checked.push((key, logical));
+    }
+    let mut live = original;
+    live.real_drivers[0] = Some(RealDriver::new());
+    let key = pools
+        .key(0, &live, &mut budget)
+        .expect("valid source-bound wire fixture");
+    let state = ProductState {
+        key,
+        real_drivers: live.real_drivers,
+        hash: String::new(),
+        parent: None,
+    };
+    let mut restored = state
+        .valuation(&pools)
+        .expect("valid source-bound wire fixture");
+    assert_eq!(
+        format!("{:?}", restored.real_drivers),
+        format!("{:?}", live.real_drivers)
+    );
+    restored.w[0].stage = "private mutation".into();
+    assert_eq!(
+        state
+            .valuation(&pools)
+            .expect("valid source-bound wire fixture")
+            .w,
+        live.w,
+        "transient mutation must not change shared source values"
+    );
+}
+
+#[test]
+fn product_wire_byte_accounting_and_stream_writer_fail_closed() {
+    let value = json!({"raw":"λ","values":[null,true,0,29_999,30_000]});
+    let exact = encoded(&value).len();
+    assert_eq!(
+        serialized_size(&value, exact).expect("valid source-bound wire fixture"),
+        exact
+    );
+    assert!(serialized_size(&value, exact - 1).is_err());
+    let mut writer = ByteLimit {
+        inner: Vec::new(),
+        bytes: 0,
+        limit: exact,
+    };
+    serde_json::to_writer(&mut writer, &value).expect("valid source-bound wire fixture");
+    assert_eq!(writer.bytes, exact);
+    assert_eq!(writer.inner, encoded(&value).as_bytes());
+    assert!(writer.write_all(b" ").is_err());
+    let mut overflow = ByteLimit {
+        inner: std::io::sink(),
+        bytes: usize::MAX,
+        limit: usize::MAX,
+    };
+    assert!(overflow.write_all(b"x").is_err());
+    let mut budget = Budget::default();
+    budget
+        .charge("pool", &value, 1)
+        .expect("valid source-bound wire fixture");
+    assert_eq!(budget.bytes, exact + 1);
+    assert_eq!(budget.component_bytes.values().sum::<usize>(), budget.bytes);
+    budget.bytes = BUNDLE_BYTES;
+    assert!(budget.charge("row", &0, 1).is_err());
+    budget.bytes = usize::MAX;
+    assert!(budget.charge("row", &0, 1).is_err());
+}
+
+#[tokio::test]
+async fn product_wire_store_export_omits_only_redundant_raw() {
+    let oracle = Oracle::new(None)
+        .await
+        .expect("valid source-bound wire fixture");
+    for (id, mut logical) in oracle.export_states().into_iter().enumerate() {
+        let raw = logical
+            .as_object_mut()
+            .expect("valid source-bound wire fixture")
+            .remove("raw")
+            .expect("valid source-bound wire fixture");
+        let wire = oracle.export_product_state(id);
+        assert_eq!(wire, logical);
+        let canonical = wire["canonical_json"]
+            .as_str()
+            .expect("valid source-bound wire fixture");
+        assert_eq!(
+            serde_json::from_str::<Value>(canonical).expect("valid source-bound wire fixture"),
+            raw
+        );
+        assert_eq!(
+            wire["canonical_sha256"],
+            json!(digest(canonical.as_bytes()))
+        );
+        assert_eq!(canonical, oracle.states[id].canonical);
+    }
 }
 
 struct NormalPrimitive {

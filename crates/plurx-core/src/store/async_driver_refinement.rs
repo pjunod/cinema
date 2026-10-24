@@ -1826,6 +1826,15 @@ impl Oracle {
         self.normalize(&view)
     }
 
+    pub(super) fn export_product_state(&self, handle: StoreHandle) -> Value {
+        // Schema4 derives raw by strictly parsing these exact canonical bytes.
+        // The standalone Store export keeps its existing redundant raw view.
+        let state = &self.states[handle];
+        let mut view = state.view.clone();
+        view["canonical_json"] = json!(state.canonical);
+        self.normalize(&view)
+    }
+
     pub(super) fn export_states(&self) -> Vec<Value> {
         (0..self.states.len())
             .map(|id| self.export_state(id))
