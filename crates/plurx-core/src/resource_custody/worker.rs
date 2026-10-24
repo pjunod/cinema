@@ -519,7 +519,7 @@ impl CustodyJournal {
                     unreachable!("change constructs only a transition")
                 }
                 #[cfg(target_os = "linux")]
-                Command::RecoverActiveR { .. } => {
+                Command::RecoverActiveR { .. } | Command::ClosePreviousDirect { .. } => {
                     unreachable!("change constructs only a transition")
                 }
             },
