@@ -301,13 +301,13 @@ class ProductCoverageContracts(unittest.TestCase):
             with self.subTest(status=status),self.assertRaises(checker.Invalid): checker.validate_source_boundaries(bad)
         with self.assertRaises(checker.Invalid): checker.validate_source_boundaries({**expected,'extra':{}})
         schema = checker.read_json(checker.PACKAGE/'product-schema.json')
-        self.assertEqual(schema['schema_version'],4)
+        self.assertEqual(schema['schema_version'],5)
         self.assertEqual(schema['source_boundaries'],expected)
 
     def test_wire_schema_and_semantic_source_drift_fail_closed(self):
         schema = checker.read_json(checker.PACKAGE/'product-schema.json')
         checker.validate_product_schema(schema)
-        for key,value in (('main_contexts',{}),('fair_families',[]),('resource_policy',{}),('store_state_additions',['raw']),('wire_columns',{}),('wire_value_ref_fields',{}),('wire_reference_pools',{}),('wire_nullable_reference_fields',{})):
+        for key,value in (('main_contexts',{}),('fair_families',[]),('resource_policy',{}),('store_state_additions',['raw']),('wire_columns',{}),('wire_value_ref_fields',{}),('wire_reference_pools',{}),('wire_nullable_reference_fields',{}),('wire_context_fields',[]),('wire_fragment_nodes',{}),('wire_digest_sequence','wrong')):
             bad = copy.deepcopy(schema); bad[key] = value
             with self.subTest(field=key),self.assertRaisesRegex(checker.Invalid,'schema .* drift'):
                 checker.validate_product_schema(bad)
@@ -338,9 +338,16 @@ class ProductCoverageContracts(unittest.TestCase):
 
 
 def product_wire_fixture(states=None,edges=None,demands=None,enabledness=None):
-    """Hand-built schema4 parser fixture, never a generated/complete relation."""
+    """Hand-built schema5 parser fixture, never a generated/complete relation.
+
+    The input dictionaries are independent expanded logical fixtures; assertions
+    compare their complete values, order and identities with the lazy decoder.
+    """
     states = copy.deepcopy(states if states is not None else [product_predecessor('base')])
-    contexts = [{'id':name} for name in dict.fromkeys(p['context'] for p in states)]
+    contexts = [{'id':name,'model':'AsyncDriverRefinement','stable_success':checker.CONTEXTS[name][0],
+        'mutation':checker.CONTEXTS[name][1],'witness':False,
+        'initial':next(i for i,p in enumerate(states) if p['context'] == name)}
+        for name in dict.fromkeys(p['context'] for p in states)]
     values,workers,value_ids,worker_ids = [],[],{},{}
     def intern(value):
         encoded = checker.canonical(value)
@@ -355,17 +362,30 @@ def product_wire_fixture(states=None,edges=None,demands=None,enabledness=None):
             worker_ids[encoded] = len(workers);workers.append(row)
         return worker_ids[encoded]
     def context_ref(name): return next(i for i,c in enumerate(contexts) if c['id'] == name)
-    rows = []
+    rows = [];digests = bytearray()
     for p in states:
         encoded = checker.canonical(checker.product_payload(p))
+        digests.extend(hashlib.sha256(encoded.encode()).digest())
         rows.append([context_ref(p['context']),p['sql'],worker_ref(p['w'][0]),worker_ref(p['w'][1]),
             intern(p['available']),intern(p['completed']),p['mono_now_ms'],intern(p['wall_anchors']),
-            intern(p['mono_anchors']),intern(p['claim_loss_keys']),hashlib.sha256(encoded.encode()).hexdigest()])
-    edge_rows = [[e['from'],e['to'],intern(e['branch']),e['oracle_edge'],e['resolution_edge'],
-        e['read_edge'],e['cleanup_edge'],intern(e['fair_actions'])] for e in edges or []]
-    demand_rows = [[context_ref(d['context']),d['from'],d['oracle_from'],intern(d['branch']),d['role'],
-        intern(d['input']),d['oracle_edge'],intern(d['exclusion'])] for d in demands or []]
-    enabled_rows = [[r['state'],intern(r['actions'])] for r in enabledness or []]
+            intern(p['mono_anchors']),intern(p['claim_loss_keys'])])
+    descriptors,demand_descriptors = [],[]
+    edge_rows,demand_rows = [[] for _ in states],[[] for _ in states]
+    def descriptor(pool,row):
+        # Canonical encoding distinguishes bool/int and retains all six fields.
+        encoded = checker.canonical(row)
+        for i,value in enumerate(pool):
+            if checker.canonical(value) == encoded:return i
+        pool.append(row);return len(pool)-1
+    for e in edges or []:
+        suffix = [intern(e['branch']),e['oracle_edge'],e['resolution_edge'],e['read_edge'],e['cleanup_edge'],intern(e['fair_actions'])]
+        edge_rows[e['from']].append([e['to'],descriptor(descriptors,suffix)])
+    for d in demands or []:
+        assert d['context'] == states[d['from']]['context']
+        suffix = [d['oracle_from'],intern(d['branch']),d['role'],intern(d['input']),d['oracle_edge'],intern(d['exclusion'])]
+        demand_rows[d['from']].append(descriptor(demand_descriptors,suffix))
+    actions = {r['state']:r['actions'] for r in enabledness or []}
+    enabled_rows = [intern(actions.get(i,[])) for i in range(len(states))]
     store = product_domain_fixture()
     for job in store['jobs']: job.update(active=False,reservation_count=0)
     raw = {'rows':{name:[] for name in checker.SNAPSHOT_TABLES},'episode':{
@@ -374,12 +394,26 @@ def product_wire_fixture(states=None,edges=None,demands=None,enabledness=None):
     raw['rows']['background_jobs'] = [['00000000-0000-4000-8000-000000000010',29999,30000]]
     # Whitespace is intentional: identity hashes original canonical_json bytes.
     text = json.dumps(raw,sort_keys=True,indent=1)
-    store.update(id=0,cutoffs=[],canonical_json=text,canonical_sha256=hashlib.sha256(text.encode()).hexdigest())
+    store.update(cutoffs=[])
+    store_row = [store['now'],*[intern(store[field]) for field in
+        ('jobs','domain','captured_tokens','captured_leases','budgets','cutoffs')],hashlib.sha256(text.encode()).hexdigest(),0]
     wire = {key:None for key in checker.PRODUCT_KEYS}
-    wire.update(schema_version=4,scope='selected_two_worker_product',value_pool=values,worker_pool=workers,
+    wire.update(schema_version=5,scope='selected_two_worker_product',value_pool=values,worker_pool=workers,
         contexts=contexts,product_states=rows,product_edges=edge_rows,demands=demand_rows,enabledness=enabled_rows,
-        store={'initial':0,'states':[store],'edges':[]})
+        edge_descriptors=descriptors,demand_descriptors=demand_descriptors,
+        product_digest_sequence_sha256=hashlib.sha256(digests).hexdigest(),
+        store={'initial':0,'states':[store_row],'edges':[],'canonical_fragments':[['leaf',text]]})
     return wire
+
+
+def fixture_store_text(wire):
+    return wire['store']['canonical_fragments'][wire['store']['states'][0][8]][1]
+
+
+def fixture_set_store_text(wire,text):
+    row = wire['store']['states'][0]
+    wire['store']['canonical_fragments'][row[8]] = ['leaf',text]
+    row[7] = hashlib.sha256(text.encode()).hexdigest()
 
 
 class CompactProductWireContracts(unittest.TestCase):
@@ -478,10 +512,9 @@ class CompactProductWireContracts(unittest.TestCase):
     def test_finite_floats_in_derived_store_raw_fail_global_numeric_preflight(self):
         for value in (1.5,1e100,{'nested':[1.5]}):
             wire = product_wire_fixture();wire['source_boundaries'] = copy.deepcopy(checker.SOURCE_BOUNDARIES)
-            store = wire['store']['states'][0];raw = json.loads(store['canonical_json'])
+            raw = json.loads(fixture_store_text(wire))
             raw['rows']['background_jobs'][0][1] = value
-            store['canonical_json'] = checker.canonical(raw)
-            store['canonical_sha256'] = hashlib.sha256(store['canonical_json'].encode()).hexdigest()
+            fixture_set_store_text(wire,checker.canonical(raw))
             with self.subTest(value=value),self.assertRaisesRegex(checker.Invalid,'UnsupportedTlcNumericDomain: decoded Store canonical JSON'):
                 checker.validate_product(wire,fixture(),verify_sources=False)
 
@@ -494,7 +527,7 @@ class CompactProductWireContracts(unittest.TestCase):
         branch = {'family':'Reply','worker':0,'choice':{'lost':False}}
         edge = dict(zip(('from','to','branch','oracle_edge','resolution_edge','read_edge','cleanup_edge','fair_actions'),
             (0,1,branch,None,None,None,None,['Reply/0'])))
-        demand = {'context':'base','from':0,'oracle_from':0,'branch':branch,'role':'apply',
+        demand = {'context':'base','from':0,'oracle_from':0,'branch':{key:value for key,value in branch.items() if key != 'choice'},'role':'apply',
             'input':{'op':'resolve','job':0,'token':0},'oracle_edge':None,'exclusion':None}
         wire = product_wire_fixture([p,q],[edge],[demand],[{'state':0,'actions':['Reply/0']}])
         logical = checker.decode_product(wire)
@@ -504,34 +537,38 @@ class CompactProductWireContracts(unittest.TestCase):
             self.assertEqual(actual['canonical_sha256'],hashlib.sha256(checker.canonical(checker.product_payload(expected)).encode()).hexdigest())
         self.assertIs(logical['product_states'][0]['w'][0],logical['product_states'][1]['w'][0])
         self.assertEqual(list(logical['product_edges']),[edge]);self.assertEqual(list(logical['demands']),[demand])
-        self.assertEqual(list(logical['enabledness']),[{'state':0,'actions':['Reply/0']}])
+        self.assertEqual(list(logical['enabledness']),[{'state':0,'actions':['Reply/0']},{'state':1,'actions':[]}])
         with self.assertRaises(IndexError): logical['product_states'][-3]
-        self.assertNotIn('raw',wire['store']['states'][0])
+        self.assertIsInstance(wire['store']['states'][0],list)
         checker.validate_raw_store(logical['store']['states'][0])
-        self.assertEqual(logical['store']['states'][0]['canonical_json'],wire['store']['states'][0]['canonical_json'])
+        self.assertEqual(logical['store']['states'][0]['canonical_json'],fixture_store_text(wire))
 
     def test_invalid_shapes_references_duplicates_and_legacy_are_refused(self):
         branch = {'family':'Reply','worker':0,'choice':{'lost':False}}
         edge = {'from':0,'to':0,'branch':branch,'oracle_edge':None,'resolution_edge':None,
             'read_edge':None,'cleanup_edge':None,'fair_actions':[]}
-        demand = {'context':'base','from':0,'oracle_from':0,'branch':branch,'role':'apply',
+        demand = {'context':'base','from':0,'oracle_from':0,'branch':{key:value for key,value in branch.items() if key != 'choice'},'role':'apply',
             'input':{'op':'resolve','job':0,'token':0},'oracle_edge':None,'exclusion':None}
         baseline = product_wire_fixture(edges=[edge],demands=[demand],enabledness=[{'state':0,'actions':[]}])
-        changes = [lambda w:w.update(schema_version=3),lambda w:w['value_pool'].append(copy.deepcopy(w['value_pool'][0])),
+        changes = [lambda w:w.update(schema_version=3),lambda w:w.update(schema_version=4),lambda w:w['value_pool'].append(copy.deepcopy(w['value_pool'][0])),
             lambda w:w['worker_pool'].append(copy.deepcopy(w['worker_pool'][0])),
             lambda w:w['product_states'][0].pop(),lambda w:w['worker_pool'][0].pop(),
-            lambda w:w['product_states'].__setitem__(0,{}),lambda w:w['store']['states'][0].update(raw={})]
+            lambda w:w['product_states'].__setitem__(0,{}),lambda w:w['store']['states'][0].append({})]
         for cell in (False,True,-1,len(baseline['value_pool']),None,'0'):
             changes.append(lambda w,cell=cell:w['product_states'][0].__setitem__(4,cell))
         for cell in (False,-1,len(baseline['worker_pool']),None):
             changes.append(lambda w,cell=cell:w['product_states'][0].__setitem__(2,cell))
         for cell in (False,-1,len(baseline['contexts']),None):
             changes.append(lambda w,cell=cell:w['product_states'][0].__setitem__(0,cell))
-        for name,ref_column in (('product_edges',2),('demands',3),('enabledness',1)):
+        for name,ref_column in (('edge_descriptors',0),('demand_descriptors',1)):
             changes.append(lambda w,name=name:w[name][0].pop())
             changes.append(lambda w,name=name,ref_column=ref_column:w[name][0].__setitem__(ref_column,False))
-        changes.append(lambda w:w['worker_pool'][0].__setitem__(checker.WORKER_COLUMNS.index('ordinary'),None))
-        changes.append(lambda w:w['store']['states'][0].update(canonical_json='{"rows":{},"rows":{}}'))
+        changes.extend([lambda w:w['product_edges'][0][0].pop(),
+            lambda w:w['product_edges'][0][0].__setitem__(1,False),
+            lambda w:w['demands'][0].__setitem__(0,False),
+            lambda w:w['enabledness'].__setitem__(0,False),
+            lambda w:w['worker_pool'][0].__setitem__(checker.WORKER_COLUMNS.index('ordinary'),None),
+            lambda w:fixture_set_store_text(w,'{"rows":{},"rows":{}}')])
         for change in changes:
             wire = copy.deepcopy(baseline);change(wire)
             with self.subTest(change=change),self.assertRaises(checker.Invalid): checker.decode_product(wire)
@@ -544,8 +581,9 @@ class CompactProductWireContracts(unittest.TestCase):
     def test_mutated_shared_values_canonical_bytes_and_hashes_do_not_alias(self):
         wire = product_wire_fixture();logical = checker.decode_product(wire);original = copy.deepcopy(logical['product_states'][0])
         wire['value_pool'][wire['product_states'][0][4]][0] = False
-        changed = checker.decode_product(wire)['product_states'][0]
-        self.assertNotEqual(changed['canonical_sha256'],hashlib.sha256(checker.canonical(checker.product_payload(changed)).encode()).hexdigest())
+        with self.assertRaisesRegex(checker.Invalid,'ordered original product digest sequence'):
+            checker.decode_product(wire)
+        changed = copy.deepcopy(original);changed['available'][0] = False
         index = checker.ExactPayloadIndex([original])
         index[checker.canonical(checker.product_payload(original))] = 0
         self.assertNotIn(checker.canonical(checker.product_payload(changed)),index)
@@ -556,10 +594,9 @@ class CompactProductWireContracts(unittest.TestCase):
 
     def test_derived_store_raw_keeps_global_tlc_numeric_refusal(self):
         wire = product_wire_fixture();wire['source_boundaries'] = copy.deepcopy(checker.SOURCE_BOUNDARIES)
-        store = wire['store']['states'][0];raw = json.loads(store['canonical_json'])
+        raw = json.loads(fixture_store_text(wire))
         raw['rows']['background_jobs'][0][1] = 2**31
-        store['canonical_json'] = checker.canonical(raw)
-        store['canonical_sha256'] = hashlib.sha256(store['canonical_json'].encode()).hexdigest()
+        fixture_set_store_text(wire,checker.canonical(raw))
         with self.assertRaisesRegex(checker.Invalid,'UnsupportedTlcNumericDomain: decoded Store canonical JSON'):
             checker.validate_product(wire,fixture(),verify_sources=False)
 
@@ -588,7 +625,7 @@ class CompactProductWireContracts(unittest.TestCase):
         for state in logical['product_states']: index[checker.canonical(checker.product_payload(state))] = state['id']
         self.assertEqual(checker.product_pair_obligations(logical['product_states'][0],candidates,index),expected)
         checker.require_exact_inventory(list(logical['product_edges']),expected[0],'pair coverage')
-        actions_ref = wire['product_edges'][0][7];wire['value_pool'][actions_ref].remove('ClaimWin/0')
+        actions_ref = wire['edge_descriptors'][wire['product_edges'][0][0][1]][5];wire['value_pool'][actions_ref].remove('ClaimWin/0')
         with self.assertRaisesRegex(checker.Invalid,'complete independent enumeration'):
             checker.require_exact_inventory(list(checker.decode_product(wire)['product_edges']),expected[0],'pair coverage')
         for actual in (expected[0][:-1],expected[0]+[expected[0][0]]):
@@ -596,6 +633,153 @@ class CompactProductWireContracts(unittest.TestCase):
         missing = checker.ExactPayloadIndex(logical['product_states']);missing[checker.canonical(checker.product_payload(p))] = 0
         with self.assertRaisesRegex(checker.Invalid,'MissingProductSuccessor'):
             checker.product_pair_obligations(p,candidates,missing)
+
+    def test_schema5_groups_preserve_original_ids_order_contexts_and_oracle_from(self):
+        states = [product_predecessor('base'),product_predecessor('base'),product_predecessor('stable')]
+        for i,state in enumerate(states): state.update(id=i,mono_now_ms=i)
+        branch = {'family':'Reply','worker':0,'choice':{'lost':False}}
+        edges = [{'from':source,'to':target,'branch':branch,'oracle_edge':None,'resolution_edge':None,
+            'read_edge':None,'cleanup_edge':None,'fair_actions':['Reply/0']} for source,target in ((0,2),(0,1),(2,0))]
+        demands = [{'context':states[source]['context'],'from':source,'oracle_from':1,'branch':{key:value for key,value in branch.items() if key != 'choice'},
+            'role':'apply','input':{'op':'resolve','job':0,'token':0},'oracle_edge':None,'exclusion':None}
+            for source in (0,2)]
+        enabled = [{'state':i,'actions':['Reply/0'] if i != 1 else []} for i in range(3)]
+        wire = product_wire_fixture(states,edges,demands,enabled)
+        wire['store']['states'].append(copy.deepcopy(wire['store']['states'][0]))  # Parser-only second oracle identity.
+        logical = checker.decode_product(wire)
+        self.assertEqual(len(wire['edge_descriptors']),1)
+        self.assertEqual(len(wire['demand_descriptors']),1)
+        self.assertEqual(list(logical['product_edges']),edges)
+        self.assertEqual(list(logical['demands']),demands)
+        self.assertEqual(list(logical['enabledness']),enabled)
+        self.assertEqual([c['states'] for c in logical['contexts']],[[0,1],[2]])
+        self.assertEqual(logical['product_edges'][2],edges[2])
+        self.assertEqual(logical['product_edges'][-1],edges[-1])
+        self.assertEqual(list(logical['product_edges'].source_indices(1)),[])
+        self.assertEqual(logical['product_edges'][1:3],edges[1:3])
+        for name in ('product_edges','demands','enabledness'):
+            for change in (lambda rows:rows.pop(),lambda rows:rows.append([])):
+                bad = copy.deepcopy(wire);change(bad[name])
+                with self.subTest(name=name),self.assertRaisesRegex(checker.Invalid,'outer length'):
+                    checker.decode_product(bad)
+        bad = copy.deepcopy(wire);bad['product_edges'][0].append(copy.deepcopy(bad['product_edges'][0][0]))
+        with self.assertRaisesRegex(checker.Invalid,'duplicates'):
+            checker.require_exact_inventory(list(checker.decode_product(bad)['product_edges']),edges,'exact edge occurrences')
+        bad = copy.deepcopy(wire);bad['demands'][0].clear()
+        with self.assertRaisesRegex(checker.Invalid,'complete independent enumeration'):
+            checker.require_exact_inventory(list(checker.decode_product(bad)['demands']),demands,'exact demand occurrences')
+
+    def test_schema5_derived_digest_sequence_retains_full_original_digest_and_order(self):
+        states = [product_predecessor('base'),product_predecessor('stable')]
+        states[1].update(id=1,mono_now_ms=29999)
+        wire = product_wire_fixture(states)
+        expected = [hashlib.sha256(checker.canonical(checker.product_payload(p)).encode('utf-8')).digest() for p in states]
+        logical = checker.decode_product(wire)
+        self.assertEqual(wire['product_digest_sequence_sha256'],hashlib.sha256(b''.join(expected)).hexdigest())
+        self.assertEqual([p['canonical_sha256'] for p in logical['product_states']],[digest.hex() for digest in expected])
+        self.assertEqual([checker.product_payload(p) for p in logical['product_states']],
+            [checker.product_payload(p) for p in states])
+        for change in (lambda w:w.update(product_digest_sequence_sha256='0'*64),
+            lambda w:w['product_states'].reverse(),lambda w:w['product_states'][1].__setitem__(6,30000)):
+            bad = copy.deepcopy(wire);change(bad)
+            with self.assertRaisesRegex(checker.Invalid,'ordered original product digest sequence'):
+                checker.decode_product(bad)
+
+    def test_schema5_fragments_restore_exact_utf8_canonical_bytes_and_full_projection(self):
+        wire = product_wire_fixture();baseline = checker.decode_product(wire)['store']['states'][0]
+        text = fixture_store_text(wire);split = text.index('"rows"')
+        nodes = wire['store']['canonical_fragments']
+        nodes.extend([['leaf',text[:split]],['leaf',text[split:]],['concat',[1,2]]])
+        wire['store']['states'][0][8] = 3
+        actual = checker.decode_product(wire)['store']['states'][0]
+        self.assertEqual(actual,baseline)
+        self.assertEqual(actual['canonical_json'].encode('utf-8'),text.encode('utf-8'))
+        self.assertNotEqual(checker.canonical(actual['raw']),text)  # Exact original whitespace remains identity-bearing.
+        repeated = [['leaf','['],['leaf','{"n":1,"utf8":"α","quoted":"2147483648"}'],
+            ['leaf',','],['leaf',']'],['concat',[0,1,2,1,3]]]
+        fragments = checker.CanonicalFragments(repeated)
+        expected = '[{"n":1,"utf8":"α","quoted":"2147483648"},{"n":1,"utf8":"α","quoted":"2147483648"}]'
+        self.assertEqual(fragments.text(4).encode('utf-8'),expected.encode('utf-8'))
+        self.assertEqual(fragments.lengths[4],len(expected.encode('utf-8')))
+        with self.assertRaisesRegex(checker.Invalid,'fragment root'):
+            fragments.text(True)
+        # A valid byte decomposition cannot mask a modified original digest.
+        wire['store']['states'][0][7] = '0'*64
+        with self.assertRaisesRegex(checker.Invalid,'preimage hash'):
+            checker.decode_product(wire)
+
+    def test_schema5_unused_fragments_descriptors_and_overlong_expansion_fail_closed(self):
+        baseline = product_wire_fixture()
+        invalid_nodes = [[],['unknown','x'],['leaf',''],['leaf',True],['leaf','00'],['leaf','truefalse'],
+            ['leaf','"a""b"'],['leaf','"unterminated'],['leaf','1.0'],['leaf','1e0'],['leaf','2147483648'],
+            ['leaf','-2147483649'],['leaf','NaN'],['leaf','Infinity'],['concat',[]],['concat',[0]],
+            ['concat',[0,1]],['concat',[0,True]],['concat',[0,-1]],['concat',[0,999]],
+            copy.deepcopy(baseline['store']['canonical_fragments'][0])]
+        for node in invalid_nodes:
+            bad = copy.deepcopy(baseline);bad['store']['canonical_fragments'].append(node)
+            with self.subTest(node=node),self.assertRaises(checker.Invalid): checker.decode_product(bad)
+        for field,value in (('accepted',1),('job',False),('stage',None),('claim_issued_mono_ms',True)):
+            bad = copy.deepcopy(baseline);row = copy.deepcopy(bad['worker_pool'][0])
+            row[checker.WORKER_COLUMNS.index(field)] = value;bad['worker_pool'].append(row)
+            with self.subTest(field=field),self.assertRaises(checker.Invalid): checker.decode_product(bad)
+        # No expansion is needed to reject exponential decoded-byte overflow.
+        nodes = [['leaf',' ']]
+        for i in range(29): nodes.append(['concat',[i,i]])
+        with self.assertRaisesRegex(checker.Invalid,'decoded byte bound'):
+            checker.CanonicalFragments(nodes)
+        for nodes in ([['leaf','1'],['leaf','2'],['concat',[0,1]]],
+            [['leaf','true'],['leaf','false'],['concat',[0,1]]],
+            [['leaf','"a"'],['leaf','"b"'],['concat',[0,1]]]):
+            with self.subTest(nodes=nodes),self.assertRaisesRegex(checker.Invalid,'joins scalar tokens'):
+                checker.CanonicalFragments(nodes)
+        self.assertEqual(checker.CanonicalFragments([['leaf','1'],['leaf',' '],['leaf','2'],
+            ['concat',[0,1]],['concat',[3,2]]]).text(4),'1 2')
+        # Valid unused descriptor targets are structurally checked without any
+        # assertion that the branch is reachable/enabled in a product context.
+        baseline['value_pool'].extend([{'family':'Reply','worker':0,'choice':{}},{'family':'StoreApply','worker':0}])
+        edge_branch,demand_branch = len(baseline['value_pool'])-2,len(baseline['value_pool'])-1
+        empty_actions = baseline['enabledness'][0]
+        for name,row in (('edge_descriptors',[edge_branch,None,None,None,None,empty_actions]),
+            ('demand_descriptors',[0,demand_branch,'apply',0,None,0])):
+            bad = copy.deepcopy(baseline);bad[name].append(row);bad[name].append(copy.deepcopy(row))
+            with self.subTest(name=name),self.assertRaisesRegex(checker.Invalid,'duplicate exact'):
+                checker.decode_product(bad)
+            bad = copy.deepcopy(baseline);bad[name].append(row);bad[name][-1][0] = True
+            with self.subTest(name=name),self.assertRaisesRegex(checker.Invalid,'reference'):
+                checker.decode_product(bad)
+        malformed = [({'family':'Reply','worker':True,'choice':{}},[]),
+            ({'family':'Reply','worker':0,'choice':[]},[]),({'family':'Reply','worker':0},[]),
+            ({'family':'Reply','worker':0,'choice':{}},['Unknown/0']),
+            ({'family':'Reply','worker':0,'choice':{}},['Reply/0','Reply/0'])]
+        for branch,actions in malformed:
+            bad = copy.deepcopy(baseline)
+            def intern(value):
+                encoded = checker.canonical(value)
+                for i,existing in enumerate(bad['value_pool']):
+                    if checker.canonical(existing) == encoded: return i
+                bad['value_pool'].append(value);return len(bad['value_pool'])-1
+            branch_ref,actions_ref = intern(branch),intern(actions)
+            bad['edge_descriptors'].append([branch_ref,None,None,None,None,actions_ref])
+            with self.subTest(branch=branch,actions=actions),self.assertRaises(checker.Invalid): checker.decode_product(bad)
+        for value in (1.5,2**31):
+            bad = copy.deepcopy(baseline);bad['demand_descriptors'].append([0,0,'apply',0,None,value])
+            with self.subTest(value=value),self.assertRaisesRegex(checker.Invalid,'UnsupportedTlcNumericDomain'):
+                checker.decode_product(bad)
+
+    def test_schema5_tla_tables_use_shared_suffixes_and_exact_source_order(self):
+        p = product_predecessor('base');q = product_predecessor('stable');q['id'] = 1
+        branch = {'family':'Reply','worker':0,'choice':{}}
+        edges = [{'from':0,'to':1,'branch':branch,'oracle_edge':None,'resolution_edge':None,
+            'read_edge':None,'cleanup_edge':None,'fair_actions':['Reply/0']}]
+        wire = product_wire_fixture([p,q],edges,enabledness=[{'state':0,'actions':['Reply/0']}])
+        text = checker.tables(fixture(),wire)
+        self.assertIn('GeneratedProductEdgeRows == <<<<<<1,0>>>>,<<>>>>',text)
+        self.assertIn('GeneratedProductEdgeFairness == (1 :> GeneratedValues[',text)
+        self.assertIn('ProductEdges == UNION {{GeneratedProductEdge(i-1,GeneratedProductEdgeRows[i][j])',text)
+        self.assertIn('fair |-> GeneratedProductEdgeFairness[GeneratedProductOutgoingRows[i][j][2]+1]',text)
+        self.assertIn('[state |-> i-1, actions |-> GeneratedValues[GeneratedProductEnabledRows[i]+1]]',text)
+        # Full wire suffixes are independently checked but are not repeated in TLA.
+        self.assertNotIn('oracle_edge',text)
 
     def test_streamed_tables_share_exact_key_and_enforce_utf8_byte_boundary(self):
         wire = product_wire_fixture();wire['value_pool'].append({'unused certificate-only key':{}})

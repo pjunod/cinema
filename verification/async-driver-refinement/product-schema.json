@@ -1,15 +1,18 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "scope": "selected_two_worker_product",
   "kind": "closed_wire_vocabulary_not_acceptance",
   "root_fields": [
     "contexts",
     "coverage",
+    "demand_descriptors",
     "demands",
     "domain",
     "driver_graph_sha256",
+    "edge_descriptors",
     "enabledness",
     "fixture_identity",
+    "product_digest_sequence_sha256",
     "product_edges",
     "product_states",
     "schema_bindings",
@@ -240,12 +243,19 @@
       "mono_now_ms",
       "wall_anchors_ref",
       "mono_anchors_ref",
-      "claim_loss_keys_ref",
-      "canonical_sha256"
+      "claim_loss_keys_ref"
     ],
     "product_edge": [
-      "from",
       "to",
+      "edge_descriptor_ref"
+    ],
+    "demand": [
+      "demand_descriptor_ref"
+    ],
+    "enabledness": [
+      "actions_ref"
+    ],
+    "edge_descriptor": [
       "branch_ref",
       "oracle_edge",
       "resolution_edge",
@@ -253,9 +263,7 @@
       "cleanup_edge",
       "fair_actions_ref"
     ],
-    "demand": [
-      "context_index",
-      "from",
+    "demand_descriptor": [
       "oracle_from",
       "branch_ref",
       "role",
@@ -263,9 +271,16 @@
       "oracle_edge",
       "exclusion_ref"
     ],
-    "enabledness": [
-      "state",
-      "actions_ref"
+    "store_state": [
+      "now",
+      "jobs_ref",
+      "domain_ref",
+      "captured_tokens_ref",
+      "captured_leases_ref",
+      "budgets_ref",
+      "cutoffs_ref",
+      "canonical_sha256",
+      "canonical_fragment_ref"
     ]
   },
   "wire_value_ref_fields": {
@@ -284,17 +299,27 @@
       "mono_anchors_ref",
       "claim_loss_keys_ref"
     ],
-    "product_edge": [
+    "product_edge": [],
+    "demand": [],
+    "enabledness": [
+      "actions_ref"
+    ],
+    "edge_descriptor": [
       "branch_ref",
       "fair_actions_ref"
     ],
-    "demand": [
+    "demand_descriptor": [
       "branch_ref",
       "input_ref",
       "exclusion_ref"
     ],
-    "enabledness": [
-      "actions_ref"
+    "store_state": [
+      "jobs_ref",
+      "domain_ref",
+      "captured_tokens_ref",
+      "captured_leases_ref",
+      "budgets_ref",
+      "cutoffs_ref"
     ]
   },
   "wire_reference_pools": {
@@ -318,8 +343,16 @@
       "claim_loss_keys_ref": "value_pool"
     },
     "product_edge": {
-      "from": "product_states",
       "to": "product_states",
+      "edge_descriptor_ref": "edge_descriptors"
+    },
+    "demand": {
+      "demand_descriptor_ref": "demand_descriptors"
+    },
+    "enabledness": {
+      "actions_ref": "value_pool"
+    },
+    "edge_descriptor": {
       "branch_ref": "value_pool",
       "oracle_edge": "store.edges",
       "resolution_edge": "store.edges",
@@ -327,32 +360,57 @@
       "cleanup_edge": "store.edges",
       "fair_actions_ref": "value_pool"
     },
-    "demand": {
-      "context_index": "contexts",
-      "from": "product_states",
+    "demand_descriptor": {
       "oracle_from": "store.states",
       "branch_ref": "value_pool",
       "input_ref": "value_pool",
       "oracle_edge": "store.edges",
       "exclusion_ref": "value_pool"
     },
-    "enabledness": {
-      "state": "product_states",
-      "actions_ref": "value_pool"
+    "store_state": {
+      "jobs_ref": "value_pool",
+      "domain_ref": "value_pool",
+      "captured_tokens_ref": "value_pool",
+      "captured_leases_ref": "value_pool",
+      "budgets_ref": "value_pool",
+      "cutoffs_ref": "value_pool",
+      "canonical_fragment_ref": "store.canonical_fragments"
     }
   },
   "wire_nullable_reference_fields": {
     "worker": [],
     "product_state": [],
-    "product_edge": [
+    "product_edge": [],
+    "demand": [],
+    "enabledness": [],
+    "edge_descriptor": [
       "oracle_edge",
       "resolution_edge",
       "read_edge",
       "cleanup_edge"
     ],
-    "demand": [
+    "demand_descriptor": [
       "oracle_edge"
     ],
-    "enabledness": []
-  }
+    "store_state": []
+  },
+  "wire_context_fields": [
+    "id",
+    "model",
+    "stable_success",
+    "mutation",
+    "witness",
+    "initial"
+  ],
+  "wire_fragment_nodes": {
+    "leaf": [
+      "leaf",
+      "utf8_json_token_text"
+    ],
+    "concat": [
+      "concat",
+      "earlier_fragment_refs"
+    ]
+  },
+  "wire_digest_sequence": "sha256-concatenated-32-raw-product-digests-in-state-id-order"
 }
