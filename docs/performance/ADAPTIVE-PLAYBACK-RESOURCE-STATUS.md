@@ -25,12 +25,17 @@ worker protocol. GPT-6 Luna completed bounded compatibility/compiler work.
 Work stays on `effort/adaptive-playback-resources`, draft PR #1248. The former
 Hermes writer remains stopped and its heartbeat paused.
 
-**Current work:** admit the source/FFprobe/FFmpeg planning stage before native
-acquisition; retain its original child, pipe and collection jobs through known
-closure, and keep resolved metadata charged through its actual aliases. Copy
-work adds exact mutable-playlist publication and its native sink. Worker work
-adds the fixed pending-owner registry and Store Prepare/Adopt/cancel/status
-protocol. These changes remain uncommitted and are outside the source pin above.
+**Current work:** P/M now has source-written pure atomic admission, original
+probe/engine task registration before first poll, measured catalog/report
+capacities, an application alias fence and cleanup on the existing maintenance
+cadence. The worker registry registers that original P owner before awaiting,
+retains exact post-R failure cleanup, and counts the request/snapshot/handoff.
+Copy adds owner-preserving playlist/segment responses and admitted allocation
+with original no-entry cleanup. These edits remain uncommitted and uncompiled;
+no new ordinary route is claimed complete. The positive engine settlement
+boundary awaits explicit user approval after automatic review rejection.
+An incomplete retained-book measurement was also rejected; it was not applied,
+and a fully compacted ownership shape is being designed before any P refund.
 Origin placement, remaining pipelines, live policy and operations are unfinished.
 
 All V1–V5 and R1/M0–M7 remain OPEN. Final actual Fable 5.1 adversarial review and
