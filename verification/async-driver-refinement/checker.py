@@ -4,6 +4,8 @@ import hashlib
 import json
 import io
 import re
+from array import array
+from bisect import bisect_right
 from collections import Counter, deque
 from collections.abc import Sequence
 from pathlib import Path
@@ -1208,7 +1210,8 @@ def validate_store(g, verify_sources=True, *, product=False):
 
 SOURCE_BOUNDARIES = {'ordinary_settlement_payload_transfer':{'status':'pending','domain':'selected_two_worker_normal_clock'}}
 PRODUCT_KEYS = {'schema_version','scope','driver_graph_sha256','source_bindings','semantic_bindings','source_boundaries',
- 'schema_bindings','domain','store','contexts','product_states','product_edges','demands','enabledness','coverage','fixture_identity','value_pool','worker_pool'}
+ 'schema_bindings','domain','store','contexts','product_states','product_edges','demands','enabledness','coverage','fixture_identity',
+ 'value_pool','worker_pool','edge_descriptors','demand_descriptors','product_digest_sequence_sha256'}
 # Fixed wire columns are deliberately independent of any producer implementation.
 WORKER_COLUMNS = tuple(sorted(IDLE))
 WORKER_VALUE_REFS = frozenset({'claim_snapshot','claim_request','claim_recovery',
@@ -1216,32 +1219,43 @@ WORKER_VALUE_REFS = frozenset({'claim_snapshot','claim_request','claim_recovery'
 WIRE_COLUMNS = {
     'worker':list(WORKER_COLUMNS),
     'product_state':['context_index','sql','worker0_ref','worker1_ref','available_ref',
-        'completed_ref','mono_now_ms','wall_anchors_ref','mono_anchors_ref','claim_loss_keys_ref','canonical_sha256'],
-    'product_edge':['from','to','branch_ref','oracle_edge','resolution_edge','read_edge','cleanup_edge','fair_actions_ref'],
-    'demand':['context_index','from','oracle_from','branch_ref','role','input_ref','oracle_edge','exclusion_ref'],
-    'enabledness':['state','actions_ref']}
+        'completed_ref','mono_now_ms','wall_anchors_ref','mono_anchors_ref','claim_loss_keys_ref'],
+    'product_edge':['to','edge_descriptor_ref'],
+    'edge_descriptor':['branch_ref','oracle_edge','resolution_edge','read_edge','cleanup_edge','fair_actions_ref'],
+    'demand':['demand_descriptor_ref'],
+    'demand_descriptor':['oracle_from','branch_ref','role','input_ref','oracle_edge','exclusion_ref'],
+    'enabledness':['actions_ref'],
+    'store_state':['now','jobs_ref','domain_ref','captured_tokens_ref','captured_leases_ref',
+        'budgets_ref','cutoffs_ref','canonical_sha256','canonical_fragment_ref']}
 WIRE_VALUE_REF_FIELDS = {
     'worker':sorted(WORKER_VALUE_REFS),
     'product_state':['available_ref','completed_ref','wall_anchors_ref','mono_anchors_ref','claim_loss_keys_ref'],
-    'product_edge':['branch_ref','fair_actions_ref'],
-    'demand':['branch_ref','input_ref','exclusion_ref'], 'enabledness':['actions_ref']}
+    'product_edge':[], 'edge_descriptor':['branch_ref','fair_actions_ref'],
+    'demand':[], 'demand_descriptor':['branch_ref','input_ref','exclusion_ref'], 'enabledness':['actions_ref'],
+    'store_state':['jobs_ref','domain_ref','captured_tokens_ref','captured_leases_ref','budgets_ref','cutoffs_ref']}
 WIRE_REFERENCE_POOLS = {
     'worker':{field:'value_pool' for field in sorted(WORKER_VALUE_REFS)},
     'product_state':{'context_index':'contexts','sql':'store.states','worker0_ref':'worker_pool',
         'worker1_ref':'worker_pool',**{field:'value_pool' for field in WIRE_VALUE_REF_FIELDS['product_state']}},
-    'product_edge':{'from':'product_states','to':'product_states','branch_ref':'value_pool',
+    'product_edge':{'to':'product_states','edge_descriptor_ref':'edge_descriptors'},
+    'edge_descriptor':{'branch_ref':'value_pool',
         **{field:'store.edges' for field in ('oracle_edge','resolution_edge','read_edge','cleanup_edge')},
         'fair_actions_ref':'value_pool'},
-    'demand':{'context_index':'contexts','from':'product_states','oracle_from':'store.states',
-        'branch_ref':'value_pool','input_ref':'value_pool','oracle_edge':'store.edges','exclusion_ref':'value_pool'},
-    'enabledness':{'state':'product_states','actions_ref':'value_pool'}}
-WIRE_NULLABLE_REFERENCE_FIELDS = {
-    'worker':[],'product_state':[],
-    'product_edge':['oracle_edge','resolution_edge','read_edge','cleanup_edge'],
-    'demand':['oracle_edge'],'enabledness':[]}
+    'demand':{'demand_descriptor_ref':'demand_descriptors'},
+    'demand_descriptor':{'oracle_from':'store.states','branch_ref':'value_pool','input_ref':'value_pool',
+        'oracle_edge':'store.edges','exclusion_ref':'value_pool'},
+    'enabledness':{'actions_ref':'value_pool'},
+    'store_state':{**{field:'value_pool' for field in WIRE_VALUE_REF_FIELDS['store_state']},
+        'canonical_fragment_ref':'store.canonical_fragments'}}
+WIRE_NULLABLE_REFERENCE_FIELDS = {kind:[] for kind in WIRE_COLUMNS}
+WIRE_NULLABLE_REFERENCE_FIELDS.update(edge_descriptor=['oracle_edge','resolution_edge','read_edge','cleanup_edge'],
+    demand_descriptor=['oracle_edge'])
 WIRE_REFERENCE_COLUMNS = {kind:tuple((WIRE_COLUMNS[kind].index(field),field,target,
     field in WIRE_NULLABLE_REFERENCE_FIELDS[kind]) for field,target in targets.items())
     for kind,targets in WIRE_REFERENCE_POOLS.items()}
+WIRE_CONTEXT_FIELDS = ['id','model','stable_success','mutation','witness','initial']
+WIRE_FRAGMENT_NODES = {'leaf':['leaf','utf8_json_token_text'], 'concat':['concat','earlier_fragment_refs']}
+WIRE_DIGEST_SEQUENCE = 'sha256-concatenated-32-raw-product-digests-in-state-id-order'
 BUNDLE_MAX_BYTES = 256*1024*1024
 ARTIFACT_MAX_BYTES = 512*1024*1024
 
@@ -1281,27 +1295,126 @@ class ExactPayloadIndex:
         self.buckets.setdefault(hashlib.sha256(encoded.encode()).digest(),[]).append(identity)
 
 
-def decode_product(wire):
-    """Validate schema4 transport and expose the original exact logical values.
+class GroupedLogicalRows(LogicalRows):
+    """Flat positional IDs over per-source occurrences without expanded rows."""
+    def __init__(self, groups, decode):
+        self.rows, self.decode = groups, decode
+        self.offsets = array('Q',[0])
+        for group in groups: self.offsets.append(self.offsets[-1]+len(group))
+    def __len__(self): return self.offsets[-1]
+    def __iter__(self):
+        for source,group in enumerate(self.rows):
+            for row in group: yield self.decode(source,row)
+    def __getitem__(self, index):
+        if isinstance(index,slice): return [self[i] for i in range(*index.indices(len(self)))]
+        if index < 0: index += len(self)
+        if not 0 <= index < len(self): raise IndexError(index)
+        source = bisect_right(self.offsets,index)-1
+        return self.decode(source,self.rows[source][index-self.offsets[source]])
+    def source_indices(self, source): return range(self.offsets[source],self.offsets[source+1])
 
-    Pool values and workers are shared, never mutated by this view. Independent
-    successor generation copies logical occurrences before every update.
+
+class CanonicalFragments:
+    """Topological exact UTF8 byte fragments; only one root is expanded at a time.
+
+    Leaves contain complete JSON lexical tokens, including punctuation. All
+    numeric tokens, even in unused nodes, receive the same TLC domain check.
+    Scalar tokens cannot be joined without punctuation or JSON whitespace.
+    """
+    def __init__(self, nodes):
+        require(type(nodes) is list,'canonical fragments must be array')
+        self.nodes, self.lengths = nodes, array('Q')
+        self.boundaries = []
+        seen = set()
+        def invalid_constant(token): raise Invalid('non-finite JSON scalar: '+token)
+        decoder = json.JSONDecoder(parse_constant=invalid_constant)
+        for identity,node in enumerate(nodes):
+            require(type(node) is list and len(node) == 2,'invalid canonical fragment shape')
+            tag,body = node
+            if tag == 'leaf':
+                require(type(body) is str and body,'invalid canonical leaf')
+                try: length = len(body.encode('utf-8'))
+                except UnicodeEncodeError as exc: raise Invalid('canonical leaf is not UTF8') from exc
+                position = 0; first = last = None; separated = True
+                while position < len(body):
+                    char = body[position]
+                    if char in ' \t\r\n': position += 1;separated = True;continue
+                    if char in '{}[]:,':
+                        kind = 'punctuation';position += 1;separated = True
+                    else:
+                        require(separated or last != 'scalar','canonical leaf joins scalar tokens')
+                        try: value,end = decoder.raw_decode(body,position)
+                        except (ValueError,RecursionError) as exc: raise Invalid('canonical leaf has incomplete JSON token') from exc
+                        # Objects/arrays must use the punctuation path above;
+                        # scalar strings remain strings regardless of their text.
+                        certify_tlc_numbers(value,'decoded Store canonical JSON fragment')
+                        kind = 'scalar';separated = False
+                        position = end
+                    if first is None: first = kind
+                    last = kind
+                boundary = (first,last,body[0] in ' \t\r\n',body[-1] in ' \t\r\n')
+            else:
+                require(tag == 'concat' and type(body) is list and len(body) >= 2,'invalid canonical concat')
+                require(all(integer(ref,0,identity-1) for ref in body),'canonical concat reference is not earlier')
+                length = 0; boundary = None
+                for ref in body:
+                    length += self.lengths[ref]
+                    require(length <= BUNDLE_MAX_BYTES,'canonical fragment decoded byte bound exceeded')
+                    current = self.boundaries[ref]
+                    if boundary is None: boundary = current;continue
+                    require(not (boundary[1] == 'scalar' and current[0] == 'scalar' and
+                        not boundary[3] and not current[2]),'canonical concat joins scalar tokens')
+                    boundary = (boundary[0] if boundary[0] is not None else current[0],
+                        current[1] if current[1] is not None else boundary[1],boundary[2],current[3])
+            require(length <= BUNDLE_MAX_BYTES,'canonical fragment decoded byte bound exceeded')
+            encoded = canonical(node)
+            require(encoded not in seen,'duplicate exact canonical fragment')
+            seen.add(encoded)
+            self.lengths.append(length);self.boundaries.append(boundary)
+    def text(self, root):
+        require(integer(root,0,len(self.nodes)-1),'invalid canonical fragment root')
+        # Iterators retain O(depth) traversal state, never an exponentially
+        # expanded pending-reference stack or a cache of expanded fragments.
+        stream = io.StringIO(); stack = [iter((root,))]
+        while stack:
+            ref = next(stack[-1],None)
+            if ref is None: stack.pop();continue
+            tag,body = self.nodes[ref]
+            if tag == 'leaf': stream.write(body)
+            else: stack.append(iter(body))
+        text = stream.getvalue()
+        require(len(text.encode('utf-8')) == self.lengths[root],'canonical fragment length mismatch')
+        return text
+
+
+def decode_product(wire):
+    """Validate schema5 transport and expose the exact original logical values.
+
+    Pool values and workers are borrowed read-only. Independent successor
+    generation copies logical occurrences before every update. Representation
+    IDs select wire objects; no digest substitutes for full logical equality.
     """
     exact_keys(wire,PRODUCT_KEYS,'product bundle')
-    require(type(wire['schema_version']) is int and wire['schema_version'] == 4 and
+    require(type(wire['schema_version']) is int and wire['schema_version'] == 5 and
         wire['scope'] == 'selected_two_worker_product','unsupported product schema/scope')
+    certify_tlc_numbers(wire)
     values, worker_rows, contexts = wire['value_pool'],wire['worker_pool'],wire['contexts']
     require(type(values) is list and type(worker_rows) is list and type(contexts) is list,
         'wire pools/contexts must be arrays')
-    exact_keys(wire['store'],{'initial','states','edges'},'imported oracle relation')
+    exact_keys(wire['store'],{'initial','states','edges','canonical_fragments'},'imported oracle wire relation')
     require(type(wire['store']['states']) is list and type(wire['store']['edges']) is list,
         'Store states/edges must be arrays')
-    for name in ('product_states','product_edges','demands','enabledness'):
+    require(len(wire['store']['states']) <= 20000,'Store canonical identity cap exceeded')
+    fragments = CanonicalFragments(wire['store']['canonical_fragments'])
+    for name in ('product_states','product_edges','demands','enabledness','edge_descriptors','demand_descriptors'):
         require(type(wire[name]) is list,'wire '+name+' must be array')
-    target_counts = {name:len(wire[name]) for name in ('value_pool','worker_pool','contexts','product_states')}
-    target_counts.update({'store.states':len(wire['store']['states']),'store.edges':len(wire['store']['edges'])})
+    target_counts = {name:len(wire[name]) for name in ('value_pool','worker_pool','contexts','product_states',
+        'edge_descriptors','demand_descriptors')}
+    target_counts.update({'store.states':len(wire['store']['states']),'store.edges':len(wire['store']['edges']),
+        'store.canonical_fragments':len(fragments.nodes)})
     seen = set()
     for value in values:
+        certify_tlc_numbers(value,'model input.value_pool')
         encoded = canonical(value)
         require(encoded not in seen,'duplicate exact value_pool entry')
         seen.add(encoded)
@@ -1313,55 +1426,112 @@ def decode_product(wire):
         return workers[index]
     def context_ref(index):
         require(integer(index,0,len(contexts)-1),'invalid context reference')
-        require(isinstance(contexts[index],dict) and isinstance(contexts[index].get('id'),str),
+        require(type(contexts[index]) is dict and isinstance(contexts[index].get('id'),str),
             'invalid context descriptor')
         return contexts[index]['id']
     def row_shape(row,kind):
         require(type(row) is list and len(row) == len(WIRE_COLUMNS[kind]),'invalid '+kind+' wire row')
+        certify_tlc_numbers(row,'model input.'+kind)
         for column,field,target,nullable in WIRE_REFERENCE_COLUMNS[kind]:
             cell = row[column]
             if cell is None and nullable: continue
             require(integer(cell,0,target_counts[target]-1),'invalid '+kind+' '+field+' reference to '+target)
+    def branch_shape(index,kind):
+        branch = ref(index)
+        exact_keys(branch,{'family','worker'} | ({'choice'} if kind == 'edge_descriptor' else set()),
+            kind+' branch')
+        require(type(branch['family']) is str and branch['family'],'invalid descriptor branch family')
+        require(branch['worker'] is None or integer(branch['worker'],0,1),'invalid descriptor branch worker')
+        if kind == 'edge_descriptor': require(type(branch['choice']) is dict,'invalid descriptor branch choice')
+    fair_vocabulary = set(GLOBAL_FAIR) | {family+'/'+str(worker) for family in FAIR_FAMILIES for worker in (0,1)}
+    def fair_shape(index):
+        actions = ref(index)
+        require(type(actions) is list and all(type(action) is str and action in fair_vocabulary for action in actions),
+            'invalid descriptor fair action list')
+        require(actions == sorted(set(actions)),'descriptor fair action list is not sorted unique')
     workers = []; seen = set()
     for row in worker_rows:
         row_shape(row,'worker'); worker = {}
         for field,cell in zip(WORKER_COLUMNS,row):
             if field in WORKER_VALUE_REFS: worker[field] = ref(cell)
             else:
-                require(cell is None or type(cell) in (str,int,bool),'non-scalar worker wire cell')
+                initial = IDLE[field]
+                if initial is None:
+                    require(cell is None or integer(cell,0,I64_MAX),'invalid nullable worker time cell')
+                else:
+                    require(type(cell) is type(initial),'worker scalar wire type drift: '+field)
                 worker[field] = cell
         encoded = canonical(worker)
         require(encoded not in seen,'duplicate exact worker_pool entry')
         seen.add(encoded); workers.append(worker)
-    def state(identity,row):
-        return dict(id=identity,context=context_ref(row[0]),sql=row[1],
-            w=[worker_ref(row[2]),worker_ref(row[3])],available=ref(row[4]),completed=ref(row[5]),
-            mono_now_ms=row[6],wall_anchors=ref(row[7]),mono_anchors=ref(row[8]),
-            claim_loss_keys=ref(row[9]),canonical_sha256=row[10])
-    def edge(identity,row):
-        return dict(zip(('from','to','branch','oracle_edge','resolution_edge','read_edge','cleanup_edge','fair_actions'),
-            (row[0],row[1],ref(row[2]),*row[3:7],ref(row[7]))))
-    def demand(identity,row):
-        return dict(context=context_ref(row[0]),**{'from':row[1]},oracle_from=row[2],branch=ref(row[3]),
-            role=row[4],input=ref(row[5]),oracle_edge=row[6],exclusion=ref(row[7]))
-    def enabled(identity,row): return dict(state=row[0],actions=ref(row[1]))
-    logical = dict(wire)
-    for name,kind,decoder in (('product_states','product_state',state),('product_edges','product_edge',edge),
-        ('demands','demand',demand),('enabledness','enabledness',enabled)):
-        rows = wire[name]; require(type(rows) is list,'wire '+name+' must be array')
-        for identity,row in enumerate(rows):
+    for name,kind in (('edge_descriptors','edge_descriptor'),('demand_descriptors','demand_descriptor')):
+        seen = set()
+        for row in wire[name]:
             row_shape(row,kind)
-            decoder(identity,row)  # Validate every reference before semantic use.
-        logical[name] = LogicalRows(rows,decoder)
-    exact_keys(wire['store'],{'initial','states','edges'},'imported oracle relation')
-    require(type(wire['store']['states']) is list,'Store states must be array')
+            branch_shape(row[0] if kind == 'edge_descriptor' else row[1],kind)
+            if kind == 'edge_descriptor': fair_shape(row[5])
+            else: require(row[2] in ('apply','capacity'),'invalid demand descriptor role')
+            encoded = canonical(row)
+            require(encoded not in seen,'duplicate exact '+kind+' entry')
+            seen.add(encoded)
+    hashes = bytearray()
+    def state(identity,row):
+        value = dict(id=identity,context=context_ref(row[0]),sql=row[1],
+            w=[worker_ref(row[2]),worker_ref(row[3])],available=ref(row[4]),completed=ref(row[5]),
+            mono_now_ms=row[6],wall_anchors=ref(row[7]),mono_anchors=ref(row[8]),claim_loss_keys=ref(row[9]))
+        if len(hashes) < (identity+1)*32:
+            require(len(hashes) == identity*32,'product digest derivation order mismatch')
+            hashes.extend(hashlib.sha256(canonical(product_payload(value)).encode('utf-8')).digest())
+        value['canonical_sha256'] = hashes[identity*32:(identity+1)*32].hex()
+        return value
+    def edge(source,row):
+        suffix = wire['edge_descriptors'][row[1]]
+        return dict(zip(('from','to','branch','oracle_edge','resolution_edge','read_edge','cleanup_edge','fair_actions'),
+            (source,row[0],ref(suffix[0]),*suffix[1:5],ref(suffix[5]))))
+    def demand(source,index):
+        suffix = wire['demand_descriptors'][index]
+        return dict(context=context_ref(wire['product_states'][source][0]),**{'from':source},oracle_from=suffix[0],
+            branch=ref(suffix[1]),role=suffix[2],input=ref(suffix[3]),oracle_edge=suffix[4],exclusion=ref(suffix[5]))
+    def enabled(identity,index): return dict(state=identity,actions=ref(index))
+    logical = dict(wire)
+    for identity,row in enumerate(wire['product_states']):
+        row_shape(row,'product_state');state(identity,row)
+    require(type(wire['product_digest_sequence_sha256']) is str and
+        re.fullmatch('[0-9a-f]{64}',wire['product_digest_sequence_sha256']) is not None and
+        hashlib.sha256(hashes).hexdigest() == wire['product_digest_sequence_sha256'],
+        'ordered original product digest sequence mismatch')
+    logical['product_states'] = LogicalRows(wire['product_states'],state)
+    for name,kind,decoder in (('product_edges','product_edge',edge),('demands','demand',demand)):
+        groups = wire[name]
+        require(len(groups) == len(wire['product_states']),'invalid '+name+' outer length')
+        for source,group in enumerate(groups):
+            require(type(group) is list,'invalid '+name+' source group')
+            for row in group:
+                row_shape(row if kind == 'product_edge' else [row],kind)
+        logical[name] = GroupedLogicalRows(groups,decoder)
+    require(len(wire['enabledness']) == len(wire['product_states']),'invalid enabledness outer length')
+    for index in wire['enabledness']:
+        row_shape([index],'enabledness');fair_shape(index)
+    logical['enabledness'] = LogicalRows(wire['enabledness'],enabled)
+    memberships = [[] for _ in contexts]
+    for identity,row in enumerate(wire['product_states']): memberships[row[0]].append(identity)
+    logical['contexts'] = []
+    for identity,context in enumerate(contexts):
+        exact_keys(context,set(WIRE_CONTEXT_FIELDS),'product wire context')
+        logical['contexts'].append({**context,'states':memberships[identity]})
     store_states = []
-    for original in wire['store']['states']:
-        require(isinstance(original,dict) and 'raw' not in original and isinstance(original.get('canonical_json'),str),
-            'Store wire requires canonical_json without redundant raw')
-        # Original bytes remain identity-bearing; do not replace them by dumps(parsed).
-        store_states.append({**original,'raw':strict_json(original['canonical_json'])})
-    logical['store'] = {**wire['store'],'states':store_states}
+    for identity,row in enumerate(wire['store']['states']):
+        row_shape(row,'store_state')
+        require(type(row[7]) is str and re.fullmatch('[0-9a-f]{64}',row[7]) is not None,'invalid Store canonical digest')
+        text = fragments.text(row[8])
+        require(hashlib.sha256(text.encode('utf-8')).hexdigest() == row[7],'Store canonical preimage hash mismatch')
+        try: raw = strict_json(text)
+        except (ValueError,RecursionError) as exc: raise Invalid('invalid complete Store canonical JSON') from exc
+        certify_tlc_numbers(raw,'decoded Store canonical JSON')
+        store_states.append(dict(id=identity,now=row[0],**{field[:-4]:ref(row[column])
+            for column,field in enumerate(WIRE_COLUMNS['store_state']) if field.endswith('_ref') and field != 'canonical_fragment_ref'},
+            canonical_sha256=row[7],canonical_json=text,raw=raw))
+    logical['store'] = {'initial':wire['store']['initial'],'states':store_states,'edges':wire['store']['edges']}
     return logical
 
 
@@ -1492,9 +1662,10 @@ def validate_product_schema(schema):
         'boundary_contexts','configuration_contexts','fair_families','worker_fields',
         'product_state_fields','product_edge_fields','demand_fields','demand_roles',
         'store_state_additions','source_policy','resource_policy','source_boundaries','global_fair_actions',
-        'wire_columns','wire_value_ref_fields','wire_reference_pools','wire_nullable_reference_fields'}, 'product schema')
+        'wire_columns','wire_value_ref_fields','wire_reference_pools','wire_nullable_reference_fields',
+        'wire_context_fields','wire_fragment_nodes','wire_digest_sequence'}, 'product schema')
     require(schema.get('kind') == 'closed_wire_vocabulary_not_acceptance', 'product schema kind drift')
-    require(schema.get('schema_version') == 4 and schema.get('scope') == 'selected_two_worker_product', 'product schema scope drift')
+    require(schema.get('schema_version') == 5 and schema.get('scope') == 'selected_two_worker_product', 'product schema scope drift')
     require(schema.get('root_fields') == sorted(PRODUCT_KEYS), 'product schema root registry drift')
     validate_source_boundaries(schema['source_boundaries'])
     require(schema.get('main_contexts') == {name:{'stable_success':v[0],'mutation':v[1]} for name,v in CONTEXTS.items()}, 'product schema context drift')
@@ -1509,7 +1680,9 @@ def validate_product_schema(schema):
         require(schema[key] == values, 'product schema '+key+' drift')
     require(schema['wire_columns'] == WIRE_COLUMNS and schema['wire_value_ref_fields'] == WIRE_VALUE_REF_FIELDS and
         schema['wire_reference_pools'] == WIRE_REFERENCE_POOLS and
-        schema['wire_nullable_reference_fields'] == WIRE_NULLABLE_REFERENCE_FIELDS,
+        schema['wire_nullable_reference_fields'] == WIRE_NULLABLE_REFERENCE_FIELDS and
+        schema['wire_context_fields'] == WIRE_CONTEXT_FIELDS and schema['wire_fragment_nodes'] == WIRE_FRAGMENT_NODES and
+        schema['wire_digest_sequence'] == WIRE_DIGEST_SEQUENCE,
         'product schema wire columns/references drift')
     require(schema['source_policy'] == 'exact core and semantic registries; raw driver input digest; full Store canonical identity; independent semantics',
             'product schema source policy drift')
@@ -1601,13 +1774,19 @@ def eligibility_mechanics_witness(bundle,driver,product_digest=None):
     """Existential actual base path; counterfactual safe windows are not base fairness."""
     states,store,edges = bundle['product_states'],bundle['store'],bundle['product_edges']
     context = next(c for c in bundle['contexts'] if c['id'] == 'base')
-    outgoing = [[] for _ in states]
-    for i,e in enumerate(edges):
-        if states[e['from']]['context'] == 'base': outgoing[e['from']].append(i)
+    if isinstance(edges,GroupedLogicalRows):
+        def outgoing(source):
+            return edges.source_indices(source) if states[source]['context'] == 'base' else ()
+    else:
+        # Also accept independent expanded logical fixtures at this helper seam.
+        expanded = [[] for _ in states]
+        for i,e in enumerate(edges):
+            if states[e['from']]['context'] == 'base': expanded[e['from']].append(i)
+        def outgoing(source): return expanded[source]
     parent = {context['initial']:None}; todo = deque(parent)
     while todo:
         src = todo.popleft()
-        for i in outgoing[src]:
+        for i in outgoing(src):
             to = edges[i]['to']
             if to not in parent: parent[to] = i;todo.append(to)
     groups = {}
@@ -1645,7 +1824,7 @@ def eligibility_mechanics_witness(bundle,driver,product_digest=None):
                     'remaining_claim_attempts':2-s['budgets']['claims'][job],
                     'product_certificate_sha256':product_digest or canonical_measure(bundle)[1],
                     'claim':'existential eligibility mechanics; no stable-history or universal fair-recovery claim'}
-            for i in outgoing[src]:
+            for i in outgoing(src):
                 edge = edges[i];to = edge['to'];q = states[to];after = store['states'][q['sql']]; row = after['jobs'][job]
                 if row['state'] != 'queued' or row['request_done'] or row['not_before_ms'] != deadline or after['budgets']['claims'][job] >= 2: continue
                 if edge['oracle_edge'] is not None:
@@ -1668,7 +1847,7 @@ def validate_product(bundle,driver,verify_sources=True,driver_sha256=None):
 
 def _validate_product(g,driver,verify_sources,driver_sha256):
     exact_keys(g,PRODUCT_KEYS,'product bundle')
-    require(g['schema_version'] == 4 and g['scope'] == 'selected_two_worker_product', 'unsupported product schema/scope')
+    require(type(g['schema_version']) is int and g['schema_version'] == 5 and g['scope'] == 'selected_two_worker_product', 'unsupported product schema/scope')
     validate_source_boundaries(g['source_boundaries'])
     certify_tlc_numbers(g)
     bundle_bytes,bundle_digest = canonical_measure(g)
@@ -1683,7 +1862,8 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
     validate_semantic_bindings(g['semantic_bindings'],verify_sources)
     exact_keys(g['store'], {'initial','states','edges'}, 'imported oracle relation')
     store = g['store']
-    certify_tlc_numbers((len(g['value_pool'])+1,len(g['worker_pool'])+1,len(g['contexts'])+1),'wire pool index/count arithmetic')
+    certify_tlc_numbers((len(g['value_pool'])+1,len(g['worker_pool'])+1,len(g['contexts'])+1,
+        len(g['edge_descriptors'])+1,len(g['demand_descriptors'])+1),'wire pool index/count arithmetic')
     certify_tlc_numbers((len(g['product_states'])+1,len(g['product_edges'])+1,len(driver['states'])+1,len(driver['edges'])+1),'model index/count arithmetic')
     oracle_graph = {'schema_version':1,'scope':'imported_oracle','initial':store['initial'],
        'states':store['states'],'edges':store['edges'],'domain':g['domain'],'source_bindings':g['source_bindings'],
@@ -1755,14 +1935,9 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
     used_oracle = set(); adjacency = [[] for _ in states]
     edge_counts, demand_counts = Counter(), Counter()
     edge_count = demand_count = 0
-    # Group only row indices. Expected logical inventories live for one predecessor.
-    groups = {}
-    for name,source in (('demands','from'),('product_edges','from'),('enabledness','state')):
-        grouped = [[] for _ in states]
-        for index,row in enumerate(g[name]):
-            require(integer(row[source],0,len(states)-1),'invalid '+name+' source')
-            grouped[row[source]].append(index)
-        groups[name] = grouped
+    # Schema5 source grouping is structural. Ranges avoid retaining one Python
+    # integer object per edge/demand in addition to the compact wire arrays.
+    groups = {'product_edges':g['product_edges'],'demands':g['demands']}
     for p in states:
         demands,used = complete_product_demands(p,driver,store,oracle)
         used_oracle.update(used)
@@ -1774,7 +1949,8 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
         for name,expected,label in (('demands',demands,'product demand coverage'),
             ('product_edges',edges,'product successor/state-pair membership'),
             ('enabledness',[enabled],'fair nonstuttering enabledness')):
-            require_exact_inventory([g[name][i] for i in groups[name][identity]],expected,label)
+            require_exact_inventory([g[name][i] for i in (range(identity,identity+1) if name == 'enabledness' else
+                groups[name].source_indices(identity))],expected,label)
         adjacency[identity] = targets
         edge_count += len(edges); demand_count += len(demands)
         edge_counts[p['context']] += len(edges); demand_counts[p['context']] += len(demands)
@@ -1795,8 +1971,9 @@ def _validate_product(g,driver,verify_sources,driver_sha256):
     return {**facts,'numeric_certificate':{'tool':'TLC 1.7.4 signed-int','input_and_candidate_arithmetic':'exact_representable','source_i64_saturation':'unreachable_in_certified_artifact','out_of_range':'global_qualification_failure'},'eligibility_mechanics_witness':witness,'product_states':len(states),'product_edges':edge_count,'coverage':coverage,
             'result_class':'independent_product_inventory','acceptance':False,'scope':g['scope'],
             'source_boundaries':dict(g['source_boundaries']),
-            'wire':{'schema_version':4,'bytes':bundle_bytes,'value_pool_count':len(g['value_pool']),
-                    'worker_pool_count':len(g['worker_pool'])}}
+            'wire':{'schema_version':5,'bytes':bundle_bytes,'value_pool_count':len(g['value_pool']),
+                    'worker_pool_count':len(g['worker_pool']),
+                    'edge_descriptor_count':len(g['edge_descriptors']),'demand_descriptor_count':len(g['demand_descriptors'])}}
 
 
 def rejection_controls(driver,store):
@@ -1963,16 +2140,17 @@ def table_chunks(driver,wire):
         used_values = {row[i] for row in wire['worker_pool'] for i,field in enumerate(WORKER_COLUMNS)
             if field in WORKER_VALUE_REFS}
         used_values.update(row[i] for row in wire['product_states'] for i in (4,5,7,8,9))
-        used_values.update(row[7] for row in wire['product_edges'])
-        used_values.update(row[1] for row in wire['enabledness'])
+        used_descriptors = {row[1] for group in wire['product_edges'] for row in group}
+        used_values.update(wire['edge_descriptors'][identity][5] for identity in used_descriptors)
+        used_values.update(wire['enabledness'])
         # Nested values contain no wire references, so this is the full
         # transitive dependency closure. Every generated lookup uses this domain.
         require(all(integer(ref,0,len(wire['value_pool'])-1) for ref in used_values),
             'missing generated value dependency')
         for row in wire['product_states']:
             require(all(row[i] in used_values for i in (4,5,7,8,9)),'missing generated state dependency')
-        require(all(row[7] in used_values for row in wire['product_edges']) and
-            all(row[1] in used_values for row in wire['enabledness']),'missing generated fairness dependency')
+        require(all(wire['edge_descriptors'][identity][5] in used_values for identity in used_descriptors) and
+            all(ref in used_values for ref in wire['enabledness']),'missing generated fairness dependency')
         def value_expression(ref):
             require(ref in used_values,'missing generated Worker dependency')
             return 'GeneratedValues['+str(ref+1)+']'
@@ -2006,25 +2184,33 @@ def table_chunks(driver,wire):
             "ProductStates == [i \\in 1..Len(GeneratedProductRows) |-> GeneratedProductState(GeneratedProductRows[i],i-1)]\n"
             "GeneratedProductKey(p) == <<p.context,p.sql,p.workers,p.available,p.completed,p.mono_now_ms,"
             "p.wall_anchors,p.mono_anchors,p.claim_loss_keys>>\n")
-        yield 'GeneratedProductEdgeRows == '
-        yield from sequence_chunks([row[0],row[1],row[7]] for row in wire['product_edges'])
-        yield ("\nGeneratedProductEdge(r) == [src |-> r[1], dst |-> r[2], fair |-> GeneratedValues[r[3]+1]]\n"
-            "ProductEdges == {GeneratedProductEdge(GeneratedProductEdgeRows[i]) : i \\in 1..Len(GeneratedProductEdgeRows)}\n")
-        outgoing = [dict() for _ in wire['product_states']]
-        for row in wire['product_edges']:
-            # Every branch for one pair has the same independently checked union.
-            outgoing[row[0]][row[1]] = row[7]
+        # Exact descriptor references share full-pair fair sets. The executable
+        # AsyncDriverRefinement Next relation remains in its unchanged model.
+        descriptor_ids = sorted(used_descriptors)
+        yield 'GeneratedProductEdgeFairness == '
+        yield from merge_function_chunks(len(descriptor_ids),lambda i:
+            '('+str(descriptor_ids[i]+1)+' :> '+value_expression(wire['edge_descriptors'][descriptor_ids[i]][5])+')')
+        yield '\nGeneratedProductEdgeRows == '
+        yield from sequence_chunks(wire['product_edges'])
+        yield ("\nGeneratedProductEdge(source,r) == [src |-> source, dst |-> r[1], fair |-> GeneratedProductEdgeFairness[r[2]+1]]\n"
+            "ProductEdges == UNION {{GeneratedProductEdge(i-1,GeneratedProductEdgeRows[i][j]) : "
+            "j \\in 1..Len(GeneratedProductEdgeRows[i])} : i \\in 1..Len(GeneratedProductEdgeRows)}\n")
+        def outgoing_rows():
+            for group in wire['product_edges']:
+                # Every independently checked branch for one pair has the
+                # same union. Retain only this predecessor's temporary map.
+                targets = {row[0]:row[1] for row in group}
+                yield [[target,targets[target]] for target in sorted(targets)]
         yield 'GeneratedProductOutgoingRows == '
-        yield from sequence_chunks([[target,targets[target]] for target in sorted(targets)] for targets in outgoing)
+        yield from sequence_chunks(outgoing_rows())
         yield ("\nProductOutgoing == [i \\in 1..Len(GeneratedProductOutgoingRows) |-> "
             "[j \\in 1..Len(GeneratedProductOutgoingRows[i]) |-> "
             "[dst |-> GeneratedProductOutgoingRows[i][j][1], "
-            "fair |-> GeneratedValues[GeneratedProductOutgoingRows[i][j][2]+1]]]]\n")
+            "fair |-> GeneratedProductEdgeFairness[GeneratedProductOutgoingRows[i][j][2]+1]]]]\n")
         yield 'GeneratedProductEnabledRows == '
-        yield from sequence_chunks(sorted(wire['enabledness'],key=lambda row:row[0]))
+        yield from sequence_chunks(wire['enabledness'])
         yield ("\nProductEnabled == [i \\in 1..Len(GeneratedProductEnabledRows) |-> "
-            "[state |-> GeneratedProductEnabledRows[i][1], "
-            "actions |-> GeneratedValues[GeneratedProductEnabledRows[i][2]+1]]]\nProductIndex == ")
+            "[state |-> i-1, actions |-> GeneratedValues[GeneratedProductEnabledRows[i]+1]]]\nProductIndex == ")
         yield from merge_function_chunks(len(wire['product_states']),
             lambda i:'(GeneratedProductKey(ProductStates['+str(i+1)+']) :> '+str(i)+')')
         delays = {(snapshot['raw_job_id'],snapshot['failed_attempts']) for state in store['states']

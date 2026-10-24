@@ -61,6 +61,10 @@ PRODUCT_WIRE_TESTS = {
  'product_wire_compact_keys_are_bijective_with_full_logical_payloads',
  'product_wire_byte_accounting_and_stream_writer_fail_closed',
  'product_wire_store_export_omits_only_redundant_raw',
+ 'product_schema5_fragment_dag_preserves_original_canonical_bytes_and_bounds',
+ 'product_schema5_grouped_descriptors_and_derived_digests_preserve_full_values',
+ 'oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock',
+ 'oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback',
 }
 PRODUCT_WIRE_CASES = [case for case in STORE_TESTS['core_tests'] if case.rsplit('::',1)[-1] in PRODUCT_WIRE_TESTS]
 c.require(len(PRODUCT_WIRE_CASES) == len(PRODUCT_WIRE_TESTS) and

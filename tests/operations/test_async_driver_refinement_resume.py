@@ -354,13 +354,19 @@ class ReuseIdentities(OwnedScratch):
           'product_wire_compact_keys_are_bijective_with_full_logical_payloads',
           'product_wire_byte_accounting_and_stream_writer_fail_closed',
           'product_wire_store_export_omits_only_redundant_raw',
+          'product_schema5_fragment_dag_preserves_original_canonical_bytes_and_bounds',
+          'product_schema5_grouped_descriptors_and_derived_digests_preserve_full_values',
+          'oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock',
+          'oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback',
         }
         self.assertEqual(runner.PRODUCT_WIRE_TESTS,expected)
         order = list(runner.CASES)
         source = 'crates/plurx-core/src/store/async_driver_product.rs'
-        sources = {source:'a'*64,**{path:'b'*64 for path in adapter.INVOCATION_PATHS}}
+        prefix_source = 'crates/plurx-core/src/store/async_driver_refinement.rs'
+        sources = {source:'a'*64,prefix_source:'d'*64,**{path:'b'*64 for path in adapter.INVOCATION_PATHS}}
         for short in expected:
-            name = 'store-'+short;test_name = 'store::async_driver_product::'+short
+            name = 'store-'+short
+            test_name = next(case for case in runner.PRODUCT_WIRE_CASES if case.rsplit('::',1)[-1] == short)
             with self.subTest(name=name):
                 argv = runner.CASES[name]
                 self.assertLess(order.index(name),order.index('graph-product'))
@@ -371,7 +377,7 @@ class ReuseIdentities(OwnedScratch):
                 self.assertEqual(runner.case_scope(name),'store')
                 bound = runner.case_sources(name,sources,out=self.directory)
                 self.assertEqual(bound,sources)
-                changed = dict(sources);changed[source] = 'c'*64
+                changed = dict(sources);changed[prefix_source if short.startswith('oracle_prefix_') else source] = 'c'*64
                 self.assertNotEqual(bound,runner.case_sources(name,changed,out=self.directory))
                 output = f'test {test_name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
                 self.assertEqual(runner.case_evidence(name,output,0),{'test_count':1,'result_class':short})
