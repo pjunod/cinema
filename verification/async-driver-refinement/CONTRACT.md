@@ -59,6 +59,38 @@ durable running ownership, including expired retained ownership; the foreign
 holder remains independent. Stale revisions, wrong-owner binding/completion,
 Fail and Stop are separate conformance partitions, not closed graph inputs.
 
+## The omitted DV-title state is constant for this protocol
+
+The fixture initializes only `library_scan` and `metadata_refresh` jobs and
+inserts no files. Selected completion updates the paired request and retires
+its job/resources; its empty scan result does not publish files. The new common
+queue predicates retain the selected kinds' truth values: enqueue's demand
+rejection selects `dv_title_scan`, and claim's added condition permits every
+other kind. The title terminal trigger selects that same DV kind; title bind
+and publish triggers select their own command operations. File and demand
+triggers have no initiating write in the selected action set. This is a
+source-backed noninterference argument for D, not for arbitrary publication.
+
+The harness separately requires empty `files` and `dv_title_jobs_demand`, the
+exact marker row `(1,1)`, and every `sqlite_sequence` row named
+`dv_title_jobs_demand` unchanged from its actual initialized baseline. Absence
+and a zero-valued sequence row are distinct. These checks run through the
+existing invariants at Init, replayed and demanded successors, restored parents,
+root reset/teardown and paired mutation reset. Drift fails the whole run and
+poisons retained materialization; it never drops an input or changes the
+original nine-table canonical bytes, digests or fairness. The existing prefix
+fixtures also define hidden-sequence perturbations whose nine-table canonical
+values stay equal while the guard refuses; they remain unexecuted pending
+independent review and qualification.
+
+Direct source bindings include the title helper, SQL and schema verifier.
+Compiled migration 114 and the complete installed schema inventory bind the
+actual new schema/trigger bytes. The existing runner already hashes the whole
+core source closure, including these files and Hiqlite installation; exact
+source/invocation validators decide receipt reuse without an exception. The
+sampled actual-backend history retains its default non-DV file probe and adds
+no DV workload or prefix-reuse claim for Hiqlite.
+
 ## The proof closes a selected product, not arbitrary Store D
 
 The Rust test `store::async_driver_product::actual_sql_two_worker_product_is_closed`

@@ -254,6 +254,9 @@
     "store/background_jobs_library.sql",
     "store/background_jobs_resources.sql",
     "store/background_jobs_schema.sql",
+    "store/dv_title_jobs.rs",
+    "store/dv_title_jobs.sql",
+    "store/dv_title_jobs_schema.rs",
     "store/mod.rs",
     "store/sqlite/background_jobs.rs",
     "store/sqlite/coordination.rs",
@@ -283,7 +286,8 @@
     "ordinary_settlement_payload_transfer": "selected actual ordinary settlement payload/capture/request/local-service correspondence; evidence pending qualification; normal wall/mono input domain only",
     "clock": "wall and mono independently advance to the smallest strict greater nonnegative representable neighbour of retained exact authority/payload/queued-eligibility or source local-deadline anchors; no horizon clipping",
     "renewal_resolution_boundary": "selected zero-delay renewal plus actual logical resolve has no inner interleaving; both actual outcomes and capture references are certified; resolution errors consume the remaining per-attempt fault allowance",
-    "initial_claim_recovery_boundary": "lost initial claims use actual fence-None resolution with original dispatch identity, conditional actual row reread or Cancel, and no inner query interleaving; at most eight persistent job/node/claim loss keys; inconclusive outcomes service exact 250ms source wakes until the fixed 30000ms local deadline; the separate Store request window is 120000ms"
+    "initial_claim_recovery_boundary": "lost initial claims use actual fence-None resolution with original dispatch identity, conditional actual row reread or Cancel, and no inner query interleaving; at most eight persistent job/node/claim loss keys; inconclusive outcomes service exact 250ms source wakes until the fixed 30000ms local deadline; the separate Store request window is 120000ms",
+    "omitted_dv_state_boundary": "selected library_scan/metadata_refresh inputs preserve empty files and DV demand, marker [(1,1)] and exact initialized dv_title_jobs_demand sqlite_sequence rows; omitted-state drift aborts the whole run without changing nine-table canonical identity"
   },
   "membership": "intrinsic cancel/retirement settle2/3 and resolve use every captured token; renew/bind/complete use latest-per-claim; ordinary saved request and wall target membership are independently contextual",
   "identity": "raw production fixture UUIDs and all full canonical nine-table rows/Episode/action bytes are retained; hash equality never replaces full equality in oracle replay/cache",

@@ -44,6 +44,7 @@ struct Fixture {
     store: SqliteStore,
     library: i64,
     jobs: [String; 2],
+    omitted_dv_sequence: Value,
 }
 
 impl Fixture {
@@ -52,6 +53,12 @@ impl Fixture {
     }
 
     async fn seed(store: SqliteStore) -> Self {
+        // Preserve the actual migrated AUTOINCREMENT state, including absence
+        // versus an initialized zero; no selected operation may change it.
+        let omitted_dv_sequence = omitted_dv_state(&store)
+            .await
+            .expect("initialized omitted DV state")["sequence"]
+            .clone();
         // This installs all production migrations in their real order,
         // including later replacements of the required-resource view.
         let library = store
@@ -98,6 +105,7 @@ impl Fixture {
             store,
             library,
             jobs: jobs.try_into().expect("two selected jobs"),
+            omitted_dv_sequence,
         }
     }
 
@@ -1393,7 +1401,42 @@ async fn apply(
     })
 }
 
+// These omitted rows are constant for the selected library-only protocol.
+// Observe them separately so the original nine-table canonical bytes stay exact.
+async fn omitted_dv_state(store: &SqliteStore) -> Result<Value, String> {
+    let rows = store.queue_sql(
+        r#"SELECT json_object(
+          'files',(SELECT count(*) FROM files),
+          'demand',(SELECT count(*) FROM dv_title_jobs_demand),
+          'marker',json((SELECT json_group_array(json_array(singleton,version))
+            FROM (SELECT singleton,version FROM dv_title_jobs_schema ORDER BY singleton,version))),
+          'sequence',json((SELECT json_group_array(json_array(name,seq))
+            FROM (SELECT name,seq FROM sqlite_sequence WHERE name='dv_title_jobs_demand' ORDER BY name,seq)))
+        ) WHERE json_valid($1)"#.into(),
+        "null".into(), false, true,
+    ).await.map_err(|error| format!("OmittedDvState: observation failed: {error}"))?;
+    let [row] = rows.as_slice() else {
+        return Err("OmittedDvState: expected one observation".into());
+    };
+    serde_json::from_str(row)
+        .map_err(|error| format!("OmittedDvState: invalid observation: {error}"))
+}
+
+async fn omitted_dv_invariants(fixture: &Fixture) -> Result<(), String> {
+    let state = omitted_dv_state(&fixture.store).await?;
+    if state["files"] != json!(0)
+        || state["demand"] != json!(0)
+        || state["marker"] != json!([[1, 1]])
+        || !state["sequence"].is_array()
+        || state["sequence"] != fixture.omitted_dv_sequence
+    {
+        return Err("OmittedDvState: selected protocol changed fixed DV rows or sequence".into());
+    }
+    Ok(())
+}
+
 async fn invariants(fixture: &Fixture, episode: &Episode) -> Result<(), String> {
+    omitted_dv_invariants(fixture).await?;
     let mut active = 0;
     for job in 0..2 {
         let row = fixture
@@ -1596,6 +1639,12 @@ fn source_bindings() -> BTreeMap<&'static str, String> {
             "store/subtitle_managed_schema.sql",
             include_str!("subtitle_managed_schema.sql"),
         ),
+        ("store/dv_title_jobs.rs", include_str!("dv_title_jobs.rs")),
+        ("store/dv_title_jobs.sql", include_str!("dv_title_jobs.sql")),
+        (
+            "store/dv_title_jobs_schema.rs",
+            include_str!("dv_title_jobs_schema.rs"),
+        ),
         ("store/sqlite/mod.rs", include_str!("sqlite/mod.rs")),
         (
             "store/sqlite/background_jobs.rs",
@@ -1726,6 +1775,7 @@ pub(super) fn domain_metadata() -> Value {
         "foreign_holder_boundary": "foreign-holder is a third adversarial domain-lease owner, not either worker node, with one independent acquisition budget",
         "retirement_sequence_boundary": "the graph supplies separate actual settle and logical resolve primitives; daemon drain/local-token/first-settle/resolve/optional-second-settle sequencing is a reviewed source and daemon-conformance boundary composed by the temporal model",
         "cleanup_boundary": "local cleanup needs bounded retirement calls to return, not eventual successful acknowledgement; errors are logged and finish returns while durable authority may remain",
+        "omitted_dv_state_boundary": "selected library_scan/metadata_refresh inputs preserve empty files and DV demand, marker [(1,1)] and exact initialized dv_title_jobs_demand sqlite_sequence rows; omitted-state drift aborts the whole run without changing nine-table canonical identity",
         "snapshot_tables": SNAPSHOT_TABLES,
         "dispatch_time_noninterference": "for retirement fence Some(F), resolve_claim reads dispatched_at_ms only in its skipped fence-is-none window branch; neither SQL query nor later classification reads it, so a representative dispatch sample preserves results at fixed now/read outcomes; this is a reviewed source lemma, not a machine proof",
         "queue_sql_boundary": "all generated queue primitives use QueueSql::queue_sql, not queue_transaction; ReplyBoundary passes queue_transaction through without fault injection, so multi-statement transaction faults are outside this slice",
@@ -1842,6 +1892,10 @@ impl Oracle {
     ) -> Result<(), String> {
         self.restore_root().await?;
         self.mutation = install_mutation(&self.fixture, mutation).await;
+        if let Err(error) = invariants(&self.fixture, &Episode::initial()).await {
+            self.materialization_failed = true;
+            return Err(error);
+        }
         self.schema = schema_bindings(&self.fixture).await;
         self.states.truncate(1);
         self.edges.clear();
@@ -2160,7 +2214,10 @@ impl Oracle {
             self.materialization_failed = true;
             return Err("MaterializationRoundTrip: parent canonical/input mismatch".into());
         }
-        invariants(fixture, &episode).await?;
+        if let Err(error) = invariants(fixture, &episode).await {
+            self.materialization_failed = true;
+            return Err(error);
+        }
         fixture
             .store
             .async_refinement_control("SAVEPOINT async_product_demand;".into())
@@ -2249,7 +2306,10 @@ impl Oracle {
             self.materialization_failed = true;
             return Err("RollbackRoundTrip: demand rollback changed parent".into());
         }
-        invariants(fixture, &parent_episode).await?;
+        if let Err(error) = invariants(fixture, &parent_episode).await {
+            self.materialization_failed = true;
+            return Err(error);
+        }
         self.diagnostics.rollback = self
             .diagnostics
             .rollback
@@ -2274,6 +2334,9 @@ impl Oracle {
                 "trace": trace, "predecessor": parent.view, "successor": view,
                 "predecessor_canonical_json": parent.canonical, "successor_canonical_json": next,
             })));
+        }
+        if invariant.is_err() {
+            self.materialization_failed = true;
         }
         invariant?;
         for (old, new) in parent.view["jobs"]
@@ -3106,6 +3169,9 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
     let mut oracle = Oracle::new(None)
         .await
         .expect("private actual SQLite fixture");
+    let omitted = omitted_dv_state(&oracle.fixture.store)
+        .await
+        .expect("fixed Init DV state");
     let claim = Action::Claim { job: 0, node: 0 };
     let first = oracle.apply(0, &claim).await.expect("initial claim");
     let claimed = oracle.edges[first].to;
@@ -3127,6 +3193,12 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
             .expect("full root replay transition");
         let edge = serde_json::to_value(&oracle.edges[baseline]).expect("baseline exact edge");
         let state = oracle.export_state(oracle.edges[baseline].to);
+        assert_eq!(
+            omitted_dv_state(&oracle.fixture.store)
+                .await
+                .expect("root replay DV state"),
+            omitted
+        );
         saw_refusal |= oracle.edges[baseline].result == "refused";
         let performed = oracle.diagnostics.replay_performed;
         oracle.cache.remove(&(from, input.clone()));
@@ -3139,6 +3211,12 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
             edge
         );
         assert_eq!(oracle.export_state(oracle.edges[reused].to), state);
+        assert_eq!(
+            omitted_dv_state(&oracle.fixture.store)
+                .await
+                .expect("retained-prefix DV state"),
+            omitted
+        );
         assert_eq!(
             oracle.diagnostics.replay_performed, performed,
             "same parent must not replay prefix"
@@ -3162,6 +3240,12 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
         .await
         .expect("deeper clock prefix");
     assert_eq!(oracle.prefix.last().expect("deep prefix").1.now, NOW + 1);
+    assert_eq!(
+        omitted_dv_state(&oracle.fixture.store)
+            .await
+            .expect("deep-prefix DV state"),
+        omitted
+    );
     oracle
         .cache
         .remove(&(claimed, Action::ReadClaimJob { job: 1 }));
@@ -3170,6 +3254,12 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
         .await
         .expect("historical captured Episode");
     assert_eq!(oracle.prefix.last().expect("historical prefix").1.now, NOW);
+    assert_eq!(
+        omitted_dv_state(&oracle.fixture.store)
+            .await
+            .expect("nonzero LCP DV state"),
+        omitted
+    );
     assert_eq!(
         oracle.prefix.last().expect("historical prefix").1.tokens,
         oracle.states[claimed].episode.tokens
@@ -3183,12 +3273,21 @@ async fn oracle_prefix_reuse_matches_root_replay_with_refusal_branch_and_clock()
         .restore_root()
         .await
         .expect("normal verified teardown");
+    assert_eq!(
+        omitted_dv_state(&oracle.fixture.store)
+            .await
+            .expect("teardown DV state"),
+        omitted
+    );
 }
 
 #[tokio::test]
 async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
     let mut oracle = Oracle::new(None).await.expect("actual SQLite fixture");
     let init = oracle.states[0].canonical.clone();
+    let omitted = omitted_dv_state(&oracle.fixture.store)
+        .await
+        .expect("Init omitted state");
     let action = Action::Claim { job: 0, node: 0 };
     let first = oracle.apply(0, &action).await.expect("claim");
     let parent = oracle.edges[first].to;
@@ -3204,6 +3303,12 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
     assert!(oracle.prefix.is_empty());
     assert!(!oracle.root_savepoint);
     assert_eq!(oracle.states.len(), 1);
+    assert_eq!(
+        omitted_dv_state(&oracle.fixture.store)
+            .await
+            .expect("mutation reset DV state"),
+        omitted
+    );
     assert_eq!(canonical(&oracle.fixture, &Episode::initial()).await, init);
     oracle
         .apply(0, &action)
@@ -3221,4 +3326,58 @@ async fn oracle_prefix_reset_preserves_mutation_and_rejects_failed_rollback() {
         oracle.apply(0, &action).await.is_err(),
         "a prior cached edge cannot hide failed restore"
     );
+
+    let mut hidden = Oracle::new(None).await.expect("omitted-state fixture");
+    let claim = hidden.apply(0, &action).await.expect("cached claim");
+    let parent = hidden.edges[claim].to;
+    hidden
+        .apply(parent, &Action::ReadClaimJob { job: 0 })
+        .await
+        .expect("retained parent");
+    hidden
+        .fixture
+        .store
+        .async_refinement_control(
+            "INSERT INTO sqlite_sequence(name,seq) VALUES('dv_title_jobs_demand',314159);".into(),
+        )
+        .await
+        .expect("deliberate omitted sequence perturbation");
+    assert_eq!(
+        canonical(&hidden.fixture, &hidden.states[parent].episode).await,
+        hidden.states[parent].canonical,
+        "the original nine-table canonical comparison cannot see omitted-state drift"
+    );
+    let error = hidden
+        .apply(parent, &Action::ReadClaimJob { job: 1 })
+        .await
+        .expect_err("retained parent must reject hidden drift");
+    assert!(error.starts_with("OmittedDvState:"), "{error}");
+    assert!(hidden.materialization_failed);
+    assert!(hidden
+        .apply(0, &action)
+        .await
+        .expect_err("no cached fallback after hidden drift")
+        .starts_with("MaterializationPoisoned:"));
+
+    let mut reset = Oracle::new(None)
+        .await
+        .expect("root-reset omitted-state fixture");
+    reset
+        .fixture
+        .store
+        .async_refinement_control(
+            "INSERT INTO sqlite_sequence(name,seq) VALUES('dv_title_jobs_demand',314159);".into(),
+        )
+        .await
+        .expect("deliberate root omitted-state drift");
+    assert_eq!(
+        canonical(&reset.fixture, &Episode::initial()).await,
+        reset.states[0].canonical
+    );
+    assert!(reset
+        .restore_root()
+        .await
+        .expect_err("root reset must check omitted state")
+        .starts_with("OmittedDvState:"));
+    assert!(reset.materialization_failed);
 }

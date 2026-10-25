@@ -78,6 +78,7 @@ STORE_BOUNDARIES = {'retirement_inputs': 'disposition 3 uses Some(worker_retired
                        'savepoint/SQL failure aborts closure',
  'refusal_observation': 'the extracted oracle retains the original full-canonical refused-edge equality guard before memoization; logical resolve retains durable read-only observation; no pre-existing closure gap is claimed',
  'ordinary_settlement_payload_transfer': 'selected actual ordinary settlement payload/capture/request/local-service correspondence; evidence pending qualification; normal wall/mono input domain only'}
+STORE_BOUNDARIES['omitted_dv_state_boundary'] = 'selected library_scan/metadata_refresh inputs preserve empty files and DV demand, marker [(1,1)] and exact initialized dv_title_jobs_demand sqlite_sequence rows; omitted-state drift aborts the whole run without changing nine-table canonical identity'
 STORE_BOUNDARIES.update(clock='wall and mono independently advance to the smallest strict greater nonnegative representable neighbour of retained exact authority/payload/queued-eligibility or source local-deadline anchors; no horizon clipping',
  retirement_inputs='disposition 3 uses Some(worker_retired), None checkpoint and not_before_ms=current episode.now for every captured original token; cancellation uses disposition 2; ordinary service uses contextual ordinary_settle payloads',
  primitive_clock_boundary='intrinsic primitives use current episode.now; ordinary_settle preserves its separately captured request_now_ms; retirement wall samples/internal dispatch races and zero-delay claim/renew-resolution envelopes remain named source/conformance boundaries',
@@ -1052,6 +1053,7 @@ def validate_store(g, verify_sources=True, *, product=False):
     expected_sources = {'store/'+p for p in ('background_jobs.rs','background_jobs_domain.rs',
       'background_jobs_library.rs','background_jobs_schema.sql','background_jobs_resources.sql',
       'background_jobs_library.sql','background_jobs_domain.sql','subtitle_managed_schema.sql',
+ 'dv_title_jobs.rs','dv_title_jobs.sql','dv_title_jobs_schema.rs',
       'sqlite/mod.rs','sqlite/background_jobs.rs','sqlite/coordination.rs','async_driver_refinement.rs')}
     expected_sources.add('cluster/coordination.rs')
     if product: expected_sources = set(CORE_SOURCES) | set(EXTERNAL_SOURCES)
@@ -1538,6 +1540,7 @@ def decode_product(wire):
 CORE_SOURCES = {'store/'+name for name in ('background_jobs.rs','background_jobs_domain.rs',
  'background_jobs_library.rs','background_jobs_schema.sql','background_jobs_resources.sql',
  'background_jobs_library.sql','background_jobs_domain.sql','subtitle_managed_schema.sql',
+ 'dv_title_jobs.rs','dv_title_jobs.sql','dv_title_jobs_schema.rs',
  'sqlite/mod.rs','sqlite/background_jobs.rs','sqlite/coordination.rs','async_driver_refinement.rs',
  'async_driver_product.rs','mod.rs')} | {'cluster/coordination.rs'}
 
