@@ -298,8 +298,8 @@ segments). This works with every encoder. The other options are ruled out:
 Phase 2 replaces the phase 1 curve with closed-form equations of Dolby's own
 display management, derived and checked privately against the licensed
 reference renderer (`cm_offline`, used only as a QC referee). Derivations and
-evidence stay on the private `rog_hdr_dv` branch (`docs/CM4_CLOSED_FORM.md`,
-`docs/CM29_CLOSED_FORM.md`); this repository carries only the equations as code.
+evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
+`CM29_CLOSED_FORM.md`); this repository carries only the equations as code.
 
 - **Family per frame, from the RPU.** CM v4 when the RPU carries CM v4.0
   metadata (L254) or L8 trims; CM v2.9 otherwise. Rust re-derives the family

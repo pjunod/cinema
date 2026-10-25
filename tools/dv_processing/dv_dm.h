@@ -1,7 +1,7 @@
 // Closed-form Dolby Vision display management for display-targeted exports.
 // CM v4 for shots whose RPU carries CM v4.0 metadata (Level254 / Level8), CM v2.9 otherwise.
 // The equations, their derivation against the licensed reference renderer and the evidence live in
-// rog_hdr_dv docs/CM4_CLOSED_FORM.md and docs/CM29_CLOSED_FORM.md; dm_closed_form.h is the
+// rog_hdr_dv CM4_CLOSED_FORM.md and CM29_CLOSED_FORM.md; dm_closed_form.h is the
 // double-precision CPU reference the shader is checked against (controls/dm_shader_control.c).
 //
 // Per frame the CPU prepares the shot state (curve anchors, trims interpolated to the target,

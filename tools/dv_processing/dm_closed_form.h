@@ -1,6 +1,6 @@
 /* dm_closed_form.h - closed-form Dolby Vision display mapping (CM v4 and CM v2.9), measured against
  * the licensed reference renderer (cm_offline 5.6.4) with synthetic patches; see rog_hdr_dv
- * docs/CM4_CLOSED_FORM.md and docs/CM29_CLOSED_FORM.md for the derivation and the evidence.
+ * CM4_CLOSED_FORM.md and CM29_CLOSED_FORM.md for the derivation and the evidence.
  *
  * Reference (CPU, double precision) implementation. All signal values are PQ in [0,1] unless noted;
  * colours are BT.2020 RGB. Per-shot state is prepared once (dm_cm4_prepare / dm_cm29_prepare) and
