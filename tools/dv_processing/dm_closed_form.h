@@ -450,10 +450,10 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   double ratio = dm_mind(1.0, sqrt((TM + Tm) / (SM + Sm)));
   double n = 3 * sqrt(1 / ratio);
   double coef[3];
-  /* A very dark shot (a few codes between crush and clip) can put the middle target anchor below
-   * the black one, and the fitted rational then has a pole or turns down inside [0,1]. Such a fit is
-   * rejected and the shot's clip widened (doubling its span) until the curve is increasing and
-   * pole-free on [0,1]; well-conditioned shots are fitted unchanged. */
+  /* Some anchor sets (very dark shots with a few codes between crush and clip, and some bright
+   * shots with a high minimum; about 1-2 % of an L1 grid) fit a rational with a pole or a downturn
+   * inside [0,1]. Such a fit is rejected and the shot's clip widened (doubling its span) until the
+   * curve is increasing and pole-free on [0,1]; fits accepted first time are unchanged. */
   for (int tries = 0;; tries++) {
     double m = dm_mind(dm_maxd(mid, crush + 0.25 * (clip - crush)), crush + 0.75 * (clip - crush));
     double key = 2 * (m - Sm) / (SM - Sm), shift = m * (1 - ratio) * key;

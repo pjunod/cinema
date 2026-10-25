@@ -276,7 +276,26 @@ int main(int argc, char **argv) {
         }
   }
 
-  // 8. pinned golden values of the model (BT.2020/PQ out for a PQ 0.75 grey and a skin-like orange).
+  // 8. dark CM v2.9 shots: a fine near-black ramp (where a pole would sit) stays monotone and dark
+  {
+    static const unsigned dark[][3] = {{0, 0, 16}, {0, 0, 8}, {10, 10, 26}, {0, 4, 32}};
+    enum { M = 2048 };
+    float *ramp = malloc((size_t)M * 16);
+    for (int i = 0; i < M; i++) { ramp[4*i] = ramp[4*i+1] = ramp[4*i+2] = 0.02f * i / (M - 1); ramp[4*i+3] = 1; }
+    for (unsigned k = 0; k < sizeof(dark) / sizeof(*dark); k++) {
+      rpu d; base(&d, dark[k][0], dark[k][1], dark[k][2]);
+      dv_dm_frame x = prep_t(&d, 600, DM_P3D65, DV_TARGET_CREATIVE_TRIMS); x.weight = -2;
+      float *o = render(&x, ramp, M, 1);
+      for (int i = 1; i < M; i++)
+        if (o[4*i+1] < o[4*(i-1)+1] - 1e-5 || dm_pq_eotf(o[4*i+1]) > 1.0) {
+          fprintf(stderr, "dark shot %u: pole or downturn at %d (%g)\n", k, i, o[4*i+1]); exit(1);
+        }
+      free(o);
+    }
+    free(ramp);
+  }
+
+  // 9. pinned golden values of the model (BT.2020/PQ out for a PQ 0.75 grey and a skin-like orange).
   // They lock the closed form against silent drift; they are model outputs, not vendor measurements.
   float probe[8] = {0.75f, 0.75f, 0.75f, 1, 0.62f, 0.45f, 0.38f, 1};
   const struct { const rpu *r; unsigned nits; enum dm_prim prim; double g[6]; } golden[] = {
