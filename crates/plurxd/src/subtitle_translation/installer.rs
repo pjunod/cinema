@@ -90,16 +90,19 @@ async fn phase(
 
 async fn admit(
     state: &AppState,
+    fence: &JobFence,
     cancel: &CancellationToken,
 ) -> Result<FragmentAdmission, StoreError> {
     interrupted(cancel)?;
+    phase(fence, SubtitlePhase::WaitingForCapacity, cancel).await?;
     let admitted = state
         .transcode
-        .admit_fragment()
+        .admit_fragment_queued(cancel)
         .await
         .filter(|admission| state.transcode.fragment_worker_idle(admission))
         .ok_or_else(|| failure("waiting_for_playback_capacity"))?;
     interrupted(cancel)?;
+    phase(fence, SubtitlePhase::Verifying, cancel).await?;
     Ok(admitted)
 }
 
@@ -153,11 +156,11 @@ pub(crate) async fn execute(
                 .await
                 .map_err(StoreError::Task)?;
             interrupted(&cancel)?;
-            let admission = admit(state, &cancel).await?;
+            let admission = admit(state, fence, &cancel).await?;
             (model, admission)
         }
         ModelAction::TranslationVerify => {
-            let admission = admit(state, &cancel).await?;
+            let admission = admit(state, fence, &cancel).await?;
             phase(fence, SubtitlePhase::Verifying, &cancel).await?;
             let model = hash_admitted(state, &cancel, &admission).await?;
             (model, admission)

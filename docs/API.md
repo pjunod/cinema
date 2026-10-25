@@ -2330,6 +2330,10 @@ not qualified by this route.
 
 Existing model Install/Test routes also accept strict version 2 translation
 requests with request UUID, intent expiry, purpose, profile ID and named workers.
+Their version 2 responses identify `purpose: "translation"`, `model_id` and
+`profile_id` alongside per-worker `operations`, so setup can follow accepted jobs.
+Model job phases include `waiting_for_capacity` while a claimed test holds a
+FIFO place for the shared heavy-background slot; this consumes no CPU admission.
 Translation qualification does not imply that the ordinary generation self-test
 ran. Work mutations require current administrator authority and an unexpired
 first-use intent; retained exact receipts replay without starting fresh work.
