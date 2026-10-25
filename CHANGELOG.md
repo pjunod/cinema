@@ -62,6 +62,14 @@ bump may break compatibility and a **patch** bump never does.
   are unchanged. The BT.2020 rows are measured on synthetic sweeps only.
   Targeted renditions re-render under method
   `dolby-closed-form-cm4-cm29-v3`.
+- The CM v2.9 near-black chroma gain is taken on the absolute output
+  intensity, not above the target black. Measured with stock targets redefined
+  with a 0.005-nit black, as plurx renders HDR targets: chroma at and just above
+  black was 2-4x too low (mean ΔE_ITP on near-black sweeps 1.4-2.7 -> 0.6-1.5).
+  CM v2.9 HDR (PQ) targets also clip to the target cube at 0, not at the
+  target black, as the reference does (the black shapes the tone curve only);
+  the SDR target keeps clipping at its display black.
+  Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v4`.
 
 ### Fixed
 
