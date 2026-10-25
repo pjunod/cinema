@@ -3,6 +3,7 @@ use super::*;
 use crate::adaptive_resources::{FamilyRoleDemand, WorkloadDemand};
 use crate::resource_custody::{InstallationContext, MemberKind, RecoveryMethod};
 use std::time::Duration;
+mod admission_provenance;
 mod binding;
 mod live_typed_settlement;
 mod native_entry;
@@ -139,10 +140,18 @@ async fn late_prepare_commit_rechecks_epoch_and_cancels_without_returning_launch
         .update_capacity(2, Metric::Known(vector(1)))
         .expect("new epoch below held cost");
     assert_eq!(runtime.accounting().expect("not clamped").used, vector(4));
+    let error = runtime
+        .resolve_preparation(&owner, deadline())
+        .await
+        .expect_err("accepted prepare now has a stale epoch");
     assert!(matches!(
-        runtime.resolve_preparation(&owner, deadline()).await,
-        Err(OperationError::Admission(AdmissionRefusal::StaleEpoch))
+        &error,
+        OperationError::Admission(AdmissionRefusal::StaleEpoch)
     ));
+    assert!(
+        !super::super::finite_vod::FiniteVodError::from(error).definitely_before_reservation(),
+        "the identical stale-epoch cause after accepted R is not a pre-reservation refusal"
+    );
     assert_eq!(
         runtime
             .accounting()
@@ -173,12 +182,16 @@ async fn drain_after_prepare_acceptance_cancels_all_members_and_refuses_new_fami
     runtime.begin_drain().expect("draining");
     assert!(matches!(
         runtime.new_family(),
-        Err(OperationError::Draining)
+        Err(OperationError::BeforeReservation(
+            PreReservationRefusal::Draining
+        ))
     ));
-    assert!(matches!(
-        runtime.resolve_preparation(&owner, deadline()).await,
-        Err(OperationError::Draining)
-    ));
+    let error = runtime
+        .resolve_preparation(&owner, deadline())
+        .await
+        .expect_err("accepted preparation drains");
+    assert!(matches!(&error, OperationError::Draining));
+    assert!(!super::super::finite_vod::FiniteVodError::from(error).definitely_before_reservation());
     assert_eq!(runtime.accounting().expect("durable cancellation").held, 0);
     runtime.drain().expect("drain");
 }

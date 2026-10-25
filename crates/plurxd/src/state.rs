@@ -11717,12 +11717,15 @@ impl JobManager {
             };
             let (job, active, fence) = match claim {
                 crate::background_jobs::PreparationClaim::Encoded(job, active, _admission) => {
-                    let fence = active.fence();
+                    let controller =
+                        crate::background_jobs::BackgroundJobController::new(job, active);
+                    let job = controller.job();
+                    let fence = controller.fence();
                     let observation = transcode.copy_preparation_attachment_observation();
                     let result = {
                         let operation = async {
                             let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
-                                file_id, source_size, source_mtime, reason, ..
+                                file_id, source_size, source_mtime, reason, intent, ..
                             } = job.supported_payload().map_err(|_| {
                                 crate::background_jobs::PreparationError::Fail(
                                     "encoded_payload_unsupported",
@@ -11762,13 +11765,30 @@ impl JobManager {
                                     .unwrap_or_default(),
                                 None => Vec::new(),
                             };
-                            crate::transcode::pretranscode_source_snapshot(&file, &roots)
-                                .await
-                                .ok_or("encoded source unavailable on owner")?;
+                            #[cfg(target_os = "linux")]
+                            let selected_static =
+                                transcode.uses_selected_static_intent(&file, &intent);
+                            #[cfg(not(target_os = "linux"))]
+                            let selected_static = {
+                                let _ = &intent;
+                                false
+                            };
+                            if !selected_static {
+                                let original =
+                                    job.token.as_ref().ok_or("encoded claim token missing")?;
+                                if fence.snapshot_for_claim(original).await.is_none() {
+                                    return Err(crate::background_jobs::PreparationError::Stop(
+                                        "ownership_lost",
+                                    ));
+                                }
+                                crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                    .await
+                                    .ok_or("encoded source unavailable on owner")?;
+                            }
                             transcode
                                 .produce_encoded_output_job(
                                     &file,
-                                    &job,
+                                    job,
                                     fence.clone(),
                                     deadline,
                                     observation,
@@ -11792,7 +11812,7 @@ impl JobManager {
                     };
                     let reason = self
                         .settle_output_preparation(
-                            &job,
+                            job,
                             &fence,
                             "encoded_output",
                             result,
@@ -11809,7 +11829,8 @@ impl JobManager {
                             *reasons.entry(reason).or_default() += 1;
                         }
                     }
-                    active.finish().await;
+                    drop(fence);
+                    let _ = controller.finish().await;
                     continue;
                 }
                 crate::background_jobs::PreparationClaim::Transcode(job, active, fence) => {

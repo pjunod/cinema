@@ -187,8 +187,20 @@ struct JournalOperation {
     acknowledged: bool,
 }
 
+/// Proven only at the exact preparation sites before any new role is
+/// reserved. Generic Admission/Draining can also occur after acceptance.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PreReservationRefusal {
+    #[error("resource admission refused: {0:?}")]
+    Admission(AdmissionRefusal),
+    #[error("resource runtime draining")]
+    Draining,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OperationError {
+    #[error(transparent)]
+    BeforeReservation(PreReservationRefusal),
     #[cfg(target_os = "linux")]
     #[error("planning facts refused: {0}")]
     Planning(crate::process::fixed_probe::DecodeFactError),
@@ -323,12 +335,18 @@ impl NodeResourceRuntime {
     pub(crate) fn new_family(&self) -> Result<FamilyIdentity, OperationError> {
         let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
         if book.draining {
-            return Err(OperationError::Draining);
+            return Err(OperationError::BeforeReservation(
+                PreReservationRefusal::Draining,
+            ));
         }
         if book.families.len() >= MAX_RESERVATIONS * 2 {
-            return Err(AdmissionRefusal::LedgerFull.into());
+            return Err(OperationError::BeforeReservation(
+                PreReservationRefusal::Admission(AdmissionRefusal::LedgerFull),
+            ));
         }
-        let identity = self.ledger.new_family()?;
+        let identity = self.ledger.new_family().map_err(|error| {
+            OperationError::BeforeReservation(PreReservationRefusal::Admission(error))
+        })?;
         book.families.insert(identity, self.journal.new_family());
         Ok(identity)
     }
@@ -479,14 +497,20 @@ impl NodeResourceRuntime {
                 .iter()
                 .any(|family| family.roles.is_empty() || family.roles.len() > 3)
         {
-            return Err(AdmissionRefusal::InvalidBundle.into());
+            return Err(OperationError::BeforeReservation(
+                PreReservationRefusal::Admission(AdmissionRefusal::InvalidBundle),
+            ));
         }
         let mut book = self.operations.lock().map_err(|_| OperationError::State)?;
         if book.draining {
-            return Err(OperationError::Draining);
+            return Err(OperationError::BeforeReservation(
+                PreReservationRefusal::Draining,
+            ));
         }
         if book.bundles.len() >= MAX_RESERVATIONS {
-            return Err(AdmissionRefusal::LedgerFull.into());
+            return Err(OperationError::BeforeReservation(
+                PreReservationRefusal::Admission(AdmissionRefusal::LedgerFull),
+            ));
         }
         let mut requests = Vec::new();
         let mut missing = 0;
@@ -531,9 +555,16 @@ impl NodeResourceRuntime {
             });
         }
         if plans.len() != missing || missing == 0 {
-            return Err(AdmissionRefusal::InvalidBundle.into());
+            return Err(OperationError::BeforeReservation(
+                PreReservationRefusal::Admission(AdmissionRefusal::InvalidBundle),
+            ));
         }
-        let owned = self.ledger.reserve_families_claiming(families, claims)?;
+        let owned = self
+            .ledger
+            .reserve_families_claiming(families, claims)
+            .map_err(|error| {
+                OperationError::BeforeReservation(PreReservationRefusal::Admission(error))
+            })?;
         let id = Uuid::new_v4();
         let typed_obligation_ids: Vec<Uuid> = if typed {
             (0..missing).map(|_| Uuid::new_v4()).collect()

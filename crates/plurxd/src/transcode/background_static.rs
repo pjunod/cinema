@@ -22,6 +22,10 @@ pub(super) struct StaticArtifactRuns {
 
 pub(super) struct StaticArtifactEntry {
     pub(super) original: JobToken,
+    // Pins the original saved catalog, source version and complete carrier.
+    // A renewal may update its token, never replace these admission inputs.
+    pub(super) payload_digest: [u8; 32],
+    pub(super) controller: crate::background_jobs::JobFence,
     pub(super) intent: EncodedOutputIntent,
     pub(super) policy_generation: String,
     pub(super) file_id: i64,
@@ -75,12 +79,14 @@ impl StaticArtifactEntry {
     pub(super) fn matches(
         &self,
         token: &JobToken,
+        payload_digest: &[u8; 32],
         intent: &EncodedOutputIntent,
         policy_generation: &str,
         file_id: i64,
         budget: u64,
     ) -> bool {
         self.original.same_claim_as(token)
+            && self.payload_digest == *payload_digest
             && self.intent == *intent
             && self.policy_generation == policy_generation
             && self.file_id == file_id
@@ -89,9 +95,12 @@ impl StaticArtifactEntry {
 }
 
 impl StaticArtifactRuns {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn reserve(
         &self,
         token: JobToken,
+        payload_digest: [u8; 32],
+        controller: crate::background_jobs::JobFence,
         intent: EncodedOutputIntent,
         policy_generation: String,
         file_id: i64,
@@ -102,13 +111,25 @@ impl StaticArtifactRuns {
             .lock()
             .map_err(|_| "static owner registry is uncertain")?;
         if let Some(existing) = slot.as_ref() {
+            if !existing.controller.same_controller_as(&controller) {
+                return Err("another original static controller retains the slot");
+            }
             return existing
-                .matches(&token, &intent, &policy_generation, file_id, budget)
+                .matches(
+                    &token,
+                    &payload_digest,
+                    &intent,
+                    &policy_generation,
+                    file_id,
+                    budget,
+                )
                 .then(|| Arc::clone(existing))
                 .ok_or("another static claim retains the slot");
         }
         let entry = Arc::new(StaticArtifactEntry {
             original: token,
+            payload_digest,
+            controller,
             intent,
             policy_generation,
             file_id,
@@ -139,6 +160,26 @@ impl StaticArtifactRuns {
     }
 }
 
+/// Bind the entire saved carrier without allocating a second JSON buffer.
+/// serde_json's pinned object map emits stable key order; this digest is only
+/// an equality fence for the original DTO, never native closure authority.
+fn static_payload_digest(value: &serde_json::Value) -> Result<[u8; 32], &'static str> {
+    use sha2::Digest as _;
+    struct Writer(sha2::Sha256);
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer(sha2::Sha256::new());
+    serde_json::to_writer(&mut writer, value).map_err(|_| "static_payload_unserializable")?;
+    Ok(writer.0.finalize().into())
+}
+
 /// Rebuild only the selected software-candidate binding from the immutable
 /// Store snapshot. The legacy quality-catalog resolver may open a source and
 /// capture an executable even for an Encode candidate; it is not called in
@@ -146,22 +187,24 @@ impl StaticArtifactRuns {
 /// reject any current plan that differs from this saved candidate.
 pub(super) fn restore_selected_candidate(
     request: &SessionRequest,
-    catalog_value: &serde_json::Value,
-    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    catalog: crate::media_sessions::CandidateCatalogContext,
+    snapshot: Arc<plurx_core::store::PlaybackPlanningSnapshot>,
     expected: (plurx_core::playback::candidate::CandidateId, [u8; 32]),
     node: &str,
 ) -> Result<Box<CandidateExecutionContext>, &'static str> {
-    let catalog: crate::media_sessions::CandidateCatalogContext =
-        serde_json::from_value(catalog_value.clone())
-            .map_err(|_| "static candidate catalog is malformed")?;
     let selected = &catalog.candidate;
-    if catalog.binding != crate::media_pool::PlanningBinding::from_snapshot(snapshot)
+    if catalog.binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
         || selected.id != expected.0
         || selected.recipe_digest != expected.1
         || !selected.identity_matches()
         || selected.route != plurx_core::playback::candidate::CandidateRoute::Encode
         || selected.grade != OutputGrade::Sdr
         || selected.processed_hdr10
+        || !selected.decoder_compatible
+        || selected
+            .planned_codec
+            .as_deref()
+            .is_some_and(|codec| codec != "h264")
         || !selected.normalized_geometry
         || !matches!(request.kind, SessionKind::Transcode { height }
             if height == i64::from(selected.target_height))
@@ -174,7 +217,7 @@ pub(super) fn restore_selected_candidate(
         file_id: request.file_id,
         source_size: snapshot.file.size,
         source_mtime: snapshot.file.mtime,
-        caps: catalog.caps.clone(),
+        caps: catalog.caps,
         audio_index: request.audio_index,
         audio_offset_ms: request.audio_offset_ms,
         audio_claim: request.audio_claim.clone(),
@@ -187,27 +230,147 @@ pub(super) fn restore_selected_candidate(
         .validate()
         .map_err(|_| "static candidate capability query changed")?;
     let mut context = TranscodeManager::candidate_context(selected);
-    context.canonical_caps = Some(catalog.caps);
+    context.canonical_caps = Some(query.caps);
     context.planning_binding = Some(catalog.binding);
-    context.planning_snapshot = Some(Arc::new(snapshot.clone()));
+    context.planning_snapshot = Some(snapshot);
     context.owner_node_id = Some(node.to_owned());
     Ok(Box::new(context))
 }
 
+/// Configured roots grant only a lexical source scope. Actual no-follow
+/// descriptor acquisition remains inside the already admitted P operation.
+fn static_source_in_roots(path: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    use std::path::Component;
+    path.is_absolute()
+        && roots.iter().any(|root| {
+            root.is_absolute()
+                && root
+                    .components()
+                    .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+                && path.strip_prefix(root).is_ok_and(|relative| {
+                    !relative.as_os_str().is_empty()
+                        && relative
+                            .components()
+                            .all(|component| matches!(component, Component::Normal(_)))
+                })
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn planning_application_bytes(
     request: &SessionRequest,
-    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    snapshot: &Arc<plurx_core::store::PlaybackPlanningSnapshot>,
     entry: &StaticArtifactEntry,
+    job: &plurx_core::store::background_jobs::BackgroundJob,
+    catalog_value: Option<&serde_json::Value>,
+    retained_intent: &EncodedOutputIntent,
+    retained_policy: &String,
+    retained_source: &String,
     frame_bytes: usize,
 ) -> Option<usize> {
+    let plurx_core::store::background_jobs::BackgroundJob {
+        id: _,
+        payload_version: _,
+        payload: _,
+        dedupe_key: _,
+        priority: _,
+        state: _,
+        token: _,
+        fence: _,
+        revision: _,
+        failed_attempts: _,
+        attempt_limit: _,
+        retry_deadline_ms: _,
+        attempt_errors: _,
+        index_diagnostic_json: _,
+        yield_count: _,
+        abandoned_count: _,
+        not_before_ms: _,
+        checkpoint: _,
+        result_ref: _,
+        last_error_code: _,
+        created_at_ms: _,
+        updated_at_ms: _,
+    } = job;
     let token = &entry.original;
     let intent = &entry.intent;
     let mut bytes = std::mem::size_of::<StaticArtifactEntry>()
         .checked_add(2 * std::mem::size_of::<usize>())? // Arc entry header
         .checked_add(frame_bytes)?
+        .checked_add(std::mem::size_of::<SessionRequest>())?
         .checked_add(request.selected_finite_requested_heap_bytes()?)?
-        .checked_add(super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)?)?
         .checked_add(super::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)?;
+    if request.candidate_context.as_ref().is_none_or(|context| {
+        context
+            .planning_snapshot
+            .as_ref()
+            .is_none_or(|held| !Arc::ptr_eq(held, snapshot))
+    }) {
+        bytes = bytes
+            .checked_add(
+                std::mem::size_of::<plurx_core::store::PlaybackPlanningSnapshot>()
+                    + 2 * std::mem::size_of::<usize>(),
+            )?
+            .checked_add(
+                super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)?,
+            )?;
+    }
+    // The claimed job and its separately decoded catalog stay live in the
+    // caller while this original coordinator awaits native work.
+    bytes = bytes
+        .checked_add(crate::background_jobs::BackgroundJobController::frame_bytes())?
+        .checked_add(crate::media_sessions::selected_finite_json_heap_bytes(
+            &job.payload,
+        )?)?
+        .checked_add(retained_policy.capacity())?
+        .checked_add(retained_source.capacity())?;
+    for value in [
+        &retained_intent.target_node_id,
+        &retained_intent.plan_digest,
+        &retained_intent.executable_digest,
+        &retained_intent.engine_digest,
+    ] {
+        bytes = bytes.checked_add(value.capacity())?;
+    }
+    bytes = bytes
+        .checked_add(
+            retained_intent
+                .subtitle_digest
+                .as_ref()
+                .map_or(0, String::capacity),
+        )?
+        .checked_add(retained_intent.audio_claim.requested_heap_bytes()?)?
+        .checked_add(retained_intent.audio_delivery.requested_heap_bytes()?)?;
+    if let Some(value) = catalog_value {
+        bytes = bytes.checked_add(crate::media_sessions::selected_finite_json_heap_bytes(
+            value,
+        )?)?;
+    }
+    if let Some(value) = &job.checkpoint {
+        bytes = bytes.checked_add(crate::media_sessions::selected_finite_json_heap_bytes(
+            value,
+        )?)?;
+    }
+    for capacity in [
+        job.id.capacity(),
+        job.dedupe_key.capacity(),
+        job.attempt_errors.capacity(),
+        job.index_diagnostic_json.capacity(),
+        job.result_ref.as_ref().map_or(0, String::capacity),
+        job.last_error_code.as_ref().map_or(0, String::capacity),
+    ] {
+        bytes = bytes.checked_add(capacity)?;
+    }
+    if let Some(token) = &job.token {
+        for value in [
+            &token.job_id,
+            &token.node_id,
+            &token.boot_id,
+            &token.claim_id,
+        ] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+    }
     for capacity in [
         token.job_id.capacity(),
         token.node_id.capacity(),
@@ -229,6 +392,58 @@ fn planning_application_bytes(
 }
 
 impl TranscodeManager {
+    /// Pure shared branch selection. Once selected, every refusal remains in
+    /// the same typed owner; it cannot trigger a fresh legacy preparation.
+    pub(crate) fn uses_selected_static_intent(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        intent: &EncodedOutputIntent,
+    ) -> bool {
+        self.resource_runtime.is_some()
+            && intent.copy_for_burn.is_none()
+            && intent.subtitle_burn.is_none()
+            && !intent.hdr10_requested
+            && intent.grade == OutputGrade::Sdr
+            && file.dolby_vision.is_empty()
+    }
+
+    pub(crate) fn selected_planning_snapshot_heap_bytes(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<usize> {
+        let plurx_core::store::PlaybackPlanningSnapshot {
+            file: _,
+            probe_json: _,
+            settings: _,
+            capacity: _,
+            generation: _,
+            item_title: _,
+        } = snapshot;
+        super::adaptive_attempts::planning_snapshot_requested_heap_bytes(snapshot)
+    }
+
+    async fn static_source_configured(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<bool, String> {
+        let Some(item) = self
+            .store
+            .get_item(file.item_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        let Some(library) = self
+            .store
+            .get_library(item.library_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        Ok(static_source_in_roots(&file.path, &library.paths))
+    }
+
     /// Existing manager reap cadence, never a new timer. The core book keeps
     /// every original P/R job and durable mutation when this bounded pass
     /// times out; the fixed entry remains until its R selector closes.
@@ -287,12 +502,10 @@ impl TranscodeManager {
             | StaticFinite::Exposed
             | StaticFinite::Closed => {}
         }
-        if matches!(&*finite, StaticFinite::Exposed) {
-            drop(finite);
-            self.static_artifact_runs.remove(&entry);
-            return;
-        }
-        if !matches!(&*finite, StaticFinite::Empty | StaticFinite::Closed) {
+        if !matches!(
+            &*finite,
+            StaticFinite::Empty | StaticFinite::Closed | StaticFinite::Exposed
+        ) {
             return;
         }
         drop(finite);
@@ -304,10 +517,28 @@ impl TranscodeManager {
                 *planning = StaticPlanning::Closing(owner.into_cleanup());
             }
         }
-        // The original core book, not this selector, retains native P jobs
-        // and its cleanup flag. Removing the rich entry drops its last M
-        // application lease after all of its own payload fields.
         drop(planning);
+        // Rich job/control payload destruction is a separate fact from the
+        // original heartbeat join and logical Store Close. A cancelled waiter
+        // leaves its original handle in this retained controller; no missing
+        // fence, timeout or pruned row can authorize M's final drop.
+        if !entry.controller.outer_payloads_dropped() {
+            return;
+        }
+        let receipt = match tokio::time::timeout_at(
+            deadline.into(),
+            entry.controller.finish_original_controller(),
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(_) => return,
+        };
+        if !receipt.closes_original(&entry.original) {
+            return;
+        }
+        // The original core book still requires positive native P closure.
+        // The entry's own fields/controller disappear before its M lease.
         self.static_artifact_runs.remove(&entry);
     }
 
@@ -317,13 +548,14 @@ impl TranscodeManager {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn produce_selected_static_job(
         &self,
-        request: &SessionRequest,
+        request: &mut SessionRequest,
+        candidate_catalog: Option<&serde_json::Value>,
         file: &plurx_core::domain::MediaFile,
         job: &plurx_core::store::background_jobs::BackgroundJob,
         fence: &crate::background_jobs::JobFence,
         intent: &EncodedOutputIntent,
-        policy_generation: &str,
-        source_object_version: &str,
+        policy_generation: &String,
+        source_object_version: &String,
         scratch_bytes: i64,
         deadline: Instant,
         frame_bytes: usize,
@@ -333,12 +565,17 @@ impl TranscodeManager {
             .token
             .as_ref()
             .ok_or(PreparationError::Fail("static_claim_token_missing"))?;
+        if fence.snapshot_for_claim(token).await.is_none() {
+            return Err(PreparationError::Stop("ownership_lost"));
+        }
         let budget = u64::try_from(scratch_bytes)
             .map_err(|_| PreparationError::Fail("encoded_cap_invalid"))?;
         let entry = self
             .static_artifact_runs
             .reserve(
                 token.clone(),
+                static_payload_digest(&job.payload).map_err(PreparationError::Fail)?,
+                fence.clone(),
                 intent.clone(),
                 policy_generation.to_owned(),
                 file.id,
@@ -354,20 +591,66 @@ impl TranscodeManager {
             .ok_or(PreparationError::Fail("static_runtime_unavailable"))?;
 
         if matches!(&*entry.finite.lock().await, StaticFinite::Empty) {
-            let snapshot = self
-                .store
-                .playback_planning_snapshot(file.id, &super::QUALITY_PLANNING_KEYS)
+            if !self
+                .static_source_configured(file)
                 .await
-                .map_err(|error| PreparationError::Retry(error.to_string()))?
-                .ok_or(PreparationError::Stop("source_changed"))?;
+                .map_err(PreparationError::Retry)?
+            {
+                return Err(PreparationError::Stop(
+                    "static_source_outside_configured_roots",
+                ));
+            }
+            let snapshot = Arc::new(
+                self.store
+                    .playback_planning_snapshot(file.id, &super::QUALITY_PLANNING_KEYS)
+                    .await
+                    .map_err(|error| PreparationError::Retry(error.to_string()))?
+                    .ok_or(PreparationError::Stop("source_changed"))?,
+            );
             if snapshot.file.id != file.id
                 || snapshot.file.size != file.size
                 || snapshot.file.mtime != file.mtime
             {
                 return Err(PreparationError::Stop("source_changed"));
             }
-            let app_bytes = planning_application_bytes(request, &snapshot, &entry, frame_bytes)
-                .ok_or(PreparationError::Fail("static_planning_capacity_overflow"))?;
+            if let Some(expected) = intent.candidate_id.zip(intent.candidate_digest) {
+                let value =
+                    candidate_catalog.ok_or(PreparationError::Stop("static_candidate_missing"))?;
+                let catalog = serde::Deserialize::deserialize(value)
+                    .map_err(|_| PreparationError::Stop("static_candidate_malformed"))?;
+                request.candidate_context = Some(
+                    restore_selected_candidate(
+                        request,
+                        catalog,
+                        Arc::clone(&snapshot),
+                        expected,
+                        &intent.target_node_id,
+                    )
+                    .map_err(|_| PreparationError::Stop("static_candidate_changed"))?,
+                );
+            } else if candidate_catalog.is_some() {
+                return Err(PreparationError::Stop("static_candidate_unexpected"));
+            }
+            let controller_bytes = entry
+                .controller
+                .controller_requested_heap_bytes()
+                .await
+                .ok_or(PreparationError::Fail(
+                    "static_controller_capacity_unavailable",
+                ))?;
+            let app_bytes = planning_application_bytes(
+                request,
+                &snapshot,
+                &entry,
+                job,
+                candidate_catalog,
+                intent,
+                policy_generation,
+                source_object_version,
+                frame_bytes,
+            )
+            .and_then(|bytes| bytes.checked_add(controller_bytes))
+            .ok_or(PreparationError::Fail("static_planning_capacity_overflow"))?;
             runtime
                 .refresh_admission_capacity(deadline)
                 .await
@@ -404,6 +687,9 @@ impl TranscodeManager {
                     );
                 }
             }
+            if fence.snapshot_for_claim(&entry.original).await.is_none() {
+                return Err(PreparationError::Stop("ownership_lost"));
+            }
             owner
                 .prepare_inputs(deadline)
                 .await
@@ -431,11 +717,23 @@ impl TranscodeManager {
                 .await
                 .map_err(PreparationError::Retry)?
                 .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
+            let compatibility_report = report.clone();
             let encoding = self
                 .resolve_adaptive_encoding_from_probe(request, file, &snapshot, report)
                 .await
                 .map_err(PreparationError::Retry)?;
-            if encoding.source_object_version != source_object_version
+            if request.candidate_context.as_ref().is_some_and(|context| {
+                context.canonical_caps.as_ref().is_none_or(|caps| {
+                    !super::manager_candidates::encoded_client_compatible(
+                        caps,
+                        &encoding.plan,
+                        compatibility_report.facts(),
+                    )
+                })
+            }) {
+                return Err(PreparationError::Stop("static_candidate_decoder_changed"));
+            }
+            if encoding.source_object_version.as_str() != source_object_version.as_str()
                 || self
                     .encoded_output_intent(request, &encoding, &intent.target_node_id)
                     .map_err(PreparationError::Retry)?
@@ -450,7 +748,21 @@ impl TranscodeManager {
                 request,
                 encoding: Some(encoding),
                 retained_capture: crate::vodserve::RetainedOutputCapture::New,
-                measured_candidate: None,
+                measured_candidate: request.candidate_context.as_ref().map(|context| {
+                    crate::vodserve::RetainedCandidateBinding {
+                        kind: request.kind,
+                        normalized_geometry: context.normalized_geometry,
+                        profile: context.profile,
+                        candidate_id: context.candidate_id,
+                        recipe_digest: context.recipe_digest,
+                        file_id: request.file_id,
+                        audio_index: request.audio_index,
+                        audio_offset_ms: request.audio_offset_ms,
+                        subtitle_burn: request.subtitle_burn,
+                        grade: context.grade,
+                        route: plurx_core::playback::candidate::CandidateRoute::Encode,
+                    }
+                }),
             };
             let prepared = self
                 .vod
@@ -494,8 +806,16 @@ impl TranscodeManager {
                 match self.vod.admit_static_artifact(planned, deadline) {
                     Ok(run) => *finite = StaticFinite::Running(run),
                     Err(error) => {
-                        *finite = StaticFinite::AdmissionUnknown;
-                        return Err(PreparationError::Retry(error));
+                        let (message, definitely_unreserved) = error.into_parts();
+                        // Only core's exact pre-reservation provenance proves
+                        // no original R escaped. Generic admission/rollback
+                        // errors remain unknown; never replay this request.
+                        *finite = if definitely_unreserved {
+                            StaticFinite::Closed
+                        } else {
+                            StaticFinite::AdmissionUnknown
+                        };
+                        return Err(PreparationError::Retry(message));
                     }
                 }
                 *entry.report.lock().await = None;
@@ -527,7 +847,7 @@ impl TranscodeManager {
                 Some(false) => {
                     return Err(PreparationError::Retry(
                         "original static publication has a nonpositive verdict".into(),
-                    ))
+                    ));
                 }
                 None => {
                     if !self
@@ -558,7 +878,13 @@ impl TranscodeManager {
             return Ok(false);
         }
         *entry.finite.lock().await = StaticFinite::Exposed;
-        self.static_artifact_runs.remove(&entry);
+        // Store publication is logical Close, not destruction of the outer
+        // worker's job payload or a join of its original heartbeat. Existing
+        // reconciliation removes this entry only after all three facts hold.
         Ok(true)
     }
 }
+
+#[cfg(test)]
+#[path = "background_static/tests.rs"]
+mod tests;

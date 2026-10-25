@@ -409,20 +409,14 @@ impl TranscodeManager {
             return Err(PreparationError::Fail("claimed_target_mismatch"));
         }
         #[cfg(target_os = "linux")]
-        if expected.is_none()
-            && intent.copy_for_burn.is_none()
-            && intent.subtitle_burn.is_none()
-            && !intent.hdr10_requested
-            && intent.grade == OutputGrade::Sdr
-            && file.dolby_vision.is_empty()
-            && self.resource_runtime.is_some()
-        {
+        if self.uses_selected_static_intent(file, &intent) {
             // The compiler measures this exact async continuation before it
             // is polled. Its original frame is charged with P rather than
             // guessed from a Store wire size.
             let frame_bytes = {
                 let future = self.produce_selected_static_job(
-                    &request,
+                    &mut request,
+                    candidate_catalog.as_ref(),
                     file,
                     job,
                     &fence,
@@ -437,7 +431,8 @@ impl TranscodeManager {
             };
             return self
                 .produce_selected_static_job(
-                    &request,
+                    &mut request,
+                    candidate_catalog.as_ref(),
                     file,
                     job,
                     &fence,

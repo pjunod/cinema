@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub(super) const CLAIM: u8 = 1;
 pub(super) const RENEW: u8 = 2;
 pub(super) const PUBLISH: u8 = 4;
+pub(super) const SETTLE: u8 = 8;
 struct Replies {
     pending: AtomicU8,
     dropped: AtomicU8,

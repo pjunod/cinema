@@ -1,5 +1,18 @@
 use super::*;
 
+/// In-process preparation provenance, never a native/refund capability.
+#[cfg(target_os = "linux")]
+pub(crate) struct StaticArtifactAdmissionError {
+    message: String,
+    definitely_unreserved: bool,
+}
+#[cfg(target_os = "linux")]
+impl StaticArtifactAdmissionError {
+    pub(crate) fn into_parts(self) -> (String, bool) {
+        (self.message, self.definitely_unreserved)
+    }
+}
+
 /// One request's resolved native recipe, before any rendition is attached.
 struct PreparedVodRecipe {
     identity: SourceIdentity,
@@ -917,12 +930,15 @@ impl VodServe {
         &self,
         planned: super::background_artifact::StaticArtifactAdmission,
         deadline: Instant,
-    ) -> Result<super::background_artifact::StaticArtifactRun, String> {
-        let runtime = self
-            .shared
-            .resource_runtime
-            .as_ref()
-            .ok_or("static artifact resource runtime is unavailable")?;
+    ) -> Result<super::background_artifact::StaticArtifactRun, StaticArtifactAdmissionError> {
+        let runtime =
+            self.shared
+                .resource_runtime
+                .as_ref()
+                .ok_or_else(|| StaticArtifactAdmissionError {
+                    message: "static artifact resource runtime is unavailable".into(),
+                    definitely_unreserved: true,
+                })?;
         let super::background_artifact::StaticArtifactAdmission {
             request,
             workspace,
@@ -934,7 +950,10 @@ impl VodServe {
         // installs its complete cleanup owner before exposing the preparation.
         let (owner, application_lease) = runtime
             .prepare_static_software_artifact(request, workspace, application_owner_bytes, deadline)
-            .map_err(|error| format!("admitting the static artifact graph: {error}"))?;
+            .map_err(|error| StaticArtifactAdmissionError {
+                definitely_unreserved: error.definitely_before_reservation(),
+                message: format!("admitting the static artifact graph: {error}"),
+            })?;
         Ok(super::background_artifact::StaticArtifactRun::new(
             owner,
             publication,

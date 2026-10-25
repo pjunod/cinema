@@ -43,10 +43,20 @@ pub struct FiniteVodError(OperationError);
 impl FiniteVodError {
     pub fn admission_refusal(&self) -> Option<crate::adaptive_resources::AdmissionRefusal> {
         match &self.0 {
-            OperationError::Admission(refusal) => Some(*refusal),
+            OperationError::Admission(refusal)
+            | OperationError::BeforeReservation(
+                super::operations::PreReservationRefusal::Admission(refusal),
+            ) => Some(*refusal),
             _ => None,
         }
     }
+    /// Exact preparation provenance only. This is not a refund, native Close,
+    /// or permission to replay the request. Generic Admission and Draining
+    /// remain uncertain because they may arise after a reservation exists.
+    pub fn definitely_before_reservation(&self) -> bool {
+        matches!(self.0, OperationError::BeforeReservation(_))
+    }
+
     /// Preserve a native failure when adapting counted reads to an I/O stream.
     pub fn into_io_error(self) -> std::io::Error {
         match self.0 {

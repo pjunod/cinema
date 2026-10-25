@@ -11,3 +11,6 @@ include!("tests/preparation_storage.rs");
 include!("tests/finite_software.rs");
 #[cfg(all(target_os = "linux", feature = "cluster-integration-tests"))]
 include!("tests/finite_software_restart.rs");
+
+#[cfg(all(target_os = "linux", feature = "cluster-integration-tests"))]
+include!("tests/automatic_static.rs");

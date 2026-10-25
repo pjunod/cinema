@@ -1831,9 +1831,11 @@ impl super::TranscodeManager {
                         "expired adaptive Fence was refused; original owner remains held".into(),
                     )
                 }
-                Err(error) => return Err(format!(
+                Err(error) => {
+                    return Err(format!(
                     "expired adaptive Fence is unknown; original operation remains held: {error}"
-                )),
+                ))
+                }
             }
             drop(state);
             return self.handoff_adaptive_loser(entry).await;

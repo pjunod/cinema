@@ -1438,61 +1438,205 @@ fn requested_string_vec_bytes(values: &Vec<String>) -> Option<usize> {
 }
 
 #[cfg(target_os = "linux")]
-fn selected_finite_device_caps_heap_bytes(
+pub(crate) fn selected_finite_device_caps_heap_bytes(
     caps: &plurx_core::playback::DeviceCaps,
 ) -> Option<usize> {
-    let mut bytes = caps.decoder_compaction.as_ref().map_or(0, String::capacity);
-    if let Some(client) = &caps.client {
+    // No `..`: adding any owned field forces this inventory to be reviewed.
+    let plurx_core::playback::DeviceCaps {
+        decoder_compaction,
+        v: _,
+        client,
+        video,
+        audio,
+        audio_sinks,
+        containers,
+        transports,
+        progressive_hevc_sample_entries,
+        hls_hevc_sample_entries,
+        subtitle_overlays,
+        dv_transport,
+        display,
+        learned_limits,
+        legacy_blanket_dolby_vision: _,
+        max_height: _,
+    } = caps;
+    let mut bytes = decoder_compaction.as_ref().map_or(0, String::capacity);
+    if let Some(client) = client {
+        let plurx_core::playback::caps::ClientInfo { kind, build, ua } = client;
         bytes = bytes
-            .checked_add(client.kind.capacity())?
-            .checked_add(client.build.capacity())?
-            .checked_add(client.ua.capacity())?;
+            .checked_add(kind.capacity())?
+            .checked_add(build.capacity())?
+            .checked_add(ua.capacity())?;
     }
-    bytes = bytes.checked_add(requested_vec_bytes(&caps.video)?)?;
-    for video in &caps.video {
+    if let Some(display) = display {
+        let plurx_core::playback::caps::DisplayCaps {
+            hdr: _,
+            dolby_vision: _,
+            max_nits: _,
+            presentation_target: _,
+        } = display;
+    }
+    bytes = bytes.checked_add(requested_vec_bytes(video)?)?;
+    for entry in video {
+        let plurx_core::playback::VideoCaps {
+            codec,
+            profiles,
+            max_height: _,
+            max_width: _,
+            max_frame_rate: _,
+            max_bitrate_bps: _,
+            present,
+            dv_profiles,
+        } = entry;
         bytes = bytes
-            .checked_add(video.codec.capacity())?
-            .checked_add(requested_string_vec_bytes(&video.profiles)?)?
-            .checked_add(requested_vec_bytes(&video.present)?)?
-            .checked_add(requested_vec_bytes(&video.dv_profiles)?)?;
+            .checked_add(codec.capacity())?
+            .checked_add(requested_string_vec_bytes(profiles)?)?
+            .checked_add(requested_vec_bytes(present)?)?
+            .checked_add(requested_vec_bytes(dv_profiles)?)?;
     }
     bytes = bytes
-        .checked_add(requested_string_vec_bytes(&caps.audio)?)?
-        .checked_add(requested_vec_bytes(&caps.audio_sinks)?)?;
-    for sink in &caps.audio_sinks {
+        .checked_add(requested_string_vec_bytes(audio)?)?
+        .checked_add(requested_vec_bytes(audio_sinks)?)?;
+    for sink in audio_sinks {
+        let plurx_core::playback::AudioSink {
+            codec,
+            max_channels: _,
+            passthrough: _,
+            sample_rates_hz,
+        } = sink;
         bytes = bytes
-            .checked_add(sink.codec.capacity())?
-            .checked_add(requested_vec_bytes(&sink.sample_rates_hz)?)?;
+            .checked_add(codec.capacity())?
+            .checked_add(requested_vec_bytes(sample_rates_hz)?)?;
     }
-    for values in [&caps.containers, &caps.transports, &caps.subtitle_overlays] {
+    for values in [containers, transports, subtitle_overlays] {
         bytes = bytes.checked_add(requested_string_vec_bytes(values)?)?;
     }
-    for values in [
-        &caps.progressive_hevc_sample_entries,
-        &caps.hls_hevc_sample_entries,
-    ] {
-        if let Some(values) = values {
-            bytes = bytes.checked_add(requested_string_vec_bytes(values)?)?;
-        }
+    for values in [progressive_hevc_sample_entries, hls_hevc_sample_entries]
+        .into_iter()
+        .flatten()
+    {
+        bytes = bytes.checked_add(requested_string_vec_bytes(values)?)?;
     }
     bytes = bytes
-        .checked_add(caps.dv_transport.as_ref().map_or(0, String::capacity))?
-        .checked_add(requested_vec_bytes(&caps.learned_limits)?)?;
-    for limit in &caps.learned_limits {
+        .checked_add(dv_transport.as_ref().map_or(0, String::capacity))?
+        .checked_add(requested_vec_bytes(learned_limits)?)?;
+    for limit in learned_limits {
+        let plurx_core::playback::LearnedLimit {
+            identity,
+            label,
+            lost: _,
+            secs: _,
+            rate: _,
+            at_ms: _,
+        } = limit;
         bytes = bytes
-            .checked_add(limit.identity.capacity())?
-            .checked_add(limit.label.capacity())?;
+            .checked_add(identity.capacity())?
+            .checked_add(label.capacity())?;
     }
     Some(bytes)
+}
+
+/// Deep requested capacities of retained JSON values. Objects use the same
+/// pinned Rust BTreeMap B=6 node bound as the planning snapshot projection;
+/// wire length is never substituted for resident strings, vectors or nodes.
+#[cfg(target_os = "linux")]
+pub(crate) fn selected_finite_json_heap_bytes(value: &serde_json::Value) -> Option<usize> {
+    match value {
+        serde_json::Value::String(text) => Some(text.capacity()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .try_fold(requested_vec_bytes(values)?, |bytes, value| {
+                bytes.checked_add(selected_finite_json_heap_bytes(value)?)
+            }),
+        serde_json::Value::Object(values) => {
+            let node = std::mem::size_of::<(String, serde_json::Value)>()
+                .checked_mul(11)?
+                .checked_add(16 * std::mem::size_of::<usize>())?;
+            let bytes = if values.is_empty() {
+                0
+            } else {
+                values.len().checked_add(1)?.checked_mul(node)?
+            };
+            values.iter().try_fold(bytes, |bytes, (key, value)| {
+                bytes
+                    .checked_add(key.capacity())?
+                    .checked_add(selected_finite_json_heap_bytes(value)?)
+            })
+        }
+        _ => Some(0),
+    }
+}
+
+/// Only the pure selected static context is supported here. This never counts
+/// a prepared admission or arbitrary nested request as a bounded empty value.
+#[cfg(target_os = "linux")]
+fn selected_finite_candidate_context_heap_bytes(
+    context: &crate::transcode::CandidateExecutionContext,
+) -> Option<usize> {
+    let crate::transcode::CandidateExecutionContext {
+        catalog_query,
+        prepared_processing,
+        ordinary_request,
+        retained_output,
+        canonical_caps,
+        selected_candidate,
+        planning_binding,
+        planning_snapshot,
+        owner_node_id,
+        candidate_id: _,
+        recipe_digest: _,
+        normalized_geometry: _,
+        grade: _,
+        profile: _,
+    } = context;
+    if catalog_query.is_some()
+        || prepared_processing.is_some()
+        || ordinary_request.is_some()
+        || retained_output.is_some()
+    {
+        return None;
+    }
+    let caps = canonical_caps.as_ref()?;
+    let crate::media_pool::PlanningBinding {
+        generation: _,
+        source_digest,
+    } = planning_binding.as_ref()?;
+    let snapshot = planning_snapshot.as_ref()?;
+    let plurx_core::playback::candidate::QualityCandidate {
+        planned_codec,
+        id: _,
+        recipe_digest: _,
+        route: _,
+        processed_hdr10: _,
+        normalized_geometry: _,
+        width: _,
+        height: _,
+        target_height: _,
+        average_bps: _,
+        peak_bps: _,
+        grade: _,
+        decoder_compatible: _,
+        complete_cache: _,
+        sustainable: _,
+    } = selected_candidate;
+    std::mem::size_of::<crate::transcode::CandidateExecutionContext>()
+        .checked_add(selected_finite_device_caps_heap_bytes(caps)?)?
+        .checked_add(planned_codec.as_ref().map_or(0, String::capacity))?
+        .checked_add(source_digest.capacity())?
+        .checked_add(owner_node_id.as_ref()?.capacity())?
+        .checked_add(
+            std::mem::size_of::<plurx_core::store::PlaybackPlanningSnapshot>()
+                + 2 * std::mem::size_of::<usize>(),
+        )?
+        .checked_add(
+            crate::transcode::TranscodeManager::selected_planning_snapshot_heap_bytes(snapshot)?,
+        )
 }
 
 #[cfg(target_os = "linux")]
 impl SessionRequest {
     pub(crate) fn selected_finite_requested_heap_bytes(&self) -> Option<usize> {
-        if self.continuous_media.is_some()
-            || self.quality_catalog.is_some()
-            || self.candidate_context.is_some()
-        {
+        if self.continuous_media.is_some() || self.quality_catalog.is_some() {
             return None;
         }
         let mut bytes = self
@@ -1510,6 +1654,9 @@ impl SessionRequest {
         }
         if let Some(claim) = &self.audio_claim {
             bytes = bytes.checked_add(claim.requested_heap_bytes()?)?;
+        }
+        if let Some(context) = &self.candidate_context {
+            bytes = bytes.checked_add(selected_finite_candidate_context_heap_bytes(context)?)?;
         }
         Some(bytes)
     }

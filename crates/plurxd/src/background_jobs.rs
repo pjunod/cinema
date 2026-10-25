@@ -246,6 +246,49 @@ fn settlement_event(settlement: &JobSettlement) -> Event {
 struct ClaimState {
     token: Option<JobToken>,
     cancelling: bool,
+    // Set only by a positive same-original-claim Store result.
+    logical_closed: bool,
+}
+
+struct OriginalHeartbeat {
+    task: Option<tokio::task::JoinHandle<()>>,
+    registered: bool,
+    failed: bool,
+    frame_bytes: usize,
+}
+
+fn original_claim_binding(token: &JobToken) -> [u8; 32] {
+    use sha2::Digest as _;
+    let JobToken {
+        job_id,
+        node_id,
+        boot_id,
+        claim_id,
+        fence,
+        revision: _,
+        lease_expires_ms: _,
+    } = token;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"plurx:live-background-original-claim:v1");
+    for value in [job_id, node_id, boot_id, claim_id] {
+        digest.update(value.len().to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(fence.to_le_bytes());
+    digest.finalize().into()
+}
+
+/// Application-task and logical Store facts only; never a native close or
+/// accounting capability. The constructor stays inside the original owner.
+pub(crate) struct BackgroundControllerClosed {
+    binding: [u8; 32],
+    joined: bool,
+    logical_closed: bool,
+}
+impl BackgroundControllerClosed {
+    pub(crate) fn closes_original(&self, token: &JobToken) -> bool {
+        self.binding == original_claim_binding(token) && self.joined && self.logical_closed
+    }
 }
 
 struct Inner {
@@ -254,6 +297,12 @@ struct Inner {
     store: Arc<dyn Store>,
     authority: Arc<dyn ClusterJobAuthority>,
     state: Mutex<ClaimState>,
+    claim_binding: [u8; 32],
+    stop: CancellationToken,
+    heartbeat: Mutex<OriginalHeartbeat>,
+    // Actual outer payload destruction, distinct from either joined task or
+    // logical claim closure. Only the owning carrier's Drop sets this flag.
+    payloads_dropped: AtomicBool,
     deadline: watch::Sender<Instant>,
     lost: CancellationToken,
     /// Historical acknowledged completion only; never artifact authority.
@@ -265,8 +314,53 @@ pub(crate) struct JobFence(Arc<Inner>);
 
 pub(crate) struct ActiveBackgroundJob {
     fence: JobFence,
-    stop: CancellationToken,
-    heartbeat: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Own the encoded pass's actual rich job and its original controller. A
+/// cancelled pass drops these values before publishing only that payload
+/// destruction; the SAME original heartbeat handle remains in JobFence.
+pub(crate) struct BackgroundJobController {
+    job: Option<BackgroundJob>,
+    active: Option<ActiveBackgroundJob>,
+    fence: JobFence,
+}
+impl BackgroundJobController {
+    pub(crate) fn new(job: BackgroundJob, active: ActiveBackgroundJob) -> Self {
+        let fence = active.fence();
+        Self {
+            job: Some(job),
+            active: Some(active),
+            fence,
+        }
+    }
+    pub(crate) fn job(&self) -> &BackgroundJob {
+        self.job.as_ref().expect("owned original job")
+    }
+    pub(crate) fn fence(&self) -> JobFence {
+        self.fence.clone()
+    }
+    /// The exact owned outer finish future, measured without constructing or
+    /// polling a job/controller. Private Tokio task headers stay separate.
+    pub(crate) fn frame_bytes() -> usize {
+        fn size<A, F: std::future::Future>(_: impl Fn(A) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        size(Self::finish)
+    }
+    pub(crate) async fn finish(self) -> BackgroundControllerClosed {
+        let receipt = self.fence.finish_original_controller().await;
+        metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
+        // self's Drop destroys job/active before the payload marker is set.
+        receipt
+    }
+}
+impl Drop for BackgroundJobController {
+    fn drop(&mut self) {
+        let Self { job, active, fence } = self;
+        drop(job.take());
+        drop(active.take());
+        fence.0.payloads_dropped.store(true, Ordering::Release);
+    }
 }
 
 /// A failed RPC is not a failed claim. Resolve the same identity while the
@@ -405,18 +499,31 @@ impl ActiveBackgroundJob {
             started: Instant::now(),
             store,
             authority,
+            claim_binding: original_claim_binding(&token),
             state: Mutex::new(ClaimState {
                 token: Some(token),
                 cancelling: false,
+                logical_closed: false,
             }),
+            stop: CancellationToken::new(),
+            heartbeat: Mutex::new(OriginalHeartbeat {
+                task: None,
+                registered: false,
+                failed: false,
+                frame_bytes: 0,
+            }),
+            payloads_dropped: AtomicBool::new(false),
             deadline,
             lost: CancellationToken::new(),
             copy_output_completed: AtomicBool::new(false),
         }));
-        let stop = CancellationToken::new();
-        let heartbeat_stop = stop.clone();
+        let heartbeat_stop = fence.0.stop.clone();
         let heartbeat_fence = fence.clone();
-        let heartbeat = tokio::spawn(async move {
+        let (start, registered) = tokio::sync::oneshot::channel();
+        let heartbeat_future = async move {
+            if registered.await.is_err() {
+                return;
+            }
             let mut tick =
                 tokio::time::interval(Duration::from_millis(JOB_RENEW_INTERVAL_MS as u64));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -457,12 +564,21 @@ impl ActiveBackgroundJob {
                     break;
                 }
             }
-        });
-        Ok(Self {
-            fence,
-            stop,
-            heartbeat: Some(heartbeat),
-        })
+        };
+        let frame_bytes = std::mem::size_of_val(&heartbeat_future);
+        let heartbeat = tokio::spawn(heartbeat_future);
+        {
+            let mut original = fence
+                .0
+                .heartbeat
+                .try_lock()
+                .expect("controller not yet published");
+            original.task = Some(heartbeat);
+            original.registered = true;
+            original.frame_bytes = frame_bytes;
+        }
+        let _ = start.send(());
+        Ok(Self { fence })
     }
 
     pub(crate) fn fence(&self) -> JobFence {
@@ -470,17 +586,8 @@ impl ActiveBackgroundJob {
     }
 
     /// Call only after the handler's child and output work have joined.
-    pub(crate) async fn finish(mut self) {
-        self.fence.0.lost.cancel();
-        self.stop.cancel();
-        if let Some(heartbeat) = self.heartbeat.take() {
-            if let Err(error) = heartbeat.await {
-                tracing::warn!(%error, "joining background heartbeat");
-            }
-        }
-        if let Err(error) = self.fence.retire().await {
-            tracing::warn!(%error, "background retirement remains ambiguous");
-        }
+    pub(crate) async fn finish(self) {
+        let _ = self.fence.finish_original_controller().await;
         metrics::execution(self.fence.0.kind, self.fence.0.started.elapsed());
     }
 }
@@ -488,14 +595,120 @@ impl ActiveBackgroundJob {
 impl Drop for ActiveBackgroundJob {
     fn drop(&mut self) {
         self.fence.0.lost.cancel();
-        self.stop.cancel();
+        self.fence.0.stop.cancel();
         // Do not release a durable reservation here: a dropped caller is not
         // proof that its child exited. The lease remains until explicit join
-        // and finish, or expiry. Dropping JoinHandle does not abort its write.
+        // and finish, or expiry. The original handle stays in JobFence even
+        // if a finishing waiter is cancelled.
     }
 }
 
 impl JobFence {
+    pub(crate) fn same_controller_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(crate) fn outer_payloads_dropped(&self) -> bool {
+        self.0.payloads_dropped.load(Ordering::Acquire)
+    }
+
+    /// Known requested owner/frame capacity only. Private Tokio task/channel
+    /// and cancellation-token allocations remain an explicit wider unknown.
+    pub(crate) async fn controller_requested_heap_bytes(&self) -> Option<usize> {
+        let Inner {
+            kind: _,
+            started: _,
+            store: _,
+            authority: _,
+            state,
+            claim_binding: _,
+            stop: _,
+            heartbeat,
+            payloads_dropped: _,
+            deadline: _,
+            lost: _,
+            copy_output_completed: _,
+        } = &*self.0;
+        let frame_bytes = {
+            let original = heartbeat.lock().await;
+            let OriginalHeartbeat {
+                task: _,
+                registered,
+                failed: _,
+                frame_bytes,
+            } = &*original;
+            if !registered {
+                return None;
+            }
+            *frame_bytes
+        };
+        let state = state.lock().await;
+        let ClaimState {
+            token,
+            cancelling: _,
+            logical_closed: _,
+        } = &*state;
+        let mut bytes = std::mem::size_of::<Inner>()
+            .checked_add(2 * std::mem::size_of::<usize>())?
+            .checked_add(frame_bytes)?
+            .checked_add(std::mem::size_of_val(&self.finish_original_controller()))?;
+        if let Some(token) = token {
+            let JobToken {
+                job_id,
+                node_id,
+                boot_id,
+                claim_id,
+                fence: _,
+                revision: _,
+                lease_expires_ms: _,
+            } = token;
+            let payload = [job_id, node_id, boot_id, claim_id]
+                .into_iter()
+                .try_fold(0usize, |sum, value| sum.checked_add(value.capacity()))?;
+            // State token, original renewal local and its one Store request.
+            bytes = bytes
+                .checked_add(payload.checked_mul(3)?)?
+                .checked_add(std::mem::size_of::<JobToken>())?;
+        }
+        Some(bytes)
+    }
+
+    /// Join by borrowing the handle inside its original retained owner. A
+    /// cancelled/deadline waiter drops the mutex guard, never the JoinHandle.
+    pub(crate) async fn finish_original_controller(&self) -> BackgroundControllerClosed {
+        self.0.lost.cancel();
+        self.0.stop.cancel();
+        let joined = {
+            let mut original = self.0.heartbeat.lock().await;
+            if !original.registered || original.failed {
+                false
+            } else {
+                if let Some(task) = original.task.as_mut() {
+                    match task.await {
+                        Ok(()) => {
+                            original.task.take();
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "joining original background heartbeat remains uncertain");
+                            original.failed = true;
+                            original.task.take();
+                        }
+                    }
+                }
+                !original.failed && original.task.is_none()
+            }
+        };
+        if joined {
+            if let Err(error) = self.retire().await {
+                tracing::warn!(%error, "background original-claim retirement remains ambiguous");
+            }
+        }
+        BackgroundControllerClosed {
+            binding: self.0.claim_binding,
+            joined,
+            logical_closed: self.0.state.lock().await.logical_closed,
+        }
+    }
+
     pub(crate) fn copy_output_completed(&self) -> bool {
         self.0.copy_output_completed.load(Ordering::Acquire)
     }
@@ -544,6 +757,7 @@ impl JobFence {
         let Some(current) = state.token.clone() else {
             return Ok(false);
         };
+        let binding = original_claim_binding(&current);
         let issued = Instant::now();
         let now_ms = unix_ms()?;
         metrics::event(self.0.kind, Event::RenewWrite);
@@ -586,6 +800,11 @@ impl JobFence {
                     state.cancelling = true;
                     return Ok(false);
                 }
+                ClaimResolution::Settled { .. } => {
+                    state.logical_closed |= binding == self.0.claim_binding;
+                    state.token = None;
+                    return Ok(false);
+                }
                 _ => {
                     state.token = None;
                     return Ok(false);
@@ -613,6 +832,7 @@ impl JobFence {
         let Some(token) = state.token.clone() else {
             return Ok(false);
         };
+        let binding = original_claim_binding(&token);
         let event = settlement_event(&settlement);
         let result = self
             .0
@@ -622,9 +842,13 @@ impl JobFence {
                 settlement,
                 now_ms: unix_ms()?,
             })
-            .await?;
+            .await;
+        #[cfg(test)]
+        let result = faults::after_commit(faults::SETTLE, result);
+        let result = result?;
         if result {
             metrics::event(self.0.kind, event);
+            state.logical_closed |= binding == self.0.claim_binding;
             state.token = None;
         }
         Ok(result)
@@ -798,6 +1022,7 @@ impl JobFence {
         let Some(token) = state.token.clone() else {
             return Ok(false);
         };
+        let binding = original_claim_binding(&token);
         let mut request = PublishEncodedOutputJob {
             token,
             intent,
@@ -825,6 +1050,7 @@ impl JobFence {
         );
         if published {
             self.0.copy_output_completed.store(true, Ordering::Release);
+            state.logical_closed |= binding == self.0.claim_binding;
             state.token = None;
         }
         metrics::event(
@@ -1468,9 +1694,10 @@ impl JobFence {
 
     async fn retire(&self) -> Result<(), StoreError> {
         let mut state = self.0.state.lock().await;
-        let Some(token) = state.token.take() else {
+        let Some(token) = state.token.clone() else {
             return Ok(());
         };
+        let binding = original_claim_binding(&token);
         let now_ms = unix_ms()?;
         let settlement = if state.cancelling {
             JobSettlement::Cancel
@@ -1494,6 +1721,8 @@ impl JobFence {
             Ok(true)
         ) {
             metrics::event(self.0.kind, event);
+            state.logical_closed |= binding == self.0.claim_binding;
+            state.token = None;
             return Ok(());
         }
         // Cancellation or an unacknowledged renewal may have advanced only
@@ -1527,12 +1756,22 @@ impl JobFence {
                 settlement: JobSettlement::Cancel,
                 now_ms,
             }),
+            ClaimResolution::Settled { .. } => {
+                state.logical_closed |= binding == self.0.claim_binding;
+                state.token = None;
+                None
+            }
             _ => None,
         };
         if let Some(request) = request {
             let event = settlement_event(&request.settlement);
+            let binding = original_claim_binding(&request.token);
+            // Keep the exact original token available across unknown writes.
+            state.token = Some(request.token.clone());
             if self.0.store.settle_job(request).await? {
                 metrics::event(self.0.kind, event);
+                state.logical_closed |= binding == self.0.claim_binding;
+                state.token = None;
             }
         }
         Ok(())
@@ -3435,5 +3674,9 @@ mod tests {
         );
         assert_eq!(store.job_attempts(&id).await.expect("attempts").len(), 1);
         active.finish().await;
+    }
+    mod controller_lifetime {
+        use super::*;
+        include!("background_job_controller_tests.rs");
     }
 }

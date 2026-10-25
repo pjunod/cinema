@@ -6435,7 +6435,8 @@ fn producer_progress_batch_proves_contiguous_deadlines_and_freezes_the_first_gap
         );
     }
     let contiguous_blocks = contiguous.drain_blocks();
-    let [Some(RollingProducerIngressBlock::Progress(contiguous))] = contiguous_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(contiguous))] = contiguous_blocks.as_slice()
+    else {
         panic!("one contiguous progress block");
     };
     assert_eq!(
@@ -7702,7 +7703,8 @@ fn command_envelope_splits_progress_and_preserves_global_ingress_order() {
     let (reply, _response) = tokio::sync::oneshot::channel();
     let envelope = ingress.seal_command(RollingControlCommand::Snapshot { reply });
     assert_eq!(envelope.sealed_flow_barriers, 0);
-    let [Some(RollingProducerIngressBlock::Progress(preceding))] = envelope.preceding_producer.as_slice()
+    let [Some(RollingProducerIngressBlock::Progress(preceding))] =
+        envelope.preceding_producer.as_slice()
     else {
         panic!("command seals exactly its preceding progress batch");
     };
@@ -7727,7 +7729,8 @@ fn command_envelope_splits_progress_and_preserves_global_ingress_order() {
         started + Duration::from_secs(2),
     );
     let successor_blocks = ingress.drain_blocks();
-    let [Some(RollingProducerIngressBlock::Progress(successor))] = successor_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(successor))] = successor_blocks.as_slice()
+    else {
         panic!("post-command progress starts a successor batch");
     };
     assert!(successor.first_sequence() > envelope.sequence);
@@ -8088,7 +8091,8 @@ fn producer_progress_watermark_resets_for_successor_and_rejects_late_predecessor
         started,
     );
     let predecessor_blocks = ingress.drain_blocks();
-    let [Some(RollingProducerIngressBlock::Progress(predecessor))] = predecessor_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(predecessor))] = predecessor_blocks.as_slice()
+    else {
         panic!("predecessor progress batch");
     };
     assert_eq!(
@@ -8133,7 +8137,8 @@ fn producer_progress_watermark_resets_for_successor_and_rejects_late_predecessor
         started + Duration::from_secs(3),
     );
     let successor_blocks = ingress.drain_blocks();
-    let [Some(RollingProducerIngressBlock::Progress(successor))] = successor_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(successor))] = successor_blocks.as_slice()
+    else {
         panic!("successor progress batch");
     };
     assert_eq!(successor.producer_attempt, 2);
