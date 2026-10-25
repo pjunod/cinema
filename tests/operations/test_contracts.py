@@ -2358,7 +2358,8 @@ assert.equal(context.ACT_TIMER, null);
             is_main = "main-fast-lane" in path
             desktop = steps["Retain or execute native macOS server tray evidence" if is_main
                             else "Build and test native macOS server tray"]
-            commands = workflow_step_literal(desktop, "run")
+            commands = ([workflow_step_scalar(desktop, "run")] if is_main
+                        else workflow_step_literal(desktop, "run"))
             if is_main:
                 self.assertEqual(commands, ["python3 -m validation.desktop_macos_retention --fresh-on-new-inputs"])
                 self.assertIn("GITHUB_TOKEN: ${{ github.token }}", desktop)
