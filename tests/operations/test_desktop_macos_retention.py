@@ -488,10 +488,16 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                  mock.patch.object(native,'git',side_effect=lambda w,*a,**k:b'' if a[0]=='diff' else CURRENT.encode()):
                 self.assertEqual(native.current_context(ROOT)[2],CURRENT)
                 original = api.get
-                api.get = lambda p,q=None:{**original(p,q),'head':{'sha':'c'*40}} if p.startswith('/pulls/') else original(p,q)
-                with self.assertRaises(native.receipts.ReceiptError):native.current_context(ROOT)
+                def wrong_live_head(p,q=None):
+                    response = original(p,q)
+                    if p.startswith('/pulls/'):response['head']['sha'] = 'c'*40
+                    return response
+                api.get = wrong_live_head
+                with self.assertRaisesRegex(native.receipts.ReceiptError,'Main receipt must match an open same-repository PR head'):
+                    native.current_context(ROOT)
                 api.get = original;event['number'] = 5;path.write_text(json.dumps(event))
-                with self.assertRaises(native.receipts.ReceiptError):native.current_context(ROOT)
+                with self.assertRaisesRegex(native.receipts.ReceiptError,'Native current repository/PR differs'):
+                    native.current_context(ROOT)
 
     def test_v1_api_upload_and_adapter_identity_authenticate_before_receipt(self):
         api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
