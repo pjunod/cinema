@@ -138,6 +138,32 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits, int
   free(l); free(lo);
 }
 
+// CM v2.9 near black, as the reference renderer does: the chroma of saturated colours below the
+// shot's crush (letterbox noise) is scaled by at most 2 x the near-black gain (the intensity ratio
+// is capped at 2), and is removed where they map to the target black (gain 0 there). Before, the
+// scale (Ib/I)^0.9385 grew without bound as I -> 0. Mid-tone colours keep their chroma.
+static void near_black_chroma_is_neutral(const rpu *c29) {
+  const struct { double nits; enum dm_prim prim; } t[] = {{600, DM_P3D65}, {2000, DM_P3D65}, {1000, DM_BT2020}, {100, DM_BT709}};
+  float in[6 * 4] = {0.018f, 0, 0, 1, 0, 0.018f, 0, 1, 0, 0, 0.018f, 1, 0.015f, 0.008f, 0, 1,
+                     0.20f, 0.12f, 0.10f, 1, 0.50f, 0.30f, 0.25f, 1};
+  for (unsigned k = 0; k < sizeof(t) / sizeof(*t); k++) {
+    dv_dm_frame f = prep(c29, t[k].nits, t[k].prim);
+    f.weight = -2;   // pointwise
+    float *o = render(&f, in, 6, 1);
+    double dmax = 0;
+    for (int i = 0; i < DM_CM29_DARK_N; i++) dmax = fmax(dmax, f.c29.dark[i]);
+    for (int i = 0; i < 6; i++) {
+      double a[3] = {in[4*i], in[4*i+1], in[4*i+2]}, b[3] = {o[4*i], o[4*i+1], o[4*i+2]};
+      dm_cm29_pix pi, po; dm_cm29_pixel_pre(&f.c29, a, &pi); dm_cm29_pixel_pre(&f.c29, b, &po);
+      double ratio = po.C / pi.C;
+      bool black = pi.Ib <= f.c29.dark_off + 1e-9;
+      bool ok = i < 4 ? (ratio <= 2 * dmax + 0.02 && (!black || ratio < 0.02)) : (ratio > 0.3 && ratio < 3);
+      if (!ok) { fprintf(stderr, "near black %g nits prim %d: colour %d chroma ratio %g (black %d)\n", t[k].nits, t[k].prim, i, ratio, black); exit(1); }
+    }
+    free(o);
+  }
+}
+
 // The retained P7 fixture (controls/tags/p7-frame0.nal) through the real parser: the same
 // selection the Rust tests pin (FIXTURE_DM in dv_runtime.rs), so the C and Rust family rules are
 // checked on identical bytes.
@@ -352,6 +378,9 @@ int main(int argc, char **argv) {
     }
     free(ramp);
   }
+
+  // 8b. CM v2.9 near-black colours stay neutral
+  near_black_chroma_is_neutral(&c29);
 
   // 9. pinned golden values of the model (BT.2020/PQ out for a PQ 0.75 grey and a skin-like orange).
   // They lock the closed form against silent drift; they are model outputs, not vendor measurements.

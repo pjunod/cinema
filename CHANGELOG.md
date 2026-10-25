@@ -52,6 +52,16 @@ bump may break compatibility and a **patch** bump never does.
   `creative_trims_partial`).
   Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v2`.
   Apple build 275, Android versionCode 181.
+- CM v2.9 display-targeted output keeps near-black colours neutral, as the
+  reference renderer does: the chroma scale's intensity ratio is capped at 2
+  and multiplied by a measured near-black gain per target (stock 600/1000/2000
+  P3 and BT.2020 targets and the 100-nit SDR target, linear in target PQ).
+  Before, chroma of noise in letterbox bars and very dark areas was boosted up
+  to 13x. On real frames with dark content p99.9 ΔE_ITP drops from 3–28 to
+  0.7–8.5 (SDR and 600/1000-nit P3); titles with little near-black content
+  are unchanged. The BT.2020 rows are measured on synthetic sweeps only.
+  Targeted renditions re-render under method
+  `dolby-closed-form-cm4-cm29-v3`.
 
 ### Fixed
 
