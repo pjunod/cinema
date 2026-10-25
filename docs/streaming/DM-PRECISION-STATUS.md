@@ -13,7 +13,7 @@ physical display acceptance remains in the build ledger.
 | Work | State | Remaining |
 |---|---|---|
 | PQ shader precision | Implemented, awaiting review | Independent adversarial review; focused regressions; llvmpipe and NVIDIA parity; fast lane; merge |
-| CM v2.9 near-black residual | Experiment running; lower-model agent owns measurements | Chroma-dependent sweep; affine hypothesis; held-out validation; title checks if justified |
+| CM v2.9 near-black residual | Affine candidate rejected; title screen finishing | Preserve private measurements and document the negative result; no production model change |
 | PR ownership | Codex owns implementation and merge | Keep the draft description current through landing |
 
 No deployment or service restart is part of this work. Paul owns deployment.
@@ -44,10 +44,28 @@ only. No parity threshold has been changed.
 
 ## 3. Near-black model — evidence before a correction
 
-The private experiment samples two L1 sets, two P3 display peaks, 30 input
-intensities, 24 hues and seven fractions of the P3 boundary. It compares
-reference output P/T against an affine map of model output P/T by output
-intensity. Boundary-touching samples are flagged before interpreting a fit.
+The private experiment sampled two L1 sets, two P3 display peaks (600 and
+1000 nits), 30 input intensities, 24 hues and seven fractions of the P3
+boundary: 10,080 samples per target. The affine map was trained on the first
+L1 set and 16 hues; the second L1 set and remaining hues were held out.
+Exclude the 2.63–2.64% union of boundary-touching samples before interpreting
+the clean validation statistics. Use the model's pre-gamut base intensity
+`Ib`; it agreed with remeasured output IPT intensity to 2.7e-15 on the
+synthetic samples.
+
+| P3 peak | Baseline mean / p95 dE_ITP | Affine mean / p95 | Through-origin mean / p95 |
+|---|---|---|---|
+| 600 nits | 0.5150 / 1.4822 | 0.4721 / 1.0776 | 0.5141 / 1.3029 |
+| 1000 nits | 0.5991 / 1.6378 | 0.5451 / 1.2125 | 0.5972 / 1.4961 |
+
+The affine offset is not a valid neutral-axis mechanism: its median P/T
+magnitude is 0.000582 / 0.000676, versus reference neutral chroma of only
+1.8e-6 / 1.9e-6. Neutral mean dE_ITP worsens from 0.087 to 0.372 and from
+0.124 to 0.450. A through-origin fit preserves neutrals but improves clean
+held-out mean error by less than 0.4%. These results reject the proposed
+affine correction; they do not identify the remaining reference operation.
+The title screen supplies further evidence, not authority to ship an
+unexplained table. No CM v2.9 model change is included in this PR.
 Reference output, metadata and fitted private research artifacts stay in the
 private research repository. Only a justified closed-form correction and
 source-backed conclusions belong in plurx.
