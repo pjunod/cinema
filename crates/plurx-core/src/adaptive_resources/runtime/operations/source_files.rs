@@ -1339,8 +1339,15 @@ impl SourceCell {
             || self.root_observed_committed
             || self.selected_root_member.is_some()
             || self.pending_root.is_some()
+            || self.failed_join
         {
             return Err(OperationError::State);
+        }
+        // A registered closer already owns the File. Its result slot is
+        // intentionally empty until that SAME task reports closure; absence
+        // from the slot cannot bypass its pending or terminal disposition.
+        if !matches!(self.parent_close, ParentCloseState::NotStarted) {
+            return self.close_parent_inner(false, true).await;
         }
         self.join_registered().await?;
         if self
@@ -1415,10 +1422,10 @@ impl SourceCell {
         closure: &crate::adaptive_resources::physical_graph::finite_vod::FiniteVodNeverRootClosure,
     ) -> Result<(), OperationError> {
         self.no_root_copy_plan(closure)?;
-        self.join_registered().await?;
-        if self.parent_closed() {
-            return Ok(());
+        if !matches!(self.parent_close, ParentCloseState::NotStarted) {
+            return self.close_parent_inner(false, false).await;
         }
+        self.join_registered().await?;
         if self.spec.is_some() {
             return Ok(());
         }
@@ -1826,8 +1833,12 @@ impl SourceCell {
             || !self.root_observed_committed
             || self.selected_root_member != Some(closure.document_member())
             || self.pending_root.is_some()
+            || self.failed_join
         {
             return Err(OperationError::State);
+        }
+        if !matches!(self.parent_close, ParentCloseState::NotStarted) {
+            return self.close_parent_inner(true, true).await;
         }
         self.join_registered().await?;
         self.close_parent_inner(true, true).await

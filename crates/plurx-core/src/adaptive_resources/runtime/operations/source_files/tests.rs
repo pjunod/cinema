@@ -608,3 +608,6 @@ async fn path_replacement_after_open_does_not_redirect_retained_source() {
     assert_eq!(opened_contents, "original opened bytes");
     assert_eq!(std::fs::read(path).unwrap(), b"replacement path bytes");
 }
+
+#[cfg(unix)]
+mod close_resume;
