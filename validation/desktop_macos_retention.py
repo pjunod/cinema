@@ -37,6 +37,14 @@ ORIGIN_JOB_SHA = 'be0760040911104d265cf4c07e2d4624306bf968ebafb514736f3ccdc97096
 JOB = 'Apple compile and native TV navigation'
 LABELS = ['self-hosted','macOS','ARM64','lab','apple','xcode-27.1']
 ROOTS = ('clients/server-tray/macos','Makefile','Cargo.toml','LICENSE','brand/export')
+# Whole recipes are pinned: a new helper/dependency cannot escape ROOTS.
+RECIPE_VERSION = 1
+RECIPE_PINS = {
+    'Makefile':('100644','ffd8237d4bc75ad370ca7c7045e1565710035659f1929ce48ccf40531a221528'),
+    'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
+    'clients/server-tray/macos/build':('100755','b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0'),
+    'clients/server-tray/macos/Package.swift':('100644','8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322'),
+}
 MAX_FILES, MAX_BLOB, MAX_SOURCE = 128, 256 * 1024, 2 * 1024 * 1024
 MAX_ZIP, MAX_LOG, MAX_HISTORY = 16 * 1024, 64 * 1024, 100
 MAX_V1_ZIP, MAX_V1_JSON, MAX_V1_TOTAL = 128 * 1024, 128 * 1024, 512 * 1024
@@ -133,7 +141,38 @@ def manifest(workspace, commit):
     require({'Makefile','Cargo.toml','LICENSE','clients/server-tray/macos/Package.swift',
         'clients/server-tray/macos/build'} <= paths and any(p.startswith('brand/export/') for p in paths),
         'Incomplete native source closure')
+    supported_recipe(workspace,commit,entries,contents)
     return entries, contents
+
+
+def supported_recipe(workspace,commit,entries,contents):
+    """The fixed dependency-free recipe must still close over ROOTS."""
+    require(not git(workspace,'ls-tree','-z',commit,'--','GNUmakefile','makefile',limit=1024),
+        'Unsupported native root Make selector; closure review required')
+    by_path = {row['path']:row for row in entries}
+    for path,(mode,sha) in RECIPE_PINS.items():
+        row = by_path.get(path)
+        require(row is not None and row['mode'] == mode and row['sha256'] == sha
+            and digest(contents[path]) == sha, 'Unsupported native recipe/dependency bytes or mode; closure review required: '+path)
+    prefix = 'clients/server-tray/macos/'
+    for path in contents:
+        if path.startswith(prefix):
+            first = path.removeprefix(prefix).split('/',1)[0]
+            require(not first.startswith('Package@') and first not in ('Package.resolved','.swiftpm'),
+                'Unsupported native SwiftPM selector/configuration; closure review required')
+
+
+def live_recipe_selectors(workspace):
+    """Check actual names, avoiding case-insensitive Makefile alias probes."""
+    for directory,package in ((workspace,False),(workspace/'clients/server-tray/macos',True)):
+        require(not directory.is_symlink(), 'Native selector directory is a symlink; closure review required')
+        with os.scandir(directory) as children:
+            for index,child in enumerate(children):
+                require(index < 512, 'Native selector directory bound exceeded')
+                name = child.name
+                forbidden = (name.casefold().startswith('package@') or name.casefold() in ('package.resolved','.swiftpm')) if package else (
+                    name != 'Makefile' and name.casefold() in ('gnumakefile','makefile'))
+                require(not forbidden, 'Unsupported live native recipe selector; closure review required: '+name)
 
 
 def case_inventory(contents):
@@ -546,6 +585,10 @@ def run_gate(api, scope, workspace, current, run_id, output, toolchain, fresh_on
         require(fresh_on_new_inputs, 'New native inputs require the explicit fresh-on-new-inputs workflow policy')
         history = history_before_fresh(api,scope,workspace,current,run_id,key,legacy)
         recheck(workspace,current,run_id)
+        live_recipe_selectors(workspace)
+        launch_entries,launch_contents = manifest(workspace,current)
+        require(launch_entries == entries and execution_key(launch_entries,case_inventory(launch_contents)) == key,
+            'Native guarded source closure changed before execution')
         start = {'state':'started','commit':current,'run':run_id,'job':job['id'],'attempt':1,'native_execution_key':key}
         receipts.atomic_json(output/'fresh-start.json',start)
         print('DESKTOP-NATIVE-START '+canonical(start).decode(),flush=True)
@@ -592,7 +635,9 @@ def policy_fingerprint():
     return digest(canonical({'version':1,'origin_commit':PRODUCER,'origin_run':ORIGIN_RUN,
         'origin_job':ORIGIN_JOB,'origin_artifact':ORIGIN_ARTIFACT,'archive_sha256':ORIGIN_ZIP_SHA,
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
-        'workflow_sha256':PRODUCER_WORKFLOW,
+        'workflow_sha256':PRODUCER_WORKFLOW,'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
+        'forbidden_make_selectors':['GNUmakefile','makefile'],'forbidden_package_selectors':['Package@*','Package.resolved','.swiftpm'],
+        'upload_section_limits':[32,16*1024],'live_selector_policy':{'actual_names':True,'casefold':True,'allow_root_spelling':'Makefile','directory_limit':512},
         'limits':[MAX_FILES,MAX_BLOB,MAX_SOURCE,MAX_ZIP,MAX_LOG,MAX_HISTORY,MAX_V1_ZIP,MAX_V1_JSON,MAX_V1_TOTAL]}))
 
 
@@ -636,6 +681,34 @@ def unpack_v1(data):
         raise receipts.ReceiptError('Invalid native v1 archive') from None
 
 
+def upload_digest(lines,name,aid,size):
+    """Bind one pinned uploader transaction; other job artifacts stay separate."""
+    final = f'Artifact {name} has been successfully uploaded! Final size is {size} bytes. Artifact ID is {aid}'
+    done = f'Artifact {name}.zip successfully finalized. Artifact ID {aid}'
+    uploads = [i for i,line in enumerate(lines) if line.startswith('Artifact '+name+' has been successfully uploaded!')]
+    require(len(uploads) == 1 and lines[uploads[0]] == final and lines.count(done) == 1,
+        'Native v1 upload identity differs')
+    end = uploads[0]
+    starts = [i for i in range(end) if re.fullmatch(r'With the provided path, there will be [1-9][0-9]* files? uploaded',lines[i])]
+    require(starts, 'Native v1 upload section start missing')
+    start = starts[-1];section = lines[start:end+1]
+    require(len(section) <= 32 and sum(len(line.encode())+1 for line in section) <= 16*1024,
+        'Native v1 upload section bound exceeded')
+    markers = ['Artifact name is valid!','Root directory input is valid!',
+        'Beginning upload of artifact content to blob storage','Uploaded bytes '+str(size),
+        'Finished uploading artifact content to blob storage!','Finalizing artifact upload',done,final]
+    require(all(section.count(line) == 1 for line in markers), 'Native v1 upload section incomplete/ambiguous')
+    positions = [section.index(line) for line in markers]
+    hashes = [(i,m[1]) for i,line in enumerate(section)
+        if (m := re.fullmatch(r'SHA256 hash of uploaded artifact zip is ([0-9a-f]{64})',line))]
+    require(len(hashes) == 1 and sum(line.startswith('SHA256 hash of uploaded artifact zip is ') for line in section) == 1
+        and positions == sorted(positions)
+        and positions[4] < hashes[0][0] < positions[5]
+        and sum(line.startswith('Artifact ') and ('successfully finalized.' in line or 'successfully uploaded!' in line)
+            for line in section) == 2, 'Native v1 upload digest/order ambiguous')
+    return hashes[0][1]
+
+
 def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
     prior = api.get('/actions/runs/'+str(receipts.positive(run_id)))
     require(prior.get('id') == run_id, 'Native v1 run ID differs')
@@ -655,21 +728,19 @@ def v1_envelope(api,scope,workspace,run_id,job_id,current,legacy):
         and type(artifact.get('size_in_bytes')) is int and 0 < artifact['size_in_bytes'] <= MAX_V1_ZIP,
         'Native v1 artifact metadata differs')
     aid = receipts.positive(artifact.get('id'));raw = download_log(api,job['id']);lines = main_receipts.log_lines(raw)
-    uploads = [line for line in lines if line.startswith('Artifact '+name+' has been successfully uploaded!')]
-    require(uploads == [f'Artifact {name} has been successfully uploaded! Final size is {artifact["size_in_bytes"]} bytes. Artifact ID is {aid}'],
-        'Native v1 upload identity differs')
-    hashes = [re.fullmatch(r'SHA256 hash of uploaded artifact zip is ([0-9a-f]{64})',line) for line in lines]
-    hashes = [m[1] for m in hashes if m]
-    require(len(hashes) == 1 and lines.count('🏁  Job succeeded') == 1, 'Native v1 upload/job log incomplete')
+    archive_sha = upload_digest(lines,name,aid,artifact['size_in_bytes'])
+    require(lines.count('🏁  Job succeeded') == 1, 'Native v1 job log incomplete')
     data = transport.archive_bytes(api,aid,spec=transport.TransportSpec(max_archive_bytes=MAX_V1_ZIP))
-    require(len(data) == artifact['size_in_bytes'] and digest(data) == hashes[0], 'Native v1 archive/upload hash differs')
+    require(len(data) == artifact['size_in_bytes'] and digest(data) == archive_sha, 'Native v1 archive/upload hash differs')
     # The pinned checkout action's final log -1 --format=%H output is bound
     # separately from the adapter's validated clean-HEAD manifest marker.
     heads = [i for i,line in enumerate(lines) if line == '[command]/usr/bin/git log -1 --format=%H']
     require(len(heads) == 1 and heads[0]+1 < len(lines) and lines[heads[0]+1] == commit,
         'Native v1 pinned checkout final HEAD record differs')
     require(all(lines.count(line) == 1 for line in TOOLCHAIN+[SWIFT])
-        and heads[0]+1 < lines.index(TOOLCHAIN[0]) < lines.index(TOOLCHAIN[1]) < lines.index(SWIFT), 'Native v1 toolchain/action order differs')
+        and heads[0]+1 < lines.index(TOOLCHAIN[0]) < lines.index(TOOLCHAIN[1]) < lines.index(SWIFT)
+        < next(i for i,line in enumerate(lines) if line.startswith('Artifact '+name+' has been successfully uploaded!'))
+        < lines.index('🏁  Job succeeded'), 'Native v1 toolchain/action/upload order differs')
     require(any(re.fullmatch(r'Runner [0-9a-f-]+ \(version:[^)]*\) received task '+str(job['task_id'])+
         r' of job apple_compile, triggered by event: pull_request',line) for line in lines), 'Native v1 task binding differs')
     return {'run':prior,'job':job,'artifact':artifact,'archive':data,'job_log':raw,'lines':lines}

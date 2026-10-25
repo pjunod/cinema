@@ -33,7 +33,7 @@ def native_log(expected, workspace=WORK):
     for arch in ('arm64','x86_64'):
         lines += ['build: swift build -c release --arch '+arch,'Building for production...',
             'Build complete! (1.00 sec)',workspace+'/target/desktop-macos/'+arch+'/Plurx Server.app']
-    lines += ['swift test --package-path clients/server-tray/macos '+chr(92)*2,
+    lines += ['swift test --package-path clients/server-tray/macos '+chr(92),
         '\t  --scratch-path "'+workspace+'/target/desktop-macos/tests"','Building for debugging...',
         'Build complete! (1.00 sec)']
     for module in ('PlurxTrayUITests','PlurxTrayCoreTests'):
@@ -59,11 +59,41 @@ def archive(payload, name=native.MEMBER, mode=stat.S_IFREG | 0o644, padded=False
     with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED) as z:
         info = zipfile.ZipInfo(name); info.external_attr = mode << 16
         z.writestr(info,payload,compress_type=zipfile.ZIP_DEFLATED)
-        if padded:
-            remaining = 3930 - (output.tell()+22)
-            assert remaining >= 0
+    if padded:
+        # Close first: the central directory and EOCD are part of the baseline.
+        remaining = 3930 - len(output.getvalue())
+        assert remaining >= 0
+        with zipfile.ZipFile(output,'a') as z:
             z.comment = b'x'*remaining
+        assert len(output.getvalue()) == 3930
     return output.getvalue()
+
+
+def upload_lines(name, aid, size, archive_sha):
+    return ['With the provided path, there will be 4 files uploaded',
+        'Artifact name is valid!','Root directory input is valid!',
+        'Beginning upload of artifact content to blob storage','Uploaded bytes '+str(size),
+        'Finished uploading artifact content to blob storage!',
+        'SHA256 hash of uploaded artifact zip is '+archive_sha,'Finalizing artifact upload',
+        f'Artifact {name}.zip successfully finalized. Artifact ID {aid}',
+        f'Artifact {name} has been successfully uploaded! Final size is {size} bytes. Artifact ID is {aid}']
+
+
+def source_tree():
+    required = ['Makefile','Cargo.toml','LICENSE','brand/export/icon.png',
+        'clients/server-tray/macos/Package.swift','clients/server-tray/macos/build']
+    rows = {path:('100644',path.encode()) for path in required}
+    rows.update({path:(mode,subprocess.check_output(['git','show',native.PRODUCER+':'+path],cwd=ROOT))
+        for path,(mode,sha) in native.RECIPE_PINS.items()})
+    def read_git(workspace,*args,**kwargs):
+        if args[:2] == ('cat-file','-t'): return b'commit'
+        if args[0] == 'ls-tree':
+            selected = {p:value for p,value in rows.items() if p in ('GNUmakefile','makefile')} if args[-2:] == ('GNUmakefile','makefile') else rows
+            return b''.join((mode+' blob '+hashlib.sha1(raw).hexdigest()+'\t'+p).encode()+b'\0' for p,(mode,raw) in selected.items())
+        raw = next(raw for mode,raw in rows.values() if hashlib.sha1(raw).hexdigest() == args[-1])
+        return str(len(raw)).encode() if args[1] == '-s' else raw
+    rows.update({path:('100644',raw) for path,raw in source_cases().items()})
+    return rows,read_git
 
 
 def run_record(identity, commit, scope=SCOPE):
@@ -119,6 +149,13 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
     def setUp(self):
         self.contents = source_cases(); self.expected = native.case_inventory(self.contents)
         self.native = native_log(self.expected); self.zip = archive(self.native,padded=True)
+        command = next(line for line in self.native.splitlines() if line.startswith(b'swift test '))
+        self.assertEqual(command, b'swift test --package-path clients/server-tray/macos '+bytes([92]))
+        self.assertEqual(command.count(bytes([92])),1)
+        self.assertEqual(len(self.zip),3930)
+        with zipfile.ZipFile(io.BytesIO(self.zip)) as zipped:
+            self.assertEqual(zipped.namelist(),[native.MEMBER])
+            self.assertEqual(zipped.read(native.MEMBER),self.native)
         self.log = job_log(archive_sha=native.digest(self.zip)); self.api = FakeAPI(self.log)
         self.entries = [{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}]
         self.policy = mock.patch.multiple(native,ORIGIN_ZIP_SHA=native.digest(self.zip),ORIGIN_JOB_SHA=native.digest(self.log))
@@ -236,23 +273,33 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             with self.assertRaises(native.receipts.ReceiptError): native.output_directory(root)
 
     def test_source_closure_membership_bytes_modes_and_symlinks_are_not_ignored(self):
-        required = ['Makefile','Cargo.toml','LICENSE','brand/export/icon.png',
-            'clients/server-tray/macos/Package.swift','clients/server-tray/macos/build']
-        rows = {path:('100644',path.encode()) for path in required}
-        def read_git(workspace,*args,**kwargs):
-            if args[:2] == ('cat-file','-t'): return b'commit'
-            if args[0] == 'ls-tree':
-                return b''.join((mode+' blob '+hashlib.sha1(raw).hexdigest()+'\t'+p).encode()+b'\0' for p,(mode,raw) in rows.items())
-            raw = next(raw for mode,raw in rows.values() if hashlib.sha1(raw).hexdigest() == args[-1])
-            return str(len(raw)).encode() if args[1] == '-s' else raw
+        rows,read_git = source_tree()
         with mock.patch.object(native,'git',side_effect=read_git):
             original,_ = native.manifest(ROOT,CURRENT)
             rows['clients/server-tray/macos/New.swift'] = ('100644',b'new')
             added,_ = native.manifest(ROOT,CURRENT);self.assertNotEqual(added,original)
-            del rows['clients/server-tray/macos/New.swift'];rows['Makefile'] = ('100755',b'Makefile')
-            mode_only,_ = native.manifest(ROOT,CURRENT);self.assertNotEqual(mode_only,original)
-            rows['Makefile'] = ('100644',b'changed')
-            changed,_ = native.manifest(ROOT,CURRENT);self.assertNotEqual(changed,original)
+            rows['clients/server-tray/macos/New.swift'] = ('100755',b'changed')
+            changed,_ = native.manifest(ROOT,CURRENT);self.assertNotEqual(changed,added)
+            del rows['clients/server-tray/macos/New.swift']
+            for path in ('GNUmakefile','makefile','clients/server-tray/macos/Package@swift-6.swift',
+                         'clients/server-tray/macos/Package.resolved','clients/server-tray/macos/.swiftpm/configuration/mirrors.json'):
+                rows[path] = ('100644',b'outside root or alternate dependency selector')
+                with self.subTest(path=path),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.manifest(ROOT,CURRENT)
+                del rows[path]
+            for path in native.RECIPE_PINS:
+                saved = rows[path]
+                changed_bytes = (saved[1].replace(b'    targets: [',
+                    b'    dependencies: [.package(path: "../../../outside")],\n    targets: [')
+                    if path.endswith('Package.swift') else saved[1]+b'\nquiet: scripts/native-prep external-helper\n')
+                self.assertNotEqual(changed_bytes,saved[1])
+                for value in (('100755' if saved[0]=='100644' else '100644',saved[1]),(saved[0],changed_bytes)):
+                    rows[path] = value
+                    with self.subTest(recipe=path),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.manifest(ROOT,CURRENT)
+                rows[path] = saved
+            rows['clients/server-tray/macos/Resources/new.txt'] = ('100644',b'ordinary resource')
+            resources,_ = native.manifest(ROOT,CURRENT);self.assertNotEqual(resources,original)
+            del rows['clients/server-tray/macos/Resources/new.txt']
+            restored,_ = native.manifest(ROOT,CURRENT);self.assertEqual(restored,original)
             rows['Makefile'] = ('120000',b'target')
             with self.assertRaises(native.receipts.ReceiptError): native.manifest(ROOT,CURRENT)
             rows['Makefile'] = ('160000',b'submodule')
@@ -381,15 +428,32 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         def sources(workspace,commit):return (self.entries if commit==native.PRODUCER else changed),self.contents
         def git_value(workspace,*args,**kwargs):
             return legacy if args[-1]==native.PRODUCER+':'+native.WORKFLOW else b'identity'
+        real_manifest = native.manifest
         with tempfile.TemporaryDirectory() as directory,mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile','GITHUB_TOKEN':'never-child','PATH':'/tools'}), \
              mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
              mock.patch.object(native,'manifest',side_effect=sources),mock.patch.object(native,'current_job',return_value=self.api.jobs[RUN][0]), \
              mock.patch.object(native,'matching_v1',return_value=None),mock.patch.object(native,'recheck'), \
+             mock.patch.object(native,'live_recipe_selectors'), \
              mock.patch.object(native,'history_before_fresh',return_value={'pagination_complete':True,'attempts':[]}), \
              mock.patch.object(native.subprocess,'run') as make,mock.patch('sys.stdout',new_callable=io.StringIO) as console:
             out = Path(directory)
             with self.assertRaises(native.receipts.ReceiptError):native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},False)
             make.assert_not_called()
+            rows,read_git = source_tree();guard_calls = []
+            def guarded_manifest(workspace,commit):
+                if commit == native.PRODUCER:return self.entries,self.contents
+                guard_calls.append(commit)
+                if len(guard_calls) == 2:
+                    rows['Makefile'] = ('100644',rows['Makefile'][1]+b'\nquiet: outside-helper\n')
+                return real_manifest(ROOT,commit)
+            def guarded_git(workspace,*args,**kwargs):
+                return git_value(workspace,*args,**kwargs) if args[0] in ('show','rev-parse') else read_git(workspace,*args,**kwargs)
+            with mock.patch.object(native,'manifest',side_effect=guarded_manifest), \
+                 mock.patch.object(native,'git',side_effect=guarded_git):
+                with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                    native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},True)
+                self.assertEqual(len(guard_calls),2);make.assert_not_called()
+                self.assertFalse((out/'fresh-start.json').exists())
             def fail(argv,**kwargs):
                 self.assertTrue((out/'fresh-start.json').exists());self.assertNotIn('GITHUB_TOKEN',kwargs['env'])
                 self.assertEqual(kwargs['env']['PATH'],'/tools')
@@ -422,9 +486,9 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
         artifact = {**envelope['artifact'],'size_in_bytes':len(envelope['archive'])};api.artifacts = [artifact]
         lines = ['Runner 00000000-0000-0000-0000-000000000001 (version:v1) received task 22 of job apple_compile, triggered by event: pull_request',
-            *envelope['lines'],'SHA256 hash of uploaded artifact zip is '+native.digest(envelope['archive']),
-            'Artifact desktop-macos-check-6100-1 has been successfully uploaded! Final size is '+str(len(envelope['archive']))+' bytes. Artifact ID is 5100',
-            '🏁  Job succeeded']
+            *envelope['lines'],*upload_lines('desktop-macos-check-6100-1',5100,
+                len(envelope['archive']),native.digest(envelope['archive'])),
+            *upload_lines('tv-navigation-6100-1',5101,2048,'e'*64),'🏁  Job succeeded']
         raw = ('\n'.join(lines)+'\n').encode()
         def git_value(w,*a,**k):return b'd'*40 if a[0]=='rev-parse' else b'adapter'
         with mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
@@ -433,6 +497,13 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
              mock.patch.object(native.transport,'archive_bytes',return_value=envelope['archive']) as fetch:
             result = native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
             self.assertEqual(result['artifact']['id'],5100)
+            digest_line = ('SHA256 hash of uploaded artifact zip is '+native.digest(envelope['archive'])+'\n').encode()
+            for mutated in (raw.replace(digest_line,b''),raw.replace(digest_line,digest_line*2),
+                            raw.replace(digest_line,b'SHA256 hash of uploaded artifact zip is '+b'f'*64+b'\n')):
+                log.return_value = mutated
+                with self.subTest(native_digest=mutated[-200:]),self.assertRaisesRegex(native.receipts.ReceiptError,'Native v1 (upload|archive/upload)'):
+                    native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
+            log.return_value = raw
             fetch.return_value = envelope['archive'][:-1]+b'!'
             with self.assertRaises(native.receipts.ReceiptError):native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
             fetch.return_value = envelope['archive'];log.return_value = raw.replace(b'c'*40,b'a'*40)
@@ -441,3 +512,60 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
         with mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
              mock.patch.object(native,'git',side_effect=changed_adapter),self.assertRaisesRegex(native.receipts.ReceiptError,'adapter source compatibility'):
             native.v1_envelope(api,SCOPE,ROOT,6100,61001,CURRENT,legacy)
+
+
+    def test_native_upload_digest_is_bound_to_one_bounded_section(self):
+        name,aid,size,sha = 'desktop-macos-check-6100-1',5100,4096,'a'*64
+        section = upload_lines(name,aid,size,sha)
+        tv = upload_lines('tv-navigation-6100-1',5101,2048,'b'*64)
+        for lines in (section+tv,tv+section):
+            self.assertEqual(native.upload_digest(lines,name,aid,size),sha)
+        changes = [lambda x:x[:6]+x[7:],lambda x:x[:7]+[x[6]]+x[7:],
+            lambda x:x[:8]+[x[8].replace('5100','5102')]+x[9:],
+            lambda x:x[:-1]+[x[-1].replace('4096','4097')],lambda x:x+x,
+            lambda x:x[:6]+[x[7],x[6]]+x[8:],lambda x:x[:3]+['padding']*33+x[3:],
+            lambda x:x[:3]+['x'*16385]+x[3:]]
+        for change in changes:
+            with self.subTest(change=change),self.assertRaisesRegex(native.receipts.ReceiptError,'Native v1 upload'):
+                native.upload_digest(change(section)+tv,name,aid,size)
+        wrong = section.copy();wrong[6] = wrong[6].replace(sha,'c'*64)
+        self.assertNotEqual(native.upload_digest(wrong+tv,name,aid,size),sha)
+
+
+    def test_unsupported_recipe_refuses_history_selection_and_direct_v1_reuse(self):
+        api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
+        rows,read_git = source_tree()
+        rows['Makefile'] = ('100644',rows['Makefile'][1]+b'\ndesktop-macos-build:\n\t@scripts/native-prep\n')
+        with mock.patch.object(native,'git',side_effect=read_git), \
+             mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+             mock.patch.object(native,'v1_envelope',return_value=envelope), \
+             mock.patch.object(native.subprocess,'run') as launch:
+            for call in (lambda:native.history_before_fresh(api,SCOPE,ROOT,CURRENT,RUN,key,legacy),
+                         lambda:native.matching_v1(api,SCOPE,ROOT,CURRENT,RUN,key,legacy),
+                         lambda:native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)):
+                with self.subTest(call=call),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                    call()
+            launch.assert_not_called()
+
+    def test_live_recipe_selectors_use_actual_names_and_refuse_untracked_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory);package = root/'clients/server-tray/macos';package.mkdir(parents=True)
+            (root/'Makefile').write_text('supported spelling')
+            native.live_recipe_selectors(root)
+            for path in (root/'GNUmakefile',package/'Package@swift-6.swift',package/'Package.resolved',package/'.swiftpm'):
+                path.write_text('untracked alternate input')
+                with self.subTest(path=path),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                    native.live_recipe_selectors(root)
+                path.unlink()
+            # On a case-insensitive host this spelling aliases Makefile; use a
+            # clean directory to verify the actual lower-case name independently.
+            (root/'Makefile').unlink();(root/'makefile').write_text('alternate selector')
+            with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.live_recipe_selectors(root)
+
+    def test_recipe_pins_and_rules_are_bound_to_policy_without_changing_execution_key(self):
+        key = native.execution_key(self.entries,self.expected);policy = native.policy_fingerprint()
+        with mock.patch.object(native,'RECIPE_VERSION',native.RECIPE_VERSION+1):
+            self.assertNotEqual(native.policy_fingerprint(),policy)
+            self.assertEqual(native.execution_key(self.entries,self.expected),key)
+        with mock.patch.object(native,'RECIPE_PINS',{**native.RECIPE_PINS,'Makefile':('100644','f'*64)}):
+            self.assertNotEqual(native.policy_fingerprint(),policy)

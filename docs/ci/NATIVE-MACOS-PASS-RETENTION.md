@@ -35,6 +35,25 @@ and 2 MiB total. The known closure has 45 files. This is explicitly
 an input manifest. The original build/test commands, desktop scope, Apple labels
 and Xcode 27.1/build 27A9275 contract remain unchanged.
 
+The closure policy pins the original whole Makefile, Cargo.toml, package `build`
+and Package.swift bytes and Git modes. Cargo.toml supplies the version expanded
+by Make; treating arbitrary manifest changes as harmless could introduce shell
+inputs outside the closure. Alternate root Make selectors (`GNUmakefile` and
+`makefile`), versioned package manifests, Package.resolved and package `.swiftpm`
+configuration are refused. An unsupported recipe or dependency requires closure
+review before any reuse, history classification or fresh execution. Ordinary
+Swift, test, resource, brand and license changes remain eligible as new inputs.
+The guard runs on every reconstructed manifest and again immediately before a
+fresh start. The final launch also checks actual root/package directory names
+for untracked alternate selectors, without following child symlinks or probing
+a case-insensitive alias of Makefile. These restrictions preserve the original 45-file provenance; they
+do not claim that future command/dependency changes have the same closure.
+
+A v1 upload hash belongs to its unique native uploader transaction, bounded to
+32 lines and 16 KiB. Its ordered start, byte count, completion, hash, finalization,
+name, ID and final size must agree with the API archive. A separate TV upload in
+the same Apple job supplies no native hash and does not invalidate one.
+
 Only the exact legacy workflow plus the reviewed Apple-only adapter replacement,
 full Git checkout and evidence-upload path are supported. Scope selection,
 Main promotion dependencies and mobile/TV steps are unchanged. The current job
