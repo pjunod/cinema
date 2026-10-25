@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A–D and F promote to `main` through #1271 by Paul's decision of 2026-10-24; E (creative trims) continues as its own effort and playback keeps reporting `creative_trims_applied:false` / “L1 only” until E is accepted · **Updated:** 2026-10-24 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
+**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims) is implemented as closed-form Dolby display management on `effort/dv-closed-form-dm` (2026-10-25); playback keeps reporting `creative_trims_applied:false` / “L1 only” until E is accepted · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 Evidence remains bound to its recorded source.
@@ -11,7 +11,7 @@ Evidence remains bound to its recorded source.
 |---|---|---|
 | A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Native459 P7/P8 HDR1000 PASS on91cbe; earlier evidence keeps its source. Current-candidate promotion remains. |
 | B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Eight new Rust460 cases PASS on91cbe; physical-device acceptance remains separate. |
-| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. GPU456/461: 4K mapping steady10.32fps. FIFO491: one continuous `cm_offline` process mapped96 frames at2560×1280, pixel-exact to TIFF488, second48 at27.62fps. Encode493 added P010+NVENC fragmented HEVC: both native exits0, two complete fragments, 0.963× real time end to end; the controller failed only on missing primaries/transfer tags (ffmpeg8.1 frame properties override encoder options for untagged RGB input; `setparams` fixes it). | Not part of this promotion. The vendor tool is a QC referee only. Accurate trims need a source-backed implementation of our own, validated against it. |
+| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. GPU456/461: 4K mapping steady10.32fps. FIFO491: one continuous `cm_offline` process mapped96 frames at2560×1280, pixel-exact to TIFF488, second48 at27.62fps. Encode493 added P010+NVENC fragmented HEVC: both native exits0, two complete fragments, 0.963× real time end to end; the controller failed only on missing primaries/transfer tags (ffmpeg8.1 frame properties override encoder options for untagged RGB input; `setparams` fixes it). | Not part of #1271. 2026-10-25: the helper's mapping is now our own closed-form CM v4 / CM v2.9 display management (see “Helper (phase 2)”), measured privately against the vendor tool as a QC referee. Open: the CM v2.9 gamut stage and trim interpolation, and the acceptance decision. |
 | F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Valid-L6 SDR passes retained; unknown-L6 source-minimum focused460 cases PASS. |
 
 Effort3cc264068 integrated#1216/#1269:78 regression fields, gate5889 8/8.
@@ -147,7 +147,11 @@ with the reason named. Valid L1 with max = 0 (black frames) is legitimate:
 those frames use the title's mastering peak as their input max, by one
 fixed rule. One title therefore never mixes master and targeted windows.
 
-### Helper (phase 1)
+### Helper (phase 1, superseded on 2026-10-25 by phase 2 below)
+
+The phase 1 curve below shipped in #1271 and is kept as the record of what
+that release did. Its shader, Python oracle and controls were removed when
+phase 2 replaced the curve.
 
 - **New argument.** A new output policy value `bt2020-pq-target-<nits>`
   sits alongside `bt2020-pq-master-clip`. `<nits>` is one of the bucket
@@ -288,25 +292,57 @@ segments). This works with every encoder. The other options are ruled out:
 | Web | Settings → Playback → "HDR display peak": Auto (unknown) / 400 / 600 / 1000 / 1600 / 2000 / 4000 | Browsers expose `(dynamic-range: high)` but no nits. The setting includes a PQ step-wedge pattern ("pick the highest step you can still tell apart"), because nobody knows their display's nits, and picking too high quietly brings clipping back. Stored per browser (localStorage is fine for this per-viewer convenience) and sent as `peak_source: viewer`. For a Pro/Studio Display XDR the suggested value is **1000** (sustained full-field), not the 1600 peak. |
 | Apple | not in phase 1 | EDR headroom × reference white has no fixed answer: reference white moves with the brightness slider. Apple clients take the native DV route anyway. |
 
-### Phase 2: L2/L8 trims (approximation)
+### Phase 2: closed-form Dolby display management (L1, L3, L2, L8)
 
-- For each shot, pick the L2 or L8 trim whose target display (L8 indexes the
-  L10 target list) is nearest to the bucket, at or below it.
-- Apply slope/offset/power as ST 2094-10 Annex B.3 describes, through a
-  custom `pl_tone_map_function` whose LUT includes the trim. libplacebo
-  caches the tone-map LUT keyed on its parameters, so a trim held only in
-  helper state would let a shot change reuse the old curve. The trim must
-  be part of the hashed parameters, for example through the function's
-  constants or one function object per distinct trim. A test changes only
-  the trim and asserts the output changes.
-- Saturation and chroma-weight trims need a separate shader pass (in ICtCp).
-- **Acceptance:**
-  - Before claiming "trims applied", compare against a real DV display
-    rendering of the same frames: the Razr or a DV TV, captured
-    photometrically or with a capture device. Paul's devices, through a GPT
-    prompt.
-  - Until that comparison passes, the report keeps
-    `creative_trims_applied: false` and the indicator says "L1 only".
+Phase 2 replaces the phase 1 curve with closed-form equations of Dolby's own
+display management, derived and checked privately against the licensed
+reference renderer (`cm_offline`, used only as a QC referee). Derivations and
+evidence stay on the private `rog_hdr_dv` branch (`docs/CM4_CLOSED_FORM.md`,
+`docs/CM29_CLOSED_FORM.md`); this repository carries only the equations as code.
+
+- **Family per frame, from the RPU.** CM v4 when the RPU carries CM v4.0
+  metadata (L254) or L8 trims; CM v2.9 otherwise. Rust re-derives the family
+  from the raw RPU and refuses a trace row that names another
+  (`DvDisplayTarget::display_management`).
+- **CM v4.** Effective L1 = L1 + L3 offsets, anchors held one 12-bit code
+  apart. Two-stage tone curve, SOP in target-normalised PQ, colour in ICtCp
+  (primary saturation, mesopic chroma, six-vector), MSWeight detail stage at
+  weight 0, clip in the target primaries. L8 trims (preset target displays,
+  or L10) are interpolated to the bucket peak: SOP linearly in PQ, colour
+  trims linearly in a per-gamut display size V = K_G + A_G·|c_G − PQ|^2.027
+  (so a BT.709 trim weighs less on a P3 display of the same peak), held for
+  displays smaller than the smallest trim target and faded to neutral at the
+  mastering display (L9 gamut, title peak). An L8 whose target
+  display can be resolved neither from the preset table nor from L10 is not
+  used.
+- **CM v2.9.** Rational three-anchor curve, L2 SOP in absolute PQ, IPT-PQ
+  colour, MSWeight detail on intensity (and on chroma when the chroma weight
+  is non-zero). L2 selection: the trim authored for the bucket's peak, else
+  the nearest lower one; the CM v2.9 interpolation rule is not measured and
+  the frame report names the selection (`cm29-l2-exact`,
+  `cm29-l2-nearest-lower`, `cm29-l1-only`).
+- **Targets.** HDR buckets: a P3-D65 display of the bucket peak inside the
+  BT.2020/PQ container. SDR: a 100-nit BT.709 display. Target black is the
+  fixed title minimum; trims fade at the fixed title mastering peak.
+- **Code.** `tools/dv_processing/dm_closed_form.h` is the double-precision
+  reference of the equations. `dv_dm.h` prepares each frame's state on the CPU
+  from the RPU and runs three GPU passes (pointwise map; horizontal and
+  vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
+  `display_target.h` calls it and prints one `display_target_frame` row per
+  frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
+  `dolby-closed-form-cm4-cm29-v1`; helper graph
+  `dv-native-master-or-closed-form-dm-v1`.
+- **Accuracy (private evidence, 2026-10-25).** CM v4 equations reproduce the
+  reference on 30/30 random30 shots (median mean ΔE_ITP 0.000, max 0.055) and
+  on real P8 frames with real L8 metadata: mean ≤ 0.001 at 300–1600 nits
+  (P3) and ≤ 0.007 at 100 nits (P3 and BT.709), with a few isolated outlier
+  pixels per frame. CM v2.9 equations
+  pass 23/23 random30 shots (median 0.19); its gamut stage is approximate.
+- **Acceptance.** Until Paul accepts E, the report keeps
+  `creative_trims_applied: false` and the indicator says "L1 only". The
+  proposed gate is pixel comparison against the reference on real frames,
+  with a physical display check (Razr or a DV TV, through a GPT prompt) as a
+  sanity pass. Paul has not yet decided.
 
 ### Phase 3: SDR target
 
@@ -336,20 +372,26 @@ cases/samples. A compile is not a run.
   and public RPU writer, not a playback route or feature toggle.
 - Build controls with `sh tools/dv_processing/controls/build_target_controls.sh`
   and the same four explicit dependency/output arguments as the helper build.
-- Run `python3 tools/dv_processing/controls/compare_display_target.py --shader
-  "$CONTROL_BIN/display_target_shader" --output "$EVIDENCE/shader"`. Every Y/U/V
-  code uses the independent Gaussian-anchor oracle (two-code bound): six buckets,
-  L1 sensitivity, monotonic grayscale, zero black, peak, explicit edge extensions
-  and saturated/out-of-range samples.
+- Phase 2 (2026-10-25) replaced the phase 1 controls. Run
+  `"$CONTROL_BIN/test_dv_dm"`: family and trim selection from the RPU, every
+  bucket finite and inside the target, monotone neutral grey axis, L1
+  sensitivity, trims that act at their target and fade out at the mastering
+  peak, pinned golden values of the model. Then run
+  `python3 tools/dv_processing/controls/run_dm_parity.py
+  "$CONTROL_BIN/dm_shader_control" "$EVIDENCE/parity" "$FRAMES_F32"`: the GPU
+  shader against the CPU reference on real-frame crops (ΔE_ITP max 0.05,
+  2e-4 PQ) and a saturated synthetic lattice (mean 0.02, max 0.5).
 - Run `python3 tools/dv_processing/controls/run_display_target_windows.py
   --helper "$HELPER_BIN/segment_decode_render" --scanner "$HELPER_BIN/scan_title"
   --policy "$RUST_BIN/dv_target_policy" --fixtures "$RUST_BIN/dv_target_fixtures"
   --mux "$CONTROL_BIN/make_movie" --ffmpeg "$FFMPEG" --output "$EVIDENCE/windows"`.
   It encodes bounded P7/P8 sources; checks title accounting, final-frame missing
   L1, missing/corrupt RPU, inconsistent L6 and truncation; uses actual Rust policy
-  for master elision; checks independent pixels, identical master/different L1
-  targeted output and overlapping-window byte/hash identity. MaxCLL is misleading
-  deliberately, never used to elide the high title.
+  for master elision; checks the per-frame trace (raw L1, method, family), the
+  target peak, different output for identical master pixels with different L1,
+  and overlapping-window byte/hash identity. Phase 2 removed only its Annex B.2
+  pixel oracle. MaxCLL is misleading deliberately, never used to elide the high
+  title.
 - Source changes during either probe invalidate publication under the existing
   admitted probe/source-revision fence. Fresh scans replace rather than merge
   title objects. Existing source-fence/probe-publication regressions remain
@@ -368,7 +410,8 @@ a per-window target/master mix.
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
 | Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
 | Daemon unit | `prepare_processed_hdr10` declines are named (no peak, elided, L1 missing) | Paul's "every decline is named" |
-| Helper control | `compare_display_target.py`: render at master and at 1000. Check peak luma ≤ PQ(1000) + 1 code and a monotonic curve. **Identical pixels with two different L1 sets must give different outputs.** Every pixel must match an independent Python implementation of ST 2094-10 Annex B.2 (from the same L1) within 2 codes | the curve is the specified one and is driven by per-shot L1 (a static curve fails) |
+| Helper control | `test_dv_dm` (phase 2; replaced phase 1's `compare_display_target.py`): every bucket stays ≤ PQ(target) + 1 code with a monotonic grey axis. **Identical pixels with two different L1 sets must give different outputs.** Trims change the output at their target and vanish at the mastering peak; golden values pin the model | the mapping is driven by per-shot L1 and trims (a static curve fails) |
+| Helper control | `run_dm_parity.py`: GPU shader against the double-precision reference | the shader computes the equations |
 | Helper control | render two overlapping windows; the shared frames' `yuv10_sha256` must be identical | segment determinism across window boundaries |
 | Helper control | an elided title rendered "targeted" is byte-identical to its master render | elision is truthful |
 | Helper unit | `contrast_recovery` and `hybrid_mix` are 0 in the targeted params | no hidden libplacebo defaults |

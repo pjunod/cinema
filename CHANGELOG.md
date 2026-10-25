@@ -34,6 +34,17 @@ bump may break compatibility and a **patch** bump never does.
 - Item pages show review-site scores: IMDb, Rotten Tomatoes and Metacritic (through the OMDb key in Settings, unused until now) and TMDB's user score, each with its own mark. They are fetched on first view and kept for two weeks.
 - A per-person watchlist and favorites. Toggles sit on movie and show pages; Home gets Watchlist and Favorites rows, and `#/list/watchlist` / `#/list/favorite` show the whole list. A movie leaves the watchlist once watched, and a show once every episode is.
 
+### Changed
+
+- Display-targeted HDR10-E and SDR now map each shot with closed-form Dolby
+  display management instead of the ST 2094-10 Annex B.2 curve: CM v4 (L1+L3,
+  L8 trims interpolated to the target, colour trims across gamuts) for CM v4.0
+  RPUs and CM v2.9 (L2 trims) otherwise, measured against the licensed reference
+  renderer as a QC referee. The helper reports the family and trim selection per
+  frame and the daemon checks it exactly against the raw RPU. Every targeted
+  rendition re-renders under the new method identity. Playback still reports
+  `creative_trims_applied:false` until the trims are accepted.
+
 ### Fixed
 
 - Display-targeted playback reads mastering metadata carried on decoded frames
