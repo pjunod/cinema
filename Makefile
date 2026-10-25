@@ -161,8 +161,12 @@ history-check: ## Verify every corrective commit has current regression evidence
 operations-check: ## Verify deploy, CI, container, and client shipping contracts
 	@python3 -m unittest discover -s tests/operations -p 'test_*.py'
 
+.PHONY: linux-player-check
+linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4)
+	@python3 -m unittest discover -s clients/linux-player/tests -p 'test_*.py'
+
 .PHONY: check
-check: validation-lint history-check operations-check benchmark-check rust-check ## History + operations + catalog + benchmark + Rust baseline
+check: validation-lint history-check operations-check linux-player-check benchmark-check rust-check ## History + operations + launcher + catalog + benchmark + Rust baseline
 
 .PHONY: spike-lock-check
 spike-lock-check: ## Prove the isolated spike's lockfile still resolves
