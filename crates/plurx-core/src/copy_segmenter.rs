@@ -233,12 +233,18 @@ impl From<std::io::Error> for PublishError {
 }
 
 pub trait CopyPublicationSink {
-    async fn torn_down(&self) -> bool;
-    async fn write_init(&mut self, init: &Init) -> std::io::Result<()>;
-    async fn write_segment(&mut self, published: &Published) -> Result<(), PublishError>;
-    async fn write_endlist(&mut self) -> std::io::Result<()>;
+    fn torn_down(&self) -> impl std::future::Future<Output = bool> + Send;
+    fn write_init(
+        &mut self,
+        init: &Init,
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
+    fn write_segment(
+        &mut self,
+        published: &Published,
+    ) -> impl std::future::Future<Output = Result<(), PublishError>> + Send;
+    fn write_endlist(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
     fn started(&self) -> bool;
-    async fn verify_endlist(&self) -> std::io::Result<bool>;
+    fn verify_endlist(&self) -> impl std::future::Future<Output = std::io::Result<bool>> + Send;
 }
 
 fn converted_dolby_vision_record(file: &MediaFile) -> Result<fmp4::DolbyVisionRecord, String> {

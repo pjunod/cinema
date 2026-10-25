@@ -943,7 +943,9 @@ async fn run_original_command(
             read_bounded(custody.stdout.as_mut().expect("original stdout")),
             read_bounded(custody.stderr.as_mut().expect("original stderr")),
             async {
-                custody
+                // The original pidfd remains level-ready until its held
+                // owner is closed; retain the readiness guard through signal.
+                let _ready = custody
                     .anchor
                     .as_ref()
                     .expect("original pidfd")

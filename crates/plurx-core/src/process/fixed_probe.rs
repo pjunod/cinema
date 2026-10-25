@@ -4781,7 +4781,7 @@ async fn probe_version_with_deadline_on_recording(
         )?;
         #[cfg(target_os = "linux")]
         let command_slot = register_probe_command_slot(admitted_custody.as_ref())?;
-        let (mut child, child_job, mut supervisor) = spawn_configured_probe(
+        let (child, child_job, supervisor) = spawn_configured_probe(
             command,
             supervisor,
             DECODE_FACT_VERSION_PROBE,
@@ -4807,6 +4807,8 @@ async fn probe_version_with_deadline_on_recording(
             command_slot.as_ref().map(Arc::clone),
             |owners, supervisor| owners.supervisor = Some(supervisor),
         );
+        #[cfg(not(target_os = "linux"))]
+        let (mut child, mut supervisor) = (child, supervisor);
         #[cfg(target_os = "linux")]
         let original_identity = spawned_probe_identity(&child);
         let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
@@ -5137,6 +5139,12 @@ pub struct DecodeFactCache {
     probe_gate: Arc<tokio::sync::Semaphore>,
     metrics: Arc<DecodeFactMetrics>,
     capacity: usize,
+}
+
+impl Default for DecodeFactCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DecodeFactCache {
@@ -6398,7 +6406,7 @@ async fn collect(
     )?;
     #[cfg(target_os = "linux")]
     let command_slot = register_probe_command_slot(probe.admitted_custody.as_ref())?;
-    let (mut child, child_job, mut supervisor) = spawn_configured_probe(
+    let (child, child_job, supervisor) = spawn_configured_probe(
         command,
         supervisor,
         work,
@@ -6424,6 +6432,8 @@ async fn collect(
         command_slot.as_ref().map(Arc::clone),
         |owners, supervisor| owners.supervisor = Some(supervisor),
     );
+    #[cfg(not(target_os = "linux"))]
+    let (mut child, mut supervisor) = (child, supervisor);
     #[cfg(target_os = "linux")]
     let original_identity = spawned_probe_identity(&child);
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());

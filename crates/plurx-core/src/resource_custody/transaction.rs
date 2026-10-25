@@ -198,7 +198,8 @@ fn adoption_holder_matches(
         "recovered_r_holders" => "SELECT obligation_id,adoption_sequence,previous_owner_id,current_owner_id FROM recovered_r_holders WHERE operation_id=?1",
         _ => return Err(codec::invalid()),
     };
-    let row: Option<(Vec<u8>, i64, Vec<u8>, Vec<u8>)> = connection
+    type AdoptionHolderRow = (Vec<u8>, i64, Vec<u8>, Vec<u8>);
+    let row: Option<AdoptionHolderRow> = connection
         .query_row(query, [operation_id.as_bytes()], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
@@ -540,10 +541,10 @@ pub(super) fn snapshot(
                     if group != trial || last_seq < sequence {
                         return Err(codec::invalid());
                     }
-                    if last == operation_id {
-                        if last_seq != sequence || last_phase != Phase::Prepared {
-                            return Err(codec::invalid());
-                        }
+                    if last == operation_id
+                        && (last_seq != sequence || last_phase != Phase::Prepared)
+                    {
+                        return Err(codec::invalid());
                     }
                 }
             }
@@ -564,10 +565,8 @@ pub(super) fn snapshot(
                 {
                     return Err(codec::invalid());
                 }
-                if last == operation_id {
-                    if last_seq != ack.sequence || last_phase != ack.phase {
-                        return Err(codec::invalid());
-                    }
+                if last == operation_id && (last_seq != ack.sequence || last_phase != ack.phase) {
+                    return Err(codec::invalid());
                 }
             }
             DiskResult::AssetChangedV2(record) => {
@@ -584,10 +583,8 @@ pub(super) fn snapshot(
                 if graph != ack.graph_id || last_seq < ack.sequence {
                     return Err(codec::invalid());
                 }
-                if last == operation_id {
-                    if last_seq != ack.sequence || last_phase != ack.phase {
-                        return Err(codec::invalid());
-                    }
+                if last == operation_id && (last_seq != ack.sequence || last_phase != ack.phase) {
+                    return Err(codec::invalid());
                 }
             }
             DiskResult::AssetChangedV3(record) => {
@@ -604,10 +601,8 @@ pub(super) fn snapshot(
                 if graph != ack.graph_id || last_seq < ack.sequence {
                     return Err(codec::invalid());
                 }
-                if last == operation_id {
-                    if last_seq != ack.sequence || last_phase != ack.phase {
-                        return Err(codec::invalid());
-                    }
+                if last == operation_id && (last_seq != ack.sequence || last_phase != ack.phase) {
+                    return Err(codec::invalid());
                 }
             }
             DiskResult::RetiredWithAssets(ack) => {
@@ -658,10 +653,10 @@ pub(super) fn snapshot(
                 {
                     return Err(codec::invalid());
                 }
-                if target.0 == operation_id {
-                    if target.2 != ack.sequence || target.3 != Phase::Sealed {
-                        return Err(codec::invalid());
-                    }
+                if target.0 == operation_id
+                    && (target.2 != ack.sequence || target.3 != Phase::Sealed)
+                {
+                    return Err(codec::invalid());
                 }
             }
             DiskResult::RecoveredSAdoption(ack) => {
