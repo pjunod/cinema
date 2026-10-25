@@ -498,6 +498,10 @@ function currentCapsDocument(incumbent=null){
   // Unknown. Geometry/decoder refreshes must not change the rendering target.
   const retained=incumbent&&incumbent.capsSnapshot;
   const peak=retained?(retained.display||{}):hdrDisplayPeakCaps();
+  // The HDR display claim is part of the rendering target too: the browser can
+  // change its answer mid-playback (a window moved to another monitor), and a
+  // seek must not switch the admitted session between tone-mapped and HDR.
+  if(retained&&typeof retained.display?.hdr==="boolean") caps.display.hdr=retained.display.hdr;
   if(peak.max_nits!=null&&peak.peak_source!=null){
     Object.assign(caps.display,{max_nits:peak.max_nits,peak_source:peak.peak_source});
   }
@@ -629,8 +633,10 @@ const PLAY_CAPS_READY=(async()=>{
         PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS,dvProfiles);
     PLAY_CAPS.hlsHevcSampleEntries=await hlsHevcSampleEntries(PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS);
     CAPS_Q=capsQuery(PLAY_CAPS);
+    // Only once the probed answer stands: after a rejection the synchronous
+    // answer is kept, and rebuilding from half-probed tiers would undo that.
+    watchDisplayDynamicRange();
   }catch(e){}
-  watchDisplayDynamicRange();
   return PLAY_CAPS;
 })();
 

@@ -68,3 +68,19 @@ test("browsers without change events keep the boot answer",()=>{
   const h=harness({hdr:false,withListener:false});
   assert.equal(h.watch(),false);assert.equal(h.caps().hdr10t,0);
 });
+test("an admitted playback keeps its HDR claim when the browser changes its answer",()=>{
+  const ctx=vm.createContext({hdrNow:false,localStorage:{getItem:()=>null}});
+  vm.runInContext([declaration("player/decode-tiers.js","hdrDisplayPeakCaps"),declaration("player/decode-tiers.js","currentCapsDocument")].join("\n")+`
+    const PLAY_CAPS={acodec:"aac"},SERVER={};
+    function browserAudioSinks(){return [];}function browserOutputChannelsCached(){return null;}
+    function capsDocument(){return {v:2,display:{hdr:hdrNow,dolby_vision:false},video:[]};}
+    function decodeLimits(){return [];}function measuredPresentationTarget(){return null;}
+    this.caps=currentCapsDocument;`,ctx);
+  const admitted=ctx.caps();assert.equal(admitted.display.hdr,false);
+  ctx.hdrNow=true;
+  assert.equal(ctx.caps({capsSnapshot:admitted}).display.hdr,false);
+  assert.equal(ctx.caps().display.hdr,true);
+  const hdrAdmitted=ctx.caps();ctx.hdrNow=false;
+  assert.equal(ctx.caps({capsSnapshot:hdrAdmitted}).display.hdr,true);
+  assert.equal(ctx.caps({capsSnapshot:{display:{}}}).display.hdr,false);
+});

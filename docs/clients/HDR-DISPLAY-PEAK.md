@@ -17,8 +17,10 @@ The browser half of the capability claim (`hdr`, `hdr10t`) comes from CSS
 answers false until its GPU process is running and true a few seconds later,
 and moving a window between an SDR and an HDR monitor changes it on every
 platform. The web client listens for the change and rebuilds the claim, so the
-next fresh playback hears the current answer; an admitted playback keeps its
-caps, like the peak below. Tested on Chrome 152 / GNOME 51 (nativehdr10 Mutter)
+next fresh playback hears the current answer; an admitted playback keeps the
+HDR claim it started with, like the peak below, so a seek never switches it
+between tone-mapped and HDR. On a cold Chrome start the change event fired
+0.3 s after the page script ran. Tested on Chrome 152 / GNOME 51 (nativehdr10 Mutter)
 on a 616-nit panel: HDR, P3 gamut and smooth HEVC Main10 PQ decode. Firefox 157
 on the same session reports no HDR capability (with or without
 `gfx.wayland.hdr`), so it is offered the tone-mapped path.
