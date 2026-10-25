@@ -310,6 +310,9 @@ let PLAY_HEVC_TIERS=hevcTiersSync(
   t=>{ try{ return !!(window.MediaSource && MediaSource.isTypeSupported(t)); }catch(e){ return false; } }
 );
 let PLAY_HEVC_PQ_TIERS=[];
+// Whether MediaCapabilities answered the PQ question at all. Until it has, the
+// PQ tiers are unknown (null), not empty: an empty list is a "no".
+let PLAY_HEVC_PQ_PROBED=false;
 let PLAY_CAPS=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS, null));
 // Safe even before the async probe settles: [] is an explicit restrictive
 // claim, never the legacy/unrestricted omission.
@@ -495,6 +498,10 @@ function currentCapsDocument(incumbent=null){
   // Unknown. Geometry/decoder refreshes must not change the rendering target.
   const retained=incumbent&&incumbent.capsSnapshot;
   const peak=retained?(retained.display||{}):hdrDisplayPeakCaps();
+  // The HDR display claim is part of the rendering target too: the browser can
+  // change its answer mid-playback (a window moved to another monitor), and a
+  // seek must not switch the admitted session between tone-mapped and HDR.
+  if(retained&&typeof retained.display?.hdr==="boolean") caps.display.hdr=retained.display.hdr;
   if(peak.max_nits!=null&&peak.peak_source!=null){
     Object.assign(caps.display,{max_nits:peak.max_nits,peak_source:peak.peak_source});
   }
@@ -616,6 +623,7 @@ const PLAY_CAPS_READY=(async()=>{
     if(mc){
       PLAY_HEVC_TIERS=mc.passed.slice();
       PLAY_HEVC_PQ_TIERS=mc.pqPassed.slice();
+      PLAY_HEVC_PQ_PROBED=true;
       PLAY_CAPS=buildPlayCaps(hevcTierSummary(mc.passed, mc.pqPassed));
     }
     const dvProfiles=String(PLAY_CAPS.dvprofile||"").split(",")
@@ -625,9 +633,45 @@ const PLAY_CAPS_READY=(async()=>{
         PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS,dvProfiles);
     PLAY_CAPS.hlsHevcSampleEntries=await hlsHevcSampleEntries(PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS);
     CAPS_Q=capsQuery(PLAY_CAPS);
+    // Only once the probed answer stands: after a rejection the synchronous
+    // answer is kept, and rebuilding from half-probed tiers would undo that.
+    watchDisplayDynamicRange();
   }catch(e){}
   return PLAY_CAPS;
 })();
+
+// The display half of the claims, re-asked when the browser changes its mind.
+//
+// `(dynamic-range: high)` is not a constant for the page. Chrome on Linux
+// (Wayland) answers false until its GPU process has started and true a few
+// seconds later, so a plurx tab restored with the browser booted claiming an
+// SDR screen and every session it started was tone-mapped to SDR on an HDR
+// display. Moving the window between an SDR and an HDR monitor changes the
+// answer the same way. The decoder half (tiers, sample entries) does not
+// depend on the display, so only the claims built from it are rebuilt; a
+// playback already admitted keeps the caps it started with.
+function rebuildPlayCapsForDisplay(){
+  const previous=PLAY_CAPS;
+  const next=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS,
+    PLAY_HEVC_PQ_PROBED?PLAY_HEVC_PQ_TIERS:null));
+  next.progressiveHevcSampleEntries=previous.progressiveHevcSampleEntries;
+  next.hlsHevcSampleEntries=previous.hlsHevcSampleEntries;
+  PLAY_CAPS=next;
+  CAPS_Q=capsQuery(PLAY_CAPS);
+  return PLAY_CAPS;
+}
+function watchDisplayDynamicRange(){
+  try{
+    const query=window.matchMedia&&window.matchMedia("(dynamic-range: high)");
+    if(!query||typeof query.addEventListener!=="function") return false;
+    query.addEventListener("change",()=>{
+      if(!!query.matches!==!!PLAY_CAPS.hdrDisplay) rebuildPlayCapsForDisplay();
+    });
+    // The answer may already have changed while MediaCapabilities was probing.
+    if(!!query.matches!==!!PLAY_CAPS.hdrDisplay) rebuildPlayCapsForDisplay();
+    return true;
+  }catch(e){ return false; }
+}
 
 // Manual quality override (player menu), persisted per browser. Auto runs the
 // automatic ladder; Original never transcodes video (direct/remux only); a

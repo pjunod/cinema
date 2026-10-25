@@ -85,6 +85,8 @@ def source_tree():
     rows = {path:('100644',path.encode()) for path in required}
     rows.update({path:(mode,subprocess.check_output(['git','show',native.PRODUCER+':'+path],cwd=ROOT))
         for path,(mode,sha) in native.RECIPE_PINS.items()})
+    rows['Makefile'] = (native.CANONICAL_MAKEFILE['mode'],subprocess.check_output(['git','show',native.PRODUCER+':Makefile'],cwd=ROOT))
+    def blob_id(raw):return hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
     def read_git(workspace,*args,**kwargs):
         if args[:2] == ('cat-file','-t'): return b'commit'
         if args[0] == 'ls-tree':
@@ -92,8 +94,8 @@ def source_tree():
                 selected = {p:value for p,value in rows.items() if any(p==r or p.startswith(r+'/') for r in native.ROOTS)}
             else:
                 selected = {p.split('/',1)[0]:(('040000',b'tree') if '/' in p else value) for p,value in rows.items()}
-            return b''.join((mode+(' tree ' if mode=='040000' else ' blob ')+hashlib.sha1(raw).hexdigest()+'\t'+p).encode()+b'\0' for p,(mode,raw) in selected.items())
-        raw = next(raw for mode,raw in rows.values() if hashlib.sha1(raw).hexdigest() == args[-1])
+            return b''.join((mode+(' tree ' if mode=='040000' else ' blob ')+blob_id(raw)+'\t'+p).encode()+b'\0' for p,(mode,raw) in selected.items())
+        raw = next(raw for mode,raw in rows.values() if blob_id(raw) == args[-1])
         return str(len(raw)).encode() if args[1] == '-s' else raw
     rows.update({path:('100644',raw) for path,raw in source_cases().items()})
     return rows,read_git
@@ -160,7 +162,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             self.assertEqual(zipped.namelist(),[native.MEMBER])
             self.assertEqual(zipped.read(native.MEMBER),self.native)
         self.log = job_log(archive_sha=native.digest(self.zip)); self.api = FakeAPI(self.log)
-        self.entries = [{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}]
+        self.entries = [dict(native.CANONICAL_MAKEFILE),{'path':'native-source','mode':'100644','blob':'1'*40,'sha256':'2'*64}]
         self.policy = mock.patch.multiple(native,ORIGIN_ZIP_SHA=native.digest(self.zip),ORIGIN_JOB_SHA=native.digest(self.log))
         self.policy.start(); self.addCleanup(self.policy.stop)
     def retained(self):
@@ -291,7 +293,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                 rows[path] = ('100644',b'outside root or alternate dependency selector')
                 with self.subTest(path=path),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):native.manifest(ROOT,CURRENT)
                 del rows[path]
-            for path in native.RECIPE_PINS:
+            for path in (*native.RECIPE_PINS,'Makefile'):
                 saved = rows[path]
                 changed_bytes = (saved[1].replace(b'    targets: [',
                     b'    dependencies: [.package(path: "../../../outside")],\n    targets: [')
@@ -355,7 +357,7 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
                 'compiler_binary_sha256':None,'sdk_inventory':None,'unrecorded_reason':'not recorded'},
             adapter_environment={'python':[3,12,15],'platform':'darwin'},producer_workflow_sha256=native.PRODUCER_WORKFLOW,
             consumer_workflow_sha256=native.digest(native.transformed_workflow(legacy)),
-            recipe_compatibility='exact legacy workflow plus bounded Apple-only adapter delta v1',
+            recipe_compatibility=native.RECIPE_COMPATIBILITY,
             adapter_sha256=native.digest(b'adapter'),policy_sha256=native.policy_fingerprint(),checkout_attestation=attest,
             decision='fresh_execution',current_native_commands_executed=True,history={'pagination_complete':True},
             observed=native.parse_native(self.native,self.expected,WORK),native_log_sha256=native.digest(self.native),
@@ -429,12 +431,13 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
 
     def test_fresh_execution_starts_once_with_scrubbed_environment_and_preserves_failure(self):
         legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
-        changed = [{**self.entries[0],'sha256':'3'*64}]
+        changed = [dict(self.entries[0]),{**self.entries[1],'sha256':'3'*64}]
         def sources(workspace,commit):return (self.entries if commit==native.PRODUCER else changed),self.contents
         def git_value(workspace,*args,**kwargs):
             return legacy if args[-1]==native.PRODUCER+':'+native.WORKFLOW else b'identity'
         real_manifest = native.manifest
-        rows,read_git = source_tree()
+        rows,read_git = source_tree();supported_rows = rows.copy()
+        revised_make = subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT)
         with tempfile.TemporaryDirectory() as directory,mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile','GITHUB_TOKEN':'never-child','PATH':'/tools'}), \
              mock.patch.object(native,'git',side_effect=git_value),mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
              mock.patch.object(native,'manifest',side_effect=sources),mock.patch.object(native,'current_job',return_value=self.api.jobs[RUN][0]), \
@@ -445,21 +448,23 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             out = Path(directory)
             with self.assertRaises(native.receipts.ReceiptError):native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},False)
             make.assert_not_called()
-            guard_calls = []
-            def guarded_manifest(workspace,commit):
-                if commit == native.PRODUCER:return self.entries,self.contents
-                guard_calls.append(commit)
-                if len(guard_calls) == 2:
-                    rows['Makefile'] = ('100644',rows['Makefile'][1]+b'\nquiet: outside-helper\n')
-                return real_manifest(ROOT,commit)
-            def guarded_git(workspace,*args,**kwargs):
-                return git_value(workspace,*args,**kwargs) if args[0] in ('show','rev-parse') else read_git(workspace,*args,**kwargs)
-            with mock.patch.object(native,'manifest',side_effect=guarded_manifest), \
-                 mock.patch.object(native,'git',side_effect=guarded_git):
-                with self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
-                    native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},True)
-                self.assertEqual(len(guard_calls),2);make.assert_not_called()
-                self.assertFalse((out/'fresh-start.json').exists())
+            for drift in ('unsupported','equivalent'):
+                rows.clear();rows.update(supported_rows);guard_calls = []
+                def guarded_manifest(workspace,commit):
+                    if commit == native.PRODUCER:return self.entries,self.contents
+                    guard_calls.append(commit)
+                    if len(guard_calls) == 2:
+                        rows['Makefile'] = ('100644',revised_make if drift=='equivalent' else rows['Makefile'][1]+b'\nquiet: outside-helper\n')
+                    return real_manifest(ROOT,commit)
+                def guarded_git(workspace,*args,**kwargs):
+                    return git_value(workspace,*args,**kwargs) if args[0] in ('show','rev-parse') else read_git(workspace,*args,**kwargs)
+                with mock.patch.object(native,'manifest',side_effect=guarded_manifest), \
+                     mock.patch.object(native,'git',side_effect=guarded_git):
+                    refusal = 'guarded source closure changed' if drift=='equivalent' else 'closure review required'
+                    with self.subTest(drift=drift),self.assertRaisesRegex(native.receipts.ReceiptError,refusal):
+                        native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},True)
+                    self.assertEqual(len(guard_calls),2);make.assert_not_called()
+                    self.assertFalse((out/'fresh-start.json').exists())
             def fail(argv,**kwargs):
                 self.assertTrue((out/'fresh-start.json').exists());self.assertNotIn('GITHUB_TOKEN',kwargs['env'])
                 self.assertEqual(kwargs['env']['PATH'],'/tools')
@@ -587,3 +592,99 @@ class DesktopMacosRetentionContracts(unittest.TestCase):
             self.assertEqual(native.execution_key(self.entries,self.expected),key)
         with mock.patch.object(native,'RECIPE_PINS',{**native.RECIPE_PINS,'Makefile':('100644','f'*64)}):
             self.assertNotEqual(native.policy_fingerprint(),policy)
+        for name,value in (('MAKEFILE_FAMILY',(native.MAKEFILE_FAMILY[0],{**native.MAKEFILE_FAMILY[1],'sha256':'f'*64})),
+                           ('CANONICAL_MAKEFILE',{**native.CANONICAL_MAKEFILE,'blob':'f'*40}),
+                           ('APPLICABILITY_PROJECTION','another-projection')):
+            with self.subTest(policy_field=name),mock.patch.object(native,name,value):
+                self.assertNotEqual(native.policy_fingerprint(),policy)
+
+    def test_reviewed_make_pair_shares_applicability_without_mutating_raw_inputs(self):
+        rows,read_git = source_tree()
+        revised_make = subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT)
+        with mock.patch.object(native,'git',side_effect=read_git):
+            original,contents = native.manifest(ROOT,native.PRODUCER)
+            rows['Makefile'] = ('100644',revised_make)
+            revised,_ = native.manifest(ROOT,CURRENT)
+            before = copy.deepcopy((original,revised))
+            self.assertNotEqual(original,revised)
+            self.assertEqual(native.applicability_inputs(original),original)
+            self.assertEqual(native.applicability_inputs(revised),original)
+            self.assertEqual(native.execution_key(original,self.expected),native.execution_key(revised,self.expected))
+            self.assertEqual((original,revised),before)
+            self.assertNotEqual(native.digest(native.canonical(original)),native.digest(native.canonical(revised)))
+            for value in (('100644',revised_make+b'\n# third web-only revision\n'),
+                          ('100644',revised_make+b'\nquiet: scripts/outside-helper\n'),('100755',revised_make)):
+                rows['Makefile'] = value
+                with self.subTest(value=value[0]),self.assertRaisesRegex(native.receipts.ReceiptError,'closure review required'):
+                    native.manifest(ROOT,CURRENT)
+            rows['Makefile'] = ('100644',revised_make)
+            rows['brand/export/new-resource.txt'] = ('100644',b'new resource')
+            changed,_ = native.manifest(ROOT,CURRENT)
+            self.assertNotEqual(native.execution_key(changed,self.expected),native.execution_key(revised,self.expected))
+        for entries in ([],original+original,[{**native.CANONICAL_MAKEFILE,'blob':'0'*40}]):
+            with self.assertRaisesRegex(native.receipts.ReceiptError,'Makefile'):
+                native.applicability_inputs(entries)
+
+    def test_reviewed_make_pair_retains_known_origin_with_actual_current_provenance(self):
+        old_rows,old_read = source_tree();new_rows,new_read = source_tree()
+        new_rows['Makefile'] = ('100644',subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT))
+        legacy = subprocess.check_output(['git','show',native.PRODUCER+':'+native.WORKFLOW],cwd=ROOT)
+        active = [old_read]
+        def read_git(workspace,*args,**kwargs):
+            if args[0] == 'show':return legacy if args[-1]==native.PRODUCER+':'+native.WORKFLOW else b'adapter'
+            if args[0] == 'rev-parse':return native.PRODUCER_TREE.encode() if args[-1].startswith(native.PRODUCER) else b'd'*40
+            if args[0] == 'ls-tree':active[0] = old_read if native.PRODUCER in args else new_read
+            return active[0](workspace,*args,**kwargs)
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(native.os.environ,{'GITHUB_JOB':'apple_compile'}), \
+             mock.patch.object(native,'git',side_effect=read_git), \
+             mock.patch.object(native,'workflow_identity',return_value=native.digest(native.transformed_workflow(legacy))), \
+             mock.patch.object(native,'recheck'),mock.patch.object(native,'live_recipe_selectors'), \
+             mock.patch.object(native,'download_log',return_value=self.log), \
+             mock.patch.object(native.transport,'archive_bytes',return_value=self.zip), \
+             mock.patch.object(native,'history_before_fresh') as history, \
+             mock.patch.object(native.subprocess,'run') as launch:
+            out = Path(directory)/'retained';out.mkdir()
+            receipt = native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,out,{},True)
+            actual,_ = native.manifest(ROOT,CURRENT);origin,_ = native.manifest(ROOT,native.PRODUCER)
+            self.assertEqual(receipt['decision'],'retained_prior_execution')
+            self.assertEqual(receipt['current_source_manifest'],actual)
+            self.assertNotEqual(actual,origin)
+            self.assertEqual(next(row for row in actual if row['path']=='Makefile'),native.MAKEFILE_FAMILY[1])
+            self.assertEqual(receipt['checkout_attestation']['source_manifest_sha256'],native.digest(native.canonical(actual)))
+            self.assertEqual(receipt['execution_origin']['commit'],native.PRODUCER)
+            self.assertFalse(receipt['current_native_commands_executed'])
+            launch.assert_not_called();history.assert_not_called()
+            self.api.artifacts = [];missing = Path(directory)/'missing';missing.mkdir()
+            with self.assertRaisesRegex(native.receipts.ReceiptError,'Known native artifact'):
+                native.run_gate(self.api,SCOPE,Path(WORK),CURRENT,RUN,missing,{},True)
+            launch.assert_not_called();history.assert_not_called()
+            self.assertFalse((missing/'fresh-start.json').exists())
+
+    def test_equivalent_make_key_does_not_normalize_v1_producer_raw_identity(self):
+        rows,read_git = source_tree()
+        revised_make = subprocess.check_output(['git','show','9bcfa9ca1f792d214122762981c84c85ba5b3e64:Makefile'],cwd=ROOT)
+        with mock.patch.object(native,'git',side_effect=read_git):
+            original,contents = native.manifest(ROOT,CURRENT)
+            rows['Makefile'] = ('100644',revised_make);revised,_ = native.manifest(ROOT,CURRENT)
+        self.entries = original
+        api,envelope,payload,receipt,key,legacy,packed = self.v1_fixture()
+        rows['Makefile'] = ('100644',contents['Makefile'])
+        def actual_git(workspace,*args,**kwargs):
+            if args[0]=='show':return b'adapter'
+            if args[0]=='rev-parse':return b'd'*40
+            return read_git(workspace,*args,**kwargs)
+        with mock.patch.object(native,'v1_envelope',return_value=envelope), \
+             mock.patch.object(native,'git',side_effect=actual_git):
+            self.assertEqual(native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)['manifest'],original)
+            receipt['current_source_manifest'] = revised
+            payload['receipt.json'] = native.canonical(receipt);envelope['archive'] = packed(payload)
+            with self.assertRaisesRegex(native.receipts.ReceiptError,'Native v1 source/receipt/policy identity differs'):
+                native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)
+            receipt['current_source_manifest'] = original
+            old_attest = copy.deepcopy(receipt['checkout_attestation'])
+            receipt['checkout_attestation']['source_manifest_sha256'] = native.digest(native.canonical(revised))
+            envelope['lines'] = [line.replace(native.canonical(old_attest).decode(),native.canonical(receipt['checkout_attestation']).decode()) for line in envelope['lines']]
+            payload['receipt.json'] = native.canonical(receipt);envelope['archive'] = packed(payload)
+            with self.assertRaisesRegex(native.receipts.ReceiptError,'Native v1 checkout identity differs'):
+                native.v1_result(api,SCOPE,ROOT,6100,61001,CURRENT,legacy,key)

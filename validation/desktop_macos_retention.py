@@ -38,10 +38,18 @@ JOB = 'Apple compile and native TV navigation'
 LABELS = ['self-hosted','macOS','ARM64','lab','apple','xcode-27.1']
 ROOTS = ('clients/server-tray/macos','Makefile','Cargo.toml','LICENSE','brand/export')
 # Whole recipes are pinned: a new helper/dependency cannot escape ROOTS.
-RECIPE_VERSION = 2
+RECIPE_VERSION = 3
 MAX_ROOT_ENTRIES, MAX_ROOT_BYTES = 512, 32*1024
+MAKEFILE_FAMILY = (
+    {'path':'Makefile','mode':'100644','blob':'917e9879ebac1006dc7267caffc3e08c2755b5a0',
+     'sha256':'ffd8237d4bc75ad370ca7c7045e1565710035659f1929ce48ccf40531a221528'},
+    {'path':'Makefile','mode':'100644','blob':'53f6271a48d8acfc96e394edf24a790f6c4d56af',
+     'sha256':'5fd6f68451b172ce48f0093adf3bb32ee63644087264130a481206a43263ad64'},
+)
+CANONICAL_MAKEFILE = MAKEFILE_FAMILY[0]
+APPLICABILITY_PROJECTION = 'exact-reviewed-make-pair-v1'
+RECIPE_COMPATIBILITY = 'exact legacy workflow plus bounded Apple-only adapter delta v1; exact reviewed Makefile pair v1'
 RECIPE_PINS = {
-    'Makefile':('100644','ffd8237d4bc75ad370ca7c7045e1565710035659f1929ce48ccf40531a221528'),
     'Cargo.toml':('100644','72af819e0c33f23e20387b12cd8b3cb72ec84ea56f14b957f101c8412315680f'),
     'clients/server-tray/macos/build':('100755','b7135b8d5de4ae53f86a5260965c72f257cd73ccfdac56477ee6688bd86456b0'),
     'clients/server-tray/macos/Package.swift':('100644','8e5ac76e4b9bece61bd85f3f92ecdceca2482bd99cfbd23bbdf4e0b6dee0c322'),
@@ -157,6 +165,8 @@ def supported_recipe(workspace,commit,entries,contents):
         require(name == 'Makefile' or name.casefold() not in ('gnumakefile','makefile'),
             'Unsupported native root Make selector; closure review required: '+name)
     by_path = {row['path']:row for row in entries}
+    require(by_path.get('Makefile') in MAKEFILE_FAMILY and digest(contents['Makefile']) == by_path['Makefile']['sha256'],
+        'Unsupported native Makefile identity; closure review required')
     for path,(mode,sha) in RECIPE_PINS.items():
         row = by_path.get(path)
         require(row is not None and row['mode'] == mode and row['sha256'] == sha
@@ -364,8 +374,22 @@ def checkout_evidence(raw, commit, scope, job, *, complete=False):
     return lines, workspace
 
 
+def applicability_inputs(entries):
+    """Copy actual inputs; project only either exact reviewed Make row."""
+    require(sum(row.get('path') == 'Makefile' for row in entries) == 1,
+        'Native applicability requires one reviewed Makefile')
+    projected = []
+    for row in entries:
+        if row.get('path') == 'Makefile':
+            require(row in MAKEFILE_FAMILY, 'Unsupported native Makefile identity; closure review required')
+            projected.append(dict(CANONICAL_MAKEFILE))
+        else:
+            projected.append(dict(row))
+    return projected
+
+
 def execution_key(entries, expected):
-    return digest(canonical({'inputs':entries,'test_ids':sorted(expected),'command':COMMAND,
+    return digest(canonical({'inputs':applicability_inputs(entries),'test_ids':sorted(expected),'command':COMMAND,
         'desktop_scope':True,'toolchain':TOOLCHAIN,'developer_dir':'/Applications/Xcode.app/Contents/Developer',
         'runner_labels':LABELS,'release_architectures':['arm64','x86_64']}))
 
@@ -564,7 +588,7 @@ def run_gate(api, scope, workspace, current, run_id, output, toolchain, fresh_on
         'current_source_manifest':entries,'expected_case_ids':sorted(expected),'toolchain_contract':toolchain,
         'adapter_environment':{'python':list(sys.version_info[:3]),'platform':sys.platform},
         'producer_workflow_sha256':PRODUCER_WORKFLOW,'consumer_workflow_sha256':consumer_workflow,
-        'recipe_compatibility':'exact legacy workflow plus bounded Apple-only adapter delta v1',
+        'recipe_compatibility':RECIPE_COMPATIBILITY,
         'adapter_sha256':digest(git(workspace,'show',current+':validation/desktop_macos_retention.py')),
         'policy_sha256':policy_fingerprint(),
         'build_product_digests':None,'current_build_products_exist':False}
@@ -579,7 +603,7 @@ def run_gate(api, scope, workspace, current, run_id, output, toolchain, fresh_on
     else:
         origin = matching_v1(api,scope,workspace,current,run_id,key,legacy)
     if origin is not None:
-        require(origin['key'] == key and origin['manifest'] == entries, 'Native source closure differs after authentication')
+        require(origin['key'] == key and applicability_inputs(origin['manifest']) == applicability_inputs(entries), 'Native source closure differs after authentication')
         recheck(workspace,current,run_id)
         (output/'origin-artifact.zip').write_bytes(origin['archive'])
         (output/'origin-job.log').write_bytes(origin['job_log'])
@@ -644,6 +668,7 @@ def policy_fingerprint():
         'origin_job':ORIGIN_JOB,'origin_artifact':ORIGIN_ARTIFACT,'archive_sha256':ORIGIN_ZIP_SHA,
         'job_log_sha256':ORIGIN_JOB_SHA,'roots':ROOTS,'command':COMMAND,
         'workflow_sha256':PRODUCER_WORKFLOW,'recipe_version':RECIPE_VERSION,'recipe_pins':RECIPE_PINS,
+        'makefile_family':MAKEFILE_FAMILY,'canonical_makefile':CANONICAL_MAKEFILE,'applicability_projection':APPLICABILITY_PROJECTION,
         'forbidden_make_selectors':['GNUmakefile','makefile'],'forbidden_package_selectors':['Package@*','Package.resolved','.swiftpm'],
         'upload_section_limits':[32,16*1024],'live_selector_policy':{'actual_names':True,'casefold':True,'allow_root_spelling':'Makefile','directory_limit':MAX_ROOT_ENTRIES},'committed_selector_policy':{'nonrecursive_root_bytes':MAX_ROOT_BYTES,'root_entries':MAX_ROOT_ENTRIES,'casefold':True,'allow_root_spelling':'Makefile'},
         'limits':[MAX_FILES,MAX_BLOB,MAX_SOURCE,MAX_ZIP,MAX_LOG,MAX_HISTORY,MAX_V1_ZIP,MAX_V1_JSON,MAX_V1_TOTAL]}))
@@ -794,7 +819,7 @@ def v1_result(api,scope,workspace,run_id,job_id,current,legacy,expected_key,*,re
         and receipt.get('producer_workflow_sha256') == PRODUCER_WORKFLOW
         and receipt.get('consumer_workflow_sha256') == digest(transformed_workflow(legacy))
         and receipt.get('source_manifest_kind') == 'reconstructed_from_authenticated_checkout'
-        and receipt.get('recipe_compatibility') == 'exact legacy workflow plus bounded Apple-only adapter delta v1'
+        and receipt.get('recipe_compatibility') == RECIPE_COMPATIBILITY
         and receipt.get('build_product_digests') is None
         and isinstance(receipt.get('toolchain_contract'),dict)
         and receipt['toolchain_contract'].get('xcode_output') == TOOLCHAIN

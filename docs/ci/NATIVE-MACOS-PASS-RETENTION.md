@@ -35,8 +35,9 @@ and 2 MiB total. The known closure has 45 files. This is explicitly
 an input manifest. The original build/test commands, desktop scope, Apple labels
 and Xcode 27.1/build 27A9275 contract remain unchanged.
 
-The closure policy pins the original whole Makefile, Cargo.toml, package `build`
-and Package.swift bytes and Git modes. Cargo.toml supplies the version expanded
+The closure policy pins Cargo.toml, package `build` and Package.swift bytes and
+Git modes, and recognizes exactly two reviewed whole Makefile identities.
+Cargo.toml supplies the version expanded
 by Make; treating arbitrary manifest changes as harmless could introduce shell
 inputs outside the closure. Alternate root Make selectors (`GNUmakefile` and
 `makefile`, including case variants except exact `Makefile`), versioned package
@@ -51,6 +52,23 @@ launch, it also checks actual root/package directory names
 for untracked alternate selectors, without following child symlinks or probing
 a case-insensitive alias of Makefile. These restrictions preserve the original 45-file provenance; they
 do not claim that future command/dependency changes have the same closure.
+
+The accepted Makefile pair is the original blob `917e9879ebac1006dc7267caffc3e08c2755b5a0`
+and blob `53f6271a48d8acfc96e394edf24a790f6c4d56af`, both mode `100644`.
+Their complete SHA-256 identities are fixed in the adapter. The second adds only
+a comment and one Node test invocation under `web-unit-check` on main
+`9bcfa9ca1f792d214122762981c84c85ba5b3e64`; native targets, prerequisites,
+global variables and VERSION extraction are identical. No third revision is
+accepted automatically, even if it appears to be another web-only change.
+
+A copied applicability projection maps only either exact Makefile row to the
+original row when computing the native key or comparing current/original input
+applicability. All other entries stay exact. This retains the prior 75-case
+execution across this reviewed web-only change while preserving both actual raw
+manifests. Producer receipt equality, checkout manifest hashes and final launch
+raw equality remain strict. The pair, canonical row and projection version are
+authenticated policy; they grant no compatibility to older v1 adapter bytes.
+Missing or corrupt original evidence still refuses instead of running 75 again.
 
 A v1 upload hash belongs to its unique native uploader transaction, bounded to
 32 lines and 16 KiB. Its ordered start, byte count, completion, hash, finalization,
