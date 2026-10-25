@@ -2,8 +2,9 @@
 """GPU shader vs CPU reference parity for dv_dm.h, on real-frame crops and synthetic rasters.
 Runs dm_shader_control for each case; prints max |GPU-CPU| (PQ) and mean/max dE_ITP.
 
-usage: run_dm_parity.py DM_SHADER_CONTROL SCRATCH_DIR SRC_F32
+usage: run_dm_parity.py DM_SHADER_CONTROL SCRATCH_DIR SRC_F32 [CASE ...]
 SRC_F32: at least five 3840x2160 frames of float32 BT.2020/PQ RGB (the decoded master).
+Optional CASE names rerun only those cases; unknown names fail.
 Real crops (real pixels, real or synthetic metadata) must match to dE_ITP max 0.05 and 2e-4 PQ.
 The synthetic raster is a 9^3 lattice reaching 10000-nit fully saturated BT.2020 corners, where the
 shader's float32 arithmetic loses digits against the double reference; it must match to dE_ITP mean
@@ -11,6 +12,7 @@ shader's float32 arithmetic loses digits against the double reference; it must m
 import json, os, subprocess, sys
 import numpy as np
 CTL = sys.argv[1]; WORK = sys.argv[2]; SRC = sys.argv[3]  # control binary, scratch dir, real 4K frames (src.yuv)
+ONLY, SEEN = set(sys.argv[4:]), set()
 os.makedirs(WORK, exist_ok=True)
 M1, M2, C1, C2, C3 = 0.1593017578125, 78.84375, 0.8359375, 18.8515625, 18.6875
 def eotf(e):
@@ -24,6 +26,8 @@ def de(a, b):
     return 720 * np.sqrt((A[:, 0] - B[:, 0]) ** 2 + 0.25 * (A[:, 1] - B[:, 1]) ** 2 + (A[:, 2] - B[:, 2]) ** 2)
 
 def run(name, params, rgb, w, h, synthetic=False):
+    SEEN.add(name)
+    if ONLY and name not in ONLY: return True
     rgba = np.concatenate([rgb.reshape(h, w, 3), np.ones((h, w, 1))], -1).astype(np.float32)
     pf, inf, go, co = (os.path.join(WORK, name + s) for s in ('.params', '.in', '.gpu', '.cpu'))
     open(pf, 'w').write(params); rgba.tofile(inf)
@@ -109,5 +113,8 @@ for tgt in ("600 0 1 4000", "1000 0.005 1 4000", "1000 0 0 4000", "100 0.005 2 4
 black = 'l1 0 0 0\nl6 50 4000\n'
 ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)
 ok &= run('cm4_black_1000_p1', black + 'l254\ntarget 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)
+if ONLY - SEEN:
+    print('Unknown parity cases: ' + ', '.join(sorted(ONLY - SEEN)), file=sys.stderr)
+    sys.exit(2)
 print('PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)

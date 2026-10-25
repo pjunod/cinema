@@ -61,6 +61,8 @@ not proof of absent contracts.
 
 Pending. Unit suites and the ready-PR fast lane run after the one final
 adversarial review. Numerical exploration supplies model evidence during
-development. Failed checks are rerun individually; unrelated passing suites
+development. The parity controller accepts optional case names after the three required
+arguments so failed cases can be rerun individually. Unknown names fail.
+Failed checks are rerun individually; unrelated passing suites
 are retained. Final source pins, commands, results and review disposition
 will be recorded here before landing.
