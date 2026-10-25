@@ -131,7 +131,8 @@ pub(super) fn validate(
     operation_id: Uuid,
     result: &DiskResult,
 ) -> Result<bool, CustodyError> {
-    let row: Option<(i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>)> = connection
+    type OperationMembershipRow = (i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+    let row: Option<OperationMembershipRow> = connection
         .query_row(
             "SELECT sequence,kind,asset_id,obligation_id,graph_id,member_id FROM asset_operation_membership WHERE operation_id=?1",
             [operation_id.as_bytes()],

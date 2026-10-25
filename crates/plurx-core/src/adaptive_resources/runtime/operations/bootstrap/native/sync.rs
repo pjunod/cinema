@@ -191,7 +191,7 @@ impl NodeResourceRuntime {
         if !bundle.installed {
             return Err(OperationError::State);
         }
-        self.eligible(&bundle)?;
+        self.eligible(bundle)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded
             || role.transition.is_some()

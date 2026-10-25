@@ -405,6 +405,9 @@ fn filename(output: OutputKey) -> String {
 
 /// Match recorded native identity and allocation without acquiring another
 /// descriptor. Future counted readers must do their own native open/recheck.
+// libc device/inode widths differ across supported Unix/Linux ABIs; retain
+// the same explicit identity projection rather than specializing to x86_64.
+#[allow(clippy::unnecessary_cast)]
 fn regular_entry_matches(
     child: &File,
     name: &str,

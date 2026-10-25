@@ -659,8 +659,8 @@ pub(super) fn change(
     {
         return Err(codec::invalid());
     }
-    let (adoption_sequence, adoption_operation, previous_owner, current_owner, head_operation, head_revision, frozen_digest):
-        (i64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i64, String) = tx.query_row(
+    type RetainedHolderRow = (i64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i64, String);
+    let (adoption_sequence, adoption_operation, previous_owner, current_owner, head_operation, head_revision, frozen_digest): RetainedHolderRow = tx.query_row(
         "SELECT adoption_sequence,operation_id,previous_owner_id,current_owner_id,head_operation_id,head_revision,frozen_digest FROM recovered_s_holders WHERE obligation_id=?1 ORDER BY adoption_sequence DESC LIMIT 1",
         [h.obligation_id.as_bytes()],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),

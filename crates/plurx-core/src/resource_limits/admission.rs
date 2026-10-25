@@ -252,6 +252,9 @@ fn parse_limit(value: &str) -> Option<Option<u64>> {
 }
 
 #[cfg(target_os = "linux")]
+// libc filesystem counters vary by Linux ABI. Keep checked conversion so
+// an unrepresentable counter remains Unknown instead of narrowing silently.
+#[allow(clippy::useless_conversion)]
 fn filesystem_headroom(path: &Path) -> Metric<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt as _;

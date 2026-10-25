@@ -5,8 +5,8 @@ mod fold;
 mod snapshot;
 pub(crate) use fold::BootstrapFold;
 pub(crate) use snapshot::{
-    frozen_snapshot_ref, validate_frozen_snapshot, validate_frozen_snapshot_ref,
-    validate_frozen_snapshot_ref_shape, FrozenScratchRefV1, FrozenScratchV3,
+    frozen_snapshot_ref, validate_frozen_snapshot_ref, validate_frozen_snapshot_ref_shape,
+    FrozenScratchRefV1, FrozenScratchV3,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

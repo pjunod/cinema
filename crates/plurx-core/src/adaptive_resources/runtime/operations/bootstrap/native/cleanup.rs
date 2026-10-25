@@ -469,6 +469,9 @@ fn run(
 /// A precheck in the held namespace. It is not a conditional unlink primitive:
 /// this first fixed profile trusts its owned namespace; an external conflicting
 /// mutation or any failed check is classified unresolved, never retried.
+// libc device/inode widths differ across supported Unix/Linux ABIs; retain
+// the same explicit identity projection rather than specializing to x86_64.
+#[allow(clippy::unnecessary_cast)]
 fn entry_matches(
     directory: &File,
     name: &CStr,

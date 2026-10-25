@@ -203,7 +203,7 @@ impl NodeResourceRuntime {
         if !bundle.installed {
             return Err(OperationError::State);
         }
-        self.eligible(&bundle)?;
+        self.eligible(bundle)?;
         let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
         if role.refunded
             || role.transition.is_some()
@@ -454,7 +454,7 @@ impl NodeResourceRuntime {
             ) {
                 AssetIoV1::PublishMetadata {
                     slot_id: FileSlotId(publication.io_id),
-                    output: publication.output.clone(),
+                    output: publication.output,
                     logical_end: publication.logical_end,
                     payload_capacity: publication.payload_capacity,
                     copy_id: publication.copy_id,
@@ -462,7 +462,7 @@ impl NodeResourceRuntime {
             } else {
                 AssetIoV1::PublishNew {
                     slot_id: FileSlotId(publication.io_id),
-                    output: publication.output.clone(),
+                    output: publication.output,
                     logical_end: publication.logical_end,
                     payload_capacity: publication.payload_capacity,
                     copy_id: publication.copy_id,
@@ -586,10 +586,7 @@ impl NodeResourceRuntime {
                 filesystem_domain: bootstrap.plan.filesystem_domain.clone(),
             },
             temporary: !result.native.published(),
-            published: result
-                .native
-                .published()
-                .then(|| publication.output.clone()),
+            published: result.native.published().then_some(publication.output),
             logical_len: observed.identity().size,
             reported_allocated_bytes: v2::NativeValue::Known {
                 value: observed.reported_allocated_bytes(),

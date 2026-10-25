@@ -627,7 +627,18 @@ pub(super) fn change(
     {
         return Err(codec::invalid());
     }
-    let row: (i64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>, i64, String) = tx.query_row(
+    type ProducerHolderRow = (
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        i64,
+        String,
+    );
+    let row: ProducerHolderRow = tx.query_row(
         "SELECT adoption_sequence,operation_id,previous_owner_id,current_owner_id,head_operation_id,head_revision,root_member_id,root_pid,root_creation_marker FROM recovered_r_holders WHERE obligation_id=?1 ORDER BY adoption_sequence DESC LIMIT 1",
         [h.obligation_id.as_bytes()],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?)),

@@ -2,6 +2,12 @@
 use super::*;
 use crate::resource_custody::codec_v2 as v2;
 
+// Named SQL row shapes keep the source and target lineage fields distinct
+// without changing their inline representation or creating new allocations.
+type RetainedObligationRow = (Vec<u8>, Vec<u8>, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+type SettledProducerRow = (String, Vec<u8>, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+type ProducerResourcesRow = (String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+
 pub(super) fn load(connection: &Connection) -> Result<Vec<RetainedAssetOwner>, CustodyError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version == 1 {
@@ -51,7 +57,7 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<RetainedAssetOwner>, C
         let v2::RetainedAssetsDocument::V1(custody) = document else {
             unreachable!()
         };
-        let (owner, graph, manifest_json, resources, target_epoch, trial): (Vec<u8>, Vec<u8>, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>) = connection.query_row("SELECT owner_id,graph_id,manifest_json,resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1", [id.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+        let (owner, graph, manifest_json, resources, target_epoch, trial): RetainedObligationRow = connection.query_row("SELECT owner_id,graph_id,manifest_json,resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1", [id.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
         let v2::ManifestDocument::V2(manifest) = v2::decode_manifest(&manifest_json)? else {
             return Err(codec::invalid());
         };
@@ -71,7 +77,7 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<RetainedAssetOwner>, C
         {
             return Err(codec::invalid());
         }
-        let (producer_phase, producer_graph, producer_settlement, original, original_epoch, original_trial): (String, Vec<u8>, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>) = connection.query_row("SELECT phase,graph_id,settlement_json,resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1", [custody.producer_obligation_id.uuid().as_bytes()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+        let (producer_phase, producer_graph, producer_settlement, original, original_epoch, original_trial): SettledProducerRow = connection.query_row("SELECT phase,graph_id,settlement_json,resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1", [custody.producer_obligation_id.uuid().as_bytes()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
         let original = codec::vector_from_bytes(&original)?;
         if producer_phase != "settled"
             || codec::uuid_from_bytes(&producer_graph)? != custody.producer_graph_id.uuid()
@@ -174,8 +180,7 @@ fn validate_v2_row(
     id: Uuid,
     custody: &v2::RetainedAssetsV2,
 ) -> Result<(), CustodyError> {
-    let (owner, graph, manifest_json, resources, target_epoch, trial):
-        (Vec<u8>, Vec<u8>, String, Vec<u8>, Vec<u8>, Option<Vec<u8>>) = connection.query_row(
+    let (owner, graph, manifest_json, resources, target_epoch, trial): RetainedObligationRow = connection.query_row(
             "SELECT owner_id,graph_id,manifest_json,resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1",
             [id.as_bytes()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
@@ -238,8 +243,7 @@ fn validate_v2_row(
     )?;
     let full = source_fold.frozen_snapshot(plan)?;
     v2::validate_retained_resources_v2(&manifest, custody, &full, retained)?;
-    let (producer_phase, producer_graph, original, original_epoch, original_trial):
-        (String, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>) = connection.query_row(
+    let (producer_phase, producer_graph, original, original_epoch, original_trial): ProducerResourcesRow = connection.query_row(
             "SELECT phase,graph_id,resources,allocation_epoch,trial_group_id FROM obligations WHERE obligation_id=?1",
             [custody.producer_obligation_id.uuid().as_bytes()],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),

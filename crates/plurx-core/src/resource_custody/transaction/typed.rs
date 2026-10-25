@@ -259,7 +259,8 @@ fn validate_direct_read_domain_link(
             handle.graph_id,
         );
     }
-    let old: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>)> = tx
+    type LinkedDomainRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>);
+    let old: Option<LinkedDomainRow> = tx
         .query_row(
             "SELECT owner_id,graph_id,allocation_epoch,resources,manifest_json,obligation_id FROM obligations WHERE obligation_id=?1 AND phase!='settled'",
             [target.as_bytes()],
