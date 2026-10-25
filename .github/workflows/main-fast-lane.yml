@@ -526,6 +526,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -533,20 +534,17 @@ jobs:
           grep -Fxq "Xcode 27.1" <<< "$xcode_version"
           grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
-      - name: Build and test native macOS server tray
+      - name: Retain or execute native macOS server tray evidence
         if: needs.scope.outputs.desktop_macos == 'true'
-        # Keep desktop XCTest namespaces out of mobile unit receipt parsing.
-        # The complete native output is preserved independently, including failures.
-        run: |
-          mkdir -p target/validation
-          make desktop-macos-check > target/validation/desktop-macos-check.log 2>&1
-          echo "Native macOS server tray build and unit checks passed."
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.desktop_macos_retention --fresh-on-new-inputs
       - name: Preserve native macOS server tray check output
         if: always() && needs.scope.outputs.desktop_macos == 'true'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: desktop-macos-check-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/validation/desktop-macos-check.log
+          path: target/validation/desktop-macos-retention
           if-no-files-found: error
           retention-days: 14
       - name: Verify the pinned mobile Apple toolchain

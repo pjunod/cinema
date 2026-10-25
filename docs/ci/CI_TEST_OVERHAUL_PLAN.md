@@ -218,6 +218,19 @@ The badge-oriented lint workflow still launches, because an omitted required
 workflow can remain pending. It resolves the same scope and turns a docs-only
 run into a small successful job without installing Rust or running Clippy.
 
+### Native desktop reuse retains the original execution
+
+The main fast lane's desktop Apple step uses the narrow
+[native pass retention contract](NATIVE-MACOS-PASS-RETENTION.md). It authenticates
+the completed run/job/archive and exact source test inventory, reconstructs the
+closed Git input manifest and records `retained_prior_execution`. It does not
+change desktop/mobile scope, rerun known successful native cases on an evidence
+failure, or manufacture current test events/build products. Fresh make requires
+explicit new-input policy and complete classified history. Source is prepared;
+independent review and qualification remain pending. Controller compatibility
+uses its existing reviewed-invocation policy only after actual completed review;
+async evidence keeps its stricter identical-invocation rule.
+
 ### 5.4 Acceptance checks
 
 ```bash
