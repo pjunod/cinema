@@ -63,9 +63,9 @@ async function translationRequest(state,path,{method="GET",body=null,headers={},
     const bytes=await translationReadBytes(response,max);
     if(!state.current())throw Error("Retired translation response");
     if(!response.ok){
-      let code="network_error";try{const error=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));if(typeof error.code==="string")code=error.code;if(!headerClock)translationClock(state,error.server_now_ms,started);}catch(error){void error;}
+      let code="network_error",legacySetupError=false;try{const error=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));if(typeof error.code==="string")code=error.code;else legacySetupError=path.startsWith("/subtitle-transcription/")&&typeof error.error==="string";if(!headerClock)translationClock(state,error.server_now_ms,started);}catch(error){void error;}
       if(response.status===401&&auth===AUTH_GENERATION&&token===TOKEN&&typeof logout==="function")void logout({revoke:false});
-      const error=Object.assign(new Error(translationFailure(response.status===403?"permission_denied":code)),{code:"",status:response.status});error.code=response.status===403?"permission_denied":code;error.status=response.status;throw error;
+      const error=Object.assign(new Error(legacySetupError&&response.status!==403?"Model setup request failed. Refresh worker status, then retry. Check Activity for an existing job.":translationFailure(response.status===403?"permission_denied":code)),{code:"",status:response.status});error.code=response.status===403?"permission_denied":code;error.status=response.status;throw error;
     }
     if(!/application\/json/i.test(response.headers.get("content-type")||""))throw Error("Unexpected translation response type");
     if(raw)return {response,data:null,bytes,started};
@@ -490,6 +490,27 @@ function translationProfileChoices(profiles,selected){
   const rows=profiles.slice();if(selected&&!rows.some(row=>row.profile_id===selected))rows.unshift({profile_id:selected,model_id:"Saved model",activation_state:"unavailable"});
   return '<option value="">Not configured</option>'+rows.map(row=>`<option value="${esc(row.profile_id)}"${row.profile_id===selected?" selected":""}>${esc(row.label||row.model_id)} · ${esc(row.activation_state||"unavailable")}</option>`).join("");
 }
+function translationSetupChoices(setup){
+  const profiles=setup.catalog?.profiles||[],profileInput=translationInput(setup.panel,"[data-translation-setting-profile]"),languageInput=translationInput(setup.panel,"[data-translation-setting-language]");
+  let selected=profileInput.value;
+  if(!setup.choicesLoaded&&!setup.edit&&!setup.saved.profile_id&&!selected){const active=profiles.filter(row=>row.activation_state==="active");if(active.length===1)selected=active[0].profile_id;}
+  const language=languageInput.value,languages=[...new Set(profiles.flatMap(row=>row.input_languages||[]))];if(language&&!languages.includes(language))languages.push(language);
+  profileInput.innerHTML=translationProfileChoices(profiles,selected);profileInput.value=selected;
+  languageInput.innerHTML='<option value="">Choose for each movie</option>'+languages.map(code=>`<option value="${esc(code)}"${code===language?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("");languageInput.value=language;
+  if(profiles.length)setup.choicesLoaded=true;
+}
+function translationSetupReason(code){
+  const reasons={output_invalid:"The model test could not prepare or validate captions. Check server storage and logs, then retry Test.",inference_failed:"The model speech test could not run recognition. Retry Test; if it fails again, update or repair this server package.",inference_timeout:"The model speech test exceeded its time limit. Retry when this server has capacity.",decode_failed:"The model speech test could not decode its sample audio. Update or repair this server package, then retry Test.",model_download_failed:"The model download failed. Check this server’s network access, then retry Download and test.",model_verification_failed:"The model failed its integrity or speech test. Retry Download and test.",model_self_test_failed:"The English translation test failed. Retry Download and test.",translation_unverified:"Test this model for English translation.",engine_unavailable:"This server’s packaged speech engine is unavailable. Update or repair its server package, then retry.",packaged_engine_unqualified:"This server’s packaged speech engine is unavailable. Update or repair its server package, then retry.",missing_model:"Download and test this model on a compatible server.",model_missing:"Download and test this model on a compatible server.",model_unavailable:"Download and test this model on a compatible server.",insufficient_disk:"Free space on this server, then retry Download and test.",waiting_for_playback_capacity:"Waiting for playback capacity. The test runs when this server has capacity.",worker_interrupted:"The worker stopped. Retry Download and test.",waiting_for_worker:"Waiting for a compatible server.",worker_source_unavailable:"Waiting for a compatible server with source access.",worker_not_current:"This server is no longer current. Refresh worker status and choose a current server.",unavailable_worker:"The server is unavailable. Refresh worker status and retry.",unsupported_worker:"This server cannot run the packaged speech engine. Choose a compatible server.",queue_full:"The background queue is full. Retry after current jobs finish.",quota_exceeded:"The background work limit was reached. Retry after current jobs finish.",conflict:"Another request changed this work. Refresh worker status before retrying.",configuration_conflict:"The configuration changed. Reload saved settings before retrying.",disabled:"Model setup is paused. Check the server and retry.",unknown:"Worker status is unknown. Refresh worker status.",network_error:"Model status is unavailable. Retry status or check Activity."};
+  if(!Object.hasOwn(reasons,code))return "Model setup could not finish. Refresh worker status and check Activity before retrying.";
+  return reasons[code];
+}
+function translationSetupNeedsClock(setup,intent){
+  return !intent&&(!setup.clock||performance.now()-setup.clock.at>240000);
+}
+function translationSetupBusy(setup,busy){
+  setup.modelBusy=busy;
+  for(const [selector,label]of [["[data-translation-install]","Download and test"],["[data-translation-test]","Test English translation"]]){const button=setup.panel.querySelector(selector);if(button){button.disabled=busy;button.textContent=busy&&setup.modelAction===(selector.includes("install")?"install":"verify")?"Working…":label;}}
+}
 function translationWorkerFresh(setup,worker){
   if(!setup.clock)return false;const now=setup.clock.server+Math.max(0,performance.now()-setup.clock.at);
   return worker.current===true&&Number.isFinite(worker.observed_at_ms)&&worker.observed_at_ms<=now+30000&&Number.isFinite(worker.expires_at_ms)&&worker.expires_at_ms>now;
@@ -497,7 +518,7 @@ function translationWorkerFresh(setup,worker){
 function translationWorkerStatus(setup,worker,modelId,profileId){
   if(!translationWorkerFresh(setup,worker))return "unknown";
   const capability=worker.capabilities?.find(row=>row.model_id===modelId&&row.profile_id===profileId);
-  const allowed=["unknown","missing","unverified_cache","installing","verifying","verified","verification_failed","engine_unavailable"];
+  const allowed=["unknown","missing","installed","unverified_cache","installing","verifying","verified","verification_failed","engine_unavailable"];
   return allowed.includes(capability?.status)?capability.status:"unknown";
 }
 function translationSetupEvidence(setup){
@@ -506,11 +527,12 @@ function translationSetupEvidence(setup){
   if(setup.workerProfile!==selected){setup.workerProfile=selected;setup.workerSelectionInitialized=false;}
   const old=new Set([...setup.panel.querySelectorAll('[name="translation-worker"]:checked')].map(node=>node.value));
   const evidence=setup.panel.querySelector("[data-translation-workers]");if(!evidence)return;
-  const label={unknown:"Readiness unknown",missing:"Model missing",unverified_cache:"Download cached · Install or Test to finish",installing:"Installing",verifying:"Testing English translation",verified:"Verified for English translation",verification_failed:"Translation test failed",engine_unavailable:"Packaged engine unavailable"};
+  const label={unknown:"Readiness unknown",missing:"Model missing",unverified_cache:"Download cached · Install or Test to finish",installing:"Installing",verifying:"Testing English translation",installed:"Downloaded · Test to finish",verified:"Verified for English translation",verification_failed:"Translation test failed",engine_unavailable:"Packaged engine unavailable"};
   evidence.innerHTML=(model?`<p>${esc(model.label)} · ${esc(typeof fmtSize==="function"?fmtSize(model.download_bytes):String(model.download_bytes)+" bytes")} · ${esc(model.license)}</p>`:"")+(profile&&profile.activation_state!=="active"?'<p class="hint">This translation model is not yet available for playback. Saved enablement remains editable.</p>':"")+(setup.catalog?.workers||[]).map(worker=>{
     const fresh=translationWorkerFresh(setup,worker),compatible=!!profile&&worker.eligible&&fresh&&worker.engine?.adapter_contract===profile?.adapter_contract&&translationDigest(worker.engine?.binary_sha256),status=translationWorkerStatus(setup,worker,profile?.model_id,selected);
     const checked=setup.workerSelectionInitialized?old.has(worker.node_id):compatible;
-    return `<p><label class="chk"><input name="translation-worker" type="checkbox" value="${esc(worker.node_id)}"${compatible?checked?" checked":"":" disabled"}> ${esc(worker.label||worker.node_id)}</label> · ${esc(label[status])}</p>`;
+    const capability=worker.capabilities?.find(row=>row.model_id===profile?.model_id&&row.profile_id===selected),reason=!fresh?"unknown":!worker.eligible?"unsupported_worker":!worker.engine?"engine_unavailable":profile&&!compatible?"engine_unavailable":capability?.reason;
+    return `<p><label class="chk"><input name="translation-worker" type="checkbox" value="${esc(worker.node_id)}"${compatible?checked?" checked":"":" disabled"}> ${esc(worker.label||worker.node_id)}</label> · ${esc(label[status])}${reason?`<br><span class="hint">${esc(translationSetupReason(reason))}</span>`:""}</p>`;
   }).join("")||"No current worker observations are available.";
   setup.workerSelectionInitialized=true;
 }
@@ -525,13 +547,13 @@ async function openTranslationSettings(){
     try{setup.catalog=(await translationRequest(setup,"/subtitle-translation/models")).data;}catch(error){if(!setup.current())return;setup.catalogError=error.message;}
     if(!setup.current())return;
     const profiles=setup.catalog?.profiles||[],languages=[...new Set(profiles.flatMap(profile=>profile.input_languages||[]))];if(saved.preferred_spoken_language&&!languages.includes(saved.preferred_spoken_language))languages.push(saved.preferred_spoken_language);
-    panel.innerHTML=`<form data-translation-settings><label class="chk"><input type="checkbox" data-translation-setting-enabled${saved.enabled?" checked":""}> Enable progressive English translation</label><p class="hint">Readiness is advisory. Saving an enabled but unconfigured choice is allowed.</p><label>Model <select data-translation-setting-profile>${translationProfileChoices(profiles,saved.profile_id)}</select></label><label>Preferred spoken language <select data-translation-setting-language><option value="">Choose for each movie</option>${languages.map(code=>`<option value="${esc(code)}"${code===saved.preferred_spoken_language?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("")}</select></label><div data-translation-workers></div><button type="button" class="sm" data-translation-install>Install selected model</button> <button type="button" class="ghost sm" data-translation-test>Test English translation</button> <button type="button" class="ghost sm" data-translation-worker-refresh>Refresh worker status</button><p data-translation-model-status role="status" aria-live="polite"></p><button type="submit" class="sm">Save</button><p data-translation-save-status role="status" aria-live="polite"></p></form>`;
+    panel.innerHTML=`<form data-translation-settings><label class="chk"><input type="checkbox" data-translation-setting-enabled${saved.enabled?" checked":""}> Enable progressive English translation</label><p class="hint">1. Download and test the model. 2. Enable translation and Save. Then choose Translate to English in the player.</p><label>Model <select data-translation-setting-profile>${translationProfileChoices(profiles,saved.profile_id)}</select></label><label>Preferred spoken language <select data-translation-setting-language><option value="">Choose for each movie</option>${languages.map(code=>`<option value="${esc(code)}"${code===saved.preferred_spoken_language?" selected":""}>${esc(typeof subtitleLanguageName==="function"?subtitleLanguageName(code):code)}</option>`).join("")}</select></label><div data-translation-workers></div><button type="button" class="sm" data-translation-install>Download and test</button> <button type="button" class="ghost sm" data-translation-test>Test English translation</button> <button type="button" class="ghost sm" data-translation-worker-refresh>Refresh worker status</button><p data-translation-model-status role="status" aria-live="polite"></p><button type="submit" class="sm">Save</button><p data-translation-save-status role="status" aria-live="polite"></p></form>`;
     for(const input of panel.querySelectorAll("[data-translation-settings] input,[data-translation-settings] select"))input.addEventListener("change",translationSetupChanged);
     panel.querySelector("form").addEventListener("submit",event=>{event.preventDefault();void saveTranslationSettings();});
     panel.querySelector("[data-translation-install]").addEventListener("click",()=>translationSetupModel("install"));
     panel.querySelector("[data-translation-test]").addEventListener("click",()=>translationSetupModel("verify"));
     panel.querySelector("[data-translation-worker-refresh]").addEventListener("click",()=>translationRefreshSetup());
-    translationSetupEvidence(setup);if(setup.catalogError)panel.querySelector("[data-translation-model-status]").textContent="Worker observations unavailable. Saved choices remain editable.";
+    translationSetupChoices(setup);translationSetupEvidence(setup);if(setup.catalogError)panel.querySelector("[data-translation-model-status]").textContent="Worker observations unavailable. Saved choices remain editable.";
   }catch(error){if(setup.current())panel.textContent=error.message;}
 }
 async function saveTranslationSettings(){
@@ -541,6 +563,8 @@ async function saveTranslationSettings(){
   const key=JSON.stringify(desired);if(setup.saveKey!==key){setup.saveIntent=null;setup.saveKey=key;}
   const request=setup.saveRequest={};const status=setup.panel.querySelector("[data-translation-save-status]");status.textContent="Saving…";
   try{
+    if(translationSetupNeedsClock(setup,setup.saveIntent)&&!await translationRefreshSetup())throw Error("Worker status is unavailable. Refresh worker status before saving.");
+    if(!setup.current()||setup.saveRequest!==request)return;
     const body=setup.saveIntent||(setup.saveIntent={...translationEnvelope(setup),expected_revision:setup.saved.revision,...desired});
     const {data}=await translationRequest(setup,"/subtitle-translation",{method:"PUT",body});
     if(!setup.current()||setup.saveRequest!==request)return;
@@ -550,26 +574,29 @@ async function saveTranslationSettings(){
 async function translationRefreshSetup(){
   const setup=TRANSLATION_SETUP;if(!translationSetupCurrent(setup))return false;
   const request=setup.refresh={},operation=setup.operation;
-  try{const {data}=await translationRequest(setup,"/subtitle-translation/models");if(!setup.current()||setup.refresh!==request||setup.operation!==operation)return false;setup.catalog=data;translationSetupEvidence(setup);return true;}
+  try{const {data}=await translationRequest(setup,"/subtitle-translation/models");if(!setup.current()||setup.refresh!==request||setup.operation!==operation)return false;setup.catalog=data;translationSetupChoices(setup);translationSetupEvidence(setup);return true;}
   catch(error){if(setup.current()&&setup.refresh===request&&setup.operation===operation)setup.panel.querySelector("[data-translation-model-status]").textContent="Worker status unavailable. Refresh to retry; saved controls remain editable.";return false;}
 }
 function translationSetupModelRows(setup){
   const status=setup.panel.querySelector("[data-translation-model-status]");status.replaceChildren();
-  for(const row of setup.rows){const paragraph=document.createElement("p"),worker=setup.catalog?.workers?.find(worker=>worker.node_id===row.node_id);paragraph.textContent=`${worker?.label||row.node_id}: ${row.job?.phase||row.job?.state||(["accepted","existing"].includes(row.outcome)?row.outcome:"not accepted")}. `;if(translationId(row.job_id)){const link=document.createElement("a");link.href="#/activity/jobs/"+row.job_id;link.textContent="Follow this job in Activity";paragraph.appendChild(link);}status.appendChild(paragraph);}
+  const phases={queued:"Queued",running:"Running model test",waiting_for_capacity:"Waiting for server capacity",downloading:"Downloading model",verifying:"Testing English translation",decoding:"Decoding test audio",transcribing:"Running speech test",validating:"Validating",publishing:"Publishing",succeeded:"Download and test complete",failed:"Failed",cancelled:"Cancelled"};
+  for(const row of setup.rows){const paragraph=document.createElement("p"),worker=setup.catalog?.workers?.find(worker=>worker.node_id===row.node_id),phase=row.job?.phase||row.job?.state,reason=row.job?.reason||row.reason||(!["accepted","existing"].includes(row.outcome)?row.outcome:null);paragraph.textContent=`${worker?.label||row.node_id}: ${phases[phase]||phases[row.job?.state]||(["accepted","existing"].includes(row.outcome)?"Queued":"Not accepted")}. ${reason?translationSetupReason(reason)+" ":""}`;if(translationId(row.job_id)){const link=document.createElement("a");link.href="#/activity/jobs/"+row.job_id;link.textContent="Follow this job in Activity";paragraph.appendChild(link);}status.appendChild(paragraph);}
 }
 async function translationSetupModel(action){
-  const setup=TRANSLATION_SETUP;if(!translationSetupCurrent(setup))return;
+  const setup=TRANSLATION_SETUP;if(!translationSetupCurrent(setup)||setup.modelBusy||!["install","verify"].includes(action))return;
   const profileId=translationInput(setup.panel,"[data-translation-setting-profile]").value,profile=setup.catalog?.profiles?.find(row=>row.profile_id===profileId),nodeIds=[...setup.panel.querySelectorAll('[name="translation-worker"]:checked')].filter(node=>!node.disabled).map(node=>node.value);
   const status=setup.panel.querySelector("[data-translation-model-status]");
   if(!profile||!translationProfileLimits(profile)||!nodeIds.length||nodeIds.length>16){status.textContent="Choose a model and current named worker.";return;}
   const key=JSON.stringify([action,profile.model_id,profileId,nodeIds]);if(setup.modelKey!==key){setup.modelIntent=null;setup.modelKey=key;}
-  const operation=setup.operation={};clearTimeout(setup.timer);
+  const operation=setup.operation={};clearTimeout(setup.timer);setup.modelAction=action;translationSetupBusy(setup,true);status.textContent=action==="install"?"Requesting model download and test…":"Requesting English translation test…";
   try{
+    if(translationSetupNeedsClock(setup,setup.modelIntent)&&!await translationRefreshSetup())throw Error("Worker status is unavailable. Refresh worker status before downloading or testing.");
+    if(!setup.current()||setup.operation!==operation)return;
     const body=setup.modelIntent||(setup.modelIntent={...translationEnvelope(setup),version:2,purpose:"translation",profile_id:profileId,node_ids:nodeIds});
     const {data}=await translationRequest(setup,`/subtitle-transcription/models/${encodeURIComponent(profile.model_id)}/${action}`,{method:"POST",body});if(!setup.current()||setup.operation!==operation)return;
     if(data.version!==2||data.purpose!=="translation"||data.profile_id!==profileId||data.model_id!==profile.model_id||!Array.isArray(data.operations)||data.operations.length>16)throw Error("Invalid model operation response");
     setup.rows=data.operations.map(row=>({...row,model_id:profile.model_id,profile_id:profileId}));setup.modelIntent=null;translationSetupModelRows(setup);void translationSetupPoll(setup,operation,profile);
-  }catch(error){if(setup.current()&&setup.operation===operation){translationRejectIntent(setup,"modelIntent",error);status.textContent=error.message;}}
+  }catch(error){if(setup.current()&&setup.operation===operation){translationRejectIntent(setup,"modelIntent",error);translationSetupBusy(setup,false);status.textContent=error.message;}}
 }
 async function translationSetupPoll(setup,operation,profile){
   if(!setup.current()||setup.operation!==operation)return;
@@ -582,8 +609,9 @@ async function translationSetupPoll(setup,operation,profile){
     for(const row of setup.rows){if(row.job?.state!=="succeeded")continue;const worker=setup.catalog?.workers?.find(worker=>worker.node_id===row.node_id);if(worker&&translationWorkerStatus(setup,worker,row.model_id,row.profile_id)==="verified")continue;
       row.deadline??=performance.now()+profile.limits.retry_max_ms;if(performance.now()<row.deadline)again=true;updating=true;
     }
+    translationSetupBusy(setup,again);
     if(updating){const status=setup.panel.querySelector("[data-translation-model-status]"),paragraph=document.createElement("p"),retry=document.createElement("button");paragraph.textContent="Translation verification status is updating. ";retry.type="button";retry.textContent="Refresh verification status";retry.addEventListener("click",()=>{for(const row of setup.rows)row.deadline=null;void translationSetupPoll(setup,operation,profile);});paragraph.appendChild(retry);status.appendChild(paragraph);}
-  }catch(error){if(setup.current()&&setup.operation===operation){translationSetupModelRows(setup);const retry=document.createElement("button");retry.type="button";retry.textContent="Retry model status";retry.addEventListener("click",()=>translationSetupPoll(setup,operation,profile));setup.panel.querySelector("[data-translation-model-status]").appendChild(retry);}}
+  }catch(error){if(setup.current()&&setup.operation===operation){translationSetupBusy(setup,setup.rows.some(row=>["accepted","existing"].includes(row.outcome)&&!["succeeded","failed","cancelled"].includes(row.job?.state)));translationSetupModelRows(setup);const status=setup.panel.querySelector("[data-translation-model-status]"),message=document.createElement("p");message.textContent="Model status is unavailable. Retry status or check Activity to resolve the current job.";status.appendChild(message);const retry=document.createElement("button");retry.type="button";retry.textContent="Retry model status";retry.addEventListener("click",()=>translationSetupPoll(setup,operation,profile));setup.panel.querySelector("[data-translation-model-status]").appendChild(retry);}}
   if(again&&setup.current()&&setup.operation===operation)setup.timer=setTimeout(()=>translationSetupPoll(setup,operation,profile),profile.limits.poll_max_ms);
 }
 function translationReset(){
