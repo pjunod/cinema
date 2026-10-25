@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	# M5: build the private mpv and libplacebo (plurx closed-form display
+	# management, docs/clients/LINUX-PLAYER-PLAN.md section 5) into build/.
+
+override_dh_auto_test:
+	python3 -m unittest discover -s tests -p 'test_*.py'

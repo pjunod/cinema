@@ -161,8 +161,12 @@ history-check: ## Verify every corrective commit has current regression evidence
 operations-check: ## Verify deploy, CI, container, and client shipping contracts
 	@python3 -m unittest discover -s tests/operations -p 'test_*.py'
 
+.PHONY: linux-player-check
+linux-player-check: ## Test the plurx Player launcher against a fake server and a fake mpv (LINUX-PLAYER-PLAN M4)
+	@python3 -m unittest discover -s clients/linux-player/tests -p 'test_*.py'
+
 .PHONY: check
-check: validation-lint history-check operations-check benchmark-check rust-check ## History + operations + catalog + benchmark + Rust baseline
+check: validation-lint history-check operations-check linux-player-check benchmark-check rust-check ## History + operations + launcher + catalog + benchmark + Rust baseline
 
 .PHONY: spike-lock-check
 spike-lock-check: ## Prove the isolated spike's lockfile still resolves
@@ -1595,6 +1599,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
+	# Settings → Playback → Open titles in, and the plurx Player handoff (LINUX-PLAYER-PLAN M3).
+	@node --test tests/web/linux-player-handoff.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js

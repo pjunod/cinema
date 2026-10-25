@@ -1,0 +1,25 @@
+Source: plurx-player
+Section: video
+Priority: optional
+Maintainer: plurx maintainers <noreply@plurx.invalid>
+Build-Depends: debhelper-compat (= 13), python3 (>= 3.10)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+# M5: the private mpv + libplacebo build adds its build dependencies here
+# (meson, ninja, libvulkan-dev, libwayland-dev, libavcodec-dev, ...) and the
+# package becomes Architecture: amd64.
+
+Package: plurx-player
+Architecture: all
+Depends: ${misc:Depends}, python3 (>= 3.10), zenity
+# M5: the private build replaces this; until then the system mpv is used.
+Recommends: mpv
+Description: Dolby Vision playback of plurx titles on Linux
+ plurx Player plays titles handed over from the plurx web app ("Open titles
+ in: plurx Player") in mpv, keeping the original Dolby Vision stream for
+ profile 5 and 8 titles and receiving profile 7 FEL titles as profile 8.1.
+ .
+ HDR output needs a Wayland compositor with wp_color_manager_v1 in HDR mode,
+ such as GNOME in HDR mode. An accurate target luminance needs a compositor
+ that reports the panel's real luminance; stock compositors may report a
+ default instead.

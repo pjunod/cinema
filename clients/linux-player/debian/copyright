@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: plurx-player
+Comment: The launcher is part of plurx; see LICENSE and NOTICE at the
+ repository root. M5 adds the private mpv and libplacebo builds, whose own
+ terms (GPL-2.0-or-later / LGPL-2.1-or-later) must be listed here then.
+
+Files: *
+Copyright: plurx contributors
+License: Apache-2.0
+ On Debian systems the full text is in /usr/share/common-licenses/Apache-2.0.
