@@ -202,7 +202,7 @@ impl TranscodeManager {
             subtitle_burn: request.subtitle_burn,
             subtitle_digest: encoding.subtitle_digest.clone(),
             hdr10_requested: request.hdr10,
-            grade: encoding.options.pipeline.output_grade(),
+            grade: encoding.delivered_output_grade(),
             normalized_geometry: context.is_some_and(|context| context.normalized_geometry),
             profile: context
                 .and_then(|context| context.profile)

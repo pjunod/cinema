@@ -1517,7 +1517,7 @@ mod tests {
         // The incumbent's published response names its candidate: the
         // measured-Link verdict records that candidate's rung.
         let incumbent = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest([4; 32]),
             recipe_digest: [4; 32],
             route: CandidateRoute::Encode,
@@ -2586,7 +2586,7 @@ mod tests {
         let row = |height: u32| {
             let digest = [height as u8; 32];
             QualityCandidate {
-                processed_hdr10: false,
+                processed_dv: false,
                 id: CandidateId::for_recipe_digest(digest),
                 recipe_digest: digest,
                 route: CandidateRoute::Encode,
@@ -2945,7 +2945,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [12; 32];
         let original = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Remux,
@@ -3018,7 +3018,7 @@ mod tests {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
         let digest = [4; 32];
         let candidate = QualityCandidate {
-            processed_hdr10: false,
+            processed_dv: false,
             id: CandidateId::for_recipe_digest(digest),
             recipe_digest: digest,
             route: CandidateRoute::Encode,
@@ -3456,7 +3456,7 @@ mod tests {
             [6; 32],
             720,
         );
-        context.selected_candidate.processed_hdr10 = true;
+        context.selected_candidate.processed_dv = true;
         context.selected_candidate.planned_codec = Some("hevc".into());
         context.selected_candidate.grade = plurx_core::transcode::OutputGrade::Hdr10;
         context.catalog_query = Some(query.clone());

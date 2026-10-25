@@ -254,6 +254,8 @@ mod background_jobs_tests;
 pub mod background_jobs_transcode;
 pub mod background_jobs_transcription;
 pub mod classification_schedule;
+pub mod dv_title_jobs;
+mod dv_title_jobs_schema;
 mod library_annotations_schema;
 pub mod offline_claim;
 pub mod offline_expiry;
@@ -2020,6 +2022,7 @@ pub mod keys {
     pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
     /// Opt-in preference for qualified DV rendering to HDR output. Missing is
     /// off. Saving the preference does not establish a worker capability.
+    pub const DV_DISPLAY_TARGET: &str = "playback.dolby_vision_display_target";
     pub const DV_HDR_PROCESSING: &str = "playback.dolby_vision_hdr_processing";
     /// Opt-in preference for qualified FEL reconstruction and P8.1 encoding.
     /// Missing is off; this never overrides the separate DV_CONVERT permission.

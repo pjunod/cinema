@@ -1,7 +1,8 @@
 # Durable-job contract — connect finite authority transitions to source
 
 **Status:** reviewed source contract; bounded qualification complete ·
-**Checked source:** `663b3aa548` · **Scope:** bound `library_scan` and
+**Initial checked source:** `663b3aa548` · **Latest scoped source review:**
+`be610d6472b8717bc034e45404141ef0854c4bf2` · **Scope:** bound `library_scan` and
 `metadata_refresh` workers calling `insert_item_fenced`.
 
 Companion to [README.md](README.md), which gives the reproducible commands,
@@ -10,6 +11,52 @@ which owns acceptance. The transition correspondence below is a **reviewed
 source mapping**, not an automatic refinement proof. Source hashes in
 `mapping.json` detect drift in the reviewed dependency set; they cannot prove
 that set complete or that the abstractions are correct.
+
+## Advisory title readiness — scoped refresh on 2026-10-23
+
+The source delta from A2923b2c to be610d647 adds only the
+`dv_title_readiness` trait/delegation and `TitleReadiness` helper in the two
+drifted files. The helper SELECTs title summary JSON and derives advisory
+counts; it does not enqueue, claim, renew, publish or cancel jobs. Existing
+queue and title-publication transitions and all eleven exact-string anchors
+are unchanged. Their whole-file mapping hashes are rebound to the inspected
+source. This read-only API remains outside the selected library-worker proof;
+no model/configuration change, model replay or new qualification is claimed.
+
+## DV-title additions preserve the selected authority boundary
+
+Codex reviewed the six drifted mapped files at
+`4b359f7923c47a1e8715e826a9b6581a08f60e05` against
+`1f30b4791476acb5d290c2f8e6ed38d07051f31d` on 2026-10-22. Their recorded
+hashes matched that base. The added module registrations, schema installers,
+queue kind/payload/delegates and `JobFence::publish_dv_title` leave the selected
+library workers' bind-before-work path, stable binding, claim CAS/replay,
+exact renewal/cancellation guards, fence/revision counters, reservation and
+receipt transitions, and fenced insertion transaction unchanged. The two
+new shared enqueue/claim predicates apply only to `dv_title_scan`.
+
+The added [title schema](../../crates/plurx-core/src/store/dv_title_jobs.sql)
+was also reviewed because its triggers run on shared files and queue tables.
+Its job/waiter invalidation selects title jobs; its terminal trigger selects
+the title kind. Ordinary file publication may rotate title demand and remove
+title JSON in the same existing transaction, but does not change the selected
+library job's authority or its binding. Both backends install the same
+extension and verify its shape through
+[dv_title_jobs_schema.rs](../../crates/plurx-core/src/store/dv_title_jobs_schema.rs).
+The mapping now tracks these dependencies so later drift requires review.
+
+The [title publisher](../../crates/plurx-core/src/store/dv_title_jobs.rs)
+requires a `dv_title_scan` job and uses its own queue-fenced command, outside
+`insert_item_fenced`. Its source generations, JSON attachment, cancellation
+suppression, scheduling/preemption and replay/retry behavior are **excluded
+from this model**. The existing
+[title contract examples](../../crates/plurx-core/tests/store_contract/dv_title_jobs.rs)
+`title_publication_is_atomic_idempotent_and_never_self_enqueues` and
+`title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield`
+are source-backed runtime regression anchors, not formal guarantees or claims
+that those tests ran in this review. No model, configuration or property was
+changed. This source-mapping review supplies no new execution or qualification
+receipt; the historical bounded result retains its stated scope.
 
 ## Publication checks two independent owners in one transaction
 
@@ -71,15 +118,15 @@ publication files would miss guards they depend on.
 
 | Predicate | Exact source comparison | Consequence at equality | Source anchor |
 |---|---|---|---|
-| Current queue/domain authority | stored expiry `> sample` | Rejected | [queue renewal:630](../../crates/plurx-core/src/store/background_jobs.rs#L630); [Hiqlite domain/bound checks:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
-| Expired queued takeover | stored queue expiry `<= caller now_ms` | Eligible subject to all other guards | [claim:532](../../crates/plurx-core/src/store/background_jobs.rs#L532) |
-| Reservation coverage | held expiry `>= job lease expiry` with same fence/key | Sufficient | [queue renewal:636](../../crates/plurx-core/src/store/background_jobs.rs#L636); [publication:61](../../crates/plurx-core/src/store/hiqlite_publication.rs#L61) |
-| Reservation occupancy | held expiry `> caller now_ms` | No longer occupies a slot | [claim:552](../../crates/plurx-core/src/store/background_jobs.rs#L552) |
-| Not-before | `not_before_ms <= caller now_ms` | Eligible | [claim:535](../../crates/plurx-core/src/store/background_jobs.rs#L535) |
-| Dispatch/resolution window | `now < dispatched` or `now-dispatched >= 120000` | Expired/pruned at upper boundary | [resolve:3465](../../crates/plurx-core/src/store/background_jobs.rs#L3465) |
+| Current queue/domain authority | stored expiry `> sample` | Rejected | [queue renewal:640](../../crates/plurx-core/src/store/background_jobs.rs#L640); [Hiqlite domain/bound checks:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
+| Expired queued takeover | stored queue expiry `<= caller now_ms` | Eligible subject to all other guards | [claim:542](../../crates/plurx-core/src/store/background_jobs.rs#L542) |
+| Reservation coverage | held expiry `>= job lease expiry` with same fence/key | Sufficient | [queue renewal:646](../../crates/plurx-core/src/store/background_jobs.rs#L646); [publication:61](../../crates/plurx-core/src/store/hiqlite_publication.rs#L61) |
+| Reservation occupancy | held expiry `> caller now_ms` | No longer occupies a slot | [claim:562](../../crates/plurx-core/src/store/background_jobs.rs#L562) |
+| Not-before | `not_before_ms <= caller now_ms` | Eligible | [claim:545](../../crates/plurx-core/src/store/background_jobs.rs#L545) |
+| Dispatch/resolution window | `now < dispatched` or `now-dispatched >= 120000` | Expired/pruned at upper boundary | [resolve:3548](../../crates/plurx-core/src/store/background_jobs.rs#L3548) |
 | Domain release | `min(stored expiry, caller now_ms)` | Does not extend lease | [SQLite:125](../../crates/plurx-core/src/store/sqlite/coordination.rs#L125); [Hiqlite:162](../../crates/plurx-core/src/store/hiqlite_coordination.rs#L162) |
 | Successor | same resource/owner/fence, revision+1, successor expiry `> predecessor expiry` | Equal successor expiry invalid | [successor construction:52](../../crates/plurx-core/src/cluster/coordination.rs#L52); [Hiqlite validation:34](../../crates/plurx-core/src/store/hiqlite_publication.rs#L34) |
-| SQLite replacement | additionally successor expiry `> backend sample` | Equal successor expiry invalid | [inside-transaction validation:1985](../../crates/plurx-core/src/store/sqlite/mod.rs#L1985) |
+| SQLite replacement | additionally successor expiry `> backend sample` | Equal successor expiry invalid | [inside-transaction validation:1988](../../crates/plurx-core/src/store/sqlite/mod.rs#L1988) |
 | Hiqlite acceptance | predecessor expiry `> backend sample` and successor expiry `> predecessor expiry` | Implies successor expiry `> sample`; no accepted-publication strength difference | [replacement validation:38](../../crates/plurx-core/src/store/hiqlite_publication.rs#L38); [predecessor UPDATE:49](../../crates/plurx-core/src/store/hiqlite_publication.rs#L49) |
 
 Facade precheck, successor-computation and each backend submission retain
@@ -122,6 +169,7 @@ compaction/removal/cancellation interference.
 | Genre backfill, `state.rs` `provider:genres` | Domain-only |
 | Transcode `manager/produce.rs` with publication_fence | Domain-only example, not a bindable library job kind |
 | `scan/mod.rs`, `metadata/mod.rs`, `metadata/{book,local,genres}.rs` convenience wrappers | Explicitly unfenced; outside the selected model |
+| `plurxd/background_jobs.rs::JobFence::publish_dv_title` → `store/dv_title_jobs.rs::publish` | Queue-fenced title JSON publication; outside the selected `insert_item_fenced` model |
 
 A control that ignores binding must be able to accept an insertion after the
 bound queue authority is invalidated. A control that bypasses bind-before-work

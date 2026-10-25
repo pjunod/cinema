@@ -56,6 +56,19 @@ enum class HomeGrouping(val storageValue: String, val label: String) {
     }
 }
 
+enum class HdrDisplayPeak(val storageValue: String, val label: String, val nits: Int?) {
+    Auto("auto", "Auto (display report or unknown)", null),
+    N400("400", "400 nits", 400), N600("600", "600 nits", 600),
+    N1000("1000", "1000 nits", 1000), N1600("1600", "1600 nits", 1600),
+    N2000("2000", "2000 nits", 2000), N4000("4000", "4000 nits", 4000);
+
+    companion object {
+        fun fromStorage(value: String?): HdrDisplayPeak = entries.firstOrNull {
+            it.storageValue == value
+        } ?: Auto
+    }
+}
+
 /**
  * The stored quality preference. The *menu* is built from the server's
  * advertised ladder (see `qualityOptions`); this enum is the storage vocabulary
@@ -140,6 +153,7 @@ data class ViewerPreferences(
     val libraryPresentation: LibraryPresentation = LibraryPresentation.Rows,
     val homeGrouping: HomeGrouping = HomeGrouping.Category,
     val playbackQuality: PlaybackQuality = PlaybackQuality.Auto,
+    val hdrDisplayPeak: HdrDisplayPeak = HdrDisplayPeak.Auto,
     val subtitleReadiness: SubtitleReadiness = SubtitleReadiness.OnDemand,
     val autoSkip: Boolean = false,
     val autoplayNext: Boolean = true,

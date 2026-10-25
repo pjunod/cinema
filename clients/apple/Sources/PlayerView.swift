@@ -2096,11 +2096,11 @@ struct PlayerView: View {
         guard let delivered, !delivered.isEmpty else { return lit }
         let rendered = DynamicRange.rendered(delivered: delivered, displayHDR: displayHDR)
         if let report = effectiveProcessing,
-           report.matches(generation: activeGeneration, delivered: delivered), rendered == DynamicRange.hdr10 {
+           report.matches(generation: activeGeneration, delivered: delivered), rendered == delivered {
             return PlayerMetadataBadge(kind: .dynamicRange, tone: .hdr,
-                mark: source == DynamicRange.hdr10 ? "HDR10-E" : sourceMark,
+                mark: source == delivered ? report.mark : sourceMark,
                 accessibilityLabel: report.detail,
-                renderedMark: source == DynamicRange.hdr10 ? nil : "HDR10-E",
+                renderedMark: source == delivered ? nil : report.mark,
                 dimmed: source != DynamicRange.hdr10)
         }
         guard rendered != source else {
@@ -2185,8 +2185,8 @@ struct PlayerView: View {
         }
         let rendered = DynamicRange.rendered(delivered: delivered, displayHDR: displayHDR)
         if let report = effectiveProcessing,
-           report.matches(generation: activeGeneration, delivered: delivered), rendered == DynamicRange.hdr10 {
-            return "HDR10-E — \(report.detail)"
+           report.matches(generation: activeGeneration, delivered: delivered), rendered == delivered {
+            return "\(report.mark) — \(report.detail)"
         }
         let long = DynamicRange.longLabel(rendered)
         guard rendered != grade else { return "\(long) (rendering)" }

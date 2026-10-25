@@ -1,7 +1,56 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** planned · **Updated:** 2026-10-19 · **Owner:** Claude, for Paul ·
+**Status:** A–D and F promote to `main` through #1271 by Paul's decision of 2026-10-24; E (creative trims) continues as its own effort and playback keeps reporting `creative_trims_applied:false` / “L1 only” until E is accepted · **Updated:** 2026-10-24 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
+
+Evidence remains bound to its recorded source.
+
+## Current qualification — source-bound evidence through F
+
+| Phase | Retained evidence | Open for promotion |
+|---|---|---|
+| A · title scan/HDR10-E | #1216/#1269 integrated. Original P7 driver348 passed1000/1600; scanner405 passed40 gap cases plus controls at its original source. | Native459 P7/P8 HDR1000 PASS on91cbe; earlier evidence keeps its source. Current-candidate promotion remains. |
+| B–D · metadata, controls, clients | Review398 closed production and harness findings. Focused Rust429 passed3 cases on4499; web425 passed221 checks. Apple434 and Android436 each passed their new identity case once. | Eight new Rust460 cases PASS on91cbe; physical-device acceptance remains separate. |
+| E · trims | Reference349 completed42 vendor commands. Comparison353 fails baseline PQ.110077 and trim deltas.44085/.48964. GPU456/461: 4K mapping steady10.32fps. FIFO491: one continuous `cm_offline` process mapped96 frames at2560×1280, pixel-exact to TIFF488, second48 at27.62fps. Encode493 added P010+NVENC fragmented HEVC: both native exits0, two complete fragments, 0.963× real time end to end; the controller failed only on missing primaries/transfer tags (ffmpeg8.1 frame properties override encoder options for untagged RGB input; `setparams` fixes it). | Not part of this promotion. The vendor tool is a QC referee only. Accurate trims need a source-backed implementation of our own, validated against it. |
+| F · SDR | P7/P8 native427 SDR100 passed on4499:17983 valid L1/zero holes each, four48-frame windows, FEL48/EL0 respectively. Earlier pixel325 retains max1code/limit2. | Valid-L6 SDR passes retained; unknown-L6 source-minimum focused460 cases PASS. |
+
+Effort3cc264068 integrated#1216/#1269:78 regression fields, gate5889 8/8.
+On4499, compiler428 and fast lane5904 (9/9) passed, retaining2044 Python
+positives. Helper404 keeps its original a764 build attribution and13-input
+adoption. Successful unchanged cases are not replayed.
+
+Native418 rejected freshly published title facts because normalization omitted
+the app-owned enrichment. Repair4499 excludes precisely that typed key while
+retaining strict media comparison and title fences; both SDR retries passed.
+Native427 then failed P7 HDR1000 before encoding because stream-only probing
+missed full mastering metadata carried on decoded frames. P8 HDR was unstarted.
+Diagnosis444 found full frame MDCV in both sources. The reviewed repair uses a
+bounded selected-stream frame sidecar, sealed to the held descriptor, source and
+probe identities. It leaves raw probe documents intact and resolves one target
+before policy freeze. Unknown-L6 SDR consumes only the mastering minimum;
+valid-L6 SDR and master remain unsampled. The same review398 closed both repair
+findings445. Source91cbe passed Rust1.97.1 fmt/check/Clippy/link/list457 and all
+eight focused460 cases once. Native459 P7/P8 HDR1000 each pass once, with
+true queue/outer0,17983 valid L1/zero holes and four48-frame720p windows.
+Only failed/unrun HDR cells ran; earlier SDR passes remain attributed to4499.
+
+Paul decided on 2026-10-24 to ship what is done: A–D and F promote with E
+unfinished, so playback reports `creative_trims_applied:false` / “L1 only”, and
+E continues as a separate effort. Promotion runs the main fast lane once on the
+candidate; only failed jobs rerun (Paul, 2026-10-24), and passes stay attributed
+to their sources. Physical-display and full-app FEL EOF acceptance remain
+outside bounded excerpt qualification.
+
+## Stage implementation checkpoints
+
+The PR B, PR C and PR A implementation checkpoints moved to
+[qualification history](DISPLAY-TARGETED-DV-QUALIFICATION-HISTORY.md#stage-implementation-checkpoints-moved-from-the-build-plan)
+on 2026-10-24; they are records, not current status.
+
+### Historical qualification records
+
+Earlier source checkpoints and qualification records are retained verbatim in
+[qualification history](DISPLAY-TARGETED-DV-QUALIFICATION-HISTORY.md).
 
 ## Goal
 
@@ -103,31 +152,43 @@ fixed rule. One title therefore never mixes master and targeted windows.
 - **New argument.** A new output policy value `bt2020-pq-target-<nits>`
   sits alongside `bt2020-pq-master-clip`. `<nits>` is one of the bucket
   values. Any other value is refused.
-- **Per frame:**
-  - Set `source.color.hdr.max_pq_y` from L1 `max_pq / 4095` and
-    `avg_pq_y` from L1 `avg_pq / 4095`. L1 values are 12-bit PQ codes, and
-    libplacebo's own AVDOVI mapping divides the same way. `repr.dovi` does
-    not carry L1, so `color.hdr` is the only path in.
-  - Set `source.color.hdr.max_luma` to the title's mastering peak (L6,
-    else 4000), **not** 10,000. That way a frame whose L1 max is 0
-    (libplacebo reads that as "no metadata") falls back to a sane input
-    peak.
-  - The black level is constant for the title: source `min_luma` =
-    mastering minimum (L6, else 0.005), and target `min_luma` = the same
-    value. Using per-shot L1 min would pump the black floor shot to shot
-    and lift OLED black.
-  - Use `cmap.metadata = PL_HDR_METADATA_CIE_Y` and
-    `cmap.tone_mapping_function = &pl_tone_map_st2094_10`.
-  - Set `target.color.hdr.max_luma = <nits>`.
-  - Set `cmap.contrast_recovery = 0` and `cmap.hybrid_mix = 0` explicitly.
-    The defaults (about 0.3 and 0.2 in this libplacebo) do nothing under
-    clip, but sharpen and blend per channel once the curve compresses, so
-    the output would no longer be ST 2094-10. A test asserts both are 0.
-  - Gamut: start with `pl_gamut_map_clip`. Compressing intensity with a
-    hard clip can shift hue in bright saturated highlights, which are
-    exactly the shots being mapped. The control compares clip against
-    `pl_gamut_map_perceptual` on a fire/neon fixture and keeps the one with
-    the smaller hue error against the master.
+- **Actual method (accepted deviation, 2026-10-19):** preserve the existing
+  native master reconstruction, including its 10,000-nit PQ container and all
+  original DV operations. An explicit stateless custom shader then reads that
+  native BT.2020/PQ RGB float texture, decodes PQ to linear RGB nits, applies the
+  published B.2 rational curve per RGB component as in B.3 equation (7), clips
+  to the target range, and encodes PQ. Existing bilinear/YUV export follows.
+  There is no built-in `pl_tone_map_st2094_10`, CIE_Y renderer metadata execution,
+  adaptive exposure, film/LMS blend, library patch or private LUT in this pass.
+  Method identity: `annex-b2-rgb-fixed-floor-no-expansion-linear-edge-v1`.
+  - Source peak and average are PQ EOTFs of L1 max/avg divided by 4095. A valid
+    max0 uses the fixed title mastering peak (consistent L6, otherwise 4000).
+  - Source and target floors are the same fixed title minimum (consistent L6,
+    otherwise 0.005); actual samples at/below that floor are preserved, including
+    exact zero black. Per-shot L1 min is not used as a rendering endpoint.
+  - B.2 target average is `sqrt(source_average * sqrt(floor * target_peak))`,
+    capped at `0.8 * target_peak` as suggested by the public standard.
+  - Fit the three anchors using an affine normalization: `t=(x-floor)/(peak-floor)`,
+    `u=(y-floor)/(target-floor)`, `u=t/(k*(1-t)+t)` and
+    `k=t_avg*(1-u_avg)/(u_avg*(1-t_avg))`. Finite positive `k`, including its
+    float uniform representation, proves no pole and nonnegative derivative on
+    the actual interval. Dynamic public shader uniforms avoid per-frame pipelines.
+  - **Versioned engineering extensions, not exact B.2 claims:** no inverse
+    expansion when frame peak already fits; a degenerate average/adaptation or
+    nonfinite/nonmonotone fit uses deterministic endpoint-linear compression.
+    Each frame reports its actual curve/fallback reason and max0 provenance.
+    Missing/invalid L1 is never an engineering-curve fallback.
+  - Independent Python controls solve the defining unnormalized anchor equations
+    by Gaussian elimination, not this coefficient expression or libplacebo code.
+    Nondegenerate controls retain the two-code bound; edge controls separately
+    disclose the extension, zero-black, peak and monotonicity requirements.
+  - RGB-component mapping can change saturated-highlight hue. The coordinator's
+    accepted RGB method supersedes the old clip-versus-perceptual choice for PR A:
+    use clip, with saturated-highlight, negative and out-of-range controls. No
+    inactive perceptual flag or second color-volume implementation is added.
+    The old fire/neon comparison has NOT been performed; a perceptual experiment
+    is separately specified future work. No hue-optimal, perceptual-equivalence
+    or calibrated-accuracy claim.
 - **Invalid L1 on a frame of an eligible title** cannot happen (the scan
   excluded such titles). If it does anyway, the window refuses and the
   daemon falls back to the master recipe for the **whole session**, with
@@ -258,9 +319,51 @@ segments). This works with every encoder. The other options are ruled out:
 
 ## Tests
 
+### PR A qualification inventory (definitions; outcomes above)
+
+The coordinator runs these only after complete independent review and fixes.
+Use native Linux, pinned Rust 1.97.1 and the verified API 374 dependency image.
+Do not use historical ARM scripts or reuse an output directory. Every receipt
+binds source archive, binary/dependency hashes, exit status and nonzero matched
+cases/samples. A compile is not a run.
+
+- Core units: title eligibility/old JSON, exact bucket/elision, and
+  `display_target_semantic_digest_separates_all_buckets_and_title_constants`.
+- Daemon units: `display_target_trace_binds_exact_bucket_endpoints_and_raw_l1`
+  and `title_scan_selects_the_catalogue_video_not_an_attached_cover`.
+- Build qualification adapters with `cargo build --locked -p plurx-core --example
+  dv_target_policy --example dv_target_fixtures`. They use the real pure policy
+  and public RPU writer, not a playback route or feature toggle.
+- Build controls with `sh tools/dv_processing/controls/build_target_controls.sh`
+  and the same four explicit dependency/output arguments as the helper build.
+- Run `python3 tools/dv_processing/controls/compare_display_target.py --shader
+  "$CONTROL_BIN/display_target_shader" --output "$EVIDENCE/shader"`. Every Y/U/V
+  code uses the independent Gaussian-anchor oracle (two-code bound): six buckets,
+  L1 sensitivity, monotonic grayscale, zero black, peak, explicit edge extensions
+  and saturated/out-of-range samples.
+- Run `python3 tools/dv_processing/controls/run_display_target_windows.py
+  --helper "$HELPER_BIN/segment_decode_render" --scanner "$HELPER_BIN/scan_title"
+  --policy "$RUST_BIN/dv_target_policy" --fixtures "$RUST_BIN/dv_target_fixtures"
+  --mux "$CONTROL_BIN/make_movie" --ffmpeg "$FFMPEG" --output "$EVIDENCE/windows"`.
+  It encodes bounded P7/P8 sources; checks title accounting, final-frame missing
+  L1, missing/corrupt RPU, inconsistent L6 and truncation; uses actual Rust policy
+  for master elision; checks independent pixels, identical master/different L1
+  targeted output and overlapping-window byte/hash identity. MaxCLL is misleading
+  deliberately, never used to elide the high title.
+- Source changes during either probe invalidate publication under the existing
+  admitted probe/source-revision fence. Fresh scans replace rather than merge
+  title objects. Existing source-fence/probe-publication regressions remain
+  affected final-batch coverage.
+
+The programme-wide table below also includes later metadata/routing/client
+phases. PR A does not write MDCV/CLL, offer a setting or establish real-title/device
+acceptance. Runtime-invalid L1 refuses the private window with a whole-session
+master reason; later session selection owns the whole-session transition, never
+a per-window target/master mix.
+
 | Level | Test | Proves |
 |---|---|---|
-| Core unit | bucket mapping, including elision; caps parsing of `min_nits`/`source` | mapping is total, rounds down, refuses junk |
+| Core unit | bucket mapping, including elision; caps parsing of `max_nits`/`peak_source` | mapping is total, rounds down, refuses junk |
 | Core unit | `playback_enhancement` with `display_target` | DYN active only with a target, and the text names the nits |
 | Daemon unit | two buckets give two `semantic_digest`s (via `DvExportPolicy`); elision gives the master digest | rendition identity |
 | Daemon unit | MDCV/CLL writer: both SEI types and the `mdcv`/`clli` boxes carry the expected values (source primaries, MaxCLL = min(bucket, title max), MaxFALL 0) | metadata reaches both client paths |
@@ -278,26 +381,50 @@ The control fails if the helper ignores the target (peak above PQ(1000)).
 
 ## Cost and performance
 
-- **GPU:** one LUT lookup per pixel in the existing render pass. Measure it
-  with the `DVT` timing method from #1202 (expected under 1 ms per 4K frame).
+- **GPU:** an additional native float shader pass (PQ decode, rational RGB curve,
+  PQ encode) precedes existing export. The old one-LUT/under-1-ms expectation is
+  superseded, not measured. Source-bound `DVT` evidence is needed for throughput.
 - **Cache:** one rendition per bucket in use. Elision covers titles whose
   content already fits.
 - **First-window qualification:** unchanged, one trial per start.
 
 ## Delivery
 
-| PR | Contents | Deploy |
-|---|---|---|
-| A | Title L1 scan (stored with the DV facts) + helper target policy + L1 → CIE_Y + ST 2094-10 + `DvExportPolicy` identity + report operation + control scripts | server image |
-| B | MDCV/CLL writer for processed output (post-encode, reusing `hdr10_index.rs`) | server image |
-| C | Caps `min_nits`/`source`, buckets, elision, Developer setting + enable section, indicator, Activity text | server image |
-| D | Android HdrCapabilities + web display-peak setting (+ Apple value) | server image (web) + Android build |
-| E | Phase 2 trims (after acceptance) | server image |
-| F | Phase 3 SDR target | server image |
+#1216/#1269 are integrated into the effort at3cc264068, preserving all78
+original regression fields. The [current matrix](#current-qualification--source-bound-evidence-through-f)
+owns source-bound evidence. Paul's 2026-10-24 decision promotes A–D and F
+with E unfinished; E continues as its own effort.
 
-Each PR follows the usual lifecycle: draft, one adversarial review, fast
-lane once, merge with `Regression-Test:` lines. STATUS.html is updated as
-each one lands.
+Review398 closed all four production findings and the qualification-fixture
+follow-up at a7642100: actual SDR grade/Main10 facts, L6/L9 contradictions across
+gaps, native SDR identity and activity100 bounds. Pinned Rust403 fmt/check/Clippy
+pass; new scanner regression405 passes40 gap cases plus controls. Other changed
+cases and current native HDR/SDR adoption remain unrun. The bounded native harness
+uses real title policy, claimed-job publication, fresh durable admission and
+normal lease/source checks; it does not prove HTTP/full-app EOF. The old two-case
+reuse test remains; a separate SDR-only case avoids repeating valid cases.
+Both scanner digests include the accumulator; binding rotation clears old facts.
+Two formal producer hashes refresh only reviewed source identity; fences unchanged.
+Promotion qualification is the main fast lane, once, on the exact candidate.
+
+### Stage PRs target one effort branch
+
+Open or retarget each A–F stage PR to `effort/display-targeted-dv`. Before
+merging a stage into the effort, dispatch the manual Effort development gate
+with `compile_only=true`. That gate checks policy, formatting, static web
+contracts and affected compilation; it runs no Rust, Apple or Android unit
+suites. Preserve focused regressions and native/media receipts with their exact
+source identities, and do not treat the compile-only result as unit or device
+qualification.
+
+### One reviewed promotion moves the effort to main
+
+When all stage merges are frozen, merge current `main` into the effort, resolve
+and review the resulting candidate, and open one promotion PR from the effort
+to `main`. Run the Main promotion gate and create the required qualification
+receipt against that exact candidate. If either branch moves, qualify the new
+tree again. Carry A’s 36 `Regression-Test:` anchors and the additional B–F regression
+fields through the promotion PR description and landing message. Do not publish or deploy from a task-stage PR.
 
 ## Risks
 

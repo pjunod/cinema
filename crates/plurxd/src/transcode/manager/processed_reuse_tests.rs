@@ -908,6 +908,14 @@ async fn fixture_with_audio(
         )
     };
     let source_tick = rational("time_base");
+    let source_clock = crate::transcode::source_preparation::held_source_clock(&actual.to_string())
+        .expect("observed held FORMAT clock");
+    let source_origin = crate::transcode::source_preparation::held_dv_source_origin(
+        video,
+        source_tick,
+        source_clock,
+    )
+    .expect("observed common origin");
     let (rate_num, rate_den) = rational("avg_frame_rate");
     let grid = plurx_core::transcode::VodFrameGrid::new(rate_num, rate_den).expect("measured grid");
     assert_eq!(source_tick, (1, 24000));
@@ -1000,6 +1008,26 @@ async fn fixture_with_audio(
             "node".into(),
         ),
     );
+    if destination == DvDestination::Sdr {
+        store
+            .put_setting(keys::DV_DISPLAY_TARGET, "1")
+            .await
+            .expect("SDR display-target policy enabled before the planning snapshot");
+        let source_file = store
+            .get_file(file_id)
+            .await
+            .expect("file")
+            .expect("source");
+        let title_stats =
+            crate::source_probe::publish_title_for_control(&manager, &store, &source_file)
+                .await
+                .expect("real fenced title job publication");
+        assert_eq!(
+            title_stats.eligibility(),
+            plurx_core::scan::dv_title::TitleEligibility::Eligible
+        );
+        assert_eq!(title_stats.decoded_frames, keys.len() as u64);
+    }
     let snapshot = store
         .playback_planning_snapshot(file_id, &QUALITY_PLANNING_KEYS)
         .await
@@ -1008,10 +1036,27 @@ async fn fixture_with_audio(
     let file = &snapshot.file;
     assert_eq!(file.dolby_vision.profile, Some(7));
     let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
-        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],"present":["hdr10","pq"],"max_width":64,"max_height":64}],
+        "v":2,"video":[{"codec":"hevc","profiles":["main10"],"dv_profiles":[8],
+            "present":if destination == DvDestination::Sdr { vec!["sdr"] } else { vec!["hdr10", "pq"] },
+            "max_width":64,"max_height":64}],
+        "display":(destination == DvDestination::Sdr).then(|| serde_json::json!({"hdr":false,"dolby_vision":false})),
         "containers":["mp4"],"transports":["hls"],"hls_hevc_sample_entries":["hvc1"],"dv_transport":"hls",
         "audio":["aac"],"audio_sinks":[{"codec":"aac","max_channels":2,"sample_rates_hz":[48000]}]
     })).expect("caps");
+    let (display_target, display_target_note) = TranscodeManager::display_target_policy(
+        destination == DvDestination::Sdr,
+        caps.display.as_ref(),
+        snapshot.probe_json.as_deref(),
+    )
+    .expect("frozen display-target policy");
+    if destination == DvDestination::Sdr {
+        let target = display_target.expect("eligible complete title selects SDR");
+        assert!(target.is_sdr());
+        assert_eq!(target.nits(), 100);
+        target
+            .resolved_sdr_floor()
+            .expect("SDR floor frozen before admission");
+    }
     let mut query = crate::media_pool::QualityCatalogRequest {
         file_id,
         source_size: file.size,
@@ -1098,6 +1143,27 @@ async fn fixture_with_audio(
     } else {
         control.arg("-an");
     }
+    let (frame_colors, encoder_colors, primaries, transfer, matrix) = if destination
+        == DvDestination::Sdr
+    {
+        (
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "pools=none:frame-threads=1:bframes=0:keyint=3:colorprim=1:transfer=1:colormatrix=1",
+            "bt709",
+            "bt709",
+            "bt709",
+        )
+    } else {
+        (
+            "setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+            "pools=none:frame-threads=1:bframes=0:keyint=3:colorprim=9:transfer=16:colormatrix=9",
+            "bt2020",
+            "smpte2084",
+            "bt2020nc",
+        )
+    };
+    // This black control is encoded directly in its destination color space.
+    // It tests the delivery contract, not the renderer's HDR-to-SDR pixel mapping.
     let status = control
         .args([
             "-frames:v",
@@ -1110,17 +1176,17 @@ async fn fixture_with_audio(
             // Set them on frames too: encoder VUI flags alone leave the MP4
             // nclx primaries/transfer unspecified on supported FFmpeg builds.
             "-vf",
-            "setparams=range=limited:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc",
+            frame_colors,
             "-preset",
             "ultrafast",
             "-x265-params",
-            "pools=none:frame-threads=1:bframes=0:keyint=3:colorprim=9:transfer=16:colormatrix=9",
+            encoder_colors,
             "-color_primaries",
-            "bt2020",
+            primaries,
             "-color_trc",
-            "smpte2084",
+            transfer,
             "-colorspace",
-            "bt2020nc",
+            matrix,
             "-video_track_timescale",
             "24000",
             "-movflags",
@@ -1172,6 +1238,8 @@ async fn fixture_with_audio(
                 panic!("actual reconstructed P81 authoring: {error:?}; retained {retained:?}");
             }
         }
+    } else if destination == DvDestination::Sdr {
+        dv_author_sdr_window(&bytes).expect("strip HDR-only metadata from actual SDR control")
     } else {
         bytes
     };
@@ -1219,11 +1287,15 @@ async fn fixture_with_audio(
         source_keys: &keys,
         source_rpus: &rpus,
         source_tick,
+        source_origin,
         grid,
         first_global_frame: 0,
         encoded: &bytes,
         raster,
-        export_policy: DvExportPolicy::PqBilinearYuv420p10V1 { raster },
+        export_policy: display_target
+            .map_or(DvExportPolicy::PqBilinearYuv420p10V1 { raster }, |target| {
+                DvExportPolicy::DisplayTargetYuv420p10V1 { raster, target }
+            }),
         source_trace: digest(b"lifecycle trace"),
         observed_at: 1,
         decoder: plurx_core::transcode::DecodeBackend::Software,
@@ -1253,9 +1325,16 @@ async fn fixture_with_audio(
         )),
         source: Arc::clone(&source),
         source_offsets: Arc::new(tokio::sync::Semaphore::new(1)),
+        display_target,
+        display: caps.display.clone(),
+        display_target_note: display_target_note.clone(),
         source_tick,
+        source_origin,
         native_bl: (64, 64),
-        source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
+        source_clock,
+        source_mastering: Ok(None),
+        source_mastering_minimum: Ok(None),
+        source_frame_probe: None,
         preferences,
         destination,
         mode: DvProcessingMode::Fel,
@@ -1328,19 +1407,21 @@ async fn fixture_with_audio(
         recipe_digest,
         route: CandidateRoute::Encode,
         planned_codec: Some("hevc".into()),
-        processed_hdr10: true,
+        processed_dv: true,
         normalized_geometry: false,
         width: raster.0,
         height: raster.1,
         target_height: 64,
         average_bps: None,
         peak_bps: None,
-        grade: OutputGrade::Hdr10,
+        grade: encoding.delivered_output_grade(),
         decoder_compatible: true,
         complete_cache: false,
         sustainable: false,
     };
     let mut context = TranscodeManager::candidate_context(&candidate);
+    context.display_target = display_target;
+    context.display_target_note = display_target_note;
     context.catalog_query = Some(query.clone());
     context.canonical_caps = Some(caps.clone());
     context.planning_binding = Some(binding.clone());
@@ -1370,7 +1451,7 @@ async fn fixture_with_audio(
         audio_claim: projected.audio_claim,
         subtitle_burn: None,
         audio_offset_ms: projected.audio_offset_ms,
-        hdr10: true,
+        hdr10: destination != DvDestination::Sdr,
         dv_processing_destination: Some(destination),
         presentation: Presentation::Vod,
         block_budget_secs: None,
@@ -1816,5 +1897,89 @@ async fn staged_processed_roots_reconstruct_both_destinations_without_serialized
         drop(f.worker.take());
         assert_eq!(f.encoding.admissions.in_use(), 0);
         assert_eq!(f.encoding.admissions.software_in_use(), 0);
+    }
+}
+
+#[tokio::test]
+async fn staged_processed_sdr_root_keeps_main10_and_sdr_grade_across_admission_and_replay() {
+    let mut f = fixture(DvDestination::Sdr).await;
+    let (_, session, json) = stage(&f).await;
+    assert!(
+        prepare(&f, &session, &json).await,
+        "fresh admitted SDR successor"
+    );
+    assert_admitted_delivery(&f, &session, DvDestination::Sdr).await;
+    let owner = f
+        .manager
+        .vod
+        .hls_facts(&session)
+        .await
+        .expect("successor")
+        .response_owner;
+    assert!(
+        prepare(&f, &session, &json).await,
+        "same owner replays its prepare"
+    );
+    assert!(f.manager.vod.response_owner_is_live(&session, &owner).await);
+    assert_admitted_delivery(&f, &session, DvDestination::Sdr).await;
+    assert!(
+        f.manager
+            .vod
+            .end(&f.session_id, crate::vodserve::Terminal::Deleted)
+            .await
+    );
+    assert!(
+        f.manager
+            .vod
+            .end(&session, crate::vodserve::Terminal::Deleted)
+            .await
+    );
+    drop(f.worker.take());
+    assert_eq!(f.encoding.admissions.in_use(), 0);
+    assert_eq!(f.encoding.admissions.software_in_use(), 0);
+}
+
+// Both calls run behind the newly admitted successor, before and after its
+// idempotent prepare replay. The carrier remains HDR10 for processed SDR.
+async fn assert_admitted_delivery(f: &Fixture, session: &str, destination: DvDestination) {
+    let expected_grade = if destination == DvDestination::Sdr {
+        OutputGrade::Sdr
+    } else {
+        OutputGrade::Hdr10
+    };
+    assert_eq!(f.encoding.options.pipeline, Pipeline::Hdr10Passthrough);
+    let recovered = f
+        .manager
+        .recover(session)
+        .await
+        .expect("idempotent create answer");
+    assert_eq!(recovered.grade, expected_grade);
+    let HlsPresentationResolution::Ready(context, file, _) = f
+        .manager
+        .hls_presentation_before(session, Instant::now() + Duration::from_secs(10))
+        .await
+    else {
+        panic!("admitted successor must have a frozen HLS presentation");
+    };
+    assert_eq!(file.video_codec.as_deref(), Some("hevc"));
+    assert_eq!(file.bit_depth, Some(10));
+    assert!(context.codecs.starts_with("hvc1") || context.codecs.starts_with("hev1"));
+    let master = String::from_utf8(crate::http::hls::source_native_master(
+        &file,
+        None,
+        &context,
+        &Default::default(),
+    ))
+    .expect("HLS text");
+    if destination == DvDestination::Sdr {
+        assert!(file.hdr.is_none());
+        assert!(file.hdr_format.is_none());
+        assert!(!master.contains("VIDEO-RANGE=PQ"), "{master}");
+        assert!(!master.contains("VIDEO-RANGE=HLG"), "{master}");
+        assert!(!master.contains("avc1"), "{master}");
+        assert!(context.supplemental_codecs.is_none(), "{master}");
+        assert_eq!(recovered.processed_dv_profile, None);
+    } else {
+        assert!(master.contains("VIDEO-RANGE=PQ"), "{master}");
     }
 }

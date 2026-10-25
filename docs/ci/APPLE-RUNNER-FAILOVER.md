@@ -13,6 +13,19 @@ This document owns Apple runner preference, outage detection and installation.
 | Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Xcode 27.0, `27A266a`; awaiting 27.1 upgrade |
 | Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `pjunod` | Xcode 27.1, `27A9275` |
 
+The toolchain pin is Xcode 27.1 (`27A9275`). The standby was observed on
+27.1 with iOS 27.1 and tvOS 27.0 SDKs on 2026-10-23; the primary still
+reports 27.0 and must match the pin before it can serve Apple jobs. This
+source change does not install or restart either runner.
+
+DerivedData cache keys and restore prefixes include the Xcode build and both
+mobile SDK versions. A different toolchain starts cold; its cache is saved only
+after success. The Effort Apple compile budget is 45 minutes because it also
+builds both macOS tray architectures before generic iOS and tvOS simulators.
+Run 5877 exhausted the old 10-minute budget during the first iOS cold build;
+that failure establishes neither iOS nor tvOS compilation. Full CI and main
+promotion retain their separate 60/120-minute Apple budgets.
+
 Both carry `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and `xcode-27`.
 The primary also carries `primary`, and the backup carries `backup`.
 Apple workflows additionally require `xcode-27.1`. Only the backup currently

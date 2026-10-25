@@ -601,7 +601,7 @@ pub struct TranscodeManager {
     hooks: crate::seam_hooks::HookSlot<dyn TranscodeManagerHooks>,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
-    decode_facts: crate::decode_facts::DecodeFactCache,
+    decode_facts: Arc<crate::decode_facts::DecodeFactCache>,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
     #[cfg(any(target_os = "linux", test))]

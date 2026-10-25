@@ -1408,6 +1408,14 @@ impl Encoding {
     }
     /// Whether the admitted processing plan reconstructs the FEL; `None`
     /// when no plan is selected.
+    pub(crate) fn delivered_output_grade(&self) -> plurx_core::transcode::OutputGrade {
+        if matches!(&self.dv_processing, plurx_core::transcode::dv_processing::DvSelection::Selected(plan) if plan.destination() == plurx_core::transcode::dv_processing::DvDestination::Sdr)
+        {
+            plurx_core::transcode::OutputGrade::Sdr
+        } else {
+            self.options.pipeline.output_grade()
+        }
+    }
     pub(crate) fn processed_fel(&self) -> Option<bool> {
         match &self.dv_processing {
             plurx_core::transcode::dv_processing::DvSelection::Selected(plan)
@@ -1441,6 +1449,9 @@ impl Encoding {
         // HDR10-E and the reconstructed Profile 8.1 are both processed
         // candidates; the destination is part of their identity.
         let tag = match &self.dv_processing {
+            DvSelection::Selected(plan) if plan.destination() == DvDestination::Sdr => {
+                "plurx:processed-sdr-candidate:v1"
+            }
             DvSelection::Selected(plan) if plan.destination() == DvDestination::Hdr10 => {
                 "plurx:processed-hdr10-candidate:v1"
             }

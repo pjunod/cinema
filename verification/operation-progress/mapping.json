@@ -9,43 +9,43 @@
         "table": "01 candidate admission",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn claim_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "02 claim ambiguity deadline",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn claim_with_resolution_inner(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "03 queue heartbeat lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn renew(&self) -> Result<bool, StoreError> {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "04 bind queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn bind_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "05 complete queue owner",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn complete_library(",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "06 queue heartbeat retirement",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) async fn finish(mut self) {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "07 queue retirement lock",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "async fn retire(&self) -> Result<(), StoreError> {",
-        "sha256": "8cac3d31e4229b8b0ce2f4146a07f3a5dd8ad36711f02c17e230861f16d9836b"
+        "sha256": "e06180976f85cefeabfe55d199a9231a1ae5fb243bc8687a771c8155a3be9026"
       },
       {
         "table": "08 worker acquisition and cleanup",
@@ -129,19 +129,19 @@
         "table": "21 timed client transaction",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "pub(super) async fn txn<C, Q>(",
-        "sha256": "6976e5fdce4c2b376514658e37aaecbe89e6bbed4b975011ddc36d2dfd1125ca"
+        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
       },
       {
         "table": "22 store timeout constant",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "const STORE_TIMEOUT: Duration = Duration::from_secs(3);",
-        "sha256": "6976e5fdce4c2b376514658e37aaecbe89e6bbed4b975011ddc36d2dfd1125ca"
+        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
       },
       {
         "table": "23 timeout drops operation future",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "anchor": "tokio::time::timeout(STORE_TIMEOUT, operation)",
-        "sha256": "6976e5fdce4c2b376514658e37aaecbe89e6bbed4b975011ddc36d2dfd1125ca"
+        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc"
       },
       {
         "table": "24 vendor transaction rate limit",
@@ -183,7 +183,7 @@
         "table": "30 authority job-kind boundary",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "anchor": "Self::LibraryScan | Self::MetadataRefresh => false,",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b"
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038"
       },
       {
         "table": "31 authority implementation",
@@ -207,31 +207,31 @@
         "table": "34 scanner page capacity",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "const WALK_PAGES_IN_FLIGHT: usize = 4;",
-        "sha256": "a4d2026a38407432fb20267b1e86b828bc607c36a0349783876713839183608b"
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
       },
       {
         "table": "35 blocking walk cancellation",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "if tx.is_closed()",
-        "sha256": "a4d2026a38407432fb20267b1e86b828bc607c36a0349783876713839183608b"
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
       },
       {
         "table": "36 blocking page send",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": ".blocking_send(std::mem::replace(&mut page, next))",
-        "sha256": "a4d2026a38407432fb20267b1e86b828bc607c36a0349783876713839183608b"
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
       },
       {
         "table": "37 scanner joins walker",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "walker\n        .await",
-        "sha256": "a4d2026a38407432fb20267b1e86b828bc607c36a0349783876713839183608b"
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
       },
       {
         "table": "38 per-file I/O loop",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "anchor": "async fn record_candidates(",
-        "sha256": "a4d2026a38407432fb20267b1e86b828bc607c36a0349783876713839183608b"
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c"
       },
       {
         "table": "39 bounded process cancellation",
@@ -249,7 +249,7 @@
         "table": "41 fragment admission try-only",
         "source": "crates/plurxd/src/transcode/manager/construct.rs",
         "anchor": "pub(crate) async fn admit_fragment(&self) -> Option<FragmentAdmission> {",
-        "sha256": "0e827be0b8f02b4da1fcf12d99ec041c25bb260c9737c86707bba0aa4d93cfeb"
+        "sha256": "81301304f54d595ffc1d10d742d757f34ddd5c1046c0a6c9ca3f5bdeaa9a1828"
       },
       {
         "table": "42 daemon schedule loop no token",

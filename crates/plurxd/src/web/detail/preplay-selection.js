@@ -60,9 +60,9 @@ async function askDecision(fileId, force, sel, signal=null, incumbent=null){
   if(context.source_ref.kind!=="local"){
     const selected={force,...playbackFileQueryFromLegacy(query)};
     for(const field of ["audio","subtitle","audio_offset_ms"])if(Object.hasOwn(selected,field))selected[field]=Number(selected[field]);
-    return SHARED_DECISION.decision(context,selected,signal);
+    return SHARED_DECISION.decision(context,selected,signal,incumbent);
   }
-  const caps=currentCapsDocument();
+  const caps=currentCapsDocument(incumbent);
   const linkReceipt=force==='auto'&&typeof candidateLinkReceipt==='function'
     ? candidateLinkReceipt(incumbent,fileId):null;
   try{
