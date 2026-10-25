@@ -18,6 +18,42 @@ use crate::media_sessions::{
 };
 use crate::state::AppState;
 
+#[cfg(target_os = "linux")]
+pub(super) fn adaptive_attempt_router() -> axum::Router<AppState> {
+    use axum::extract::DefaultBodyLimit;
+    use axum::routing::post;
+    axum::Router::new()
+        .route(
+            crate::media_sessions::ADAPTIVE_ATTEMPT_PREPARE_PATH,
+            post(adaptive_attempt_prepare).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ADAPTIVE_ATTEMPT_STATUS_PATH,
+            post(adaptive_attempt_status).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ADAPTIVE_ATTEMPT_ADOPT_PATH,
+            post(adaptive_attempt_adopt).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ADAPTIVE_ATTEMPT_CANCEL_PATH,
+            post(adaptive_attempt_cancel).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES,
+            )),
+        )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn adaptive_attempt_router() -> axum::Router<AppState> {
+    axum::Router::new()
+}
+
 pub(crate) enum RemoteStartError {
     Status(StatusCode),
     RestartDrain,
@@ -149,6 +185,222 @@ async fn authorize_read(
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// A status read reports the durable Store row and the local registered
+/// original owner separately. The Store row cannot manufacture native proof.
+#[cfg(target_os = "linux")]
+pub(crate) async fn adaptive_attempt_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::media_sessions::{AdaptiveAttemptStatusV1, ADAPTIVE_ATTEMPT_STATUS_PATH};
+    if let Err(status) = authorize_read(&state, &headers, ADAPTIVE_ATTEMPT_STATUS_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<AdaptiveAttemptStatusV1>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if request.version != crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION
+        || request.key.validate(&request.binding).is_err()
+        || request.binding.principal.local_user_id().is_none()
+        || request.key.worker_node_id != state.node_id
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let status = match state
+        .store
+        .adaptive_request_status(&request.binding.key, &request.binding.principal)
+        .await
+    {
+        Ok(Some(status)) if status.binding == request.binding && status.validate().is_ok() => {
+            status
+        }
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(Some(_)) => return StatusCode::CONFLICT.into_response(),
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let local = state
+        .transcode
+        .adaptive_attempt_local_status(request.key.attempt_id)
+        .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "version": crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+            "request": status,
+            "local": local,
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn adaptive_attempt_prepare(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::media_sessions::{AdaptiveAttemptPrepareV1, ADAPTIVE_ATTEMPT_PREPARE_PATH};
+    if let Err(status) = authorize(&state, &headers, ADAPTIVE_ATTEMPT_PREPARE_PATH, &body).await {
+        return status.into_response();
+    }
+    let Some(request) = serde_json::from_slice::<AdaptiveAttemptPrepareV1>(&body)
+        .ok()
+        .filter(AdaptiveAttemptPrepareV1::is_valid)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if request.claim.key.worker_node_id != state.node_id
+        || request.claim.binding.principal.local_user_id().is_none()
+        || state
+            .resource_runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.owner().owner_id != request.claim.worker_instance_id)
+        || state.serving.authority().admit() != Some(request.claim.serving_generation)
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let remaining = request
+        .claim
+        .binding
+        .original_deadline_ms
+        .saturating_sub(unix_ms());
+    let Ok(remaining) = u64::try_from(remaining) else {
+        return StatusCode::CONFLICT.into_response();
+    };
+    if remaining == 0 {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let deadline = Instant::now() + Duration::from_millis(remaining);
+    let Some(restart_admission) = state.serving.try_restart_admission().await else {
+        return RemoteStartError::RestartDrain.into_response();
+    };
+    let started = state
+        .transcode
+        .begin_adaptive_prepare(state.clone(), request, deadline, restart_admission)
+        .await;
+    match started {
+        Ok(crate::transcode::adaptive_attempts::AdaptivePrepareStart::Prepared(reply)) => {
+            (StatusCode::OK, Json(reply)).into_response()
+        }
+        Ok(crate::transcode::adaptive_attempts::AdaptivePrepareStart::Pending) => {
+            StatusCode::ACCEPTED.into_response()
+        }
+        Ok(crate::transcode::adaptive_attempts::AdaptivePrepareStart::Started(receiver)) => {
+            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await
+            {
+                Ok(Ok(Ok(reply))) => (StatusCode::OK, Json(reply)).into_response(),
+                Ok(Ok(Err(_))) | Ok(Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                Err(_) => StatusCode::ACCEPTED.into_response(),
+            }
+        }
+        Err(_) => StatusCode::CONFLICT.into_response(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn adaptive_attempt_adopt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::media_sessions::{AdaptiveAttemptAdoptV1, ADAPTIVE_ATTEMPT_ADOPT_PATH};
+    if let Err(status) = authorize(&state, &headers, ADAPTIVE_ATTEMPT_ADOPT_PATH, &body).await {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<AdaptiveAttemptAdoptV1>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let adoption = request.adoption;
+    let preview_json = request.preview_json;
+    if request.version != crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION
+        || adoption.key.validate(&adoption.binding).is_err()
+        || adoption.binding.principal.local_user_id().is_none()
+        || adoption
+            .worker
+            .validate(&adoption.binding, &adoption.key)
+            .is_err()
+        || adoption.key.worker_node_id != state.node_id
+        || state
+            .resource_runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.owner().owner_id != adoption.worker.worker_instance_id)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let authority = state.serving.authority();
+    if authority.admit() != Some(adoption.worker.serving_generation) {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let remaining = adoption
+        .binding
+        .original_deadline_ms
+        .saturating_sub(unix_ms());
+    let Ok(remaining) = u64::try_from(remaining) else {
+        return StatusCode::CONFLICT.into_response();
+    };
+    if remaining == 0 {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let deadline = Instant::now() + Duration::from_millis(remaining);
+    let receiver =
+        match state
+            .transcode
+            .begin_adaptive_adopt(adoption, preview_json, authority, deadline)
+        {
+            Ok(receiver) => receiver,
+            Err(_) => return StatusCode::CONFLICT.into_response(),
+        };
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receiver).await {
+        Ok(Ok(Ok(start))) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "version": crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+                "session_id": start.session_id,
+                "duration_ms": start.duration_ms,
+            })),
+        )
+            .into_response(),
+        Ok(Ok(Err(_))) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Ok(Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn adaptive_attempt_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::media_sessions::{AdaptiveAttemptCancelV1, ADAPTIVE_ATTEMPT_CANCEL_PATH};
+    if let Err(status) = authorize(&state, &headers, ADAPTIVE_ATTEMPT_CANCEL_PATH, &body).await {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<AdaptiveAttemptCancelV1>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let fence = request.fence;
+    if request.version != crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION
+        || fence.key.validate(&fence.binding).is_err()
+        || fence.binding.principal.local_user_id().is_none()
+        || fence.context.validate().is_err()
+        || fence.key.worker_node_id != state.node_id
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let receiver = match state.transcode.begin_adaptive_cancel(fence) {
+        Ok(receiver) => receiver,
+        Err(_) => return StatusCode::CONFLICT.into_response(),
+    };
+    match tokio::time::timeout(Duration::from_secs(5), receiver).await {
+        Ok(Ok(Ok(()))) => StatusCode::ACCEPTED.into_response(),
+        Ok(Ok(Err(_))) | Ok(Err(_)) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => StatusCode::ACCEPTED.into_response(),
     }
 }
 

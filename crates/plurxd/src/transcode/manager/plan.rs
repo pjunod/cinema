@@ -260,7 +260,7 @@ impl TranscodeManager {
         )
     }
 
-    fn resolve_movie_plan_with_processing_context(
+    pub(super) fn resolve_movie_plan_with_processing_context(
         &self,
         file: &plurx_core::domain::MediaFile,
         options: &TranscodeOptions,

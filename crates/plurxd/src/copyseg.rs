@@ -524,8 +524,10 @@ impl CopyPublicationSink for SessionDir {
         self.started
     }
 
-    async fn read_endlist(&self) -> std::io::Result<String> {
-        tokio::fs::read_to_string(self.dir.join("index.m3u8")).await
+    async fn verify_endlist(&self) -> std::io::Result<bool> {
+        Ok(tokio::fs::read_to_string(self.dir.join("index.m3u8"))
+            .await?
+            .ends_with("#EXT-X-ENDLIST\n"))
     }
 }
 

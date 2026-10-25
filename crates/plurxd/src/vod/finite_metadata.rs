@@ -29,7 +29,7 @@ pub(super) fn closing_owner_heap_bytes(key_capacity: usize) -> Option<usize> {
         .checked_add(key_capacity.checked_mul(3)?)
 }
 
-fn recipe_heap_bytes(recipe: &Recipe) -> Option<usize> {
+pub(super) fn recipe_heap_bytes(recipe: &Recipe) -> Option<usize> {
     let mut bytes = recipe.file.requested_heap_bytes()?;
     if let Some(value) = &recipe.retained_logical {
         bytes = bytes.checked_add(value.requested_heap_bytes()?)?;

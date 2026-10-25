@@ -529,7 +529,9 @@ impl JobFence {
         {
             return None;
         }
-        state.token.as_ref()
+        state
+            .token
+            .as_ref()
             .filter(|current| current.same_claim_as(original))
             .cloned()
     }
@@ -1808,7 +1810,9 @@ pub(crate) async fn claim_pretranscode(
                 continue;
             };
             let projection = plurx_core::store::background_jobs_pretranscode::projection(&job)?;
-            let original_claim = job.token.clone()
+            let original_claim = job
+                .token
+                .clone()
                 .ok_or_else(|| StoreError::Task("claimed job has no ownership token".into()))?;
             let active = ActiveBackgroundJob::start(
                 Arc::clone(&store),

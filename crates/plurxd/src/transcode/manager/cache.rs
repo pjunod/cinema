@@ -915,6 +915,12 @@ impl TranscodeManager {
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
             copy_reader_task: Mutex::new(CopyReaderTask::default()),
+            #[cfg(target_os = "linux")]
+            core_copy: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            core_copy_close: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
             actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
@@ -1006,6 +1012,8 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            core_copy_app: None,
         });
         if let Err(reason) = self
             .register_session(&session_id, Arc::clone(&session), 0)

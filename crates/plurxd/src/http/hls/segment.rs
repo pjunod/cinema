@@ -1367,19 +1367,17 @@ async fn segment_local_answer(
         };
     if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
         let publication_deadline = response_publication_deadline_before(request_deadline);
-        let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
-        let read_elapsed = match tokio::time::timeout_at(
+        let mut init = match tokio::time::timeout_at(
             tokio::time::Instant::from_std(publication_deadline),
             opened
                 .file
-                .take(APPLE_INIT_REWRITE_LIMIT_BYTES)
-                .read_to_end(&mut init),
+                .read_all_bounded(APPLE_INIT_REWRITE_LIMIT_BYTES, publication_deadline),
         )
         .await
         {
-            Ok(Ok(_)) => started.elapsed(),
+            Ok(Ok(bytes)) => bytes,
             Ok(Err(error)) => {
                 delivery.fail(&error);
                 authorize_attempt_status(
@@ -1429,12 +1427,18 @@ async fn segment_local_answer(
             return Err(ApiError::Internal(error.to_string()));
         }
         if let Ok((context, file, _)) = session_file(state, session, publication_deadline).await {
-            if strip_unadvertised_dolby_vision(&context, &mut init) {
-                tracing::info!(
-                    target: "plurxd::http::hls",
-                    session = %crate::transcode::session_log_id(session),
-                    "removed a Dolby Vision record the playlist does not advertise"
-                );
+            // The admitted rolling-copy parser performs the same Dolby Vision
+            // removal before publishing its journaled init. A finite payload
+            // remains in its charged allocation here; legacy local output
+            // retains the response-time compatibility rewrite.
+            if let Some(bytes) = init.as_local_mut() {
+                if strip_unadvertised_dolby_vision(&context, bytes) {
+                    tracing::info!(
+                        target: "plurxd::http::hls",
+                        session = %crate::transcode::session_log_id(session),
+                        "removed a Dolby Vision record the playlist does not advertise"
+                    );
+                }
             }
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
@@ -1444,17 +1448,18 @@ async fn segment_local_answer(
                 );
             }
         }
+        let complete_init = init.into_bytes();
         let (status, body, content_range) = match requested_range {
             Some((start, end)) => {
                 let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
                 let end = usize::try_from(end).map_err(|_| ApiError::NotFound("segment"))?;
                 (
                     StatusCode::PARTIAL_CONTENT,
-                    init[start..=end].to_vec(),
-                    Some(format!("bytes {start}-{end}/{}", init.len())),
+                    complete_init.slice(start..end + 1),
+                    Some(format!("bytes {start}-{end}/{}", complete_init.len())),
                 )
             }
-            None => (StatusCode::OK, init, None),
+            None => (StatusCode::OK, complete_init, None),
         };
         let mut response = Response::builder()
             .status(status)
@@ -1504,7 +1509,7 @@ async fn segment_local_answer(
         // codec metadata, but client-delivery accounting follows only the
         // bytes placed in this response (especially for a Range request).
         delivery.expect_at_most(response_bytes);
-        delivery.note_read(response_bytes, read_elapsed);
+        delivery.note_read(response_bytes, started.elapsed());
         delivery.finish();
         return Ok(bound_admitted_media_body(response));
     }
@@ -1521,43 +1526,46 @@ async fn segment_local_answer(
         .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
         .unwrap_or((StatusCode::OK, 0, opened.len.saturating_sub(1)));
     let publication_deadline = response_publication_deadline_before(request_deadline);
-    if start > 0 {
-        match tokio::time::timeout_at(
-            tokio::time::Instant::from_std(publication_deadline),
-            opened.file.seek(std::io::SeekFrom::Start(start)),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                opened.delivery.fail(&error);
-                authorize_attempt_status(
-                    state,
-                    session,
-                    &response_owner,
-                    segment_publication_kind(seg, requested_range),
-                    Some(seg),
-                    publication_deadline,
-                )
-                .await?;
-                return Err(ApiError::Internal(error.to_string()));
-            }
-            Err(_) => {
-                opened.delivery.finish_without_body();
-                authorize_attempt_status(
-                    state,
-                    session,
-                    &response_owner,
-                    segment_publication_kind(seg, requested_range),
-                    Some(seg),
-                    publication_deadline,
-                )
-                .await?;
-                return Err(response_publication_timeout());
-            }
-        }
-    }
     let opened_len = end.saturating_sub(start).saturating_add(1);
+    let reader = match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(publication_deadline),
+        opened.file.into_range_stream(
+            start,
+            end.saturating_add(1),
+            MEDIA_BODY_READ_BUFFER,
+            publication_deadline,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(error)) => {
+            opened.delivery.fail(&error);
+            authorize_attempt_status(
+                state,
+                session,
+                &response_owner,
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(ApiError::Internal(error.to_string()));
+        }
+        Err(_) => {
+            opened.delivery.finish_without_body();
+            authorize_attempt_status(
+                state,
+                session,
+                &response_owner,
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(response_publication_timeout());
+        }
+    };
     let total_len = opened.len;
     let complete_object = range_covers_object(requested_range, opened.len);
     let completion_permit = match reserve_response_completion(publication_deadline).await {
@@ -1600,10 +1608,6 @@ async fn segment_local_answer(
     // unlinked-but-open file.
     let mut authorization = authorization;
     authorization.pin_scratch_object(total_len);
-    let reader = tokio_util::io::ReaderStream::with_capacity(
-        opened.file.take(opened_len),
-        MEDIA_BODY_READ_BUFFER,
-    );
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;

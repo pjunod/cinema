@@ -177,5 +177,11 @@ test('Resource ownership keeps unknown task and memory peaks distinct from reser
   assert.match(planning,/Planning metadata: 1 held roles/);
   assert.match(planning,/8192 reserved bytes \(included above\)/);
   assert.match(planning,/cleanup records stay charged/);
+  const planningWork=h.systemResourceOwnershipCard({resource_ownership:{state:'available',planning:{metadata_owners:2,native_roles_held:1,original_tasks_pending:1,cleanup_requested:1,uncertain_native_owners:1}}});
+  assert.match(planningWork,/2 retained metadata owners; 1 native roles held/);
+  assert.match(planningWork,/1 original tasks pending; 1 cleanup requests; 1 uncertain native owners/);
+  const unavailable=h.systemResourceOwnershipCard({resource_ownership:{state:'available',planning:null}});
+  assert.match(unavailable,/Planning owner details are unavailable/);
+  assert.doesNotMatch(unavailable,/0 retained metadata owners/);
   assert.equal(h.systemResourceOwnershipCard({}), '');
 });

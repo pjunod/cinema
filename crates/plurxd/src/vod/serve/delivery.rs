@@ -119,6 +119,9 @@ impl VodServe {
                 .filter_map(|(id, session)| {
                     let rendition = Arc::clone(session.live_rendition()?);
                     let snapshot = session.last_control_snapshot.as_ref();
+                    let policy_identity = session.control.lock().ok()
+                        .and_then(|fence| fence.accepted_policy_identity())
+                        .map(|(generation, epoch, _, _)| (generation, epoch));
                     let observation = VodActivityObservation {
                         control_demand: snapshot.map(|s| {
                             match s.demand {
@@ -173,11 +176,12 @@ impl VodServe {
                             delivered_idle_ms: session.delivery.idle_for_ms(),
                         },
                         rendition,
+                        policy_identity,
                     ))
                 })
                 .collect::<Vec<_>>()
         };
-        selected.sort_by(|(left, _), (right, _)| {
+        selected.sort_by(|(left, _, _), (right, _, _)| {
             right
                 .started_unix
                 .cmp(&left.started_unix)
@@ -185,8 +189,22 @@ impl VodServe {
         });
         selected.truncate(limit);
         let mut infos = Vec::with_capacity(selected.len());
-        for (mut info, rendition) in selected {
-            // Diagnostics never queue for a producer or acquire its manifest.
+        for (mut info, rendition, policy_identity) in selected {
+            // The policy field reads bounded status publication for this
+            // selected viewer; no producer is started or lease renewed.
+            if let Some((generation, epoch)) = policy_identity {
+                if let Some(policy) = self.accepted_policy_runway(&info.id, generation, epoch).await {
+                    debug_assert_eq!(policy.generation, generation);
+                    debug_assert_eq!(policy.owner_epoch, epoch);
+                    debug_assert!(policy.accepted_sequence > 0);
+                    debug_assert!(policy.produced_frontier_ms >= 0);
+                    debug_assert!(policy.observed_at <= Instant::now());
+                    if let Some(observation) = info.observation.as_mut() {
+                        observation.policy_runway_ms = u64::try_from(policy.runway.as_millis()).ok();
+                    }
+                }
+            }
+            // Producer state remains a read of the retained local owner.
             let belief = rendition.slot.try_belief();
             let (state, hold) = if rendition.failure().is_some() {
                 ("failed", None)

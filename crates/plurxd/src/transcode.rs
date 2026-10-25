@@ -118,6 +118,15 @@ static PROBE_CHANGED_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 const MIXED_RECOVERY_CAPACITY_WAIT: Duration = Duration::from_secs(5);
 
 // split: begin planning
+#[cfg(target_os = "linux")]
+#[path = "transcode/adaptive_attempts.rs"]
+pub(crate) mod adaptive_attempts;
+#[cfg(target_os = "linux")]
+#[path = "transcode/adaptive_planning.rs"]
+mod adaptive_planning;
+#[cfg(target_os = "linux")]
+#[path = "transcode/background_static.rs"]
+mod background_static;
 #[path = "transcode/planning.rs"]
 mod planning;
 #[cfg(test)]
@@ -551,6 +560,12 @@ pub use rate_control::*;
 // split: end rate-control
 
 pub struct TranscodeManager {
+    #[cfg(target_os = "linux")]
+    resource_runtime: Option<Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>>,
+    #[cfg(target_os = "linux")]
+    adaptive_attempts: adaptive_attempts::AdaptiveAttemptRegistry,
+    #[cfg(target_os = "linux")]
+    static_artifact_runs: background_static::StaticArtifactRuns,
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
     #[cfg(target_os = "linux")]
@@ -606,7 +621,7 @@ pub struct TranscodeManager {
     hooks: crate::seam_hooks::HookSlot<dyn TranscodeManagerHooks>,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
-    decode_facts: crate::decode_facts::DecodeFactCache,
+    decode_facts: Arc<crate::decode_facts::DecodeFactCache>,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
     #[cfg(any(target_os = "linux", test))]
@@ -687,6 +702,13 @@ pub struct TranscodeManager {
     /// authorize only already-promised segment/init bytes and disappear at
     /// the finite RFC removal deadline; no control or flow path reads them.
     retired_presentations: RetiredPresentations,
+    /// Compact selected-copy close selectors survive rich Session removal and
+    /// retry their original journal operation on the existing reap cadence.
+    #[cfg(target_os = "linux")]
+    retired_copy_tickets:
+        Arc<std::sync::Mutex<std::collections::BTreeMap<uuid::Uuid, SelectedCopyTerminalTicket>>>,
+    #[cfg(target_os = "linux")]
+    retired_copy_cursor: std::sync::Mutex<Option<uuid::Uuid>>,
     /// Recently retired rolling presentations remain ambiguous for delayed
     /// fire-and-forget marker beacons after their live registry row is gone.
     recent_marker_ambiguities: RecentMarkerAmbiguities,

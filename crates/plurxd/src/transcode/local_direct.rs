@@ -152,10 +152,9 @@ impl TranscodeManager {
             return Err(LocalDirectFailure::Unavailable);
         }
         let runtime = state.resource_runtime.as_ref().ok_or(())?;
-        let observed = Arc::clone(runtime);
-        let epoch = tokio::task::spawn_blocking(move || observed.observe_admission_capacity())
+        let epoch = runtime
+            .refresh_admission_capacity(deadline)
             .await
-            .map_err(|_| ())?
             .map_err(|_| ())?;
         let media_file_id = file.id.to_string();
         let path_len = file.path.to_str().ok_or(())?.len();

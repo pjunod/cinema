@@ -347,6 +347,106 @@ async fn prepared_root_idle_expiry_releases_parent_without_retaining_cache_capac
     }
 
     #[tokio::test]
+    async fn accepted_policy_runway_uses_only_fresh_contiguous_owner_frontier() {
+        let base = crate::test_tempdir().expect("policy runway fixture");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = local_serve(base.path().to_path_buf(), store);
+        let empty_readiness = serve.observe_adaptive_trial_readiness(
+            Instant::now() + Duration::from_secs(30), Some(false),
+        ).await;
+        assert_eq!(empty_readiness.active_vod_sessions, 0);
+        assert_eq!(empty_readiness.refusal,
+            plurx_core::resource_policy::TrialRefusal::UnknownBounds,
+            "an empty VOD registry does not verify all protected work or native bounds");
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.dir.write_init(b"fixture-init").await.expect("init");
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+        let (anchor, end0, end2) = {
+            let first = rendition.plan.entry(0).expect("first entry");
+            let third = rendition.plan.entry(2).expect("third entry");
+            (ticks_to_ms(first.start_ticks, rendition.timescale) + 1,
+                ticks_to_ms(first.end_ticks(), rendition.timescale),
+                ticks_to_ms(third.end_ticks(), rendition.timescale))
+        };
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            assert!(manifest.materialize(0, 1_024, 0));
+            assert!(manifest.materialize(2, 1_024, 0));
+        }
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.position_ms = anchor;
+        snapshot.buffered_from_ms = Some(anchor);
+        snapshot.buffered_through_ms = end2;
+        let accepted = serve.control(crate::playback_control::LocalControlRequest {
+            session_id: &session_id,
+            generation: &generation,
+            owner_node_id: "node-a",
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-000000000005",
+            sequence: 1,
+            snapshot,
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+        }).await.expect("VOD owner").expect("accepted control");
+        assert_eq!(accepted.disposition, crate::playback_control::ControlDisposition::Accepted);
+
+        let generation_id = uuid::Uuid::parse_str(&generation).expect("generation");
+        let policy = serve.accepted_policy_runway(&session_id, generation_id, 1)
+            .await.expect("fresh owner-local runway");
+        assert_eq!(policy.accepted_sequence, 1);
+        assert_eq!(policy.generation, uuid::Uuid::parse_str(&generation).expect("generation"));
+        assert_eq!(policy.produced_frontier_ms, end0,
+            "an isolated later segment cannot extend protected runway");
+        assert!(policy.runway <= Duration::from_millis((end0 - anchor) as u64));
+        let readiness = serve.observe_adaptive_trial_readiness(
+            Instant::now() + Duration::from_secs(30), Some(false),
+        ).await;
+        assert_eq!(readiness.active_vod_sessions, 1);
+        assert_eq!(readiness.accepted_control_sessions, 1);
+        assert_eq!(readiness.refusal,
+            plurx_core::resource_policy::TrialRefusal::UnprotectedIncumbent,
+            "accepted control alone cannot grant a trial");
+        assert_eq!(serve.observe_adaptive_trial_readiness(
+            Instant::now() + Duration::from_secs(30), Some(true),
+        ).await.refusal, plurx_core::resource_policy::TrialRefusal::PeerFirst);
+        assert_eq!(serve.observe_adaptive_trial_readiness(
+            Instant::now() + Duration::from_secs(30), None,
+        ).await.refusal, plurx_core::resource_policy::TrialRefusal::InsufficientEvidence);
+        assert_eq!(serve.observe_adaptive_trial_readiness(
+            Instant::now() - Duration::from_millis(1), Some(true),
+        ).await.refusal, plurx_core::resource_policy::TrialRefusal::DeadlineBudget,
+            "the original deadline wins even when a capacity peer exists");
+        assert!(serve.accepted_policy_runway(&session_id, uuid::Uuid::new_v4(), 1)
+            .await.is_none(), "another generation has no accepted report");
+        assert!(serve.accepted_policy_runway(&session_id, generation_id, 2)
+            .await.is_none(), "another owner epoch has no accepted report");
+
+        assert!(rendition.manifest.lock().await.materialize(1, 1_024, 0));
+        let filled = serve.accepted_policy_runway(&session_id, generation_id, 1)
+            .await.expect("filled contiguous run");
+        assert_eq!(filled.produced_frontier_ms, end2);
+        let fresh_inventory = serve.delivery_infos_bounded(8).await;
+        let fresh_activity = fresh_inventory.iter().find(|item| item.id == session_id)
+            .and_then(|item| item.observation.as_ref()).expect("active observation");
+        assert!(fresh_activity.policy_runway_ms.is_some());
+        serve.shared.sessions.lock().await.get_mut(&session_id)
+            .expect("session").control_observed_at = Some(Instant::now() - Duration::from_secs(16));
+        assert!(serve.accepted_policy_runway(&session_id, generation_id, 1)
+            .await.is_none(), "stale client report cannot protect a trial");
+        let stale_inventory = serve.delivery_infos_bounded(8).await;
+        let stale_activity = stale_inventory.iter().find(|item| item.id == session_id)
+            .and_then(|item| item.observation.as_ref()).expect("stale observation");
+        assert_eq!(stale_activity.policy_runway_ms, None);
+        let serialized = serde_json::to_value(stale_activity).expect("activity JSON");
+        assert!(serialized.get("policy_runway_ms").is_none(),
+            "Unknown policy runway is absent, never a fabricated zero");
+    }
+
+    #[tokio::test]
     async fn vod_control_renews_only_fresh_sequences_and_lifecycle_is_per_session() {
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));

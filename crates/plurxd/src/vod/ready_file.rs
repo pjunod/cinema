@@ -1,6 +1,8 @@
 //! Opaque response ownership for local and counted finite VOD files.
 use bytes::Bytes;
 use futures_util::Stream;
+#[cfg(target_os = "linux")]
+use plurx_core::adaptive_resources::runtime::copy_vod::{CopyFile, CopyOutput};
 #[cfg(unix)]
 use plurx_core::adaptive_resources::runtime::finite_vod::{
     FiniteFile, FiniteOutput, FiniteReader, FiniteResponseBuffer, FiniteVodError,
@@ -57,6 +59,13 @@ impl<T: AsRef<[u8]>> PartialEq<T> for ReadyBytes {
     }
 }
 impl ReadyBytes {
+    pub(crate) fn as_local_mut(&mut self) -> Option<&mut Vec<u8>> {
+        match self {
+            Self::Local(bytes) => Some(bytes),
+            #[cfg(unix)]
+            Self::Finite(_) => None,
+        }
+    }
     #[cfg(unix)]
     pub(crate) fn reserve_metadata_workspace(
         &self,
@@ -77,6 +86,11 @@ impl ReadyBytes {
         }
     }
 }
+impl From<ReadyBytes> for Bytes {
+    fn from(value: ReadyBytes) -> Self {
+        value.into_bytes()
+    }
+}
 
 /// A selected response object. The finite variant retains only a counted
 /// selection and file key; it never exports the native file or its payload.
@@ -86,6 +100,12 @@ pub(crate) enum ReadyFile {
     Finite {
         output: FiniteOutput,
         file: FiniteFile,
+        len: u64,
+    },
+    #[cfg(target_os = "linux")]
+    Copy {
+        output: CopyOutput,
+        file: CopyFile,
         len: u64,
     },
 }
@@ -99,6 +119,11 @@ impl fmt::Debug for ReadyFile {
                 .debug_struct("ReadyFile::Finite")
                 .field("len", len)
                 .finish_non_exhaustive(),
+            #[cfg(target_os = "linux")]
+            Self::Copy { len, .. } => formatter
+                .debug_struct("ReadyFile::Copy")
+                .field("len", len)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -110,6 +135,15 @@ impl From<tokio::fs::File> for ReadyFile {
 }
 
 impl ReadyFile {
+    pub(crate) async fn length(&self) -> io::Result<u64> {
+        match self {
+            Self::Local(file) => Ok(file.metadata().await?.len()),
+            #[cfg(unix)]
+            Self::Finite { len, .. } => Ok(*len),
+            #[cfg(target_os = "linux")]
+            Self::Copy { len, .. } => Ok(*len),
+        }
+    }
     pub(crate) async fn read_all_bounded(
         &mut self,
         limit: u64,
@@ -119,6 +153,8 @@ impl ReadyFile {
             Self::Local(file) => timeout(deadline, file.metadata()).await??.len(),
             #[cfg(unix)]
             Self::Finite { len, .. } => *len,
+            #[cfg(target_os = "linux")]
+            Self::Copy { len, .. } => *len,
         };
         if len > limit {
             return Err(io::Error::new(
@@ -167,6 +203,13 @@ impl ReadyFile {
                     (Ok(bytes), Ok(())) => Ok(ReadyBytes::Finite(bytes)),
                 }
             }
+            #[cfg(target_os = "linux")]
+            Self::Copy { output, file, .. } => output
+                .read_all_bounded(*file, size, deadline)
+                .await
+                .map_err(finite_error)?
+                .map(ReadyBytes::Finite)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "copy object disappeared")),
         }
     }
 
@@ -181,6 +224,8 @@ impl ReadyFile {
             Self::Local(file) => timeout(deadline, file.metadata()).await??.len(),
             #[cfg(unix)]
             Self::Finite { len, .. } => *len,
+            #[cfg(target_os = "linux")]
+            Self::Copy { len, .. } => *len,
         };
         if start > end_exclusive || end_exclusive > len || chunk_capacity == 0 {
             return Err(io::Error::new(
@@ -208,6 +253,20 @@ impl ReadyFile {
                 let reader = timeout(
                     deadline,
                     output.prepare_reader(file, start, end_exclusive, chunk_capacity_u64, deadline),
+                )
+                .await?
+                .map_err(finite_error)?;
+                RangeSource::Finite {
+                    reader,
+                    remaining,
+                    deadline,
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Self::Copy { output, file, .. } => {
+                let reader = timeout(
+                    deadline,
+                    output.prepare_reader(file, start, end_exclusive, chunk_capacity_u64),
                 )
                 .await?
                 .map_err(finite_error)?;

@@ -363,12 +363,98 @@ pub(super) struct RetiredPresentation {
     pub(super) serve_until: Instant,
 }
 
-pub(super) type RetiredPresentations = Arc<Mutex<HashMap<String, RetiredPresentation>>>;
+pub(super) type RetiredPresentations =
+    Arc<Mutex<std::collections::BTreeMap<String, RetiredPresentation>>>;
+
+/// A terminal selector keeps the original native operation and the original
+/// control task join together after every rich Session alias has gone away.
+#[cfg(target_os = "linux")]
+pub(super) struct SelectedCopyTerminalTicket {
+    pub(super) native: plurx_core::adaptive_resources::runtime::copy_vod::CopyCloseTicket,
+    pub(super) actor: Option<crate::playback_control::RollingControlActorJoin>,
+}
+
+#[cfg(target_os = "linux")]
+struct SelectedRetiredCloseAttempt(Arc<Session>);
+
+#[cfg(target_os = "linux")]
+impl Drop for SelectedRetiredCloseAttempt {
+    fn drop(&mut self) {
+        self.0.scratch_cleanup_started.store(false, Release);
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn close_expired_selected_presentation(
+    presentations: &RetiredPresentations,
+    session_id: &str,
+    retired: &RetiredPresentation,
+) -> Result<bool, String> {
+    if retired
+        .session
+        .scratch_cleanup_started
+        .compare_exchange(false, true, AcqRel, Acquire)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    // This guard also restores retry eligibility when the original grace
+    // waiter or the reap pass is cancelled during an uncertain native close.
+    let _attempt = SelectedRetiredCloseAttempt(Arc::clone(&retired.session));
+    prepare_selected_copy_close(&retired.session).await?;
+    park_selected_copy_ticket(&retired.session).await?;
+    let mut entries = presentations.lock().await;
+    if entries.get(session_id).is_some_and(|current| {
+        current.producer_attempt == retired.producer_attempt
+            && Arc::ptr_eq(&current.session, &retired.session)
+    }) {
+        entries.remove(session_id);
+    }
+    Ok(true)
+}
+
+/// The ordinary reap pass resumes one expired original retirement entry.
+/// It creates no new cleanup task and retains the same native owner on every
+/// uncertain result.
+#[cfg(target_os = "linux")]
+pub(super) async fn reconcile_expired_selected_copy_presentation(
+    presentations: &RetiredPresentations,
+) {
+    let candidate = {
+        let entries = presentations.lock().await;
+        entries
+            .iter()
+            .find(|(_, retired)| {
+                retired.session.scratch.is_none()
+                    && Instant::now()
+                        >= retired
+                            .session
+                            .retired_release
+                            .deadline()
+                            .unwrap_or(retired.serve_until)
+                    && !retired.session.scratch_cleanup_started.load(Acquire)
+            })
+            .map(|(id, retired)| (id.clone(), retired.clone()))
+    };
+    let Some((session_id, retired)) = candidate else {
+        return;
+    };
+    if let Err(error) =
+        close_expired_selected_presentation(presentations, &session_id, &retired).await
+    {
+        tracing::debug!(target: "plurxd::transcode", %error,
+            "selected copy original retirement remains held for the next reap pass");
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct RollingRetirementContext {
     pub(super) sessions: Weak<Mutex<HashMap<String, Arc<Session>>>>,
-    pub(super) retired_presentations: Weak<Mutex<HashMap<String, RetiredPresentation>>>,
+    pub(super) retired_presentations:
+        Weak<Mutex<std::collections::BTreeMap<String, RetiredPresentation>>>,
+    #[cfg(target_os = "linux")]
+    pub(super) retired_copy_tickets:
+        Weak<std::sync::Mutex<std::collections::BTreeMap<uuid::Uuid, SelectedCopyTerminalTicket>>>,
     pub(super) active_session_count: Arc<AtomicUsize>,
     pub(super) store: Arc<dyn Store>,
     pub(super) recent_marker_ambiguities: RecentMarkerAmbiguities,
@@ -387,6 +473,7 @@ impl RollingRetirementTicket {
 /// never submitted here.
 pub(super) fn spawn_rolling_scratch_cleanup_owner(session_id: String, session: &Arc<Session>) {
     if session.cached
+        || session.scratch.is_none()
         || session
             .scratch_cleanup_started
             .compare_exchange(false, true, AcqRel, Acquire)
@@ -461,96 +548,134 @@ pub(super) fn spawn_retired_presentation_cleanup_owner(
     session_id: String,
     retired: RetiredPresentation,
 ) {
-    tokio::spawn(async move {
-        // Sleep on the shared promise, not on a value captured at spawn: an
-        // exact same-viewer release can pull it in while this task waits, and
-        // a deadline nobody can wake is a deadline that never moves. The
-        // promise can only shorten, so re-reading it is monotone and the loop
-        // terminates.
-        loop {
-            let until = retired
-                .session
-                .retired_release
-                .deadline()
-                .unwrap_or(retired.serve_until);
-            // Register before the re-read, or a shorten between them is a
-            // lost wakeup.
-            let woken = retired.session.retired_release.wake.notified();
-            if Instant::now() >= until {
-                break;
-            }
-            tokio::select! {
-                () = tokio::time::sleep_until(tokio::time::Instant::from_std(until)) => {}
-                () = woken => {}
-            }
-        }
-        if retired
+    tokio::spawn(run_retired_presentation_cleanup_owner(
+        retired_presentations,
+        session_id,
+        retired,
+    ));
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn retired_presentation_cleanup_frame_bytes() -> usize {
+    fn future_bytes<F: std::future::Future<Output = ()>>(
+        _: impl Fn(RetiredPresentations, String, RetiredPresentation) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+    future_bytes(run_retired_presentation_cleanup_owner)
+}
+
+async fn run_retired_presentation_cleanup_owner(
+    retired_presentations: RetiredPresentations,
+    session_id: String,
+    retired: RetiredPresentation,
+) {
+    // Sleep on the shared promise, not on a value captured at spawn: an
+    // exact same-viewer release can pull it in while this task waits, and
+    // a deadline nobody can wake is a deadline that never moves. The
+    // promise can only shorten, so re-reading it is monotone and the loop
+    // terminates.
+    loop {
+        let until = retired
             .session
-            .scratch_cleanup_started
-            .compare_exchange(false, true, AcqRel, Acquire)
-            .is_err()
-        {
+            .retired_release
+            .deadline()
+            .unwrap_or(retired.serve_until);
+        // Register before the re-read, or a shorten between them is a
+        // lost wakeup.
+        let woken = retired.session.retired_release.wake.notified();
+        if Instant::now() >= until {
+            break;
+        }
+        tokio::select! {
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(until)) => {}
+            () = woken => {}
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if retired.session.scratch.is_none() {
+        loop {
+            match close_expired_selected_presentation(&retired_presentations, &session_id, &retired)
+                .await
+            {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(target: "plurxd::transcode", %error,
+                        "selected copy original retirement remains held for retry"),
+            }
+            // This is the original promise owner, which must keep the
+            // rich Session reachable even if its session-id row is later
+            // superseded. The reap pass shares this exact close phase;
+            // the CAS guard prevents simultaneous native work.
+            tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+        }
+    }
+    if retired
+        .session
+        .scratch_cleanup_started
+        .compare_exchange(false, true, AcqRel, Acquire)
+        .is_err()
+    {
+        return;
+    }
+    begin_rolling_scratch_release(&retired.session);
+    retired.session.hooks.get().before_scratch_cleanup().await;
+    let mut attempt = 0_u64;
+    loop {
+        attempt = attempt.saturating_add(1);
+        // Exactness governs the *map entry*, not the directory: `dir` is
+        // this incarnation's own `w-{uuid}` and is shared with nothing.
+        // A session id can be reused, so the map row can be overwritten
+        // by a successor while this owner is still retrying a failing
+        // unlink -- and returning here would abandon a charged ledger
+        // entry whose last `Arc<Session>` is about to drop, leaving bytes
+        // charged for the life of the process with nobody able to
+        // release them. Clean our own directory either way.
+        let exact = retired_presentations
+            .lock()
+            .await
+            .get(&session_id)
+            .is_some_and(|current| {
+                current.producer_attempt == retired.producer_attempt
+                    && Arc::ptr_eq(&current.session, &retired.session)
+            });
+        let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
+            clear_session_dir(&retired.session.dir).await?;
+            match tokio::fs::remove_dir_all(&retired.session.dir).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        })
+        .await;
+        if matches!(cleanup, Ok(Ok(()))) {
+            let mut presentations = retired_presentations.lock().await;
+            if presentations.get(&session_id).is_some_and(|current| {
+                current.producer_attempt == retired.producer_attempt
+                    && Arc::ptr_eq(&current.session, &retired.session)
+            }) {
+                presentations.remove(&session_id);
+            }
+            retired.session.live_bytes.store(0, Release);
+            retired.session.retention_garbage_bytes.store(0, Release);
+            drop(presentations);
+            // The names are gone. Anything an accepted read still holds
+            // open keeps its own charge; the rest is released once, and
+            // a duplicate completion finds nothing left to subtract.
+            settle_rolling_scratch_release(&retired.session);
             return;
         }
-        begin_rolling_scratch_release(&retired.session);
-        retired.session.hooks.get().before_scratch_cleanup().await;
-        let mut attempt = 0_u64;
-        loop {
-            attempt = attempt.saturating_add(1);
-            // Exactness governs the *map entry*, not the directory: `dir` is
-            // this incarnation's own `w-{uuid}` and is shared with nothing.
-            // A session id can be reused, so the map row can be overwritten
-            // by a successor while this owner is still retrying a failing
-            // unlink -- and returning here would abandon a charged ledger
-            // entry whose last `Arc<Session>` is about to drop, leaving bytes
-            // charged for the life of the process with nobody able to
-            // release them. Clean our own directory either way.
-            let exact = retired_presentations
-                .lock()
-                .await
-                .get(&session_id)
-                .is_some_and(|current| {
-                    current.producer_attempt == retired.producer_attempt
-                        && Arc::ptr_eq(&current.session, &retired.session)
-                });
-            let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
-                clear_session_dir(&retired.session.dir).await?;
-                match tokio::fs::remove_dir_all(&retired.session.dir).await {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(error),
-                }
-            })
-            .await;
-            if matches!(cleanup, Ok(Ok(()))) {
-                let mut presentations = retired_presentations.lock().await;
-                if presentations.get(&session_id).is_some_and(|current| {
-                    current.producer_attempt == retired.producer_attempt
-                        && Arc::ptr_eq(&current.session, &retired.session)
-                }) {
-                    presentations.remove(&session_id);
-                }
-                retired.session.live_bytes.store(0, Release);
-                retired.session.retention_garbage_bytes.store(0, Release);
-                drop(presentations);
-                // The names are gone. Anything an accepted read still holds
-                // open keeps its own charge; the rest is released once, and
-                // a duplicate completion finds nothing left to subtract.
-                settle_rolling_scratch_release(&retired.session);
-                return;
-            }
-            hold_rolling_scratch_charge(&retired.session, "unlink_failed");
-            tracing::warn!(
-                target: "plurxd::transcode",
-                session = %session_log_id(&session_id),
-                path = %retired.session.dir.display(),
-                attempt,
-                superseded = !exact,
-                "retired rolling object cleanup failed; promises remain charged for retry"
-            );
-            tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
-        }
-    });
+        hold_rolling_scratch_charge(&retired.session, "unlink_failed");
+        tracing::warn!(
+            target: "plurxd::transcode",
+            session = %session_log_id(&session_id),
+            path = %retired.session.dir.display(),
+            attempt,
+            superseded = !exact,
+            "retired rolling object cleanup failed; promises remain charged for retry"
+        );
+        tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
+    }
 }
 
 /// Convert this incarnation's producer reservation into its measured retained
@@ -698,14 +823,106 @@ async fn finish_rolling_retirement_after_reap(session: &Session) {
     session.prepublication_cleanup_active.store(false, Release);
 }
 
-async fn finish_prepublication_cleanup_after_reap(session: &Arc<Session>) {
+#[cfg(target_os = "linux")]
+async fn prepare_selected_copy_close(session: &Session) -> Result<(), String> {
+    if session.core_copy_close.lock().await.is_some() {
+        return Ok(());
+    }
+    let mut selected = session.core_copy.lock().await;
+    let owner = selected
+        .as_mut()
+        .ok_or("selected copy original owner is absent")?;
+    let deadline = std::time::Instant::now() + ROLLING_SCRATCH_WRITER_SETTLE;
+    let ticket = owner
+        .prepare_retirement(true, deadline)
+        .await
+        .map_err(|error| format!("closing selected copy native graph: {error}"))?;
+    *session.core_copy_close.lock().await = Some(ticket);
+    // The original native graph is closed, but this rich owner and the
+    // Session's application lease remain charged until actual Arc drain.
+    drop(selected.take());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn stop_selected_copy_producer(session: &Session) -> Result<(), String> {
+    let mut selected = session.core_copy.lock().await;
+    let owner = selected
+        .as_mut()
+        .ok_or("selected copy original owner is absent")?;
+    owner
+        .stop_producer(true)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("joining selected copy producer: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+async fn park_selected_copy_ticket(session: &Session) -> Result<(), String> {
+    let tickets = session
+        .retirement_context
+        .as_ref()
+        .and_then(|context| context.retired_copy_tickets.upgrade())
+        .ok_or("selected copy compact retirement registry is unavailable")?;
+    {
+        let book = tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if book.contains_key(&session.response_incarnation) {
+            return Ok(());
+        }
+        if book.len() >= 1024 {
+            return Err("selected copy compact retirement registry is full".into());
+        }
+    }
+    let ticket = session
+        .core_copy_close
+        .lock()
+        .await
+        .take()
+        .ok_or("selected copy native close ticket is absent")?;
+    // The std guard must be out of scope before any await on the rejection
+    // path; the rejected ticket returns to the same Session slot.
+    let rejected = {
+        let mut book = tickets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if book.len() >= 1024 || book.contains_key(&session.response_incarnation) {
+            Some(ticket)
+        } else {
+            book.insert(
+                session.response_incarnation,
+                SelectedCopyTerminalTicket {
+                    native: ticket,
+                    actor: Some(session.control.original_actor_join()),
+                },
+            );
+            None
+        }
+    };
+    if let Some(ticket) = rejected {
+        *session.core_copy_close.lock().await = Some(ticket);
+        return Err("selected copy compact retirement registry cannot accept this ticket".into());
+    }
+    Ok(())
+}
+
+async fn finish_prepublication_cleanup_after_reap(session: &Arc<Session>) -> Result<(), String> {
     finish_rolling_retirement_after_reap(session).await;
+    #[cfg(target_os = "linux")]
+    if session.scratch.is_none() {
+        // A full compact book is an uncertain handoff, not completed cleanup.
+        // The original prepublication owner keeps this same Session and ticket
+        // alive, then retries on its existing cadence.
+        park_selected_copy_ticket(session).await?;
+    }
     if !session.cached {
         spawn_rolling_scratch_cleanup_owner("unregistered-prepublication".to_owned(), session);
     }
     if session.control.end().await.is_err() {
         session.control.fence_unavailable();
     }
+    Ok(())
 }
 
 /// One detached cleanup owner survives cancellation of whichever request,
@@ -727,16 +944,27 @@ async fn own_prepublication_cleanup(
         // this lock would block the global reaper and every explicit stop.
         let cleanup = {
             let _transition = session.child_transition.lock().await;
-            terminate_current_prepublication_child(&session).await
+            #[cfg(target_os = "linux")]
+            if session.scratch.is_none() {
+                prepare_selected_copy_close(&session).await
+            } else {
+                terminate_current_prepublication_child(&session).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                terminate_current_prepublication_child(&session).await
+            }
         };
         let cleanup = if cleanup.is_ok() {
             let deadline = tokio::time::Instant::now() + ROLLING_SCRATCH_WRITER_SETTLE;
             match session.join_copy_reader_owner(deadline).await {
                 Ok(()) => {
                     let _transition = session.child_transition.lock().await;
-                    finish_prepublication_cleanup_after_reap(&session).await;
-                    session.prepublication_cleanup_active.store(false, Release);
-                    Ok(())
+                    let result = finish_prepublication_cleanup_after_reap(&session).await;
+                    if result.is_ok() {
+                        session.prepublication_cleanup_active.store(false, Release);
+                    }
+                    result
                 }
                 Err(error) => Err(error),
             }
@@ -912,7 +1140,22 @@ async fn own_rolling_retirement(
     loop {
         let cleanup = {
             let _transition = session.child_transition.lock().await;
-            terminate_current_prepublication_child(&session).await
+            #[cfg(target_os = "linux")]
+            if session.scratch.is_none() {
+                if session.core_copy_close.lock().await.is_some() {
+                    // A prior uncertain compact-book handoff already closed
+                    // the original graph. Retry that same ticket below.
+                    Ok(())
+                } else {
+                    stop_selected_copy_producer(&session).await
+                }
+            } else {
+                terminate_current_prepublication_child(&session).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                terminate_current_prepublication_child(&session).await
+            }
         };
         match cleanup {
             Ok(()) => {
@@ -939,18 +1182,37 @@ async fn own_rolling_retirement(
                 // all of it before this session enters the retired registry
                 // carrying a charge it no longer needs.
                 settle_rolling_scratch_charge(&session_id, &session).await;
+                #[cfg(target_os = "linux")]
+                if session.scratch.is_none() && registered_key.is_none() {
+                    // A cancelled start never published a serving Session, so
+                    // it has no grace promise that could drive later close.
+                    // Keep this original detached retirement owner until the
+                    // same native operation is parked in the compact book.
+                    let close = async {
+                        prepare_selected_copy_close(&session).await?;
+                        park_selected_copy_ticket(&session).await
+                    }
+                    .await;
+                    if let Err(error) = close {
+                        tracing::warn!(target: "plurxd::transcode", %error,
+                            "unpublished selected copy original close remains held for retry");
+                        tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+                        continue;
+                    }
+                }
                 // Keep the exact retired Arc discoverable until process death
                 // and admission release are both facts. Adoption may rename it
                 // during actor settlement, so remove by pointer at the end.
-                let retired_promise = if session.cached {
-                    None
-                } else {
-                    Some(RetiredPresentation {
-                        session: Arc::clone(&session),
-                        producer_attempt: session.control.current_producer_attempt(),
-                        serve_until: session.prepare_retired_object_promise().await,
-                    })
-                };
+                let retired_promise =
+                    if session.cached || (session.scratch.is_none() && registered_key.is_none()) {
+                        None
+                    } else {
+                        Some(RetiredPresentation {
+                            session: Arc::clone(&session),
+                            producer_attempt: session.control.current_producer_attempt(),
+                            serve_until: session.prepare_retired_object_promise().await,
+                        })
+                    };
                 let (removed, removed_key, installed_retired) = {
                     let mut registry = sessions.lock().await;
                     let mut retired_registry = retired_presentations.lock().await;

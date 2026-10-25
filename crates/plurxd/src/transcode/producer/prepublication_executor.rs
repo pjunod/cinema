@@ -148,6 +148,9 @@ pub(super) async fn execute_prepublication_transcode_retry(
                 .map_err(|error| format!("resetting held retry input: {error}"))?;
         }
         retire_upload_lane(&session).await;
+        if session.scratch.is_none() {
+            return Err("selected copy predecessor needs its original typed close".into());
+        }
         clear_session_dir(&session.dir)
             .await
             .map_err(|error| format!("clearing predecessor scratch: {error}"))?;
@@ -364,6 +367,9 @@ async fn execute_prepublication_copy_retry(
                 .map_err(|error| format!("resetting held copy fallback input: {error}"))?;
         }
         retire_upload_lane(&session).await;
+        if session.scratch.is_none() {
+            return Err("selected copy predecessor needs its original typed close".into());
+        }
         clear_session_dir(&session.dir)
             .await
             .map_err(|error| format!("clearing copy-reader predecessor scratch: {error}"))?;
@@ -579,6 +585,66 @@ async fn publish_copy_reader_outcome(
         return false;
     }
     classification == crate::playback_control::CopyProducerExitClassification::Completed
+}
+
+/// Register the selected copy actor observer after core has registered the
+/// original parser/root jobs. This task only classifies their result; core
+/// retains every native JoinHandle and the typed close operation.
+#[cfg(target_os = "linux")]
+pub(super) async fn spawn_core_copy_result_owner(
+    session: Arc<Session>,
+    sid: String,
+    producer_attempt: u64,
+) -> Result<(), String> {
+    let output = session
+        .core_copy
+        .lock()
+        .await
+        .as_ref()
+        .ok_or("selected copy owner is absent")?
+        .output();
+    let registry = Arc::clone(&session);
+    let mut registered = registry.copy_reader_task.lock().await;
+    if !matches!(&*registered, CopyReaderTask::Empty) {
+        return Err("selected copy result owner already registered".into());
+    }
+    let (entry, ready) = tokio::sync::oneshot::channel();
+    let original = tokio::spawn(async move {
+        if ready.await.is_err() {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(60 * 60);
+        let classification = match output.wait_producer_result(deadline).await {
+            Ok(result) if result.completed => {
+                crate::playback_control::CopyProducerExitClassification::Completed
+            }
+            Ok(_) => crate::playback_control::CopyProducerExitClassification::ReaderFailed,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::transcode", session = %session_log_id(&sid),
+                    producer_attempt, %error,
+                    "selected copy parser result remains unknown; exact native owner stays held");
+                return;
+            }
+        };
+        if let Err(error) = session
+            .control
+            .classify_copy_producer_exit_before(
+                producer_attempt,
+                classification,
+                Instant::now() + COPY_READER_INGRESS_TIMEOUT,
+            )
+            .await
+        {
+            tracing::warn!(target: "plurxd::transcode", session = %session_log_id(&sid),
+                producer_attempt, ?error,
+                "selected copy parser result could not classify its exact actor attempt");
+        }
+    });
+    *registered = CopyReaderTask::Pending(original);
+    drop(registered);
+    entry
+        .send(())
+        .map_err(|_| "selected copy result observer stopped before entry".to_owned())
 }
 
 #[allow(clippy::too_many_arguments)] // one copy producer's worth of identity
@@ -1106,6 +1172,12 @@ async fn run_prepublication_producer_executor(
                         let cleanup = async {
                             terminate_exact_prepublication_child(&session, *failed_attempt).await?;
                             retire_upload_lane(&session).await;
+                            if session.scratch.is_none() {
+                                return Err(
+                                    "selected copy predecessor needs its original typed close"
+                                        .into(),
+                                );
+                            }
                             clear_session_dir(&session.dir).await.map_err(|error| {
                                 format!("clearing failed producer scratch: {error}")
                             })?;

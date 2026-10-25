@@ -677,7 +677,10 @@ impl PretranscodeFence {
     }
 
     pub async fn snapshot(&self) -> Option<PretranscodeJob> {
-        let token = self.durable.snapshot_for_claim(&self.original_claim).await?;
+        let token = self
+            .durable
+            .snapshot_for_claim(&self.original_claim)
+            .await?;
         if token.job_id != self.job.id
             || token.node_id != self.job.owner_node_id
             || token.fence != self.job.fence

@@ -24,6 +24,26 @@ impl PreparedAdaptiveRecipe {
         &self.key
     }
 
+    /// Actual requested capacities of the recipe held between P closure and
+    /// R admission. The M handoff partition must fit this with the original
+    /// coordinator envelope before `build_adaptive_recipe` enters native work.
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>()
+            .checked_add(self.key.capacity())?
+            .checked_add(self.identity.argv_fingerprint.capacity())?
+            .checked_add(crate::vodserve::finite_metadata::recipe_heap_bytes(
+                &self.recipe,
+            )?)?;
+        if let Some(index) = &self.index {
+            bytes = bytes.checked_add(index.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+
+    pub(crate) fn key_capacity(&self) -> usize {
+        self.key.capacity()
+    }
+
     /// Serialize the locally selected route in the format all existing route
     /// readers and recovery paths understand. This is a Store equality fact,
     /// not an authority to acquire a source or prove physical closure.
@@ -31,17 +51,58 @@ impl PreparedAdaptiveRecipe {
         &self,
         envelope: &crate::media_sessions::RemoteStartRequest,
     ) -> Result<String, String> {
+        let planned_source = self
+            .recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.planning_metadata.as_ref());
         if !envelope.is_valid()
             || envelope.request.file_id != self.recipe.file.id
             || envelope.source_size != self.recipe.file.size
             || envelope.source_mtime != self.recipe.file.mtime
+            || !planned_source.is_some_and(|source| {
+                source.source_file_id().parse::<i64>() == Ok(self.recipe.file.id)
+                    && source.scanner_size() == self.recipe.file.size
+                    && source.scanner_mtime() == self.recipe.file.mtime
+                    && self.recipe.source_object_version.as_deref()
+                        == Some(source.source_object_version())
+            })
             || !finite_software::selected_recipe(&self.recipe, false, false)
             || rendition_key(&self.recipe, &self.identity) != self.key
         {
             return Err("adaptive selected route differs from its local finite recipe".into());
         }
-        let json = serde_json::to_string(envelope)
+        // The Store's selected-route limit is 32 KiB. Reserve and verify
+        // that one actual backing allocation before serialization; a writer
+        // error refuses an overlong route before Vec can grow past it.
+        struct BoundedRoute(Vec<u8>);
+        impl std::io::Write for BoundedRoute {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.len() > 32 * 1024 - self.0.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "adaptive selected route exceeds Store limit",
+                    ));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(32 * 1024)
+            .map_err(|_| "reserving adaptive selected route capacity")?;
+        if bytes.capacity() > 32 * 1024 {
+            return Err("adaptive selected route allocation exceeds its charged limit".into());
+        }
+        let mut writer = BoundedRoute(bytes);
+        serde_json::to_writer(&mut writer, envelope)
             .map_err(|error| format!("serializing adaptive selected route: {error}"))?;
+        let json =
+            String::from_utf8(writer.0).map_err(|_| "adaptive selected route is not UTF-8")?;
         plurx_core::store::adaptive_resource_attempts::selected_recipe_digest(&json)
             .map_err(|error| format!("adaptive selected route exceeds Store bounds: {error}"))?;
         Ok(json)
@@ -704,7 +765,7 @@ impl VodServe {
         prepared: PreparedAdaptiveRecipe,
         settings: &VodSettings,
         application_owner_bytes: usize,
-    ) -> Result<shared::PreparedAttemptRendition, String> {
+    ) -> Result<shared::PreparedAttemptRendition, shared::AdaptiveBuildFailure> {
         let PreparedAdaptiveRecipe {
             key,
             identity,
@@ -723,6 +784,163 @@ impl VodServe {
                 application_owner_bytes,
             )
             .await
+    }
+
+    /// Resolve the selected background artifact while the original P owner
+    /// still covers pure plan/command allocations. This phase performs no R
+    /// admission and returns no native authority.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn plan_static_artifact(
+        &self,
+        prepared: PreparedAdaptiveRecipe,
+        registry_owner_bytes: usize,
+        planning_handoff_limit_bytes: usize,
+        deadline: Instant,
+    ) -> Result<super::background_artifact::StaticArtifactAdmission, String> {
+        let PreparedAdaptiveRecipe {
+            key,
+            identity,
+            index,
+            recipe,
+            duration_ms,
+        } = prepared;
+        if !finite_software::selected_recipe(&recipe, false, false) {
+            return Err("static artifact requires the selected software AVC recipe".into());
+        }
+        let runtime = self
+            .shared
+            .resource_runtime
+            .as_ref()
+            .ok_or("static artifact resource runtime is unavailable")?;
+        let plan = self
+            .shared
+            .stored_plan(&key, &identity, &index, &recipe, duration_ms)
+            .await?;
+        if plan.is_empty() || plan.len() > 8192 {
+            return Err("static artifact has no bounded segment plan".into());
+        }
+        let playlist = plan.playlist().into_bytes();
+        let logical = recipe
+            .retained_logical
+            .as_ref()
+            .ok_or("static artifact has no resolved delivery identity")?
+            .clone();
+        let source_version = finite_profile::source_version(&recipe)?;
+        let workspace = retained_manifest::projected_static_manifest_workspace_bytes(
+            plan.len(),
+            playlist.capacity(),
+            logical
+                .requested_heap_bytes()
+                .ok_or("static delivery identity capacity overflow")?,
+        )
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or("static manifest workspace capacity overflow")?;
+        let publication = super::background_artifact::StaticArtifactPublication::new(
+            key.clone(),
+            source_version,
+            plan.clone(),
+            playlist,
+            0,
+        )
+        .map_err(|error| format!("constructing static publication observer: {error}"))?;
+        let application_owner_bytes =
+            super::background_artifact::StaticArtifactRun::projected_application_bytes(
+                &publication,
+                &logical,
+                registry_owner_bytes,
+            )
+            .ok_or("static application owner capacity overflow")?;
+        let (_, software) =
+            plurx_core::resource_settings::admission_pair(self.shared.store.as_ref())
+                .await
+                .map_err(|error| format!("reading static software pool policy: {error}"))?;
+        let software_pool_threads = software
+            .as_deref()
+            .map(str::trim)
+            .map(str::parse::<u64>)
+            .transpose()
+            .map_err(|_| "static software pool policy is invalid")?
+            .unwrap_or_else(|| crate::admission::software_budget() as u64);
+        let epoch = runtime
+            .refresh_admission_capacity(deadline)
+            .await
+            .map_err(|error| format!("observing static artifact admission: {error:?}"))?;
+        let accounting = runtime
+            .accounting()
+            .map_err(|error| format!("reading static artifact admission: {error:?}"))?;
+        let mut capacity = accounting.capacity;
+        capacity.cpu_ns_per_second = match capacity.cpu_ns_per_second {
+            plurx_core::process::observation::Metric::Known(cpu) => {
+                plurx_core::process::observation::Metric::Known(
+                    cpu.saturating_sub(accounting.used.cpu_ns_per_second),
+                )
+            }
+            unknown => unknown,
+        };
+        let mut request = finite_profile::compile(
+            &self.shared,
+            &key,
+            &recipe,
+            index.as_ref(),
+            &plan,
+            epoch,
+            capacity,
+            software_pool_threads,
+        )?;
+        request = finite_profile::with_static_manifest_file(request)?;
+        request
+            .charge_application_owner_bytes(application_owner_bytes)
+            .map_err(|error| format!("charging the static run owner: {error}"))?;
+        let mut publication = publication;
+        publication.set_epoch(epoch);
+        let admission = super::background_artifact::StaticArtifactAdmission {
+            request,
+            workspace,
+            publication,
+            logical,
+            application_owner_bytes,
+        };
+        if admission
+            .requested_heap_bytes()
+            .is_none_or(|bytes| bytes > planning_handoff_limit_bytes)
+        {
+            return Err("static artifact plan exceeds the admitted P application partition".into());
+        }
+        Ok(admission)
+    }
+
+    /// Called in the same coordinator poll that positively closes P. There
+    /// is no await or fallible daemon allocation between core R admission and
+    /// installation of its sole original run owner in the manager registry.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn admit_static_artifact(
+        &self,
+        planned: super::background_artifact::StaticArtifactAdmission,
+        deadline: Instant,
+    ) -> Result<super::background_artifact::StaticArtifactRun, String> {
+        let runtime = self
+            .shared
+            .resource_runtime
+            .as_ref()
+            .ok_or("static artifact resource runtime is unavailable")?;
+        let super::background_artifact::StaticArtifactAdmission {
+            request,
+            workspace,
+            publication,
+            logical,
+            application_owner_bytes,
+        } = planned;
+        // Core takes the original application lease before accepted R and
+        // installs its complete cleanup owner before exposing the preparation.
+        let (owner, application_lease) = runtime
+            .prepare_static_software_artifact(request, workspace, application_owner_bytes, deadline)
+            .map_err(|error| format!("admitting the static artifact graph: {error}"))?;
+        Ok(super::background_artifact::StaticArtifactRun::new(
+            owner,
+            publication,
+            logical,
+            application_lease,
+        ))
     }
 
     /// Select the output once for this attachment. New capture and issued
@@ -845,7 +1063,14 @@ impl VodServe {
             ));
         };
         let phase_started = Instant::now();
-        let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+        // The selected ordinary AVC path has no Dolby Vision work. Avoid an
+        // unrelated first-use FFmpeg probe while an admitted fixed worker is
+        // planning or reattaching its exact retained rendition.
+        let have_dovi = if prepared.encoding.is_some() && file.dolby_vision.is_empty() {
+            false
+        } else {
+            crate::ffmpeg::has_dovi_rpu().await
+        };
         tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
             phase = "pipeline_capability", elapsed_ms = phase_started.elapsed().as_millis(),
             "rendition preparation phase completed");

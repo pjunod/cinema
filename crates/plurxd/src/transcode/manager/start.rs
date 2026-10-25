@@ -1,5 +1,268 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+struct SelectedCopyPlanning {
+    owner: plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningProbeOwner,
+    application: plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease,
+    report: plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease,
+    recipe_binding: String,
+}
+
+#[cfg(target_os = "linux")]
+fn selected_copy_session_dynamic_bytes(session: &Session) -> Option<usize> {
+    session
+        .frozen_presentation
+        .as_ref()?
+        .requested_heap_bytes()?
+        .checked_add(session.dir.capacity())?
+        .checked_add(session.item_title.capacity())?
+        .checked_add(session.user_name.capacity())?
+        .checked_add(session.supersession_user.capacity())?
+        .checked_add(session.playback_id.capacity())?
+        .checked_add(session.audio_delivery.as_ref().map_or(
+            Some(0),
+            plurx_core::playback::audio::AudioDelivery::requested_heap_bytes,
+        )?)?
+        .checked_add(
+            session
+                .recovery
+                .as_ref()
+                .map_or(Some(0), SessionRecoveryIdentity::requested_heap_bytes)?,
+        )
+}
+
+#[cfg(target_os = "linux")]
+fn selected_copy_session_fixed_heap_bytes() -> Option<usize> {
+    let header = 2usize.checked_mul(std::mem::size_of::<usize>())?;
+    // These are the actual Arc::new payloads in the selected Session literal.
+    // Its inline fields and the Arc<Session> header are counted separately.
+    [
+        std::mem::size_of::<AtomicBool>(), // actor_prepublication_producer
+        std::mem::size_of::<AtomicBool>(), // terminal_response_pending
+        std::mem::size_of::<AtomicBool>(), // failed
+        std::mem::size_of::<AtomicBool>(), // retention_cleanup_active
+        std::mem::size_of::<AtomicI64>(),  // high_segment
+        std::mem::size_of::<AtomicI64>(),  // fetched_end_ms
+        std::mem::size_of::<AtomicI64>(),  // live_bytes
+        std::mem::size_of::<AtomicI64>(),  // retention_garbage_bytes
+        std::mem::size_of::<Progress>(),
+        std::mem::size_of::<RetiredRelease>(),
+        std::mem::size_of::<std::sync::Mutex<Vec<(std::path::PathBuf, i64)>>>(),
+        std::mem::size_of::<std::sync::Mutex<u64>>(), // compatibility_attempt
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, payload| {
+        total.checked_add(payload.checked_add(header)?)
+    })
+}
+
+// Selected copy has no daemon-created scratch to clean up. Keep the legacy
+// start guard's call sites identical while its ownership is optional here.
+trait OptionalCopyStartSettlement {
+    fn attach(&mut self, session: &Arc<Session>);
+    fn disarm(&mut self);
+    fn settle(self);
+}
+impl OptionalCopyStartSettlement for Option<PrepublicationStartSettlement> {
+    fn attach(&mut self, session: &Arc<Session>) {
+        if let Some(owner) = self.as_mut() {
+            owner.attach(session);
+        }
+    }
+    fn disarm(&mut self) {
+        if let Some(owner) = self.as_mut() {
+            owner.disarm();
+        }
+    }
+    fn settle(self) {
+        if let Some(owner) = self {
+            owner.settle();
+        }
+    }
+}
+
+/// Construct the entire selected R demand while the original P still owns its
+/// native planning work. This is pure: no source, output directory or root is
+/// opened here. The resident window is a policy ceiling, independent of the
+/// lifetime segment-name range; a full window backpressures the original
+/// pipe until the rolling actor approves a typed prefix removal.
+#[cfg(target_os = "linux")]
+fn selected_copy_request(
+    runtime: &Arc<plurx_core::adaptive_resources::runtime::NodeResourceRuntime>,
+    planning: &SelectedCopyPlanning,
+    source: &plurx_core::domain::MediaFile,
+    rendition_id: String,
+    video: plurx_core::transcode::CopyVideoOptions,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: plurx_core::transcode::Pacing,
+    audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
+    runtime_cache: std::path::PathBuf,
+    application_metadata_bytes: usize,
+    limit_epoch: u64,
+    capacity: plurx_core::adaptive_resources::ResourceCapacity,
+) -> Result<plurx_core::adaptive_resources::runtime::copy_vod::CopyVodRequest, String> {
+    use plurx_core::adaptive_resources::runtime::copy_vod::{CopyPipeCommand, CopyVodRequest};
+    use plurx_core::adaptive_resources::runtime::finite_vod::{
+        FiniteOutputLimits, FiniteResponseBuffer, SoftwareAvcExecutable,
+    };
+    use plurx_core::adaptive_resources::{ResourceVector, WorkloadDemand};
+    use plurx_core::process::observation::Metric;
+    let max_segments = CopyVodRequest::maximum_segment_names();
+    let parser_limits = plurx_core::copy_segmenter::Limits::default();
+    if max_segments == 0 || parser_limits.max_bytes == 0 {
+        return Err("selected copy has no bounded segment inventory".into());
+    }
+    let one_file =
+        u64::try_from(parser_limits.max_bytes).map_err(|_| "selected copy file bound overflows")?;
+    let resident_files = 128u32;
+    let resident_logical_bytes = u64::from(resident_files)
+        .checked_mul(one_file)
+        .ok_or("selected copy resident window overflows")?;
+    let reserved_storage_bytes = resident_logical_bytes
+        .checked_add(u64::from(resident_files) * 16 * 1024)
+        .and_then(|n| n.checked_add(128 * 1024))
+        .ok_or("selected copy storage bound overflows")?;
+    let playlist_bytes = usize::try_from(max_segments)
+        .ok()
+        .and_then(|n| n.checked_mul(64))
+        .and_then(|n| {
+            n.checked_add(plurx_core::fmp4::playlist_header(parser_limits.target_seconds).len())
+        })
+        .and_then(|n| n.checked_add("#EXT-X-ENDLIST\n".len()))
+        .ok_or("selected copy playlist bound overflows")?;
+    let app_entries = usize::try_from(max_segments)
+        .ok()
+        .and_then(|n| n.checked_mul(std::mem::size_of::<SegmentMeta>() + 12))
+        .and_then(|n| n.checked_mul(3))
+        .ok_or("selected copy rolling index bound overflows")?;
+    // A terminal Session is replaced by one compact same-operation selector
+    // in the manager's BTree book. Charge a sparse leaf plus internal node
+    // for that entry until the original known close refunds this role.
+    let compact_entry = std::mem::size_of::<uuid::Uuid>()
+        .checked_add(std::mem::size_of::<SelectedCopyTerminalTicket>())
+        .and_then(|n| n.checked_mul(11))
+        .and_then(|n| n.checked_add(16 * std::mem::size_of::<usize>()))
+        .and_then(|n| n.checked_mul(2))
+        .ok_or("selected copy terminal selector bound overflows")?;
+    let retired_entry = std::mem::size_of::<String>()
+        .checked_add(std::mem::size_of::<RetiredPresentation>())
+        .and_then(|n| n.checked_mul(11))
+        .and_then(|n| n.checked_add(16 * std::mem::size_of::<usize>()))
+        .and_then(|n| n.checked_mul(2))
+        .and_then(|n| n.checked_add(36))
+        .and_then(|n| n.checked_add(retired_presentation_cleanup_frame_bytes()))
+        .and_then(|n| n.checked_add(36))
+        .ok_or("selected copy retired presentation bound overflows")?;
+    let application_owner_bytes = app_entries
+        .checked_add(
+            playlist_bytes
+                .checked_mul(2)
+                .ok_or("selected copy playlist overlap overflows")?,
+        )
+        .and_then(|n| n.checked_add(compact_entry))
+        .and_then(|n| n.checked_add(retired_entry))
+        .and_then(|n| {
+            n.checked_add(std::mem::size_of::<Session>() + 2 * std::mem::size_of::<usize>())
+        })
+        .and_then(|n| n.checked_add(selected_copy_session_fixed_heap_bytes()?))
+        .and_then(|n| {
+            n.checked_add(
+                crate::playback_control::RollingControlHandle::original_actor_frame_bytes()?,
+            )
+        })
+        .and_then(|n| n.checked_add(source.requested_heap_bytes()?))
+        .and_then(|n| n.checked_add(application_metadata_bytes))
+        .ok_or("selected copy application owner bound overflows")?;
+    let response_memory_bytes =
+        FiniteResponseBuffer::required_partition_bytes(parser_limits.max_bytes, 2)
+            .ok_or("selected copy response partition overflows")?;
+    let output = FiniteOutputLimits {
+        response_memory_bytes,
+        retained_metadata_bytes: 0,
+        client_state_bytes: 16 * 1024 * 1024,
+        resident_file_objects: resident_files,
+        resident_logical_bytes,
+        reserved_storage_bytes,
+        one_file_logical_bytes: one_file,
+        one_io_payload_bytes: one_file,
+        live_handles: 24,
+        reader_leases: 8,
+        resident_memory_bytes: 128 * 1024 * 1024,
+        allocation_unit_bytes: 4096,
+        per_object_reserve_bytes: 16 * 1024,
+        child_directory_reserve_bytes: 64 * 1024,
+        parent_entry_reserve_bytes: 64 * 1024,
+        bootstrap_memory_bytes: 1024 * 1024,
+    };
+    let producer = planning.report.engine().producer();
+    let executable = SoftwareAvcExecutable::new(
+        producer.path().to_owned(),
+        producer.source_identity(),
+        producer.sha256(),
+    )
+    .map_err(|error| format!("selected copy executable plan: {error}"))?;
+    let command = CopyPipeCommand::compile(
+        source.clone(),
+        video,
+        executable,
+        runtime_cache,
+        audio_index,
+        transcode_audio,
+        pacing,
+        audio_delivery,
+    )
+    .map_err(|error| format!("selected copy command: {error}"))?;
+    let Metric::Known(cpu_ns_per_second) = capacity.cpu_ns_per_second else {
+        return Err("selected copy CPU capacity is unknown".into());
+    };
+    if cpu_ns_per_second == 0 {
+        return Err("selected copy CPU capacity is zero".into());
+    }
+    let mut request = CopyVodRequest {
+        rendition_id,
+        generation_epoch: 0,
+        recipe_source_binding: planning.recipe_binding.clone(),
+        source: planning.report.finite_source_request(),
+        command,
+        max_segments,
+        parser_limits,
+        reader_bounds: plurx_core::fmp4::FragmentReaderBounds {
+            buffer_bytes: parser_limits.max_bytes,
+            unit_bytes: parser_limits.max_bytes,
+            max_tracks: 8,
+            max_runs: 262_144,
+            max_samples: 262_144,
+        },
+        max_pending_fragments: 8,
+        operation_timeout: Duration::from_secs(60),
+        demand: WorkloadDemand {
+            resources: Metric::Known(ResourceVector {
+                cpu_ns_per_second,
+                peak_memory_bytes: 0,
+                handles: u64::from(output.live_handles) + 9,
+                processes: 1,
+                hardware_slots: 0,
+                tuner_slots: 0,
+                scratch_bytes: reserved_storage_bytes,
+            }),
+            limit_epoch,
+            trial: false,
+        },
+        application_owner_bytes: u64::try_from(application_owner_bytes)
+            .map_err(|_| "selected copy application charge overflows")?,
+        output,
+    };
+    let known_memory = runtime
+        .copy_vod_known_memory_bytes(&request)
+        .map_err(|error| format!("sizing selected copy role: {error}"))?;
+    let Metric::Known(resources) = &mut request.demand.resources else {
+        return Err("selected copy known component disappeared".into());
+    };
+    resources.peak_memory_bytes = known_memory;
+    Ok(request)
+}
+
 /// Everything a rolling start reads from the Store — the file, its stored
 /// probe and every setting on the path — from one statement.
 ///
@@ -172,9 +435,104 @@ impl TranscodeManager {
         options
     }
 
-    /// Start a transcode session for a file, superseding this viewer's previous
-    /// session on the same file (see [`Self::reap_superseded_before`]).
-    #[cfg(test)]
+    /// The original P owner enters the core book synchronously before its
+    /// first native await. Its real probe and executable facts are compared
+    /// to the catalog row before any rolling R can acquire a source or root.
+    #[cfg(target_os = "linux")]
+    async fn collect_selected_copy_planning(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        stored_probe: Option<&str>,
+        audio_override: Option<i64>,
+        options: &CopySessionOptions,
+    ) -> Result<SelectedCopyPlanning, String> {
+        use sha2::Digest as _;
+        let runtime = self
+            .resource_runtime
+            .as_ref()
+            .ok_or("rolling copy resource runtime is unavailable")?;
+        runtime
+            .refresh_admission_capacity(std::time::Instant::now() + Duration::from_secs(15))
+            .await
+            .map_err(|error| format!("observing rolling copy admission capacity: {error:?}"))?;
+        let snapshot = self
+            .store
+            .playback_planning_snapshot(file.id, &super::QUALITY_PLANNING_KEYS)
+            .await
+            .map_err(|error| format!("reading copy planning snapshot: {error}"))?
+            .ok_or("rolling copy source is missing")?;
+        if snapshot.file.id != file.id
+            || snapshot.file.path != file.path
+            || snapshot.file.size != file.size
+            || snapshot.file.mtime != file.mtime
+            || snapshot.probe_json.as_deref() != stored_probe
+        {
+            return Err("rolling copy source changed between catalog and admission".into());
+        }
+        let stored =
+            stored_probe.ok_or("rolling copy requires a stored probe; rescan the source")?;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"rolling-copy-one-input-v1\0");
+        hasher.update(file.id.to_le_bytes());
+        hasher.update(file.size.to_le_bytes());
+        hasher.update(file.mtime.to_le_bytes());
+        hasher.update(audio_override.unwrap_or(-1).to_le_bytes());
+        hasher.update([
+            u8::from(options.transcode_audio),
+            u8::from(options.preserve_dolby_vision),
+            u8::from(options.convert_dolby_vision),
+        ]);
+        let recipe_binding = hex::encode(hasher.finalize());
+        let snapshot_bytes =
+            crate::transcode::adaptive_attempts::planning_snapshot_requested_heap_bytes(&snapshot)
+                .ok_or("rolling copy planning snapshot heap overflows")?;
+        let application_bytes = snapshot_bytes
+            .checked_add(crate::transcode::adaptive_attempts::PLANNING_TO_R_HANDOFF_BYTES)
+            .ok_or("rolling copy planning application charge overflows")?;
+        let request = crate::transcode::adaptive_attempts::fixed_planning_request(
+            self,
+            &snapshot,
+            &recipe_binding,
+            application_bytes,
+        )?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut planning = runtime
+            .prepare_fixed_planning_probe(request, deadline)
+            .map_err(|error| format!("admitting rolling copy planning: {error}"))?;
+        let application = planning
+            .take_application_lease(application_bytes)
+            .map_err(|error| format!("retaining rolling copy planning owner: {error}"))?;
+        planning
+            .prepare_inputs(deadline)
+            .await
+            .map_err(|error| format!("acquiring rolling copy planning inputs: {error}"))?;
+        let report = planning
+            .collect_and_refine(deadline)
+            .await
+            .map_err(|error| format!("collecting rolling copy planning facts: {error}"))?;
+        if report.source_file_id() != file.id.to_string()
+            || report.source_path() != file.path
+            || report.scanner_size() != file.size
+            || report.scanner_mtime() != file.mtime
+        {
+            return Err("rolling copy admitted source differs from catalog".into());
+        }
+        let comparison = crate::ffmpeg::compare_probe_documents(stored, report.document())
+            .map_err(|error| format!("rolling copy stored probe differs: {error}"))?;
+        if !comparison.same {
+            return Err(format!(
+                "rolling copy source requires rescan at {}",
+                comparison.rendered_differences()
+            ));
+        }
+        Ok(SelectedCopyPlanning {
+            owner: planning,
+            application,
+            report,
+            recipe_binding,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
     pub async fn start(
         &self,
@@ -1508,6 +1866,12 @@ impl TranscodeManager {
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
             copy_reader_task: Mutex::new(CopyReaderTask::default()),
+            #[cfg(target_os = "linux")]
+            core_copy: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            core_copy_close: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
             actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
@@ -1601,6 +1965,8 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover,
             first_slide_logged: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            core_copy_app: None,
         });
         start_settlement.attach(&session);
         if let Err(reason) = executor_registration.register().await {
@@ -1827,12 +2193,24 @@ impl TranscodeManager {
         // One Store read for the file, its probe and its settings (D4).
         let RollingStartInputs {
             mut file,
-            probe_json: stored_probe,
+            probe_json: mut stored_probe,
             settings,
             item_title,
             capacity: _,
         } = self.rolling_start_inputs(file_id, None).await?;
         let retained_budget = Self::rolling_retained_budget_from(&settings);
+        // This exact one-input rolling profile is admitted through the core
+        // P→R graph. Once selected, a planning or admission refusal is a
+        // refusal of this start; it cannot fall through to the legacy native
+        // probe, raw scratch directory, or unregistered FFmpeg spawn.
+        #[cfg(target_os = "linux")]
+        let selected_core_copy = self.resource_runtime.is_some()
+            && start_seconds == 0.0
+            && takeover.is_none()
+            && audio_offset_ms == 0
+            && copyseg::supports(file.video_codec.as_deref());
+        #[cfg(not(target_os = "linux"))]
+        let selected_core_copy = false;
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -1840,11 +2218,42 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let probe_json =
-            crate::hevc_census::probe_json_for_copy_from(self.store.as_ref(), &file, stored_probe)
-                .await
-                .ok()
-                .flatten();
+        #[cfg(target_os = "linux")]
+        let selected_planning = if selected_core_copy {
+            Some(
+                self.collect_selected_copy_planning(
+                    &file,
+                    stored_probe.as_deref(),
+                    audio_override,
+                    &options,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let probe_json = if let Some(report) = selected_planning.as_ref() {
+            Some(report.report.document().to_owned())
+        } else {
+            crate::hevc_census::probe_json_for_copy_from(
+                self.store.as_ref(),
+                &file,
+                stored_probe.take(),
+            )
+            .await
+            .ok()
+            .flatten()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let probe_json = crate::hevc_census::probe_json_for_copy_from(
+            self.store.as_ref(),
+            &file,
+            stored_probe.take(),
+        )
+        .await
+        .ok()
+        .flatten();
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
@@ -1953,82 +2362,91 @@ impl TranscodeManager {
             );
         }
         let pacing = Self::pacing_from_settings(&settings, true).await;
-        let canonical_args = if segmenting {
-            transcode::copy_pipe_args_with_audio_delivery(
-                &file,
-                start_seconds,
-                audio_index,
-                options.transcode_audio,
-                pacing,
-                video_options,
-                audio_delivery,
-            )
-        } else {
-            transcode::hls_copy_args_with_audio_delivery(
-                &file,
-                start_seconds,
-                audio_index,
-                options.transcode_audio,
-                pacing,
-                video_options,
-                0,
-                "init.mp4",
-                "retained-output",
-                audio_delivery,
-            )
-        };
-        let mut logical = serde_json::json!({
-            "file": &file,
-            "kind": SessionKind::Copy {
-                aac: options.transcode_audio,
-                preserve_dolby_vision: options.preserve_dolby_vision,
-                convert_dolby_vision: options.convert_dolby_vision,
-            },
-            "audio_index": audio_index,
-            "audio": audio_delivery,
-            "args": canonical_args,
-        });
-        // This transform runs after FFmpeg, so its version is not in argv.
-        // Keep completed rolling output from aliasing the old retaining bytes.
-        if segmenting
-            && video_options.retains_hevc_parameter_sets()
-            && transcode::hevc_copy_tag_for_source(&file, video_options.preserves_dolby_vision())
-                == "dvh1"
+        let rolling_provenance = if !selected_core_copy
+            && start_seconds == 0.0
+            && takeover.is_none()
+            && retained_budget.is_some()
         {
-            logical["copyseg_dvh1_guard"] = serde_json::json!(1);
-        }
-        let logical = serde_json::to_vec(&logical).ok();
-        let rolling_provenance =
-            if start_seconds == 0.0 && takeover.is_none() && retained_budget.is_some() {
-                match logical {
-                    Some(logical) => {
-                        crate::rolling_provenance::RollingProduction::capture(
-                            &file,
-                            &logical,
-                            file.audio_offset_ms != 0
-                                && !file.audio_streams.is_empty()
-                                && audio_delivery
-                                    .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
-                            &if segmenting {
-                                ffmpeg_bin()
-                            } else {
-                                producer_ffmpeg_bin()
-                            },
-                        )
-                        .await
-                    }
-                    None => None,
-                }
+            let canonical_args = if segmenting {
+                transcode::copy_pipe_args_with_audio_delivery(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    video_options,
+                    audio_delivery,
+                )
             } else {
-                None
+                transcode::hls_copy_args_with_audio_delivery(
+                    &file,
+                    start_seconds,
+                    audio_index,
+                    options.transcode_audio,
+                    pacing,
+                    video_options,
+                    0,
+                    "init.mp4",
+                    "retained-output",
+                    audio_delivery,
+                )
             };
-        let mut execution_file = file.clone();
-        if let Some(provenance) = &rolling_provenance {
+            let mut logical = serde_json::json!({
+                "file": &file,
+                "kind": SessionKind::Copy {
+                    aac: options.transcode_audio,
+                    preserve_dolby_vision: options.preserve_dolby_vision,
+                    convert_dolby_vision: options.convert_dolby_vision,
+                },
+                "audio_index": audio_index,
+                "audio": audio_delivery,
+                "args": canonical_args,
+            });
+            // This transform runs after FFmpeg, so its version is not in argv.
+            // Keep completed rolling output from aliasing the old retaining bytes.
+            if segmenting
+                && video_options.retains_hevc_parameter_sets()
+                && transcode::hevc_copy_tag_for_source(
+                    &file,
+                    video_options.preserves_dolby_vision(),
+                ) == "dvh1"
+            {
+                logical["copyseg_dvh1_guard"] = serde_json::json!(1);
+            }
+            let logical = serde_json::to_vec(&logical).ok();
+            match logical {
+                Some(logical) => {
+                    crate::rolling_provenance::RollingProduction::capture(
+                        &file,
+                        &logical,
+                        file.audio_offset_ms != 0
+                            && !file.audio_streams.is_empty()
+                            && audio_delivery
+                                .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
+                        &if segmenting {
+                            ffmpeg_bin()
+                        } else {
+                            producer_ffmpeg_bin()
+                        },
+                    )
+                    .await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut execution_file = (!selected_core_copy).then(|| file.clone());
+        if let (Some(execution_file), Some(provenance)) =
+            (execution_file.as_mut(), rolling_provenance.as_ref())
+        {
             execution_file.path = provenance.input_path();
         }
         let legacy_args = |output: &str| match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_audio_delivery(
-                &execution_file,
+                execution_file
+                    .as_ref()
+                    .expect("legacy copy has its execution source"),
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
@@ -2040,7 +2458,9 @@ impl TranscodeManager {
                 audio_delivery,
             ),
             None => transcode::hls_copy_args_with_audio_delivery(
-                &execution_file,
+                execution_file
+                    .as_ref()
+                    .expect("legacy copy has its execution source"),
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
@@ -2063,7 +2483,13 @@ impl TranscodeManager {
         // Freeze the achieved media origin before actor admission. The actor,
         // retry recipe, and response contract must describe one immutable
         // presentation even if the start future is later cancelled.
-        let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
+        let media_origin_seconds = if selected_core_copy {
+            // The only selected seek is exactly zero. The keyframe probe's
+            // source-backed implementation returns zero without native entry.
+            0.0
+        } else {
+            probe_media_origin(&file.path, start_seconds).await
+        };
 
         // `served`, not `options`, from here on: the playlist must advertise
         // the HDR10 base this path serves and the session record must not
@@ -2134,58 +2560,188 @@ impl TranscodeManager {
             .filter(|rate| *rate > 0)
             .map(|rate| rate as f64);
         let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
-        let scratch_reservation = self.reserve_rolling_scratch_with(
-            RollingScratchSizing::Startup(rolling_startup_bytes(copy_bitrate, 1.0)),
-            self.ahead_limits_for_start(&settings),
-        )?;
-
+        // Only the legacy scratch grant still reads settings below. Release
+        // selected planning settings before the distinct R charge begins.
+        let settings = (!selected_core_copy).then_some(settings);
         let session_id = takeover
             .as_ref()
             .map(|takeover| takeover.provisional_session_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
+        #[cfg(target_os = "linux")]
+        let selected_owner = if let Some(mut planning) = selected_planning {
+            let runtime = self
+                .resource_runtime
+                .as_ref()
+                .ok_or("selected rolling copy runtime disappeared")?;
+            let accounting = runtime
+                .accounting()
+                .map_err(|error| format!("reading selected copy capacity: {error:?}"))?;
+            let rendition_id = format!("copy-{session_id}");
+            let path_capacity = runtime
+                .copy_vod_application_path_capacity(&rendition_id)
+                .map_err(|error| format!("sizing selected copy session path: {error}"))?;
+            let selected_session_metadata_bytes = frozen_presentation
+                .requested_heap_bytes()
+                .and_then(|n| n.checked_add(path_capacity))
+                .and_then(|n| n.checked_add(item_title.capacity()))
+                .and_then(|n| n.checked_add(user_name.len()))
+                .and_then(|n| n.checked_add(supersession_user.len()))
+                .and_then(|n| n.checked_add(playback_id.len()))
+                .and_then(|n| {
+                    n.checked_add(audio_delivery.map_or(
+                        Some(0),
+                        plurx_core::playback::audio::AudioDelivery::requested_heap_bytes,
+                    )?)
+                })
+                .and_then(|n| {
+                    n.checked_add(
+                        recovery.map_or(Some(0), SessionRecoveryIdentity::requested_heap_bytes)?,
+                    )
+                })
+                .ok_or("selected copy session metadata bound overflows")?;
+            // Four original UUID selectors can coexist across manager,
+            // observer, retired map and original grace owner.
+            let application_metadata_bytes = selected_session_metadata_bytes
+                // The local start path and the Session-attached guard
+                // created below retain the second and third daemon paths.
+                // The core owner's directory Arc is charged separately.
+                .checked_add(
+                    path_capacity
+                        .checked_mul(2)
+                        .ok_or("selected copy application path overlap overflows")?,
+                )
+                .and_then(|n| n.checked_add(session_id.capacity().checked_mul(4)?))
+                .ok_or("selected copy application metadata bound overflows")?;
+            let request = selected_copy_request(
+                runtime,
+                &planning,
+                &file,
+                rendition_id,
+                video_options,
+                audio_index,
+                options.transcode_audio,
+                pacing,
+                audio_delivery,
+                self.runtime_cache.clone(),
+                application_metadata_bytes,
+                accounting.limit_epoch,
+                accounting.capacity,
+            )?;
+            let app_bytes = usize::try_from(request.application_owner_bytes)
+                .map_err(|_| "selected copy application charge overflows")?;
+            // All JSON interpretation, command construction and hard-vector
+            // sizing above occur while the actual P owner remains charged.
+            // P native closure is the last step before the distinct R admit.
+            drop(probe_json);
+            drop(stored_probe);
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            planning
+                .owner
+                .finish_native(deadline)
+                .await
+                .map_err(|error| format!("closing selected copy planning native work: {error}"))?;
+            let mut cleanup = planning.owner.into_cleanup();
+            drop(planning.report);
+            drop(planning.application);
+            cleanup
+                .finish_retirement(deadline)
+                .await
+                .map_err(|error| format!("settling selected copy planning metadata: {error}"))?;
+            let owner = runtime
+                .prepare_copy_vod(request, deadline)
+                .await
+                .map_err(|error| format!("admitting selected rolling copy: {error}"))?;
+            let app = owner
+                .take_application_lease(app_bytes)
+                .map_err(|error| format!("retaining selected copy application owner: {error}"))?;
+            Some((owner, app, selected_session_metadata_bytes))
+        } else {
+            None
+        };
+        let scratch_reservation = if selected_core_copy {
+            None
+        } else {
+            Some(self.reserve_rolling_scratch_with(
+                RollingScratchSizing::Startup(rolling_startup_bytes(copy_bitrate, 1.0)),
+                self.ahead_limits_for_start(
+                    settings.as_ref().ok_or("legacy copy settings are absent")?,
+                ),
+            )?)
+        };
+        let dir = {
+            #[cfg(target_os = "linux")]
+            if let Some((owner, _, _)) = selected_owner.as_ref() {
+                owner.directory_path().to_owned()
+            } else {
+                self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()))
+            }
+        };
         #[cfg(windows)]
         let dir = std::path::absolute(dir)
             .map_err(|error| format!("resolving Windows session directory: {error}"))?;
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| format!("creating session dir: {e}"))?;
+        if !selected_core_copy {
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| format!("creating session dir: {e}"))?;
+        }
         #[cfg(windows)]
         let output_handle = plurx_core::fs_secure::SecureDirectory::open(&dir)
             .await
             .map_err(|error| format!("holding Windows session directory: {error}"))?;
-        let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
+        let mut start_settlement =
+            (!selected_core_copy).then(|| PrepublicationStartSettlement::new(dir.clone()));
         // FFmpeg's own HLS muxer -- the legacy writer, a takeover, and the
         // legacy retry a segmenter session keeps in reserve -- uploads
         // through this endpoint, so its objects are granted before they land
         // exactly as the segmenter's are. Lane 0 is the initial attempt and
         // lane 1 the retry.
-        let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
-        let initial_args = if segmenting {
-            transcode::copy_pipe_args_with_audio_delivery(
-                &execution_file,
+        let upload = if let Some(reservation) = scratch_reservation.as_ref() {
+            Some(self.bind_scratch_upload(&dir, reservation, scratch_envelope)?)
+        } else {
+            None
+        };
+        let initial_args = if selected_core_copy {
+            None
+        } else if segmenting {
+            Some(transcode::copy_pipe_args_with_audio_delivery(
+                execution_file
+                    .as_ref()
+                    .ok_or("legacy copy execution source is absent")?,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
                 pacing,
                 video_options,
                 audio_delivery,
-            )
+            ))
         } else {
-            legacy_args(&upload.base_url(0))
+            Some(legacy_args(
+                &upload
+                    .as_ref()
+                    .ok_or("legacy copy upload is absent")?
+                    .base_url(0),
+            ))
         };
-        tracing::info!(
-            target: "plurxd::transcode",
-            session = %session_log_id(&session_id),
-            file_id,
-            start_seconds,
-            mode = if segmenting { "segmenter" } else { "legacy" },
-            build = crate::version::BUILD,
-            "{}",
-            ffmpeg_args_log_message("copy-video HLS ffmpeg args", &initial_args, &session_id)
-        );
-        let rolling_collection = self
-            .begin_rolling_retention(
+        if let Some(initial_args) = initial_args.as_ref() {
+            tracing::info!(
+                target: "plurxd::transcode",
+                session = %session_log_id(&session_id),
+                file_id,
+                start_seconds,
+                mode = if segmenting { "segmenter" } else { "legacy" },
+                build = crate::version::BUILD,
+                "{}",
+                ffmpeg_args_log_message("copy-video HLS ffmpeg args", initial_args, &session_id)
+            );
+        }
+        let rolling_collection = if selected_core_copy {
+            None
+        } else {
+            self.begin_rolling_retention(
                 rolling_provenance.as_ref(),
                 file.duration_ms,
                 file.size,
@@ -2194,17 +2750,30 @@ impl TranscodeManager {
                 file.id,
                 &item_title,
             )
-            .await;
+            .await
+        };
         if let Some(collection) = &rolling_collection {
-            upload.bind_retained(Arc::clone(collection));
+            upload
+                .as_ref()
+                .ok_or("legacy copy upload is absent")?
+                .bind_retained(Arc::clone(collection));
         }
-        let retry = build_prepublication_copy_retry(
-            segmenting,
-            video_options,
-            legacy_args(&upload.base_url(1)),
-            &presentation_contract_fingerprint,
-            self.runtime_cache.clone(),
-        );
+        let retry = if selected_core_copy {
+            None
+        } else {
+            build_prepublication_copy_retry(
+                segmenting,
+                video_options,
+                legacy_args(
+                    &upload
+                        .as_ref()
+                        .ok_or("legacy copy upload is absent")?
+                        .base_url(1),
+                ),
+                &presentation_contract_fingerprint,
+                self.runtime_cache.clone(),
+            )
+        };
         let expected_remaining_ms =
             file.duration_ms
                 .filter(|duration_ms| *duration_ms > 0)
@@ -2228,22 +2797,27 @@ impl TranscodeManager {
         }
         .with_completion_expectation(expected_remaining_ms, completion_tolerance_ms);
         let progress = Arc::new(Progress::new());
+        #[cfg(target_os = "linux")]
+        let (selected_core_owner, selected_core_app, selected_metadata_bound) = match selected_owner
+        {
+            Some((owner, app, bound)) => (Some(owner), Some(app), Some(bound)),
+            None => (None, None, None),
+        };
+        #[cfg(target_os = "linux")]
+        let (control, mut executor_registration) = match selected_core_app {
+            Some(application) => crate::playback_control::RollingControlHandle::spawn_prepublication_producer_with_application(
+                "copy-session-start", application,
+            ),
+            None => crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                "copy-session-start",
+            ),
+        };
+        #[cfg(not(target_os = "linux"))]
         let (control, mut executor_registration) =
             crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
                 "copy-session-start",
             );
         let failed = Arc::new(AtomicBool::new(false));
-        if let Err(reason) = control
-            .bind_response_publication_contract(
-                frozen_presentation.contract_fingerprint.clone(),
-                Arc::clone(&failed),
-            )
-            .await
-        {
-            return Err(format!(
-                "rolling control actor rejected copy response-publication failure fencing: {reason:?}"
-            ));
-        }
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
@@ -2256,6 +2830,12 @@ impl TranscodeManager {
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
             copy_reader_task: Mutex::new(CopyReaderTask::default()),
+            #[cfg(target_os = "linux")]
+            core_copy: Mutex::new(selected_core_owner),
+            #[cfg(target_os = "linux")]
+            core_copy_close: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
             actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
@@ -2318,10 +2898,10 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
-            scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
+            scratch: scratch_reservation.map(|reservation| reservation.bound_to(&session_id, 0)),
             retired_release: Arc::new(RetiredRelease::new()),
             scratch_envelope,
-            upload: Some(upload),
+            upload,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -2340,8 +2920,44 @@ impl TranscodeManager {
             suspend_count: AtomicU64::new(0),
             takeover,
             first_slide_logged: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            core_copy_app: None,
         });
+        // Selected output is core-owned: construct this existing cancellation
+        // owner only with a rich Session attached, so its raw-directory branch
+        // is unreachable. It retains the original actor join and core owner
+        // before the first awaited actor bind can be cancelled.
+        if selected_core_copy {
+            start_settlement = Some(PrepublicationStartSettlement::new(dir.clone()));
+        }
         start_settlement.attach(&session);
+        #[cfg(target_os = "linux")]
+        if let Some(bound) = selected_metadata_bound {
+            if selected_copy_session_dynamic_bytes(&session).is_none_or(|actual| actual > bound) {
+                return Err("selected copy session metadata exceeded its admitted capacity".into());
+            }
+        }
+        if let Err(reason) = session
+            .control
+            .bind_response_publication_contract(
+                session
+                    .frozen_presentation
+                    .as_ref()
+                    .expect("new copy session has a frozen presentation")
+                    .contract_fingerprint
+                    .clone(),
+                Arc::clone(&session.failed),
+            )
+            .await
+        {
+            fail_prepublication_transaction(&session,
+                format!("rolling control actor rejected copy response-publication failure fencing: {reason:?}"),
+            ).await;
+            start_settlement.disarm();
+            return Err(format!(
+                "rolling control actor rejected copy response-publication failure fencing: {reason:?}"
+            ));
+        }
         if let Err(reason) = executor_registration.register().await {
             fail_prepublication_transaction(
                 &session,
@@ -2381,7 +2997,45 @@ impl TranscodeManager {
             provenance.bind_initial_attempt(generation);
         }
         session.bind_retry_compatibility_attempt(generation).await;
-        let pipe_stdout = if segmenting {
+        let pipe_stdout = if selected_core_copy {
+            #[cfg(target_os = "linux")]
+            {
+                let deadline = std::time::Instant::now() + Duration::from_secs(90);
+                let started = {
+                    let mut selected = session.core_copy.lock().await;
+                    selected
+                        .as_mut()
+                        .ok_or("selected copy owner was lost before entry")?
+                        .start(deadline)
+                        .await
+                };
+                if let Err(error) = started {
+                    fail_prepublication_transaction(
+                        &session,
+                        format!("selected copy root did not start: {error}"),
+                    )
+                    .await;
+                    start_settlement.disarm();
+                    return Err(format!("selected copy root did not start: {error}"));
+                }
+                if let Err(error) = spawn_core_copy_result_owner(
+                    Arc::clone(&session),
+                    session_id.clone(),
+                    generation,
+                )
+                .await
+                {
+                    fail_prepublication_transaction(&session, error.clone()).await;
+                    start_settlement.disarm();
+                    return Err(error);
+                }
+                None
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                unreachable!("selected copy requires the Linux owner")
+            }
+        } else if segmenting {
             match session
                 .spawn_and_install_prepublication_pipe_child(generation, || {
                     spawn_ffmpeg_pipe_at(
@@ -2390,7 +3044,9 @@ impl TranscodeManager {
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&ffmpeg_bin())),
-                        &initial_args,
+                        initial_args
+                            .as_ref()
+                            .ok_or("legacy copy arguments are absent")?,
                         crate::process_control::ChildWork::realtime("playback transcode"),
                         &session_id,
                         FfmpegProgressObserver::rolling(
@@ -2439,7 +3095,9 @@ impl TranscodeManager {
                             .as_ref()
                             .map(|proof| proof.executable_path())
                             .unwrap_or(std::path::Path::new(&producer_ffmpeg_bin())),
-                        &initial_args,
+                        initial_args
+                            .as_ref()
+                            .ok_or("legacy copy arguments are absent")?,
                         crate::process_control::ChildWork::realtime("playback copy HLS"),
                         "copy",
                         &session_id,

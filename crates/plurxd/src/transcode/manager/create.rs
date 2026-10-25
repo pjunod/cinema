@@ -2569,6 +2569,8 @@ impl TranscodeManager {
             retained
         };
         let encoding = Arc::new(crate::vodencode::Encoding {
+            #[cfg(target_os = "linux")]
+            planning_metadata: None,
             source_clock,
             shared_audio,
             source_object_version,
@@ -3494,7 +3496,7 @@ impl TranscodeManager {
     /// Read the VOD serving settings. Absence means enabled; an explicit `0`
     /// is a maintenance kill switch that refuses playback rather than routing
     /// it through the removed live presentation.
-    pub(super) async fn vod_settings(
+    pub(crate) async fn vod_settings(
         &self,
         req: &SessionRequest,
     ) -> Result<Option<crate::vodserve::VodSettings>, String> {

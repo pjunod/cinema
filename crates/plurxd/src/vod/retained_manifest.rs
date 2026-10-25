@@ -6,6 +6,51 @@ use std::io::{Read, Write};
 
 pub(super) const MANIFEST_NAME: &str = "complete-v1.json";
 pub(super) const MAX_MANIFEST: u64 = 4 * 1024 * 1024;
+/// The first typed static-software artifact fits one charged scratch IO
+/// payload. Static and legacy manifests share the same published size limit;
+/// the static admission must charge this whole capacity before entry.
+pub(super) const STATIC_MANIFEST_LIMIT: usize = MAX_MANIFEST as usize;
+
+/// Requested application workspace for the selected static writer. The
+/// complete-output observer already owns its original state; publishing a
+/// manifest can simultaneously own the completed observation, its parsed
+/// validation copy, and the 4 MiB serialization buffer. This counts those
+/// concrete Vec/String requests, not allocator or Tokio private overhead.
+pub(super) fn projected_static_manifest_workspace_bytes(
+    entries: usize,
+    playlist_capacity: usize,
+    logical_heap_bytes: usize,
+) -> Option<usize> {
+    if entries == 0 || entries > 8192 || playlist_capacity > STATIC_MANIFEST_LIMIT {
+        return None;
+    }
+    let member_bytes = entries.checked_mul(std::mem::size_of::<ObservedOutputMember>())?;
+    let observed_slots = entries.checked_mul(std::mem::size_of::<Option<ObservedOutputMember>>())?;
+    let validation_members = entries.checked_mul(std::mem::size_of::<ObservedOutputMember>())?;
+    let durations = entries.checked_mul(std::mem::size_of::<WireDuration>())?;
+    let reduction = entries.checked_mul(std::mem::size_of::<(WireDuration, Option<u64>)>())?;
+    // The caller's playlist, original measurement, completed observation and
+    // validation copy can coexist. The constructor's canonical-plan check
+    // briefly allocates another playlist while only the caller's copy exists,
+    // so four copies still cover its peak. Each carries the playlist and small
+    // identity strings. The source
+    // version is bounded by the finite request's 4096-byte identity gate.
+    let origin_copies =
+        4usize.checked_mul(playlist_capacity.checked_add(4096)?.checked_add(64 * 3)?)?;
+    STATIC_MANIFEST_LIMIT
+        .checked_add(origin_copies)?
+        .checked_add(member_bytes)?
+        .checked_add(observed_slots)?
+        .checked_add(validation_members)?
+        .checked_add(durations.checked_mul(2)?)?
+        .checked_add(reduction.checked_mul(2)?)?
+        // Request logical facts, published manifest, and the retained
+        // artifact's audio-delivery clone may coexist during handoff.
+        .checked_add(logical_heap_bytes.checked_mul(3)?)?
+        .checked_add(4096)? // retained display path cloned from the selected finite output
+        .checked_add(std::mem::size_of::<ArtifactManifest>())?
+        .checked_add(std::mem::size_of::<CompleteOutputObservation>())
+}
 
 /// Logical delivery facts are separate from the original salted execution.
 /// No process digest is stripped and no durable idempotency key is reused.
@@ -328,6 +373,58 @@ pub(super) struct ArtifactManifest {
 }
 
 impl ArtifactManifest {
+    /// Build the historical manifest shape from the original finite pump's
+    /// post-publication observations. No second hard-link directory is made.
+    pub(super) fn from_finite_observation(
+        id: uuid::Uuid,
+        observation: CompleteOutputObservation,
+        logical: LogicalOutput,
+        init_bytes: u64,
+    ) -> Self {
+        Self {
+            version: 1,
+            id: id.to_string(),
+            origin: observation.preimage,
+            logical,
+            init_bytes,
+            members: observation.members,
+        }
+    }
+
+    /// Serialize into one pre-reserved buffer that cannot grow beyond the
+    /// static scratch plan's IO bound. Its digest is the same historical
+    /// complete-v1 JSON seal used by Store output identity.
+    pub(super) fn encode_finite_bounded(&self) -> io::Result<(Vec<u8>, [u8; 32])> {
+        self.observation()?;
+        struct Bounded(Vec<u8>);
+        impl Write for Bounded {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if bytes.len() > STATIC_MANIFEST_LIMIT - self.0.len() {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(STATIC_MANIFEST_LIMIT)
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
+        if bytes.capacity() > STATIC_MANIFEST_LIMIT {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mut writer = Bounded(bytes);
+        serde_json::to_writer(&mut writer, self).map_err(io::Error::other)?;
+        if writer.0.is_empty() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let seal = Sha256::digest(&writer.0).into();
+        Ok((writer.0, seal))
+    }
+
     /// Canonical typed metadata seals every actual member digest/length and
     /// logical fact. The execution origin alone does not bind those bytes.
     pub(super) fn seal(&self) -> io::Result<[u8; 32]> {
@@ -373,32 +470,42 @@ impl ArtifactManifest {
         if !playlist.ends_with("#EXT-X-ENDLIST\n") {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        let target: Vec<_> = playlist
+        let mut targets = playlist
             .lines()
-            .filter_map(|l| l.strip_prefix("#EXT-X-TARGETDURATION:"))
-            .collect();
-        let target = match target.as_slice() {
-            [value] => value.parse::<u64>().ok(),
-            _ => None,
-        }
-        .ok_or(io::ErrorKind::InvalidData)?;
-        let durations: Option<Vec<_>> = playlist
-            .lines()
-            .filter_map(|l| l.strip_prefix("#EXTINF:"))
-            .map(|d| WireDuration::parse(d.strip_suffix(',')?))
-            .collect();
-        let durations = durations
-            .filter(|d| d.len() == self.members.len())
+            .filter_map(|line| line.strip_prefix("#EXT-X-TARGETDURATION:"));
+        let target = targets
+            .next()
+            .filter(|_| targets.next().is_none())
+            .and_then(|value| value.parse::<u64>().ok())
             .ok_or(io::ErrorKind::InvalidData)?;
-        let names: Vec<_> = playlist
+        let mut durations = Vec::new();
+        durations
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| io::ErrorKind::OutOfMemory)?;
+        if durations.capacity() > self.members.len() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        for value in playlist
             .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect();
-        if names.len() != self.members.len()
-            || names
-                .iter()
-                .enumerate()
-                .any(|(i, n)| *n != segment_name(i as u64))
+            .filter_map(|line| line.strip_prefix("#EXTINF:"))
+        {
+            if durations.len() == self.members.len() {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            durations.push(
+                WireDuration::parse(value.strip_suffix(',').ok_or(io::ErrorKind::InvalidData)?)
+                    .ok_or(io::ErrorKind::InvalidData)?,
+            );
+        }
+        if durations.len() != self.members.len() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mut names = playlist
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'));
+        if (0..self.members.len())
+            .any(|index| names.next() != Some(segment_name(index as u64).as_str()))
+            || names.next().is_some()
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -519,6 +626,39 @@ impl ArtifactManifest {
             id: uuid::Uuid::parse_str(&self.id).map_err(|_| io::ErrorKind::InvalidData)?,
             observation,
             directory,
+            #[cfg(target_os = "linux")]
+            finite_output: None,
+            charge,
+            init_bytes: self.init_bytes,
+            repair: Mutex::new(()),
+            recipe_key: self.origin.recipe_key,
+            source_version: self.origin.source_version,
+            candidate: None,
+            audio_delivery: self.logical.audio_delivery.clone(),
+            durable: true,
+            logical: Some(self.logical),
+            validated: AtomicBool::new(false),
+            sealed_identity: std::sync::OnceLock::from(seal),
+        })
+    }
+
+    /// Construct Store-facing facts from the SAME retained S selector after
+    /// the core's known R-to-S transfer. The pathname is display identity;
+    /// all selected reads use its counted native reader cells.
+    #[cfg(target_os = "linux")]
+    pub(super) fn into_finite_artifact(
+        self,
+        output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+    ) -> io::Result<super::retained::RetainedVodArtifact> {
+        let observation = self.observation()?;
+        let charge = self.charge()?;
+        let seal = self.seal()?;
+        Ok(super::retained::RetainedVodArtifact {
+            private_preparation_origin: std::sync::OnceLock::new(),
+            id: uuid::Uuid::parse_str(&self.id).map_err(|_| io::ErrorKind::InvalidData)?,
+            observation,
+            directory: output.path().to_path_buf(),
+            finite_output: Some(output),
             charge,
             init_bytes: self.init_bytes,
             repair: Mutex::new(()),

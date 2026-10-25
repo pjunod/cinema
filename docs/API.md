@@ -29,7 +29,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-As of 2026-10-21, plurx has 387 routes declared by the ordinary listener's
+As of 2026-10-25, plurx has 391 routes declared by the ordinary listener's
 assembled router. The ordinary listener (`:32400` by default) serves the five
 surfaces below.
 Sharing uses a separate private TLS listener with its own peer credentials
@@ -37,7 +37,6 @@ Sharing uses a separate private TLS listener with its own peer credentials
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
-plurx has 387 routes across the registered routers.
 
 A test keeps that number and this inventory honest:
 `tests/operations/test_api_doc_routes.py` parses the router and fails the
@@ -466,7 +465,7 @@ of never storing it.
 | GET | `/api/v1/settings` | admin | Full settings snapshot; capacity provenance includes a separate atomic revision snapshot |
 | PUT | `/api/v1/settings` | admin | Partial update; returns the new full snapshot |
 | PUT | `/api/v1/settings/transcode-capacity` | admin | Explicit Automatic/limit choices in one revision-CAS transaction; returns settings, or 409 on stale form/unavailable schema |
-| GET | `/api/v1/system` | admin | Environment diagnostics, counters and `resource_ownership` (node-local selected finite software VOD accounting, explicit Unknown peaks and startup custody state; not whole-node coverage) |
+| GET | `/api/v1/system` | admin | Environment diagnostics, counters and `resource_ownership` (node-local selected playback accounting, explicit Unknown peaks, startup custody and optional bounded planning-owner/cleanup counts; unavailable counts never imply an empty inventory; not whole-node coverage) |
 | PUT | `/api/v1/system/transcoder` | admin | Saves this node's backend preference for its next restart |
 | POST | `/api/v1/system/transcoder` | admin | Starts an idle-node capability check and benchmark |
 | POST | `/api/v1/system/video-processing/reprobe` | admin | Requests a new node-local video-processing compatibility generation (macOS processing graphs, or Linux strict Dolby graphs with their per-graph refusal reasons) and returns the current reports. Saved preferences and running plans are unchanged |
@@ -3812,6 +3811,9 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
 | POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
+| POST | `/internal/cluster/media/adaptive-attempts/status` | 256 KiB | Authenticated peer read of the exact durable adaptive attempt and its separately reported local owner state; this status is not native cleanup proof |
+| POST | `/internal/cluster/media/adaptive-attempts/prepare` | 256 KiB | Authenticated worker admission for an existing Store Claimed, blocked starting route; retains the original admitted planning and finite owner before replying Prepared |
+| POST | `/internal/cluster/media/adaptive-attempts/adopt`, `/internal/cluster/media/adaptive-attempts/cancel` | 256 KiB | Authenticated exact-operation adoption or fencing of a registered finite worker; the Store row coordinates identity while the original local owner retains physical cleanup |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
 | POST | `/internal/cluster/media/sessions/control` | 20 KiB | Relays one playback-control exchange |
 | POST | `/internal/media-sessions/sharing-ingress-close` | 2 KiB | Exact-request member authentication and current durable ownership authorize closure of one registered Source/B ingress driver. Binds principal, incarnation, owner identity/epoch, ingress boot, physical driver and registration sequence. Returns an exact member-signed receipt bound to the request nonce and path only after actual accepted-driver closure; absence, restart and timeout remain unavailable. |

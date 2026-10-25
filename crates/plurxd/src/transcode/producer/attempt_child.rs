@@ -52,6 +52,20 @@ pub(super) struct FrozenHlsPresentation {
 }
 
 impl FrozenHlsPresentation {
+    pub(in crate::transcode) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.file
+            .requested_heap_bytes()?
+            .checked_add(self.context.requested_heap_bytes()?)?
+            .checked_add(self.contract_fingerprint.capacity())?
+            .checked_add(
+                self.sealed_stable_master_contract
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )
+    }
+}
+
+impl FrozenHlsPresentation {
     pub(super) fn new(
         file: plurx_core::domain::MediaFile,
         context: HlsContext,

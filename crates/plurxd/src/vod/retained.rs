@@ -346,12 +346,16 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
     (descriptor.recipe_digest, other)
 }
 
-#[derive(Debug)]
 pub(crate) struct RetainedVodArtifact {
     pub(super) private_preparation_origin: std::sync::OnceLock<PreparedOrigin>,
     pub(super) id: uuid::Uuid,
     pub(super) observation: CompleteOutputObservation,
     pub(super) directory: PathBuf,
+    /// The first typed static artifact reads from the SAME retained S. Its
+    /// directory path remains display/identity data, never read authority.
+    #[cfg(target_os = "linux")]
+    pub(super) finite_output:
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput>,
     pub(super) charge: u64,
     pub(super) init_bytes: u64,
     pub(super) repair: Mutex<()>,
@@ -363,6 +367,18 @@ pub(crate) struct RetainedVodArtifact {
     pub(super) logical: Option<super::retained_manifest::LogicalOutput>,
     pub(super) validated: AtomicBool,
     pub(super) sealed_identity: std::sync::OnceLock<[u8; 32]>,
+}
+
+impl std::fmt::Debug for RetainedVodArtifact {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut item = formatter.debug_struct("RetainedVodArtifact");
+        item.field("id", &self.id)
+            .field("directory", &self.directory)
+            .field("durable", &self.durable);
+        #[cfg(target_os = "linux")]
+        item.field("finite_output", &self.finite_output.is_some());
+        item.finish_non_exhaustive()
+    }
 }
 
 /// Process-private provenance minted only by post-settlement exposure. It is
@@ -466,8 +482,43 @@ impl RetainedVodArtifact {
             }
             None => (INIT_NAME.to_owned(), self.observation.served_init.clone()),
         };
-        let path = self.directory.join(&name);
         let etag = format!("{}-{digest}", self.id);
+        #[cfg(target_os = "linux")]
+        if let Some(output) = &self.finite_output {
+            use plurx_core::adaptive_resources::runtime::finite_vod::FiniteFile;
+            let (file, expected_len) = match index {
+                Some(index) => (
+                    FiniteFile::Segment(index),
+                    self.observation.members[index as usize].bytes,
+                ),
+                None => (FiniteFile::Init, self.init_bytes),
+            };
+            let len = output
+                .file_len(file)
+                .await
+                .map_err(|error| VodError::Io(error.into_io_error()))?
+                .filter(|len| *len == expected_len)
+                .ok_or_else(|| {
+                    VodError::ProducerFailed(
+                        "retained finite artifact length differs from its sealed manifest"
+                            .to_owned(),
+                    )
+                })?;
+            return Ok(SegmentReady {
+                observed_media_duration_ms: index
+                    .and_then(|entry| plan_media_duration_ms(rendition, entry)),
+                file: ReadyFile::Finite {
+                    output: output.clone(),
+                    file,
+                    len,
+                },
+                len,
+                etag: format!("{etag}-{len}"),
+                delivery: Arc::clone(delivery),
+                retained_lease: Some(Arc::clone(self)),
+            });
+        }
+        let path = self.directory.join(&name);
         let opened = open_ready(&path, &etag, delivery).await;
         let mut ready = match opened {
             Ok(ready) => ready,
@@ -639,6 +690,8 @@ impl Drop for AssemblyReservation {
 struct RetainedState {
     entries: HashMap<[u8; 32], RetainedEntry>,
     retired: VecDeque<Arc<RetainedVodArtifact>>,
+    #[cfg(target_os = "linux")]
+    finite_closing: VecDeque<FiniteArtifactClosing>,
     rolling: HashMap<[u8; 32], rolling_retained::RollingEntry>,
     rolling_retired: VecDeque<Arc<RollingArtifact>>,
     bytes: u64,
@@ -661,10 +714,28 @@ impl RetainedState {
     fn artifact_count(&self) -> usize {
         self.entries.len()
             + self.retired.len()
+            + {
+                #[cfg(target_os = "linux")]
+                {
+                    self.finite_closing.len()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    0
+                }
+            }
             + self.rolling.len()
             + self.rolling_retired.len()
             + self.preparations.len()
     }
+}
+
+#[cfg(target_os = "linux")]
+struct FiniteArtifactClosing {
+    ticket: Arc<
+        tokio::sync::Mutex<plurx_core::adaptive_resources::runtime::finite_vod::FiniteCloseTicket>,
+    >,
+    charge: u64,
 }
 
 struct PreparationAssemblyOutcome {
@@ -698,6 +769,56 @@ pub(super) struct RetainedArtifactRegistry {
 }
 
 impl RetainedArtifactRegistry {
+    /// Install only a known-retained finite S after the exact background
+    /// Store publication committed. The caller keeps the original Arc on
+    /// refusal; no pathname link, repair or decoded Store DTO creates S.
+    #[cfg(target_os = "linux")]
+    pub(super) fn expose_finite_static(
+        &self,
+        artifact: Arc<RetainedVodArtifact>,
+        budget: u64,
+    ) -> Result<(), Arc<RetainedVodArtifact>> {
+        if artifact.finite_output.is_none() || !artifact.durable || artifact.logical.is_none() {
+            return Err(artifact);
+        }
+        let mut state = self.state.lock().expect("retained registry lock");
+        if state
+            .entries
+            .get(&artifact.observation.rates.identity)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.artifact, &artifact))
+        {
+            return Ok(());
+        }
+        let Some(total) = state.bytes.checked_add(artifact.charge) else {
+            return Err(artifact);
+        };
+        if !state.startup_done
+            || !state.cold_ready
+            || !state.orphans.is_empty()
+            || state.artifact_count() >= MAX_ARTIFACTS
+            || state
+                .entries
+                .contains_key(&artifact.observation.rates.identity)
+            || total
+                .checked_add(state.cold_capacity)
+                .is_none_or(|bytes| bytes > budget)
+            || state.entries.try_reserve(1).is_err()
+        {
+            return Err(artifact);
+        }
+        artifact.validated.store(true, Release);
+        state.bytes = total;
+        state.entries.insert(
+            artifact.observation.rates.identity,
+            RetainedEntry {
+                artifact,
+                used: Instant::now(),
+                idle_since: None,
+            },
+        );
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn test_has_artifact(&self, facts: &crate::transcode::RetainedOutputFacts) -> bool {
         self.state
@@ -1707,6 +1828,8 @@ impl RetainedArtifactRegistry {
             id,
             observation,
             directory,
+            #[cfg(target_os = "linux")]
+            finite_output: None,
             charge,
             init_bytes,
             repair: Mutex::new(()),
@@ -1963,6 +2086,8 @@ impl RetainedArtifactRegistry {
         let Ok(_collector) = self.collector.try_lock() else {
             return;
         };
+        #[cfg(target_os = "linux")]
+        self.collect_finite_closing().await;
         if !self.own_namespace(base).await {
             return;
         }
@@ -2010,6 +2135,37 @@ impl RetainedArtifactRegistry {
         if Arc::strong_count(&artifact) != 2 {
             return;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(output) = &artifact.finite_output {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            match output.prepare_eviction(deadline).await {
+                Ok(ticket) => {
+                    let closing = FiniteArtifactClosing {
+                        ticket: Arc::new(tokio::sync::Mutex::new(ticket)),
+                        charge: artifact.charge,
+                    };
+                    // The compact ticket is installed before the last rich
+                    // artifact alias drops. Its original core book survives
+                    // a cancelled waiter or uncertain native/journal result.
+                    let removed = {
+                        let mut state = self.state.lock().expect("retained registry lock");
+                        let removed = state
+                            .retired
+                            .pop_front()
+                            .expect("selected retired artifact");
+                        state.finite_closing.push_back(closing);
+                        removed
+                    };
+                    drop(removed);
+                    drop(artifact);
+                    self.collect_finite_closing().await;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve", %error, artifact = %artifact.id, "finite artifact eviction remains charged")
+                }
+            }
+            return;
+        }
         let result = remove_artifact_batch(&artifact.directory).await;
         match result {
             Ok(true) => {
@@ -2020,6 +2176,41 @@ impl RetainedArtifactRegistry {
             Ok(false) => {}
             Err(error) => {
                 tracing::warn!(target: "plurxd::vodserve", %error, artifact = %artifact.id, "retained artifact cleanup remains charged")
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn collect_finite_closing(&self) {
+        let ticket = self
+            .state
+            .lock()
+            .expect("retained registry lock")
+            .finite_closing
+            .front()
+            .map(|entry| Arc::clone(&entry.ticket));
+        let Some(ticket) = ticket else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let result = ticket.lock().await.finish_retirement(deadline).await;
+        match result {
+            Ok(()) => {
+                let mut state = self.state.lock().expect("retained registry lock");
+                if state
+                    .finite_closing
+                    .front()
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.ticket, &ticket))
+                {
+                    let finished = state
+                        .finite_closing
+                        .pop_front()
+                        .expect("selected finite close");
+                    state.bytes = state.bytes.saturating_sub(finished.charge);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", %error, "finite artifact closure remains charged")
             }
         }
     }

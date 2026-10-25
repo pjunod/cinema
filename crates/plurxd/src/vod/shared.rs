@@ -34,7 +34,89 @@ pub(crate) struct PreparedAttemptCleanup {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) struct AdaptiveBuildFailure {
+    pub(crate) message: String,
+    /// Present only when the original finite R was admitted and its exact
+    /// closing owner was registered before this failure was returned.
+    pub(crate) cleanup: Option<PreparedAttemptCleanup>,
+}
+
+#[cfg(target_os = "linux")]
+impl AdaptiveBuildFailure {
+    pub(crate) fn before_r(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cleanup: None,
+        }
+    }
+}
+
+/// Owns the original cleanup registration task across a cancelled waiter.
+/// The M4 registry keeps this handle until it has joined the same task and
+/// recovered the exact finite-closing selector.
+#[cfg(target_os = "linux")]
+pub(crate) struct PreparedAttemptCleanupTask {
+    task: Option<tokio::task::JoinHandle<Arc<FiniteClosingOwner>>>,
+}
+
+#[cfg(target_os = "linux")]
+async fn run_prepared_attempt_cleanup(
+    shared: Arc<Shared>,
+    key: String,
+    gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+    rendition: Arc<Rendition>,
+    output: plurx_core::adaptive_resources::runtime::finite_vod::FiniteOutput,
+    producer: Arc<super::finite_software::FiniteSoftwareProducer>,
+    lease: Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
+) -> Arc<FiniteClosingOwner> {
+    let closing = shared
+        .retain_unattached_finite_with_handle(&key, Some(Arc::clone(&rendition)), output, producer)
+        .await;
+    drop(gate);
+    drop(rendition);
+    drop(lease);
+    closing
+}
+
+/// Exact application-owned original registration future layout, obtained
+/// from its function item without constructing a dummy native owner.
+#[cfg(target_os = "linux")]
+pub(crate) fn prepared_attempt_cleanup_frame_bytes() -> usize {
+    fn frame_size<A, B, C, D, E, F, G, Fut: std::future::Future>(
+        _: impl Fn(A, B, C, D, E, F, G) -> Fut,
+    ) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    frame_size(run_prepared_attempt_cleanup)
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedAttemptCleanupTask {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+    }
+
+    pub(crate) async fn join(&mut self) -> Result<PreparedAttemptCleanup, String> {
+        let task = self
+            .task
+            .as_mut()
+            .ok_or("adaptive cleanup task was already joined")?;
+        let closing = task
+            .await
+            .map_err(|error| format!("registering adaptive finite cleanup: {error}"))?;
+        self.task.take();
+        Ok(PreparedAttemptCleanup { closing })
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl PreparedAttemptCleanup {
+    pub(super) fn from_closing(closing: Arc<FiniteClosingOwner>) -> Self {
+        Self { closing }
+    }
+
     pub(crate) fn known_closed(&self) -> bool {
         self.closing.known_closed.load(Acquire)
     }
@@ -42,8 +124,128 @@ impl PreparedAttemptCleanup {
 
 #[cfg(target_os = "linux")]
 impl PreparedAttemptRendition {
+    /// A bounded preview from the SAME dormant plan that Adopt later attaches.
+    /// It creates no session, route, File or process and carries no physical
+    /// proof. Its exact encoded bytes become Store activation's negative check.
+    pub(crate) fn planned_preview(
+        &self,
+        session_id: &str,
+        serving_generation: u64,
+    ) -> Result<crate::media_sessions::RemoteStartResponse, String> {
+        let rendition = self
+            .rendition
+            .as_ref()
+            .ok_or("adaptive dormant rendition was already transferred")?;
+        let encoding = rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .ok_or("adaptive finite rendition has no frozen encoding")?;
+        let audio_bytes = rendition
+            .recipe
+            .audio_delivery
+            .as_ref()
+            .map_or(Some(0), |audio| audio.requested_heap_bytes())
+            .ok_or("adaptive audio preview capacity overflow")?;
+        if audio_bytes > crate::media_sessions::ADAPTIVE_PREVIEW_BYTES / 2 {
+            return Err("adaptive audio preview exceeds its precharged partition".into());
+        }
+        let height = encoding.options.target_height;
+        let preview = crate::media_sessions::RemoteStartResponse {
+            processed_dv_profile: None,
+            processed_fel: None,
+            retained_output: None,
+            audio_delivery: rendition.recipe.audio_delivery.clone(),
+            session_id: session_id.to_owned(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(self.planned_duration_ms()),
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            target_height: height,
+            kind: crate::transcode::SessionKind::Transcode { height },
+            encoder: encoding.delivered_encoder_label().to_owned(),
+            grade: encoding.options.pipeline.output_grade(),
+            vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            activation_generation: Some(serving_generation),
+        };
+        if !preview.is_valid()
+            || preview
+                .adaptive_preview_requested_heap_bytes()
+                .is_none_or(|bytes| bytes > crate::media_sessions::ADAPTIVE_PREVIEW_BYTES)
+        {
+            return Err("adaptive dormant preview exceeds its measured partition".into());
+        }
+        Ok(preview)
+    }
+
+    /// Attach only this original prepared rendition after the Store's exact
+    /// Adopt is known. The request contributes viewer intent; its executable
+    /// recipe and source file come from the retained charged Rendition.
+    pub(crate) async fn attach_after_store_adopt(
+        &mut self,
+        vod: &VodServe,
+        envelope: &crate::media_sessions::RemoteStartRequest,
+        settings: &VodSettings,
+        user_name: &str,
+        session_id: String,
+        authority: crate::serving_fence::ServingAuthority,
+        serving_generation: u64,
+        deadline: Instant,
+    ) -> Result<VodStart, String> {
+        if !envelope.is_valid()
+            || envelope.request.continuous_media.is_some()
+            || envelope.retained_output.is_some()
+        {
+            return Err("adaptive selected route is outside the finite AVC profile".into());
+        }
+        self.install_after_adoption().await?;
+        let rendition = self.rendition();
+        let file = &rendition.recipe.file;
+        if envelope.request.file_id != file.id {
+            return Err("adaptive adopted file differs from the original rendition".into());
+        }
+        let encoding = rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .ok_or("adaptive rendition lost its planned encoding")?;
+        let request = VodRecipeRequest {
+            root_admission: None,
+            measured_candidate: None,
+            retained_capture: RetainedOutputCapture::New,
+            request: &envelope.request,
+            encoding: Some(Arc::clone(encoding)),
+            soundtrack: None,
+            companion: None,
+        };
+        let item_title = format!("#{}", file.item_id);
+        vod.try_create_adopted_attempt(
+            request,
+            file,
+            settings,
+            VodAttribution {
+                user_name,
+                item_title: &item_title,
+                supersession_user: user_name,
+            },
+            session_id,
+            VodServingAdmission::new(authority, serving_generation, deadline),
+            crate::state::PlaybackViewerDemand {
+                principal: envelope.principal.clone(),
+                playback_id: envelope.request.playback_id.clone(),
+            },
+            self,
+        )
+        .await
+    }
+
     pub(crate) fn key(&self) -> &str {
         &self.key
+    }
+
+    pub(crate) fn planned_duration_ms(&self) -> i64 {
+        plan_duration_ms(&self.rendition().plan)
     }
 
     pub(crate) fn rendition(&self) -> &Arc<Rendition> {
@@ -140,30 +342,16 @@ impl PreparedAttemptRendition {
         let lease = self.application_lease.take();
         // The original charged owner is moved into a detached existing
         // finite-closing registration. Dropping the waiter cannot discard it.
-        Some(tokio::spawn(async move {
-            let closing = shared
-                .retain_unattached_finite_with_handle(
-                    &key,
-                    Some(Arc::clone(&rendition)),
-                    output,
-                    producer,
-                )
-                .await;
-            drop(gate);
-            drop(rendition);
-            drop(lease);
-            closing
-        }))
+        Some(tokio::spawn(run_prepared_attempt_cleanup(
+            shared, key, gate, rendition, output, producer, lease,
+        )))
     }
 
-    pub(crate) async fn abandon(mut self) -> Result<PreparedAttemptCleanup, String> {
+    pub(crate) fn begin_abandon(mut self) -> Result<PreparedAttemptCleanupTask, String> {
         let task = self
             .launch_abandoned_cleanup()
             .ok_or("adaptive attempt no longer owns a dormant rendition")?;
-        let closing = task
-            .await
-            .map_err(|error| format!("registering adaptive finite cleanup: {error}"))?;
-        Ok(PreparedAttemptCleanup { closing })
+        Ok(PreparedAttemptCleanupTask { task: Some(task) })
     }
 }
 
@@ -686,21 +874,28 @@ impl Shared {
         duration_ms: i64,
         settings: &VodSettings,
         application_owner_bytes: usize,
-    ) -> Result<PreparedAttemptRendition, String> {
+    ) -> Result<PreparedAttemptRendition, AdaptiveBuildFailure> {
         let build_guard = self.rendition_build_gate(&key).lock_owned().await;
         if self.finite_closing.lock().await.contains_key(&key)
             || self.renditions.lock().await.contains_key(&key)
         {
-            return Err("adaptive rendition key already has an owner".into());
+            return Err(AdaptiveBuildFailure::before_r(
+                "adaptive rendition key already has an owner",
+            ));
         }
         if !super::finite_software::selected(&key, &recipe, false, false) {
-            return Err("adaptive attempt requires selected finite software AVC".into());
+            return Err(AdaptiveBuildFailure::before_r(
+                "adaptive attempt requires selected finite software AVC",
+            ));
         }
         let plan = self
             .stored_plan(&key, &identity, &index, &recipe, duration_ms)
-            .await?;
+            .await
+            .map_err(AdaptiveBuildFailure::before_r)?;
         if plan.is_empty() {
-            return Err("adaptive attempt has no immutable segment plan".into());
+            return Err(AdaptiveBuildFailure::before_r(
+                "adaptive attempt has no immutable segment plan",
+            ));
         }
         let (rendition, application_lease) = super::finite_software::build_attempt(
             self,
@@ -956,7 +1151,7 @@ impl Shared {
     /// Plan acquisition (put-if-absent): the first plan written under a key
     /// is THE plan — on a lost race the stored one wins and is what every
     /// node serves.
-    async fn stored_plan(
+    pub(super) async fn stored_plan(
         &self,
         key: &str,
         identity: &SourceIdentity,
@@ -1756,7 +1951,7 @@ impl Shared {
     }
 
     #[cfg(target_os = "linux")]
-    async fn retain_unattached_finite_with_handle(
+    pub(super) async fn retain_unattached_finite_with_handle(
         self: &Arc<Shared>,
         key: &str,
         rich: Option<Arc<Rendition>>,

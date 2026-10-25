@@ -349,9 +349,19 @@ pub(super) async fn build(
     plan: SegmentPlan,
     settings: &VodSettings,
 ) -> Result<Arc<Rendition>, String> {
-    build_inner(shared, key, index, recipe, plan, settings, None)
-        .await
-        .map(|(rendition, _)| rendition)
+    let mut ignored = None;
+    build_inner(
+        shared,
+        key,
+        index,
+        recipe,
+        plan,
+        settings,
+        None,
+        &mut ignored,
+    )
+    .await
+    .map(|(rendition, _)| rendition)
 }
 
 /// An adaptive attempt retains a separate precharged application owner until
@@ -364,8 +374,9 @@ pub(super) async fn build_attempt(
     plan: SegmentPlan,
     settings: &VodSettings,
     application_owner_bytes: usize,
-) -> Result<(Arc<Rendition>, FiniteApplicationLease), String> {
-    let (rendition, lease) = build_inner(
+) -> Result<(Arc<Rendition>, FiniteApplicationLease), super::shared::AdaptiveBuildFailure> {
+    let mut cleanup = None;
+    let result = build_inner(
         shared,
         key,
         index,
@@ -373,8 +384,11 @@ pub(super) async fn build_attempt(
         plan,
         settings,
         Some(application_owner_bytes),
+        &mut cleanup,
     )
-    .await?;
+    .await;
+    let (rendition, lease) =
+        result.map_err(|message| super::shared::AdaptiveBuildFailure { message, cleanup })?;
     Ok((
         rendition,
         lease.expect("attempt build takes its application lease"),
@@ -389,6 +403,7 @@ async fn build_inner(
     plan: SegmentPlan,
     settings: &VodSettings,
     application_owner_bytes: Option<usize>,
+    failed_attempt_cleanup: &mut Option<super::shared::PreparedAttemptCleanup>,
 ) -> Result<(Arc<Rendition>, Option<FiniteApplicationLease>), String> {
     let runtime = shared
         .resource_runtime
@@ -528,10 +543,10 @@ async fn build_inner(
         .transpose()
         .map_err(|_| "finite software pool policy is invalid".to_owned())?
         .unwrap_or_else(|| crate::admission::software_budget() as u64);
-    let observed_runtime = Arc::clone(runtime);
-    let epoch = tokio::task::spawn_blocking(move || observed_runtime.observe_admission_capacity())
+    let admission_deadline = Instant::now() + settings.materialize_budget;
+    let epoch = runtime
+        .refresh_admission_capacity(admission_deadline)
         .await
-        .map_err(|error| format!("finite admission observer failed: {error}"))?
         .map_err(|error| format!("observing finite admission: {error:?}"))?;
     let accounting = runtime
         .accounting()
@@ -575,7 +590,6 @@ async fn build_inner(
     }
     // No selected source/root/marker has been opened. Core synchronously
     // reserves the complete role and retains its prepare operation before return.
-    let admission_deadline = Instant::now() + settings.materialize_budget;
     let owner = runtime
         .prepare_software_vod(request, admission_deadline)
         .map_err(|error| {
@@ -619,14 +633,18 @@ async fn build_inner(
             Ok(lease) => Some(lease),
             Err(error) => {
                 let output = owner.output();
-                shared
-                    .retain_unattached_finite(
+                let closing = shared
+                    .retain_unattached_finite_with_handle(
                         key,
                         None,
                         output,
                         Arc::new(FiniteSoftwareProducer::new(owner)),
                     )
                     .await;
+                if application_owner_bytes.is_some() {
+                    *failed_attempt_cleanup =
+                        Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
+                }
                 return Err(format!("taking adaptive attempt owner lease: {error}"));
             }
         }
@@ -648,14 +666,18 @@ async fn build_inner(
     let Some(projected_metadata) = projection else {
         // Preparation already owns a charged journal operation. Even a
         // metadata-fit refusal must retain that exact owner for cleanup.
-        shared
-            .retain_unattached_finite(
+        let closing = shared
+            .retain_unattached_finite_with_handle(
                 key,
                 None,
                 output,
                 Arc::new(FiniteSoftwareProducer::new(owner)),
             )
             .await;
+        if application_owner_bytes.is_some() {
+            *failed_attempt_cleanup =
+                Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
+        }
         return Err("finite owner metadata projection overflowed".into());
     };
     let (metadata_lease, client_lease) = match output
@@ -667,14 +689,18 @@ async fn build_inner(
     {
         Ok(leases) => leases,
         Err(error) => {
-            shared
-                .retain_unattached_finite(
+            let closing = shared
+                .retain_unattached_finite_with_handle(
                     key,
                     None,
                     output,
                     Arc::new(FiniteSoftwareProducer::new(owner)),
                 )
                 .await;
+            if application_owner_bytes.is_some() {
+                *failed_attempt_cleanup =
+                    Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
+            }
             return Err(format!("reserving finite rendition metadata: {error}"));
         }
     };
@@ -701,9 +727,13 @@ async fn build_inner(
                 .dir
                 .finite_producer()
                 .expect("fresh finite directory retains its original producer");
-            shared
-                .retain_unattached_finite(key, Some(rendition), output, producer)
+            let closing = shared
+                .retain_unattached_finite_with_handle(key, Some(rendition), output, producer)
                 .await;
+            if application_owner_bytes.is_some() {
+                *failed_attempt_cleanup =
+                    Some(super::shared::PreparedAttemptCleanup::from_closing(closing));
+            }
             Err(error)
         }
     }

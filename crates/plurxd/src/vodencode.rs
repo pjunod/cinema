@@ -244,6 +244,12 @@ pub(crate) struct HandoffClaim {
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
+    /// The original planning metadata owner follows every immutable Encoding
+    /// alias. Last-alias Drop only signals core; known journal closure is the
+    /// sole authority to release its separate M reservation.
+    #[cfg(target_os = "linux")]
+    pub planning_metadata:
+        Option<plurx_core::adaptive_resources::runtime::planning_probe::FixedProbeMetadataLease>,
     pub source_object_version: String,
     pub source_clock: plurx_core::transcode::VodSourceClock,
     pub plan: ResolvedTranscode,
@@ -888,6 +894,8 @@ impl Encoding {
         admissions: Admissions,
     ) -> Arc<Encoding> {
         Arc::new(Encoding {
+            #[cfg(target_os = "linux")]
+            planning_metadata: self.planning_metadata.clone(),
             source_object_version: self.source_object_version.clone(),
             source_clock: self.source_clock,
             plan: self.plan.clone(),

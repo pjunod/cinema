@@ -621,6 +621,11 @@ fn http_route_group(path: &str) -> usize {
         | hls::QUALITY_CONTROL_PATH
         | hls::QUALITY_SCHEDULE_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
+        #[cfg(target_os = "linux")]
+        crate::media_sessions::ADAPTIVE_ATTEMPT_PREPARE_PATH
+        | crate::media_sessions::ADAPTIVE_ATTEMPT_ADOPT_PATH
+        | crate::media_sessions::ADAPTIVE_ATTEMPT_CANCEL_PATH
+        | crate::media_sessions::ADAPTIVE_ATTEMPT_STATUS_PATH => 7,
         _ => 8,
     }
 }
@@ -2328,6 +2333,7 @@ pub fn router(state: AppState) -> Router {
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
         )
+        .merge(internal_media_sessions::adaptive_attempt_router())
         .merge(shared_receiver_playback::internal_forwarding_router())
         .route(
             crate::media_sessions::ACTIVATE_PATH,

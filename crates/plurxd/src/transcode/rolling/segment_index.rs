@@ -422,6 +422,80 @@ pub(super) fn parse_playlist(text: &str) -> Vec<SegmentMeta> {
     out
 }
 
+/// Parse the core's canonical rolling-copy playlist into one precharged
+/// metadata vector. The source sink already bounds its names and bytes; this
+/// second check prevents a daemon actor parse from growing beyond the same
+/// fixed name cardinality if its producer view is ever malformed.
+#[cfg(target_os = "linux")]
+pub(super) fn parse_selected_copy_playlist(
+    text: &str,
+    maximum_names: u32,
+) -> Result<Vec<SegmentMeta>, &'static str> {
+    let planned = text
+        .lines()
+        .filter(|line| line.starts_with("#EXTINF:"))
+        .count();
+    if planned == 0 || planned > usize::try_from(maximum_names).map_err(|_| "copy name cap")? {
+        return Err("copy playlist exceeds its admitted name range");
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(planned)
+        .map_err(|_| "copy metadata allocation refused")?;
+    if out.capacity() > usize::try_from(maximum_names).map_err(|_| "copy name cap")? {
+        return Err("copy metadata vector exceeded its admitted capacity");
+    }
+    let mut pending_ms = None;
+    let mut cursor_ms = 0_i64;
+    let mut next_index = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            pending_ms = extinf_ms(rest);
+            if pending_ms.is_none() {
+                return Err("invalid copy EXTINF");
+            }
+            continue;
+        }
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let duration_ms = pending_ms.take().ok_or("copy URI without EXTINF")?;
+        let Some(plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::Segment(index)) =
+            plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::from_canonical_name(line)
+        else {
+            return Err("noncanonical copy segment name");
+        };
+        if u64::from(index) >= u64::from(maximum_names)
+            || next_index.is_some_and(|next| next != index)
+        {
+            return Err("copy segment index outside contiguous name range");
+        }
+        let end_ms = cursor_ms
+            .checked_add(duration_ms)
+            .ok_or("copy duration overflow")?;
+        let mut name = String::new();
+        name.try_reserve_exact(line.len())
+            .map_err(|_| "copy name allocation refused")?;
+        if name.capacity() > 12 {
+            return Err("copy name capacity exceeded");
+        }
+        name.push_str(line);
+        out.push(SegmentMeta {
+            index: i64::from(index),
+            name,
+            start_ms: cursor_ms,
+            end_ms,
+            bytes: 0,
+            visibility: SegmentVisibility::Advertised,
+        });
+        cursor_ms = end_ms;
+        next_index = Some(index.checked_add(1).ok_or("copy name overflow")?);
+    }
+    if out.len() != planned {
+        return Err("copy playlist segment count changed");
+    }
+    Ok(out)
+}
+
 /// Whether the first HTTP response for a live transcode can safely expose this
 /// EVENT playlist. Later reloads never pass through this verdict: the session
 /// remembers that publication opened.

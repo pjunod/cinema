@@ -911,7 +911,14 @@ impl TranscodeManager {
             .lock()
             .await
             .get(session_id)
-            .is_some_and(|retired| Instant::now() < retired.serve_until);
+            .is_some_and(|retired| {
+                Instant::now()
+                    < retired
+                        .session
+                        .retired_release
+                        .deadline()
+                        .unwrap_or(retired.serve_until)
+            });
         let adoption = match (!promised_namespace)
             .then(|| self.session_adoption_token(session_id))
             .flatten()
@@ -1874,7 +1881,12 @@ impl TranscodeManager {
             .is_some_and(|retired| {
                 retired.producer_attempt == producer_attempt
                     && Arc::ptr_eq(&retired.session, session)
-                    && Instant::now() < retired.serve_until
+                    && Instant::now()
+                        < retired
+                            .session
+                            .retired_release
+                            .deadline()
+                            .unwrap_or(retired.serve_until)
             })
     }
 

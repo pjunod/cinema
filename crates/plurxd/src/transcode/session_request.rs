@@ -473,6 +473,15 @@ pub struct SessionRecoveryIdentity {
     pub recovery_epoch: String,
 }
 
+impl SessionRecoveryIdentity {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.principal
+            .requested_heap_bytes()?
+            .checked_add(self.incarnation_id.capacity())?
+            .checked_add(self.recovery_epoch.capacity())
+    }
+}
+
 pub(crate) fn principal_supersession_scope(
     principal: &plurx_core::playback_principal::PlaybackPrincipal,
 ) -> String {

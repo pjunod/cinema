@@ -291,6 +291,8 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         &crate::admission::Workload::of(&file, options.target_height),
     );
     let encoding = Arc::new(crate::vodencode::Encoding {
+        #[cfg(target_os = "linux")]
+        planning_metadata: None,
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,
@@ -1854,6 +1856,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect_err("a captured old source cannot attach a new object");
     assert!(refused.contains("source changed"), "{refused}");
     let fresh = Arc::new(crate::vodencode::Encoding {
+        #[cfg(target_os = "linux")]
+        planning_metadata: None,
         source_clock: plurx_core::transcode::VodSourceClock::ReportedOrigin(0),
         shared_audio: None,
         candidate_recipe: None,

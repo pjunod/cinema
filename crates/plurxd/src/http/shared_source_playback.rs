@@ -1417,6 +1417,10 @@ async fn source_file_body(
         crate::vodserve::ReadyFile::Local(file) => file,
         #[cfg(unix)]
         crate::vodserve::ReadyFile::Finite { .. } => return Err(unavailable()),
+        // A selected copy object is likewise read only through its counted
+        // native reader; it is never converted into an uncounted file here.
+        #[cfg(target_os = "linux")]
+        crate::vodserve::ReadyFile::Copy { .. } => return Err(unavailable()),
     };
     let conversion_guard = std::sync::Arc::clone(&guard);
     // Tokio may already own an outstanding blocking operation. The conversion

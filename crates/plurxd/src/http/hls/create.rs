@@ -1,5 +1,583 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+struct AdaptiveOriginPrepared {
+    claim: plurx_core::store::adaptive_resource_attempts::AttemptClaim,
+    worker: plurx_core::store::adaptive_resource_attempts::WorkerBinding,
+    selected_recipe_json: String,
+    preview_json: String,
+    preview: RemoteStartResponse,
+}
+
+/// Store Winner only selects the dormant original worker. The exact Adopt
+/// mutation commits the route and starts that worker; the legacy activation
+/// path would mint a second owner and must never run for this selection.
+#[cfg(target_os = "linux")]
+async fn adopt_adaptive_origin(
+    state: AppState,
+    selected: AdaptiveOriginPrepared,
+    activation: MediaSessionActivation,
+    deadline: tokio::time::Instant,
+) -> Result<(), ApiError> {
+    use plurx_core::store::adaptive_resource_attempts::{
+        AdaptiveAdoption, AttemptPhase, MutationContext,
+    };
+    let status = state
+        .store
+        .adaptive_request_status(
+            &selected.claim.binding.key,
+            &selected.claim.binding.principal,
+        )
+        .await
+        .map_err(|error| session_store_error("reading adaptive Winner", error))?
+        .ok_or_else(|| ApiError::ServiceUnavailable("adaptive Winner disappeared".into()))?;
+    let attempt = status
+        .attempts
+        .iter()
+        .find(|row| row.key == selected.claim.key)
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("adaptive Winner attempt disappeared".into())
+        })?;
+    if status.binding != selected.claim.binding
+        || status.winner_attempt_id != Some(selected.claim.key.attempt_id)
+        || attempt.phase != AttemptPhase::Winner
+        || attempt.worker.as_ref() != Some(&selected.worker)
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive Winner changed before Adopt".into(),
+        ));
+    }
+    let adoption = AdaptiveAdoption {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: status.sequence,
+            expected_attempt_sequence: attempt.sequence,
+            now_ms: activation.now_ms,
+        },
+        binding: selected.claim.binding.clone(),
+        key: selected.claim.key.clone(),
+        worker: selected.worker.clone(),
+        activation: activation.clone(),
+    };
+    let worker_deadline = selected
+        .claim
+        .binding
+        .original_deadline_ms
+        .saturating_sub(unix_ms());
+    let worker_deadline = u64::try_from(worker_deadline)
+        .ok()
+        .filter(|remaining| *remaining > 0)
+        .map(|remaining| tokio::time::Instant::now() + Duration::from_millis(remaining))
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("adaptive Adopt original deadline expired".into())
+        })?;
+    let deadline = deadline.min(worker_deadline);
+    let first_reply_deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(5));
+    let mut attached = false;
+    let mut remote_adopt = None;
+    if selected.claim.key.worker_node_id == state.node_id {
+        let receiver = state
+            .transcode
+            .begin_adaptive_adopt(
+                adoption,
+                selected.preview_json,
+                state.serving.authority(),
+                deadline.into_std(),
+            )
+            .map_err(ApiError::ServiceUnavailable)?;
+        match tokio::time::timeout_at(first_reply_deadline, receiver).await {
+            Ok(Ok(Ok(start)))
+                if start.session_id == activation.session_id
+                    && Some(start.duration_ms) == selected.preview.duration_ms =>
+            {
+                attached = true
+            }
+            Ok(Ok(Ok(_))) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "adaptive worker attached a different session".into(),
+                ))
+            }
+            Ok(Ok(Err(error))) => return Err(ApiError::ServiceUnavailable(error)),
+            Ok(Err(_)) | Err(_) => {} // The registered original task may still complete.
+        }
+    } else {
+        let request = crate::media_sessions::AdaptiveAttemptAdoptV1 {
+            version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+            adoption,
+            preview_json: selected.preview_json,
+        };
+        let answer = state
+            .media_sessions
+            .adaptive_attempt_peer_request(
+                &selected.claim.key.worker_node_id,
+                crate::media_sessions::ADAPTIVE_ATTEMPT_ADOPT_PATH,
+                &request,
+                first_reply_deadline,
+            )
+            .await;
+        remote_adopt = Some(request);
+        if let Ok(answer) = answer {
+            if answer.status != reqwest::StatusCode::OK
+                && answer.status != reqwest::StatusCode::ACCEPTED
+            {
+                return Err(ApiError::ServiceUnavailable(
+                    "adaptive peer refused original Adopt".into(),
+                ));
+            }
+            if answer.status == reqwest::StatusCode::OK {
+                let body: serde_json::Value = serde_json::from_slice(&answer.body)?;
+                if body.get("version").and_then(serde_json::Value::as_u64)
+                    != Some(u64::from(crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION))
+                    || body.get("session_id").and_then(serde_json::Value::as_str)
+                        != Some(activation.session_id.as_str())
+                    || body.get("duration_ms").and_then(serde_json::Value::as_i64)
+                        != selected.preview.duration_ms
+                {
+                    return Err(ApiError::ServiceUnavailable(
+                        "adaptive peer Adopt returned a different session".into(),
+                    ));
+                }
+                attached = true;
+            }
+        } // Unknown transport outcome is reconciled by original Store/worker status.
+    }
+    // A timed-out HTTP waiter never cancels the registered worker task. Read
+    // its original status and the same durable Winner/Adopt row until the
+    // original deadline, without minting a second mutation or native owner.
+    while !attached && tokio::time::Instant::now() < deadline {
+        let status = state
+            .store
+            .adaptive_request_status(
+                &selected.claim.binding.key,
+                &selected.claim.binding.principal,
+            )
+            .await
+            .map_err(|error| session_store_error("reconciling original adaptive Adopt", error))?
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable("adaptive Adopt request disappeared".into())
+            })?;
+        let original = status
+            .attempts
+            .iter()
+            .find(|row| row.key == selected.claim.key);
+        if status.binding != selected.claim.binding
+            || status.winner_attempt_id != Some(selected.claim.key.attempt_id)
+            || original.is_none_or(|row| row.worker.as_ref() != Some(&selected.worker))
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive original Adopt lost its binding".into(),
+            ));
+        }
+        let local = if selected.claim.key.worker_node_id == state.node_id {
+            state
+                .transcode
+                .adaptive_attempt_local_status(selected.claim.key.attempt_id)
+                .await
+                == "adopted"
+        } else {
+            let request = crate::media_sessions::AdaptiveAttemptStatusV1 {
+                version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+                binding: selected.claim.binding.clone(),
+                key: selected.claim.key.clone(),
+            };
+            match state
+                .media_sessions
+                .adaptive_attempt_peer_request(
+                    &selected.claim.key.worker_node_id,
+                    crate::media_sessions::ADAPTIVE_ATTEMPT_STATUS_PATH,
+                    &request,
+                    deadline,
+                )
+                .await
+            {
+                Ok(reply) if reply.status == reqwest::StatusCode::OK => {
+                    let reply: serde_json::Value = serde_json::from_slice(&reply.body)?;
+                    reply.get("version").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION))
+                        && reply.get("local").and_then(serde_json::Value::as_str) == Some("adopted")
+                        && reply
+                            .get("request")
+                            .cloned()
+                            .and_then(|row| {
+                                serde_json::from_value::<
+                                    plurx_core::store::adaptive_resource_attempts::RequestStatus,
+                                >(row)
+                                .ok()
+                            })
+                            .is_some_and(|row| row == status)
+                }
+                _ => false,
+            }
+        };
+        if local
+            && status.disposition
+                == plurx_core::store::adaptive_resource_attempts::RequestDisposition::Adopted
+        {
+            attached = true;
+            break;
+        }
+        if let Some(original) = remote_adopt.as_ref() {
+            // Re-send the SAME immutable Adopt operation after an unknown
+            // transport outcome. Worker and Store replay its UUID and bytes;
+            // this never creates a replacement attempt or new native owner.
+            let next = deadline.min(tokio::time::Instant::now() + Duration::from_secs(2));
+            let _ = state
+                .media_sessions
+                .adaptive_attempt_peer_request(
+                    &selected.claim.key.worker_node_id,
+                    crate::media_sessions::ADAPTIVE_ATTEMPT_ADOPT_PATH,
+                    original,
+                    next,
+                )
+                .await;
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(200)).min(deadline),
+        )
+        .await;
+    }
+    if !attached {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive original Adopt remains durably owned and unpublished".into(),
+        ));
+    }
+    let route = state
+        .store
+        .media_session_route(&activation.session_id)
+        .await
+        .map_err(|error| session_store_error("reading adaptive adopted route", error))?
+        .ok_or_else(|| ApiError::ServiceUnavailable("adaptive adopted route is absent".into()))?;
+    if !route_matches_activation(&route, &activation)
+        || route.state != "active"
+        || route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive adopted route differs from original activation".into(),
+        ));
+    }
+    state.media_sessions.cache_route(route).await;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn adaptive_digest<T: serde::Serialize>(value: &T) -> Result<String, ApiError> {
+    use sha2::{Digest, Sha256};
+    struct HashedEnvelope {
+        hash: Sha256,
+        bytes: usize,
+    }
+    impl std::io::Write for HashedEnvelope {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(bytes.len())
+                .filter(|count| *count <= crate::media_sessions::MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES)
+                .ok_or_else(|| {
+                    std::io::Error::other("adaptive binding exceeds its fixed envelope")
+                })?;
+            self.hash.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut output = HashedEnvelope {
+        hash: Sha256::new(),
+        bytes: 0,
+    };
+    serde_json::to_writer(&mut output, value).map_err(|_| {
+        ApiError::ServiceUnavailable(
+            "adaptive source binding exceeds its bounded request envelope".into(),
+        )
+    })?;
+    Ok(hex::encode(output.hash.finalize()))
+}
+
+/// The existing root request claim is the durable starting authority. A
+/// distinct route incarnation belongs to this one physical worker attempt.
+/// Every uncertain Store/peer answer remains in that original namespace; a
+/// caller never retries by minting another native owner.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+async fn prepare_adaptive_origin(
+    state: &AppState,
+    owner_node_id: &str,
+    quote: crate::media_pool::AdaptiveWorkerQuote,
+    source: &MediaFile,
+    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    mut recipe: RemoteStartRequest,
+    request_claim_id: &str,
+    root_incarnation_id: &str,
+    request_fingerprint: &str,
+    recovery_epoch: &str,
+    predecessor: Option<&MediaSessionRoute>,
+    expected_predecessor_incarnation_id: Option<&str>,
+    desired_revision: Option<i64>,
+    original_claim_deadline_ms: i64,
+    deadline: tokio::time::Instant,
+) -> Result<AdaptiveOriginPrepared, ApiError> {
+    use plurx_core::store::adaptive_resource_attempts::{
+        AttemptClaim, AttemptKey, AttemptMutation, AttemptPhase, MutationContext, RequestBinding,
+        RequestKey, WinnerSelection,
+    };
+    if !quote.valid() || tokio::time::Instant::now() >= deadline {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive worker quote or deadline expired".into(),
+        ));
+    }
+    let root_id = uuid::Uuid::parse_str(root_incarnation_id)
+        .map_err(|_| ApiError::ServiceUnavailable("adaptive root incarnation is invalid".into()))?;
+    let recovery_id = uuid::Uuid::parse_str(recovery_epoch)
+        .map_err(|_| ApiError::ServiceUnavailable("adaptive recovery epoch is invalid".into()))?;
+    let route_id = uuid::Uuid::new_v4();
+    let session_id = uuid::Uuid::new_v4();
+    recipe.incarnation_id = route_id.to_string();
+    recipe.request.request_id = Some(recipe.incarnation_id.clone());
+    if !recipe.is_valid()
+        || recipe.source_size != source.size
+        || recipe.source_mtime != source.mtime
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive source intent changed before Claim".into(),
+        ));
+    }
+    let key = RequestKey {
+        request_id: request_claim_id.to_owned(),
+        request_incarnation_id: root_id,
+    };
+    let binding = RequestBinding {
+        version: 1,
+        key: key.clone(),
+        principal: recipe.principal.clone(),
+        request_fingerprint: request_fingerprint.to_owned(),
+        playback_id: recipe.request.playback_id.clone(),
+        recovery_epoch: recovery_id,
+        planning_generation: snapshot.generation,
+        planning_source_digest: adaptive_digest(&(source.id, source.size, source.mtime))?,
+        settings_digest: adaptive_digest(&snapshot.settings)?,
+        intent_digest: adaptive_digest(&recipe)?,
+        original_deadline_ms: original_claim_deadline_ms,
+        expected_predecessor_incarnation_id: expected_predecessor_incarnation_id
+            .map(uuid::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| {
+                ApiError::ServiceUnavailable("adaptive predecessor identity is invalid".into())
+            })?,
+        expected_predecessor_owner_epoch: expected_predecessor_incarnation_id
+            .and_then(|expected| predecessor.filter(|route| route.incarnation_id == expected))
+            .map(|route| route.owner_epoch),
+        expected_desired_revision: desired_revision,
+    };
+    let key = AttemptKey {
+        request: key,
+        attempt_id: uuid::Uuid::new_v4(),
+        route_incarnation_id: route_id,
+        session_id,
+        worker_node_id: owner_node_id.to_owned(),
+        owner_epoch: 1,
+        ordinal: 1,
+    };
+    let claim = AttemptClaim {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: 0,
+            expected_attempt_sequence: 0,
+            now_ms: unix_ms(),
+        },
+        binding,
+        key,
+        worker_instance_id: quote.owner_id,
+        serving_generation: quote.serving_generation,
+        domains: vec![owner_node_id.to_owned()],
+    };
+    claim.validate().map_err(|error| {
+        ApiError::ServiceUnavailable(format!("adaptive Claim contract is invalid: {error}"))
+    })?;
+    let claimed = state
+        .store
+        .claim_adaptive_attempt(&claim)
+        .await
+        .map_err(|error| session_store_error("claiming adaptive worker", error))?;
+    let status = match claimed {
+        AttemptMutation::Applied(status) | AttemptMutation::Replay(status)
+            if status.binding == claim.binding
+                && status
+                    .attempts
+                    .iter()
+                    .any(|row| row.key == claim.key && row.phase == AttemptPhase::Provisional) =>
+        {
+            status
+        }
+        _ => {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive Claim was refused or changed".into(),
+            ))
+        }
+    };
+    let _ = status; // The exact row is checked again before Winner.
+    let prepare = crate::media_sessions::AdaptiveAttemptPrepareV1 {
+        version: crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION,
+        claim: claim.clone(),
+        recipe,
+    };
+    let mut prepared = None;
+    for _ in 0..2 {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        if owner_node_id == state.node_id {
+            let admission = state.serving.try_restart_admission().await.ok_or_else(|| {
+                ApiError::ServiceUnavailable("adaptive local worker is draining".into())
+            })?;
+            match state
+                .transcode
+                .begin_adaptive_prepare(
+                    state.clone(),
+                    prepare.clone(),
+                    deadline.into_std(),
+                    admission,
+                )
+                .await
+                .map_err(ApiError::ServiceUnavailable)?
+            {
+                crate::transcode::adaptive_attempts::AdaptivePrepareStart::Prepared(reply) => {
+                    prepared = Some(reply);
+                    break;
+                }
+                crate::transcode::adaptive_attempts::AdaptivePrepareStart::Started(receiver) => {
+                    if let Ok(Ok(Ok(reply))) = tokio::time::timeout_at(deadline, receiver).await {
+                        prepared = Some(reply);
+                        break;
+                    }
+                }
+                crate::transcode::adaptive_attempts::AdaptivePrepareStart::Pending => {}
+            }
+        } else {
+            let answer = state
+                .media_sessions
+                .adaptive_attempt_peer_request(
+                    owner_node_id,
+                    crate::media_sessions::ADAPTIVE_ATTEMPT_PREPARE_PATH,
+                    &prepare,
+                    deadline,
+                )
+                .await
+                .map_err(|error| {
+                    ApiError::ServiceUnavailable(format!(
+                        "adaptive peer Prepare remains uncertain: {error:?}"
+                    ))
+                })?;
+            if answer.status == reqwest::StatusCode::OK {
+                prepared = serde_json::from_slice(&answer.body).ok();
+                if prepared.is_some() {
+                    break;
+                }
+            } else if answer.status != reqwest::StatusCode::ACCEPTED {
+                return Err(ApiError::ServiceUnavailable(
+                    "adaptive peer refused Prepare".into(),
+                ));
+            }
+        }
+        let current = state
+            .store
+            .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+            .await
+            .map_err(|error| session_store_error("reading adaptive Prepare", error))?;
+        if current
+            .as_ref()
+            .is_none_or(|row| row.binding != claim.binding)
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive Prepare lost its original Store row".into(),
+            ));
+        }
+    }
+    let prepared = prepared.ok_or_else(|| {
+        ApiError::ServiceUnavailable("adaptive Prepare remains owned by its original worker".into())
+    })?;
+    if prepared.version != crate::media_sessions::ADAPTIVE_ATTEMPT_VERSION
+        || prepared
+            .worker
+            .validate(&claim.binding, &claim.key)
+            .is_err()
+        || prepared.preview_json.len() > crate::media_sessions::ADAPTIVE_PREVIEW_BYTES
+        || plurx_core::store::adaptive_resource_attempts::selected_recipe_digest(
+            &prepared.selected_recipe_json,
+        )
+        .ok()
+        .as_deref()
+            != Some(prepared.worker.selected_recipe_digest.as_str())
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive Prepared binding is invalid".into(),
+        ));
+    }
+    let preview: RemoteStartResponse = serde_json::from_str(&prepared.preview_json)?;
+    if !preview.is_valid()
+        || preview.session_id != claim.key.session_id.to_string()
+        || preview.activation_generation != Some(quote.serving_generation)
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive preview differs from the original attempt".into(),
+        ));
+    }
+    let status = state
+        .store
+        .adaptive_request_status(&claim.binding.key, &claim.binding.principal)
+        .await
+        .map_err(|error| session_store_error("reading adaptive Prepared", error))?
+        .ok_or_else(|| ApiError::ServiceUnavailable("adaptive Prepared row disappeared".into()))?;
+    let attempt = status
+        .attempts
+        .iter()
+        .find(|row| row.key == claim.key)
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("adaptive original attempt disappeared".into())
+        })?;
+    if status.binding != claim.binding
+        || attempt.phase != AttemptPhase::Prepared
+        || attempt.worker.as_ref() != Some(&prepared.worker)
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "adaptive Prepared row changed".into(),
+        ));
+    }
+    let selection = WinnerSelection {
+        context: MutationContext {
+            operation_id: uuid::Uuid::new_v4(),
+            expected_request_sequence: status.sequence,
+            expected_attempt_sequence: attempt.sequence,
+            now_ms: unix_ms(),
+        },
+        binding: claim.binding.clone(),
+        key: claim.key.clone(),
+        worker: prepared.worker.clone(),
+    };
+    match state
+        .store
+        .select_adaptive_winner(&selection)
+        .await
+        .map_err(|error| session_store_error("selecting adaptive worker", error))?
+    {
+        AttemptMutation::Applied(known) | AttemptMutation::Replay(known)
+            if known.binding == claim.binding
+                && known.winner_attempt_id == Some(claim.key.attempt_id) => {}
+        _ => {
+            return Err(ApiError::ServiceUnavailable(
+                "adaptive Winner selection is uncertain".into(),
+            ))
+        }
+    }
+    Ok(AdaptiveOriginPrepared {
+        claim,
+        worker: prepared.worker,
+        selected_recipe_json: prepared.selected_recipe_json,
+        preview_json: prepared.preview_json,
+        preview,
+    })
+}
+
 /// Classify a refused catalogue without changing candidate selection.
 fn candidate_refusal_reason(
     catalog: &[plurx_core::playback::candidate::QualityCandidate],
@@ -3969,15 +4547,104 @@ async fn create_with_purpose_inner(
     if owner_candidates.is_empty() {
         owner_candidates.push(state.node_id.clone());
     }
+    #[cfg(target_os = "linux")]
+    let adaptive_software_offers: std::collections::HashSet<String> = if source.is_some()
+        && planning_snapshot.is_some()
+        && matches!(
+            request.kind,
+            crate::transcode::SessionKind::Transcode { .. }
+        )
+        && request.start_seconds == 0.0
+        && request.subtitle_burn.is_none()
+        && !request.hdr10
+        && !native_subtitles
+        && request.continuous_media.is_none()
+        && library_channel.is_none()
+        && source
+            .as_ref()
+            .is_some_and(|file| file.dolby_vision.is_empty())
+    {
+        let file = source.as_ref().expect("adaptive source was checked");
+        match MediaOfferRequest::new(
+            file,
+            height,
+            0,
+            request.audio_index,
+            request.subtitle_burn,
+            request.hdr10,
+        ) {
+            Ok(offer) => state
+                .media_pool
+                .offers(&state, offer)
+                .await
+                .offers
+                .into_iter()
+                .filter(|row| row.eligible && row.encoder == "software")
+                .map(|row| row.node_id)
+                .collect(),
+            Err(_) => std::collections::HashSet::new(),
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
     crate::media_pool::mark_create_phase("placement");
 
     let mut started = None;
     let mut last_error = None;
+    #[cfg(target_os = "linux")]
+    let mut adaptive_selection: Option<AdaptiveOriginPrepared> = None;
     for candidate in owner_candidates {
         if tokio::time::Instant::now() >= placement_deadline {
             last_error = Some(ApiError::ServiceUnavailable(
                 "media worker placement exceeded its common deadline".to_owned(),
             ));
+            break;
+        }
+        #[cfg(target_os = "linux")]
+        let adaptive_quote = if adaptive_software_offers.contains(&candidate) {
+            state
+                .media_pool
+                .adaptive_worker_quote(&state, &candidate)
+                .await
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        if adaptive_software_offers.contains(&candidate) && adaptive_quote.is_none() {
+            last_error = Some(ApiError::ServiceUnavailable(format!(
+                "media worker {candidate} has no current adaptive admission quote"
+            )));
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(quote) = adaptive_quote {
+            // The root claim has entered the versioned attempt protocol.
+            // A failed or uncertain result never falls through to legacy.
+            request_guard.disarm();
+            let selection = prepare_adaptive_origin(
+                &state,
+                &candidate,
+                quote,
+                source.as_ref().expect("adaptive source was checked"),
+                planning_snapshot
+                    .as_ref()
+                    .expect("adaptive snapshot was checked"),
+                remote_request.clone(),
+                &request_claim_id,
+                &incarnation_id,
+                &fingerprint,
+                &recovery_epoch,
+                activation_predecessor.as_ref(),
+                expected_predecessor_incarnation_id.as_deref(),
+                recorded_ask_revision,
+                now_ms.saturating_add(60_000),
+                placement_deadline,
+            )
+            .await?;
+            let info = selection.preview.clone();
+            let generation = selection.worker.serving_generation;
+            adaptive_selection = Some(selection);
+            started = Some((candidate, info, None, Some(generation), None));
             break;
         }
         let result = if candidate == state.node_id {
@@ -4168,6 +4835,15 @@ async fn create_with_purpose_inner(
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
+    #[cfg(target_os = "linux")]
+    let adaptive_selected = adaptive_selection.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let adaptive_selected = false;
+    #[cfg(target_os = "linux")]
+    if let Some(selected) = adaptive_selection.as_ref() {
+        incarnation_id = selected.claim.key.route_incarnation_id.to_string();
+        remote_request = serde_json::from_str(&selected.selected_recipe_json)?;
+    }
     request_guard.disarm();
     if let Some(reason) = degraded_processing {
         // The worker served the ordinary request the processed candidate
@@ -4212,7 +4888,7 @@ async fn create_with_purpose_inner(
             "the ingress node lost serving authority during worker placement".to_owned(),
         ));
     }
-    if owner_node_id == state.node_id {
+    if owner_node_id == state.node_id && !adaptive_selected {
         let provisional_pin_ms =
             i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
         if !pin_shared_session_for_local_start(
@@ -4244,35 +4920,37 @@ async fn create_with_purpose_inner(
             "the ingress node lost serving authority before owner assignment".to_owned(),
         ));
     }
-    match tokio::time::timeout(
-        OWNER_ASSIGNMENT_DEADLINE,
-        state.store.assign_media_session_request_owner(
-            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
-            &request_claim_id,
-            &incarnation_id,
-            &owner_node_id,
-            unix_ms(),
-        ),
-    )
-    .await
-    {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => {
-            // The armed guard aborts the exact worker and fails this claim.
-            return Err(ApiError::ServiceUnavailable(
-                "session ownership changed while placement was being committed".to_owned(),
-            ));
-        }
-        Ok(Err(error)) => {
-            return Err(session_store_error(
-                "assigning the media-session owner",
-                error,
-            ));
-        }
-        Err(_) => {
-            return Err(ApiError::ServiceUnavailable(
-                "session ownership assignment timed out".to_owned(),
-            ));
+    if !adaptive_selected {
+        match tokio::time::timeout(
+            OWNER_ASSIGNMENT_DEADLINE,
+            state.store.assign_media_session_request_owner(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                &request_claim_id,
+                &incarnation_id,
+                &owner_node_id,
+                unix_ms(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                // The armed guard aborts the exact worker and fails this claim.
+                return Err(ApiError::ServiceUnavailable(
+                    "session ownership changed while placement was being committed".to_owned(),
+                ));
+            }
+            Ok(Err(error)) => {
+                return Err(session_store_error(
+                    "assigning the media-session owner",
+                    error,
+                ));
+            }
+            Err(_) => {
+                return Err(ApiError::ServiceUnavailable(
+                    "session ownership assignment timed out".to_owned(),
+                ));
+            }
         }
     }
     if !ingress_serving_authority.is_current(ingress_serving_generation) {
@@ -4313,6 +4991,10 @@ async fn create_with_purpose_inner(
     };
     remote_request.retained_output = info.retained_output.clone();
     recipe_json = serde_json::to_string(&remote_request)?;
+    #[cfg(target_os = "linux")]
+    if let Some(selected) = adaptive_selection.as_ref() {
+        recipe_json = selected.selected_recipe_json.clone();
+    }
     let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
         quality_enabled && quality_negotiated,
         source.as_ref(),
@@ -4499,6 +5181,12 @@ async fn create_with_purpose_inner(
     let publication_activation = activation.clone();
     let mut publication_guard =
         ActivationPublicationGuard::new(state.clone(), publication_activation.clone());
+    // An adopted adaptive route remains blocked until this ingress publishes
+    // it. Its original worker owns any uncertain Adopt and cleanup; the
+    // legacy guard must not independently abort that same route on timeout.
+    if adaptive_selected {
+        publication_guard.disarm();
+    }
     // The detached owner keeps both serving serialization and exact worker
     // cleanup until the route is publishable or its fixed activation lease
     // expires. The Store future itself may outlive its caller, so every first
@@ -4512,7 +5200,24 @@ async fn create_with_purpose_inner(
     // read-budget line) even though the task is detached so it can outlive a
     // cancelled caller.
     let activation_counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
-    let mut activation_task = if owner_node_id == state.node_id {
+    #[cfg(target_os = "linux")]
+    let adaptive_activation_task =
+        adaptive_selection.map(|selected| {
+            let activation_state = state.clone();
+            let deadline = activation_lease_deadline(&activation);
+            let activation = activation.clone();
+            tokio::spawn(plurx_core::store::scope_http_store_operations(
+                activation_counts.clone(),
+                async move {
+                    adopt_adaptive_origin(activation_state, selected, activation, deadline).await
+                },
+            ))
+        });
+    #[cfg(not(target_os = "linux"))]
+    let adaptive_activation_task: Option<tokio::task::JoinHandle<Result<(), ApiError>>> = None;
+    let mut activation_task = if let Some(task) = adaptive_activation_task {
+        task
+    } else if owner_node_id == state.node_id {
         let activation_state = state.clone();
         let activation_authority = ingress_serving_authority.clone();
         tokio::spawn(plurx_core::store::scope_http_store_operations(

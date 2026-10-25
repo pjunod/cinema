@@ -2382,6 +2382,69 @@ pub(crate) struct EncodedEngine {
 }
 
 impl EncodedEngine {
+    /// Translate the admitted planning collector's immutable observations into
+    /// the existing finite recipe identity. This performs no native I/O: core
+    /// retains the original collection/closure authority, and the finite
+    /// producer revalidates these exact objects under its own admission.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_fixed_planning_attestation(
+        attestation: &plurx_core::adaptive_resources::runtime::planning_probe::FixedPlanningEngineAttestation,
+    ) -> Result<(EncodedExecutable, Self, String), String> {
+        let producer = attestation.producer();
+        let reporter = attestation.reporter();
+        let executable = EncodedExecutable {
+            path: producer.path().to_owned(),
+            digest: producer.sha256().to_owned(),
+            object_version: producer.object_version().to_owned(),
+            linux_binding: None,
+        };
+        // Validate the pure planning representation too. These constructors
+        // cannot open a pathname or turn metadata into a custody receipt.
+        executable.finite_software_plan()?;
+        let reporter = EncodedExecutable {
+            path: reporter.path().to_owned(),
+            digest: reporter.sha256().to_owned(),
+            object_version: reporter.object_version().to_owned(),
+            linux_binding: None,
+        };
+        reporter.finite_software_plan()?;
+        let process = encoded_process_identity();
+        let mut digest = Sha256::new();
+        digest.update(b"plurx/encoded-vod/engine-v1\0");
+        digest.update(attestation.media_digest().as_bytes());
+        digest.update(process.as_bytes());
+        let stable_software_digest = attestation.boot_id().map(|boot| {
+            let mut hash = Sha256::new();
+            hash.update(b"plurx/finite-software/engine/same-boot-v1\0");
+            hash.update(boot.as_bytes());
+            hash.update(attestation.media_digest().as_bytes());
+            hex::encode(hash.finalize())
+        });
+        let mut engine = Self {
+            digest: hex::encode(digest.finalize()),
+            process_identity: process.to_owned(),
+            stable_software_digest,
+            objects: attestation.dependencies().to_vec().into(),
+            font_objects: Arc::from([]),
+            font_env: None,
+        };
+        // Match bind_clock_reporter's identity domains without repeating its
+        // native stat. The admitted collector already checked this reporter;
+        // the same reporter observation joins the finite engine's own fence.
+        let mut digest = Sha256::new();
+        digest.update(b"plurx/held-source-clock-reporter/v1\0");
+        digest.update(engine.digest.as_bytes());
+        digest.update(reporter.digest.as_bytes());
+        engine.digest = hex::encode(digest.finalize());
+        engine.extend_stable_software_digest(
+            b"plurx/finite-software/clock-reporter/v1\0",
+            &[&reporter.digest],
+        );
+        let mut objects = engine.objects.to_vec();
+        objects.push(reporter.attestation_object());
+        engine.objects = objects.into();
+        Ok((executable, engine, attestation.build_line().to_owned()))
+    }
     pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
         let mut bytes = self
             .digest

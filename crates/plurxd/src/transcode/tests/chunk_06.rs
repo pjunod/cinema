@@ -386,6 +386,12 @@
             rolling_artifact: None,
             copy_output_measurement: std::sync::Mutex::new(None),
         copy_reader_task: Mutex::new(CopyReaderTask::default()),
+        #[cfg(target_os = "linux")]
+        core_copy: Mutex::new(None),
+        #[cfg(target_os = "linux")]
+        core_copy_close: Mutex::new(None),
+        #[cfg(target_os = "linux")]
+        core_copy_refresh_gate: Mutex::new(()),
             actor_managed_response_publication: actor_managed_prepublication,
             actor_managed_prepublication_process: actor_managed_prepublication,
             actor_prepublication_producer: Arc::new(AtomicBool::new(actor_managed_prepublication)),
@@ -467,6 +473,8 @@
             suspend_count: AtomicU64::new(0),
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
+            #[cfg(target_os = "linux")]
+            core_copy_app: None,
         })
     }
 
@@ -538,6 +546,33 @@
             .join_copy_reader_owner(tokio::time::Instant::now() + Duration::from_secs(2))
             .await
             .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn selected_copy_missing_typed_selector_never_uses_raw_retention() {
+        let dir = crate::test_tempdir().expect("selected copy negative boundary");
+        let path = dir.path().join("seg00000.m4s");
+        std::fs::write(&path, b"held").expect("unowned path sentinel");
+        let session = watchdog_session(dir.path(), None, false);
+        let expired = Instant::now() - Duration::from_secs(1);
+        *session.segments.lock().await = SegmentIndex {
+            segs: vec![SegmentMeta {
+                index: 0,
+                name: "seg00000.m4s".to_owned(),
+                start_ms: 0,
+                end_ms: 6000,
+                bytes: 4,
+                visibility: SegmentVisibility::Grace {
+                    removed_at: expired,
+                    serve_until: expired,
+                },
+            }],
+            revision: 1,
+        };
+        assert_eq!(session.measure_scratch_bytes().await, ScratchMeasurement::NotScratch);
+        gc_expired_segments(&session).await;
+        assert!(path.exists(), "an absent typed selector grants no raw unlink authority");
     }
 
     fn reserve_test_admissions(session: &Session, admissions: &Admissions) {

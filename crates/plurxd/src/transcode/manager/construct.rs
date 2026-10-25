@@ -11,6 +11,8 @@ impl TranscodeManager {
         RollingRetirementContext {
             sessions: Arc::downgrade(&self.sessions),
             retired_presentations: Arc::downgrade(&self.retired_presentations),
+            #[cfg(target_os = "linux")]
+            retired_copy_tickets: Arc::downgrade(&self.retired_copy_tickets),
             active_session_count: Arc::clone(&self.active_session_count),
             store: Arc::clone(&self.store),
             recent_marker_ambiguities: Arc::clone(&self.recent_marker_ambiguities),
@@ -45,11 +47,17 @@ impl TranscodeManager {
             runtime_cache.clone(),
         ));
         TranscodeManager {
+            #[cfg(target_os = "linux")]
+            adaptive_attempts: adaptive_attempts::AdaptiveAttemptRegistry::default(),
+            #[cfg(target_os = "linux")]
+            static_artifact_runs: background_static::StaticArtifactRuns::default(),
             source_workers: source_actor::SourceWorkerRegistry::default(),
             #[cfg(target_os = "linux")]
             local_direct_owners: local_direct::LocalDirectOwners::default(),
             source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
+            #[cfg(target_os = "linux")]
+            resource_runtime: None,
             store,
             work_dir,
             runtime_cache,
@@ -79,7 +87,7 @@ impl TranscodeManager {
             macos_video_preference_update: Mutex::new(()),
             macos_video_probe,
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
-            decode_facts: crate::decode_facts::DecodeFactCache::new(),
+            decode_facts: Arc::new(crate::decode_facts::DecodeFactCache::new()),
             decode_probe_identity: None,
             candidate_production_proofs: Arc::new(
                 crate::vodencode::CandidateProductionProofs::default(),
@@ -106,7 +114,13 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            retired_presentations: Arc::new(Mutex::new(HashMap::new())),
+            retired_presentations: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            #[cfg(target_os = "linux")]
+            retired_copy_tickets: Arc::new(
+                std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            ),
+            #[cfg(target_os = "linux")]
+            retired_copy_cursor: std::sync::Mutex::new(None),
             recent_marker_ambiguities: Arc::new(std::sync::Mutex::new(
                 RecentMarkerAmbiguityLedger::default(),
             )),
@@ -340,6 +354,10 @@ impl TranscodeManager {
             Arc::new(self.macos_video_probe.rebuilt(self.runtime_cache.clone()));
         self.subtitle_cache = subtitle_cache;
         self.subtitle_membership = cluster_membership.clone();
+        #[cfg(target_os = "linux")]
+        {
+            self.resource_runtime = resource_runtime.clone();
+        }
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.

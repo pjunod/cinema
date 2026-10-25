@@ -13,7 +13,7 @@ pub struct PlaylistQuery {
     pub diagnostic: Option<String>,
 }
 
-pub(super) fn playlist_response(bytes: Vec<u8>) -> Response {
+pub(super) fn playlist_response(bytes: impl Into<bytes::Bytes>) -> Response {
     (
         StatusCode::OK,
         [
@@ -23,7 +23,7 @@ pub(super) fn playlist_response(bytes: Vec<u8>) -> Response {
             ),
             (header::CACHE_CONTROL, "no-store".to_owned()),
         ],
-        bytes,
+        bytes.into(),
     )
         .into_response()
 }

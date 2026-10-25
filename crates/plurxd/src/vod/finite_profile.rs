@@ -39,6 +39,48 @@ const ALLOCATION_UNIT_BYTES: u64 = 4096;
 const PER_OBJECT_RESERVE_BYTES: u64 = 16 * 1024;
 const CHILD_DIRECTORY_RESERVE_BYTES: u64 = 64 * 1024;
 const PARENT_ENTRY_RESERVE_BYTES: u64 = 64 * 1024;
+const STATIC_MANIFEST_FILE_BYTES: u64 = 4 * MIB;
+
+/// Expand the already compiled finite output plan for one additional
+/// `complete-v1.json` in the SAME scratch directory before core admission.
+/// Core separately charges its manifest serialization/validation workspace;
+/// this function accounts only for the retained native file and storage.
+#[cfg(target_os = "linux")]
+pub(super) fn with_static_manifest_file(
+    mut request: SoftwareVodRequest,
+) -> Result<SoftwareVodRequest, String> {
+    if request.output.one_file_logical_bytes < STATIC_MANIFEST_FILE_BYTES
+        || request.output.one_io_payload_bytes < STATIC_MANIFEST_FILE_BYTES
+    {
+        return Err("finite static manifest exceeds the planned file or IO bound".into());
+    }
+    request.output.resident_file_objects = request
+        .output
+        .resident_file_objects
+        .checked_add(1)
+        .ok_or("finite static file count overflows")?;
+    request.output.resident_logical_bytes = request
+        .output
+        .resident_logical_bytes
+        .checked_add(STATIC_MANIFEST_FILE_BYTES)
+        .ok_or("finite static logical bytes overflow")?;
+    let extra_storage = STATIC_MANIFEST_FILE_BYTES
+        .checked_add(request.output.per_object_reserve_bytes)
+        .ok_or("finite static storage reserve overflows")?;
+    request.output.reserved_storage_bytes = request
+        .output
+        .reserved_storage_bytes
+        .checked_add(extra_storage)
+        .ok_or("finite static storage reserve overflows")?;
+    let Metric::Known(resources) = &mut request.demand.resources else {
+        return Err("finite static storage requires a known resource vector".into());
+    };
+    resources.scratch_bytes = resources
+        .scratch_bytes
+        .checked_add(extra_storage)
+        .ok_or("finite static scratch demand overflows")?;
+    Ok(request)
+}
 
 #[cfg(target_os = "linux")]
 pub(super) fn source_version(recipe: &Recipe) -> Result<String, String> {

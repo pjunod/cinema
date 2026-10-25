@@ -792,6 +792,29 @@ pub(crate) struct MediaPool {
 }
 
 impl MediaPool {
+    /// Advisory worker identity from the same bounded snapshot cache used by
+    /// placement. The worker rechecks its actual owner and generation when it
+    /// receives Claim; this cached quote never grants native authority.
+    pub(crate) async fn adaptive_worker_quote(
+        &self,
+        state: &AppState,
+        node_id: &str,
+    ) -> Option<AdaptiveWorkerQuote> {
+        if node_id == state.node_id {
+            return local_snapshot(state)
+                .await
+                .adaptive_worker_quote
+                .filter(AdaptiveWorkerQuote::valid);
+        }
+        let now = tokio::time::Instant::now();
+        self.snapshots.read().await.get(node_id).and_then(|cached| {
+            (now <= cached.expires_at && snapshot_is_bounded(&cached.snapshot, node_id))
+                .then(|| cached.snapshot.adaptive_worker_quote.clone())
+                .flatten()
+                .filter(AdaptiveWorkerQuote::valid)
+        })
+    }
+
     pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
         let now = tokio::time::Instant::now();
         self.snapshots

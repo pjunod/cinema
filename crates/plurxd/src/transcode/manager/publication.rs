@@ -348,15 +348,22 @@ impl TranscodeManager {
             {
                 return Err(MediaResponsePublicationRejection::OwnerGone);
             }
-            if object == crate::playback_control::RollingResponseObject::VideoMediaPlaylist && {
-                require_publication_authority!();
-                !tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(deadline),
-                    session.publish_compatibility_playlist(*producer_attempt, deadline),
-                )
-                .await
-                .unwrap_or(false)
-            } {
+            #[cfg(target_os = "linux")]
+            let core_copy_playlist = session.scratch.is_none() && !session.cached;
+            #[cfg(not(target_os = "linux"))]
+            let core_copy_playlist = false;
+            if object == crate::playback_control::RollingResponseObject::VideoMediaPlaylist
+                && !core_copy_playlist
+                && {
+                    require_publication_authority!();
+                    !tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(deadline),
+                        session.publish_compatibility_playlist(*producer_attempt, deadline),
+                    )
+                    .await
+                    .unwrap_or(false)
+                }
+            {
                 require_publication_authority!();
                 fail_prepublication_transaction(
                     session,
@@ -1139,6 +1146,7 @@ impl TranscodeManager {
     ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
         self.playlist_with_owner_before(session_id, self.playlist_request_deadline())
             .await
+            .map(|(bytes, owner)| (bytes.into_bytes().to_vec(), owner))
     }
 
     /// One absolute HTTP patience boundary. Reclassification may inspect a
@@ -1151,7 +1159,7 @@ impl TranscodeManager {
         self: &Arc<Self>,
         session_id: &str,
         deadline: Instant,
-    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
+    ) -> Result<(crate::vodserve::ReadyBytes, MediaResponseOwner), PlaylistPublicationError> {
         let budget = self.playlist_wait();
         if tokio::time::Instant::now().into_std() >= deadline {
             return Err(PlaylistPublicationError::without_owner(
@@ -1220,7 +1228,7 @@ impl TranscodeManager {
         session: Arc<Session>,
         deadline: Instant,
         budget: Duration,
-    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
+    ) -> Result<(crate::vodserve::ReadyBytes, MediaResponseOwner), PlaylistPublicationError> {
         // Hold the request until the playlist exists. On the transcode path
         // that is a beat after ffmpeg starts; on the copy path it is the
         // publish gate filling (COPY_PUBLISH_GATE_SECS), which on a
@@ -1272,52 +1280,84 @@ impl TranscodeManager {
                 // fallback. Fence each concrete read, not the whole wait, so old
                 // bytes are retried while valid successor bytes keep the original
                 // request alive.
-                let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
-                    if session
-                        .cache_location
-                        .as_ref()
-                        .is_some_and(|location| location.storage_class == "shared")
-                    {
-                        let Some(shared_cache) = self.shared_cache.as_ref() else {
-                            return Err(PlaylistPublicationError::for_session(
-                                PlaylistError::SessionFailed(
-                                    "shared cache coordinator is unavailable".to_owned(),
-                                ),
-                                &session,
-                            ));
-                        };
-                        let manifest = Arc::clone(manifest);
-                        let directory = session.dir.clone();
-                        shared_cache
-                            .run_mount_io("shared_playlist_read_timeout", async move {
-                                manifest
-                                    .read_verified_playlist(&directory, "index.m3u8")
-                                    .await
-                                    .map_err(|error| error.to_string())
-                            })
-                            .await
-                            .ok()
-                            .flatten()
-                    } else {
-                        manifest
-                            .read_verified_playlist(&session.dir, "index.m3u8")
-                            .await
-                            .ok()
-                            .flatten()
-                    }
-                } else if session.cached {
-                    plurx_core::transcode::manifest::read_bounded_playlist(
-                        &session.dir,
-                        "index.m3u8",
-                    )
+                #[cfg(target_os = "linux")]
+                let core_copy_output = session
+                    .core_copy
+                    .lock()
                     .await
-                    .ok()
-                    .flatten()
+                    .as_ref()
+                    .map(|owner| owner.output());
+                #[cfg(not(target_os = "linux"))]
+                let core_copy_output: Option<()> = None;
+                let playlist_bytes = if core_copy_output.is_some() {
+                    #[cfg(target_os = "linux")]
+                    {
+                        core_copy_output
+                            .as_ref()
+                            .expect("selected copy output")
+                            .playlist_buffer(deadline)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(crate::vodserve::ReadyBytes::Finite)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        None
+                    }
+                } else if session.scratch.is_none() && !session.cached {
+                    // The selected copy owner may have moved into its compact
+                    // close ticket. Its pathname is never a legacy fallback.
+                    None
                 } else {
-                    session
-                        .served_playlist(producer_attempt)
+                    let legacy = if let Some(manifest) = &session.cache_manifest {
+                        if session
+                            .cache_location
+                            .as_ref()
+                            .is_some_and(|location| location.storage_class == "shared")
+                        {
+                            let Some(shared_cache) = self.shared_cache.as_ref() else {
+                                return Err(PlaylistPublicationError::for_session(
+                                    PlaylistError::SessionFailed(
+                                        "shared cache coordinator is unavailable".to_owned(),
+                                    ),
+                                    &session,
+                                ));
+                            };
+                            let manifest = Arc::clone(manifest);
+                            let directory = session.dir.clone();
+                            shared_cache
+                                .run_mount_io("shared_playlist_read_timeout", async move {
+                                    manifest
+                                        .read_verified_playlist(&directory, "index.m3u8")
+                                        .await
+                                        .map_err(|error| error.to_string())
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                        } else {
+                            manifest
+                                .read_verified_playlist(&session.dir, "index.m3u8")
+                                .await
+                                .ok()
+                                .flatten()
+                        }
+                    } else if session.cached {
+                        plurx_core::transcode::manifest::read_bounded_playlist(
+                            &session.dir,
+                            "index.m3u8",
+                        )
                         .await
-                        .map(|bytes| bytes.as_ref().to_vec())
+                        .ok()
+                        .flatten()
+                    } else {
+                        session
+                            .served_playlist(producer_attempt)
+                            .await
+                            .map(|bytes| bytes.as_ref().to_vec())
+                    };
+                    legacy.map(crate::vodserve::ReadyBytes::Local)
                 };
                 if session.replacing_child.load(Acquire)
                     || session.control.current_producer_attempt() != producer_attempt
@@ -1733,7 +1773,14 @@ impl TranscodeManager {
             .await
             .map_err(|_| SegmentOpenError::Capacity)?
             .get(session_id)
-            .filter(|retired| Instant::now() < retired.serve_until)
+            .filter(|retired| {
+                Instant::now()
+                    < retired
+                        .session
+                        .retired_release
+                        .deadline()
+                        .unwrap_or(retired.serve_until)
+            })
             .cloned()
         } else {
             None
@@ -1755,6 +1802,32 @@ impl TranscodeManager {
                 session: Arc::clone(&session),
                 producer_attempt: resolved_attempt,
             })
+        };
+        #[cfg(target_os = "linux")]
+        let core_copy_output = session
+            .core_copy
+            .lock()
+            .await
+            .as_ref()
+            .map(|owner| owner.output());
+        #[cfg(not(target_os = "linux"))]
+        let core_copy_output: Option<()> = None;
+        #[cfg(target_os = "linux")]
+        if session.scratch.is_none() && !session.cached && core_copy_output.is_none() {
+            return Ok(SegmentPublication::Missing(Some(current_owner())));
+        }
+        #[cfg(target_os = "linux")]
+        let core_copy_file = if core_copy_output.is_some() {
+            let Some(file) =
+                plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::from_canonical_name(
+                    name,
+                )
+            else {
+                return Ok(SegmentPublication::Missing(Some(current_owner())));
+            };
+            Some(file)
+        } else {
+            None
         };
         if !retired_owner && session.failed.load(Relaxed) {
             return Ok(SegmentPublication::Failed(
@@ -1911,6 +1984,15 @@ impl TranscodeManager {
                 continue;
             };
             if !session.cached {
+                #[cfg(target_os = "linux")]
+                let core_copy_available = core_copy_output
+                    .as_ref()
+                    .zip(core_copy_file)
+                    .map(|(output, file)| output.playlist_names(file))
+                    .transpose()
+                    .map_err(|_| SegmentOpenError::Capacity)?;
+                #[cfg(not(target_os = "linux"))]
+                let core_copy_available: Option<bool> = None;
                 let current_visibility = if let Some(index) = idx {
                     session
                         .segments
@@ -1928,7 +2010,25 @@ impl TranscodeManager {
                 {
                     return Ok(SegmentPublication::Missing(Some(current_owner())));
                 }
-                let available = if retired_owner {
+                let available = if let Some(published) = core_copy_available {
+                    published
+                        && (!retired_owner
+                            || self
+                                .retired_presentations
+                                .lock()
+                                .await
+                                .get(session_id)
+                                .is_some_and(|retired| {
+                                    retired.producer_attempt == producer_attempt
+                                        && Arc::ptr_eq(&retired.session, &session)
+                                        && Instant::now()
+                                            < retired
+                                                .session
+                                                .retired_release
+                                                .deadline()
+                                                .unwrap_or(retired.serve_until)
+                                }))
+                } else if retired_owner {
                     let owner_current = self
                         .retired_presentations
                         .lock()
@@ -1937,7 +2037,12 @@ impl TranscodeManager {
                         .is_some_and(|retired| {
                             retired.producer_attempt == producer_attempt
                                 && Arc::ptr_eq(&retired.session, &session)
-                                && Instant::now() < retired.serve_until
+                                && Instant::now()
+                                    < retired
+                                        .session
+                                        .retired_release
+                                        .deadline()
+                                        .unwrap_or(retired.serve_until)
                         });
                     owner_current
                         && idx.is_none_or(|_| {
@@ -1972,25 +2077,59 @@ impl TranscodeManager {
                     continue;
                 }
             }
-            let opened = if let Some(opened) = authenticated_cached_file.take() {
-                Some((opened.file, Some(opened.bytes), Some(opened.lease)))
+            #[cfg(target_os = "linux")]
+            let opened_copy =
+                if let Some((output, file)) = core_copy_output.as_ref().zip(core_copy_file) {
+                    output
+                        .file_len(file)
+                        .await
+                        .map_err(|_| SegmentOpenError::Capacity)?
+                        .map(|len| {
+                            (
+                                crate::vodserve::ReadyFile::Copy {
+                                    output: output.clone(),
+                                    file,
+                                    len,
+                                },
+                                Some(len),
+                                None,
+                            )
+                        })
+                } else {
+                    None
+                };
+            #[cfg(not(target_os = "linux"))]
+            let opened_copy: Option<(
+                crate::vodserve::ReadyFile,
+                Option<u64>,
+                Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
+            )> = None;
+            let opened = if core_copy_output.is_some() {
+                // A selected copy object is readable only through its counted
+                // scratch cell. A miss cannot fall through to an uncharged
+                // pathname open in the legacy rolling directory.
+                opened_copy
+            } else if let Some(opened) = authenticated_cached_file.take() {
+                Some((opened.file.into(), Some(opened.bytes), Some(opened.lease)))
+            } else if let Some(copy) = opened_copy {
+                Some(copy)
             } else if session.cached {
                 plurx_core::transcode::manifest::open_bounded_regular_object(&session.dir, name)
                     .await
                     .ok()
                     .flatten()
-                    .map(|(file, len)| (file, Some(len), None))
+                    .map(|(file, len)| (file.into(), Some(len), None))
             } else {
                 tokio::fs::File::open(&path)
                     .await
                     .ok()
-                    .map(|file| (file, None, None))
+                    .map(|file| (file.into(), None, None))
             };
             if let Some((file, authenticated_len, snapshot_lease)) = opened {
                 let len = match authenticated_len {
                     Some(len) => len,
-                    None => match file.metadata().await {
-                        Ok(metadata) => metadata.len(),
+                    None => match file.length().await {
+                        Ok(len) => len,
                         Err(_) => {
                             return Ok(SegmentPublication::Unavailable(MediaResponseOwner(
                                 MediaResponseOwnerKind::Rolling {
@@ -2015,7 +2154,12 @@ impl TranscodeManager {
                         .is_some_and(|retired| {
                             retired.producer_attempt == producer_attempt
                                 && Arc::ptr_eq(&retired.session, &session)
-                                && Instant::now() < retired.serve_until
+                                && Instant::now()
+                                    < retired
+                                        .session
+                                        .retired_release
+                                        .deadline()
+                                        .unwrap_or(retired.serve_until)
                         });
                     if !exact {
                         return Ok(SegmentPublication::Missing(Some(current_owner())));

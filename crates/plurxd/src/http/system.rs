@@ -257,10 +257,11 @@ pub struct ResourceOwnershipDto {
     pub unreconciled_custody: Option<bool>,
     pub accounting: Option<plurx_core::adaptive_resources::LedgerSnapshot>,
     pub history: Option<plurx_core::resource_history::HistoryDiagnostics>,
+    pub planning: Option<plurx_core::adaptive_resources::runtime::PlanningOwnershipDiagnostics>,
 }
 impl ResourceOwnershipDto {
     fn read(state: &AppState) -> Self {
-        let scope = "selected_linux_finite_software_vod";
+        let scope = "selected_linux_owned_playback";
         let Some(runtime) = state.resource_runtime.as_ref() else {
             return Self {
                 state: "not_installed",
@@ -268,6 +269,7 @@ impl ResourceOwnershipDto {
                 unreconciled_custody: None,
                 accounting: None,
                 history: None,
+                planning: None,
             };
         };
         let unreconciled_custody = Some(runtime.has_unreconciled_custody());
@@ -278,6 +280,7 @@ impl ResourceOwnershipDto {
                 unreconciled_custody,
                 accounting: Some(accounting),
                 history: runtime.history_diagnostics(),
+                planning: runtime.planning_ownership_diagnostics(),
             },
             Err(_) => Self {
                 state: "accounting_unavailable",
@@ -285,6 +288,7 @@ impl ResourceOwnershipDto {
                 unreconciled_custody,
                 accounting: None,
                 history: runtime.history_diagnostics(),
+                planning: runtime.planning_ownership_diagnostics(),
             },
         }
     }

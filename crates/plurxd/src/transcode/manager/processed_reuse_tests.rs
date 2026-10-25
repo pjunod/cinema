@@ -1238,6 +1238,8 @@ async fn fixture_with_audio(
     resources.hardware_slot = true;
     resources.cpu_threads = 15;
     let mut encoding = crate::vodencode::Encoding {
+        #[cfg(target_os = "linux")]
+        planning_metadata: None,
         source_object_version: source.object_version().to_owned(),
         source_clock: runtime.source_clock,
         shared_audio: None,

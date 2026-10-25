@@ -6435,7 +6435,7 @@ fn producer_progress_batch_proves_contiguous_deadlines_and_freezes_the_first_gap
         );
     }
     let contiguous_blocks = contiguous.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(contiguous)] = contiguous_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(contiguous))] = contiguous_blocks.as_slice() else {
         panic!("one contiguous progress block");
     };
     assert_eq!(
@@ -6473,7 +6473,7 @@ fn producer_progress_batch_proves_contiguous_deadlines_and_freezes_the_first_gap
         );
     }
     let gapped_blocks = gapped.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(gapped)] = gapped_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(gapped))] = gapped_blocks.as_slice() else {
         panic!("one gapped progress block");
     };
     assert_eq!(
@@ -7702,7 +7702,7 @@ fn command_envelope_splits_progress_and_preserves_global_ingress_order() {
     let (reply, _response) = tokio::sync::oneshot::channel();
     let envelope = ingress.seal_command(RollingControlCommand::Snapshot { reply });
     assert_eq!(envelope.sealed_flow_barriers, 0);
-    let [RollingProducerIngressBlock::Progress(preceding)] = envelope.preceding_producer.as_slice()
+    let [Some(RollingProducerIngressBlock::Progress(preceding))] = envelope.preceding_producer.as_slice()
     else {
         panic!("command seals exactly its preceding progress batch");
     };
@@ -7727,7 +7727,7 @@ fn command_envelope_splits_progress_and_preserves_global_ingress_order() {
         started + Duration::from_secs(2),
     );
     let successor_blocks = ingress.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(successor)] = successor_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(successor))] = successor_blocks.as_slice() else {
         panic!("post-command progress starts a successor batch");
     };
     assert!(successor.first_sequence() > envelope.sequence);
@@ -7801,7 +7801,7 @@ async fn command_publication_time_not_dispatch_delay_owns_lease_ordering() {
     let snapshot_envelope = RollingControlEnvelope {
         sequence: 1,
         published_at,
-        preceding_producer: Vec::new(),
+        preceding_producer: RollingProducerIngressBlocks::new(),
         sealed_flow_barriers: 0,
         command: RollingControlCommand::Snapshot {
             reply: snapshot_reply,
@@ -7811,7 +7811,7 @@ async fn command_publication_time_not_dispatch_delay_owns_lease_ordering() {
     let envelope = RollingControlEnvelope {
         sequence: 2,
         published_at: published_at + Duration::from_millis(1),
-        preceding_producer: Vec::new(),
+        preceding_producer: RollingProducerIngressBlocks::new(),
         sealed_flow_barriers: 0,
         command: RollingControlCommand::Renew {
             kind: "sequenced-before-deadline",
@@ -7844,7 +7844,7 @@ async fn command_publication_time_not_dispatch_delay_owns_lease_ordering() {
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: tied,
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::Terminal {
                 cause: RollingTerminalCause::End,
@@ -8020,7 +8020,7 @@ fn producer_progress_watermark_rejects_a_cross_drain_repeat_as_deadline_evidence
         started,
     );
     let initial_blocks = ingress.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(initial)] = initial_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(initial))] = initial_blocks.as_slice() else {
         panic!("initial progress batch");
     };
     assert_eq!(
@@ -8054,7 +8054,7 @@ fn producer_progress_watermark_rejects_a_cross_drain_repeat_as_deadline_evidence
         started + Duration::from_secs(14),
     );
     let repeated_blocks = ingress.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(repeated)] = repeated_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(repeated))] = repeated_blocks.as_slice() else {
         panic!("post-drain progress batch");
     };
     assert_eq!(
@@ -8088,7 +8088,7 @@ fn producer_progress_watermark_resets_for_successor_and_rejects_late_predecessor
         started,
     );
     let predecessor_blocks = ingress.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(predecessor)] = predecessor_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(predecessor))] = predecessor_blocks.as_slice() else {
         panic!("predecessor progress batch");
     };
     assert_eq!(
@@ -8133,7 +8133,7 @@ fn producer_progress_watermark_resets_for_successor_and_rejects_late_predecessor
         started + Duration::from_secs(3),
     );
     let successor_blocks = ingress.drain_blocks();
-    let [RollingProducerIngressBlock::Progress(successor)] = successor_blocks.as_slice() else {
+    let [Some(RollingProducerIngressBlock::Progress(successor))] = successor_blocks.as_slice() else {
         panic!("successor progress batch");
     };
     assert_eq!(successor.producer_attempt, 2);
@@ -12665,7 +12665,7 @@ async fn exact_deadline_attempt_media_wins_then_retains_one_published_failure() 
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: deadline,
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::AuthorizeResponsePublication {
                 publication: RollingResponsePublication::attempt_media(
@@ -13933,7 +13933,7 @@ async fn generation_and_protocol_responses_are_due_first_at_exact_deadline() {
             .handle_command(RollingControlEnvelope {
                 sequence: 1,
                 published_at: deadline,
-                preceding_producer: Vec::new(),
+                preceding_producer: RollingProducerIngressBlocks::new(),
                 sealed_flow_barriers: 0,
                 command: RollingControlCommand::AuthorizeResponsePublication {
                     publication,
@@ -13977,7 +13977,7 @@ async fn cancelled_attempt_media_admission_cannot_mutate_or_win_the_deadline() {
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: deadline,
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::AuthorizeResponsePublication {
                 publication: RollingResponsePublication::attempt_media(
@@ -14024,7 +14024,7 @@ async fn cancelled_or_expired_response_commits_do_not_mutate_actor_delivery() {
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: started + Duration::from_millis(1),
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::CommitMedia {
                 kind: "cancelled-response-eof",
@@ -14043,7 +14043,7 @@ async fn cancelled_or_expired_response_commits_do_not_mutate_actor_delivery() {
         .handle_command(RollingControlEnvelope {
             sequence: 2,
             published_at: started + Duration::from_millis(2),
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::CommitMedia {
                 kind: "expired-response-eof",
@@ -14095,7 +14095,7 @@ async fn accepted_segment_eof_projects_frontier_and_flow_before_reply() {
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: started + Duration::from_millis(1),
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::CommitMedia {
                 kind: "accepted-response-eof",
@@ -14234,7 +14234,7 @@ async fn cancelled_or_expired_http_observations_do_not_mutate_actor_delivery() {
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: started + Duration::from_millis(1),
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::ObservePublication {
                 observation: publication(attempt, true, 7, 28_000, None),
@@ -14249,7 +14249,7 @@ async fn cancelled_or_expired_http_observations_do_not_mutate_actor_delivery() {
         .handle_command(RollingControlEnvelope {
             sequence: 2,
             published_at: started + Duration::from_millis(2),
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::ObservePublication {
                 observation: publication(attempt, true, 8, 32_000, None),
@@ -14280,7 +14280,7 @@ async fn cancellation_after_attempt_media_mutation_keeps_the_synchronous_handoff
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: started + Duration::from_secs(1),
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::AuthorizeResponsePublication {
                 publication: RollingResponsePublication::attempt_media(
@@ -14340,7 +14340,7 @@ async fn applied_failure_consumes_a_preceding_exit_and_replays_permanently() {
         .handle_command(RollingControlEnvelope {
             sequence: 2,
             published_at: exit_at,
-            preceding_producer: vec![exit],
+            preceding_producer: RollingProducerIngressBlocks::from([exit]),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::DecisionApplied {
                 decision_sequence: 1,
@@ -14855,7 +14855,7 @@ async fn successor_exit_before_retry_ack_is_retained_as_the_final_decision() {
         .handle_command(RollingControlEnvelope {
             sequence: 1,
             published_at: exit_at,
-            preceding_producer: Vec::new(),
+            preceding_producer: RollingProducerIngressBlocks::new(),
             sealed_flow_barriers: 0,
             command: RollingControlCommand::DecisionApplied {
                 decision_sequence: 1,

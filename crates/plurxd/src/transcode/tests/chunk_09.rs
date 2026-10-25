@@ -1,4 +1,3 @@
-
 #[tokio::test]
 async fn the_published_identity_reaches_the_plan_and_renames_the_artifact() {
     use plurx_core::transcode::{
@@ -1659,11 +1658,22 @@ async fn preparation_status_tracks_writer_inventory_before_first_publication() {
     let session = test_session(dir.path().to_path_buf());
     for count in [8, 12] {
         seeded_session_dir(dir.path(), count, 2.0).await;
-        session.publication_cycle("preparation-inventory").await.expect("staging cycle");
+        session
+            .publication_cycle("preparation-inventory")
+            .await
+            .expect("staging cycle");
         let info = session_info(
-            "preparation-inventory", &session,
-            AheadLimits { max_secs: 0, max_bytes: 0, global_max_bytes: 0 }, 0, 0,
-        ).await;
+            "preparation-inventory",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
         assert_eq!(info.produced_end_ms, Some(count * 2_000));
         assert_eq!(info.playlist_ready, Some(false));
         assert!(info.served_end_ms.is_none());
@@ -1745,7 +1755,7 @@ async fn scratch_cleanup_points_follow_the_release_and_precede_the_removal() {
     let key = session.scratch.as_ref().expect("scratch permit").key();
     let point = session.test_hooks().scratch_cleanup.arm("scratch_cleanup");
     spawn_retired_presentation_cleanup_owner(
-        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         "retired-owner".to_owned(),
         RetiredPresentation {
             session: Arc::clone(&session),

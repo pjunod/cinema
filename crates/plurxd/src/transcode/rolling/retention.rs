@@ -194,9 +194,20 @@ pub(super) async fn gc_expired_segments(session: &Session) {
     if session.cached {
         return;
     }
+    #[cfg(target_os = "linux")]
+    if session.core_copy_close.lock().await.is_some() {
+        // The exact selected copy has already transferred native custody to
+        // its compact close ticket; legacy path cleanup must not race it.
+        return;
+    }
     // A failed detached unlink remains queued and charged. The next repair
     // tick retries it, while the active/queued check below refuses to hand off
     // a second batch and thus bounds each session to one cleanup owner.
+    #[cfg(target_os = "linux")]
+    if session.scratch.is_some() {
+        ensure_retention_cleanup(session);
+    }
+    #[cfg(not(target_os = "linux"))]
     ensure_retention_cleanup(session);
     // Segment names are reused by a replacement. Sample the attempt before
     // waiting, then own the producer transition through a bounded metadata
@@ -258,6 +269,57 @@ pub(super) async fn gc_expired_segments(session: &Session) {
             .collect()
     };
     if expired.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(output) = session
+        .core_copy
+        .lock()
+        .await
+        .as_ref()
+        .map(|owner| owner.output())
+    {
+        // The selected copy role owns the only segment directory and its
+        // original native RemoveOwned cells. Never hand a selected path to
+        // the legacy raw rename/unlink worker. Reader-open and producer
+        // transitions remain serialized by the core fold and role bundle.
+        drop(producer_transition);
+        for (name, _) in expired {
+            let Some(plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::Segment(index)) =
+                plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::from_canonical_name(
+                    &name,
+                )
+            else {
+                continue;
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            if output.retire_segment(index, deadline).await.is_err() {
+                // An active exact reader, unknown journal commit or uncertain
+                // unlink retains the same charged file for the next pass.
+                continue;
+            }
+            if session.control.current_producer_attempt() != producer_attempt {
+                return;
+            }
+            let mut index = session.segments.lock().await;
+            if let Some(segment) = index.segs.iter_mut().find(|segment| segment.name == name) {
+                if matches!(segment.visibility,
+                    SegmentVisibility::Grace { serve_until, .. } if Instant::now() >= serve_until)
+                {
+                    segment.bytes = 0;
+                    segment.visibility = SegmentVisibility::Deleted;
+                    index.revision = index.revision.wrapping_add(1);
+                    session.live_bytes.store(index.total_bytes(), Release);
+                }
+            }
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if session.scratch.is_none() {
+        // The selected owner can move into its close ticket between the
+        // first guard and this read. That transition never grants the legacy
+        // pathname sweeper authority over its charged output.
         return;
     }
     let sweep = RETENTION_SWEEP_ID.fetch_add(1, Relaxed);

@@ -1,6 +1,80 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+struct SelectedCopyTicketAttempt {
+    registry:
+        Arc<std::sync::Mutex<std::collections::BTreeMap<uuid::Uuid, SelectedCopyTerminalTicket>>>,
+    identity: uuid::Uuid,
+    ticket: Option<SelectedCopyTerminalTicket>,
+}
+#[cfg(target_os = "linux")]
+impl Drop for SelectedCopyTicketAttempt {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            debug_assert!(!registry.contains_key(&self.identity));
+            registry.insert(self.identity, ticket);
+        }
+    }
+}
+
 impl TranscodeManager {
+    #[cfg(target_os = "linux")]
+    async fn reconcile_selected_copy_tickets(&self) {
+        let next = {
+            let mut cursor = self
+                .retired_copy_cursor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut registry = self
+                .retired_copy_tickets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let next = registry
+                .keys()
+                .copied()
+                .find(|id| Some(*id) > *cursor)
+                .or_else(|| registry.keys().next().copied());
+            next.and_then(|id| {
+                *cursor = Some(id);
+                registry
+                    .remove(&id)
+                    .map(|ticket| SelectedCopyTicketAttempt {
+                        registry: Arc::clone(&self.retired_copy_tickets),
+                        identity: id,
+                        ticket: Some(ticket),
+                    })
+            })
+        };
+        let Some(mut attempt) = next else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let ticket = attempt
+            .ticket
+            .as_mut()
+            .expect("registered selected copy ticket");
+        if let Some(actor) = ticket.actor.as_mut() {
+            if actor.join(deadline).await.is_err() {
+                tracing::debug!(target: "plurxd::transcode",
+                    "selected copy original control actor remains held for next reap pass");
+                return;
+            }
+            // The completed task's Arc payload is application memory, so
+            // destroy its final selector before native credit can return.
+            ticket.actor.take();
+        }
+        match ticket.native.finish_retirement(deadline).await {
+            Ok(()) => {
+                attempt.ticket.take();
+            }
+            Err(error) => tracing::debug!(target: "plurxd::transcode", %error,
+                "selected copy original retirement remains held for next reap pass"),
+        }
+    }
     /// Hold a session that has run far enough ahead of the client, and let it
     /// go again once the client has caught up.
     ///
@@ -673,6 +747,14 @@ impl TranscodeManager {
             self.reconcile_local_direct_owners();
             #[cfg(target_os = "linux")]
             self.reconcile_source_direct_tasks();
+            #[cfg(target_os = "linux")]
+            self.reconcile_adaptive_attempt_tasks().await;
+            #[cfg(target_os = "linux")]
+            self.reconcile_selected_copy_tickets().await;
+            #[cfg(target_os = "linux")]
+            self.reconcile_static_artifact_run().await;
+            #[cfg(target_os = "linux")]
+            reconcile_expired_selected_copy_presentation(&self.retired_presentations).await;
             let now_unix_ms = crate::media_sessions::unix_ms();
             self.terminal_controls
                 .lock()

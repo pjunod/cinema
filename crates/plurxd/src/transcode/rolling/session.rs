@@ -27,6 +27,16 @@ pub(super) struct Session {
     /// The original copy stdout owner is installed before its task can poll.
     /// Retirement joins this task, not just the scratch writer barrier.
     pub(super) copy_reader_task: Mutex<CopyReaderTask>,
+    #[cfg(target_os = "linux")]
+    pub(super) core_copy:
+        Mutex<Option<plurx_core::adaptive_resources::runtime::copy_vod::CopyVodOwner>>,
+    #[cfg(target_os = "linux")]
+    pub(super) core_copy_close:
+        Mutex<Option<plurx_core::adaptive_resources::runtime::copy_vod::CopyCloseTicket>>,
+    /// Bound selected-copy playlist parses and complete index snapshots to
+    /// one original session operation at a time, including publication.
+    #[cfg(target_os = "linux")]
+    pub(super) core_copy_refresh_gate: Mutex<()>,
     /// True for every rolling generation whose response publication is
     /// admitted by the actor. Producer recovery may still remain compatibility
     /// owned; response ownership does not imply prepublication retry policy.
@@ -340,6 +350,12 @@ pub(super) struct Session {
     /// playlist reload may observe that state hundreds of times; only the
     /// transition records retention starting to advance the visible window.
     pub(super) first_slide_logged: AtomicBool,
+    /// Last for any Session-owned application lease. Selected copy moves its
+    /// lease into the original actor owner, so queued actor work and the
+    /// original join selector remain charged after the Session drops.
+    #[cfg(target_os = "linux")]
+    pub(super) core_copy_app:
+        Option<plurx_core::adaptive_resources::runtime::finite_vod::FiniteApplicationLease>,
 }
 
 /// The points of a rolling [`Session`] that a race test can pause at, and the
@@ -794,6 +810,13 @@ impl Session {
     /// which happened: retirement may only collapse a reservation onto a
     /// `Complete` inventory.
     pub(super) async fn measure_scratch_bytes(&self) -> ScratchMeasurement {
+        #[cfg(target_os = "linux")]
+        if self.scratch.is_none() && !self.cached {
+            // The core copy role journals its scratch inventory and charge.
+            // A second, path-based daemon scan would neither own those files
+            // nor be allowed to collapse the reservation on a missing path.
+            return ScratchMeasurement::NotScratch;
+        }
         if self.cached {
             return ScratchMeasurement::NotScratch;
         }
@@ -905,6 +928,12 @@ impl Session {
         session_id: &str,
         now: Instant,
     ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        let _selected_publication = if self.core_copy.lock().await.is_some() {
+            Some(self.core_copy_refresh_gate.lock().await)
+        } else {
+            None
+        };
         // A write the muxer's upload needed failed. FFmpeg does not read the
         // reply, so it would keep producing objects no playlist can name.
         if let Some(reason) = self
@@ -920,7 +949,7 @@ impl Session {
         // reporting no inventory to clients deciding whether to keep waiting.
         // This refresh retains the normal attempt/revision fences and does
         // not authorize publication before its cushion is ready.
-        self.refresh_segments().await;
+        self.refresh_segments_inner().await;
         if self.replacing_child.load(Acquire) {
             return Ok(());
         }
@@ -928,11 +957,44 @@ impl Session {
         if self.compatibility_producer_attempt() != producer_attempt {
             return Ok(());
         }
-        let Some(raw) =
+        #[cfg(target_os = "linux")]
+        let copy_output = self
+            .core_copy
+            .lock()
+            .await
+            .as_ref()
+            .map(|owner| owner.output());
+        #[cfg(target_os = "linux")]
+        if self.scratch.is_none() && !self.cached && copy_output.is_none() {
+            return Err("selected copy output is closing".to_owned());
+        }
+        #[cfg(target_os = "linux")]
+        let charged_playlist = if let Some(output) = copy_output.as_ref() {
+            output
+                .produced_playlist_buffer(now + Duration::from_secs(5))
+                .await
+                .map_err(|error| format!("reading admitted copy playlist: {error}"))?
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let legacy_playlist = if copy_output.is_none() {
             plurx_core::transcode::manifest::read_bounded_playlist(&self.dir, "index.m3u8")
                 .await
                 .map_err(|error| format!("reading rolling writer playlist: {error}"))?
-        else {
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let raw = charged_playlist.as_deref().or(legacy_playlist.as_deref());
+        #[cfg(not(target_os = "linux"))]
+        let legacy_playlist =
+            plurx_core::transcode::manifest::read_bounded_playlist(&self.dir, "index.m3u8")
+                .await
+                .map_err(|error| format!("reading rolling writer playlist: {error}"))?;
+        #[cfg(not(target_os = "linux"))]
+        let raw = legacy_playlist.as_deref();
+        let Some(raw) = raw else {
             return Ok(());
         };
         if raw.is_empty() {
@@ -944,8 +1006,18 @@ impl Session {
             return Ok(());
         }
         validate_rolling_target(&raw)?;
+        #[cfg(target_os = "linux")]
+        let parsed = if copy_output.is_some() {
+            parse_selected_copy_playlist(text,
+                plurx_core::adaptive_resources::runtime::copy_vod::CopyVodRequest::maximum_segment_names())
+                .map_err(str::to_owned)?
+        } else {
+            parse_playlist(text)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let parsed = parse_playlist(text);
         let index = SegmentIndex {
-            segs: parse_playlist(text),
+            segs: parsed,
             revision: 0,
         };
         let Some(last_segment) = index.segs.last().map(|segment| segment.index) else {
@@ -1305,15 +1377,51 @@ impl Session {
                 .find(|segment| segment.index <= first_segment && segment.start_ms <= max_start)
                 .map_or(old_first, |segment| segment.index.max(old_first));
         }
+        #[cfg(target_os = "linux")]
+        let (served_raw, copy_revision) = if let Some(output) = copy_output.as_ref() {
+            let first = u32::try_from(first_segment)
+                .map_err(|_| "rolling copy selected an invalid first segment".to_owned())?;
+            let last = u32::try_from(selected_last)
+                .map_err(|_| "rolling copy selected an invalid last segment".to_owned())?;
+            let revision = output
+                .commit_served_playlist(first, last, Instant::now() + Duration::from_secs(5))
+                .await
+                .map_err(|error| format!("committing admitted copy playlist: {error}"))?;
+            (revision.as_ref().to_vec(), Some(revision))
+        } else {
+            let served = served_live_playlist(
+                raw.to_vec(),
+                Some(first_segment),
+                (selected_last < last_segment).then_some(selected_last),
+                self.takeover.as_ref(),
+            )
+            .ok_or_else(|| {
+                "rolling snapshot could not retain a complete media window".to_owned()
+            })?;
+            (served, None)
+        };
+        #[cfg(not(target_os = "linux"))]
         let served_raw = served_live_playlist(
-            raw,
+            raw.to_vec(),
             Some(first_segment),
             (selected_last < last_segment).then_some(selected_last),
             self.takeover.as_ref(),
         )
         .ok_or_else(|| "rolling snapshot could not retain a complete media window".to_owned())?;
+        #[cfg(target_os = "linux")]
+        let served_segments = if copy_output.is_some() {
+            let text = std::str::from_utf8(&served_raw)
+                .map_err(|_| "admitted copy playlist is not UTF-8".to_owned())?;
+            parse_selected_copy_playlist(text,
+                plurx_core::adaptive_resources::runtime::copy_vod::CopyVodRequest::maximum_segment_names())
+                .map_err(str::to_owned)?
+        } else {
+            parse_playlist(&String::from_utf8_lossy(&served_raw))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let served_segments = parse_playlist(&String::from_utf8_lossy(&served_raw));
         let served_index = SegmentIndex {
-            segs: parse_playlist(&String::from_utf8_lossy(&served_raw)),
+            segs: served_segments,
             revision: 0,
         };
         let served_first = served_index
@@ -1381,6 +1489,12 @@ impl Session {
             || clock.budget_anchor_sequence != budget.demand_sequence
         {
             return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if let (Some(output), Some(revision)) = (copy_output.as_ref(), copy_revision) {
+            output
+                .activate_served_playlist(revision)
+                .map_err(|error| format!("activating admitted copy playlist: {error}"))?;
         }
         if clock.served.is_none() {
             tracing::info!(
@@ -2406,6 +2520,16 @@ impl Session {
     /// so slow storage cannot block stop/replacement/control while an old
     /// playlist still cannot enter its successor's compatibility index.
     pub(super) async fn refresh_segments(&self) {
+        #[cfg(target_os = "linux")]
+        let _selected_refresh = if self.core_copy.lock().await.is_some() {
+            Some(self.core_copy_refresh_gate.lock().await)
+        } else {
+            None
+        };
+        self.refresh_segments_inner().await;
+    }
+
+    async fn refresh_segments_inner(&self) {
         let _ = self.refresh_scratch_bytes().await;
         // Actor admission deliberately precedes predecessor teardown. During
         // that interval the current attempt already names the successor while
@@ -2419,47 +2543,137 @@ impl Session {
         // Capturing it after the playlist read gives an old read a new token
         // when another refresh lands during that read, allowing stale bytes
         // to overwrite the newer observation.
-        let previous = self.segments.lock().await.clone();
-        let base_revision = previous.revision;
+        #[cfg(target_os = "linux")]
+        let copy_output = self
+            .core_copy
+            .lock()
+            .await
+            .as_ref()
+            .map(|owner| owner.output());
+        #[cfg(target_os = "linux")]
+        if self.scratch.is_none() && !self.cached && copy_output.is_none() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let (base_revision, previous) = {
+            let current = self.segments.lock().await;
+            (
+                current.revision,
+                copy_output.is_none().then(|| current.clone()),
+            )
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (base_revision, previous) = {
+            let current = self.segments.lock().await;
+            (current.revision, Some(current.clone()))
+        };
         let pending_fetched_segment = self
             .control
             .snapshot()
             .await
             .and_then(|snapshot| snapshot.delivery.pending_fetched_segment);
-        let Ok(raw) = tokio::fs::read(self.dir.join("index.m3u8")).await else {
+        #[cfg(target_os = "linux")]
+        let charged_playlist = if let Some(output) = copy_output.as_ref() {
+            match output
+                .produced_playlist_buffer(Instant::now() + Duration::from_secs(5))
+                .await
+            {
+                Ok(value) => value,
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let legacy_playlist = if copy_output.is_none() {
+            tokio::fs::read(self.dir.join("index.m3u8")).await.ok()
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let raw = charged_playlist.as_deref().or(legacy_playlist.as_deref());
+        #[cfg(not(target_os = "linux"))]
+        let legacy_playlist = tokio::fs::read(self.dir.join("index.m3u8")).await.ok();
+        #[cfg(not(target_os = "linux"))]
+        let raw = legacy_playlist.as_deref();
+        let Some(raw) = raw else {
             return;
         };
         self.hooks.get().after_refresh_playlist_read().await;
+        #[cfg(target_os = "linux")]
+        let parsed = if copy_output.is_some() {
+            let text = match std::str::from_utf8(raw) {
+                Ok(text) => text,
+                Err(_) => return,
+            };
+            match parse_selected_copy_playlist(text,
+                plurx_core::adaptive_resources::runtime::copy_vod::CopyVodRequest::maximum_segment_names()) {
+                Ok(parsed) => parsed,
+                Err(_) => return,
+            }
+        } else {
+            parse_playlist(&String::from_utf8_lossy(&raw))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let parsed = parse_playlist(&String::from_utf8_lossy(&raw));
         let mut observed = SegmentIndex {
-            segs: parse_playlist(&String::from_utf8_lossy(&raw)),
+            segs: parsed,
             revision: 0,
         };
         // Preserve known sizes and visibility promises only when this observation agrees
         // with the snapshot it extends. A rewrite describes different files
         // even when it reused their names, so all of those sizes are measured
         // again.
-        let compatible_prefix =
-            previous
-                .segs
-                .iter()
-                .zip(&observed.segs)
-                .all(|(current, observed)| {
-                    current.index == observed.index
-                        && current.name == observed.name
-                        && current.start_ms == observed.start_ms
-                        && current.end_ms == observed.end_ms
-                });
-        if compatible_prefix {
-            for (observed, previous) in observed.segs.iter_mut().zip(&previous.segs) {
-                observed.bytes = previous.bytes;
-                observed.visibility = previous.visibility;
+        if let Some(previous) = previous.as_ref() {
+            let compatible_prefix =
+                previous
+                    .segs
+                    .iter()
+                    .zip(&observed.segs)
+                    .all(|(current, observed)| {
+                        current.index == observed.index
+                            && current.name == observed.name
+                            && current.start_ms == observed.start_ms
+                            && current.end_ms == observed.end_ms
+                    });
+            if compatible_prefix {
+                for (observed, previous) in observed.segs.iter_mut().zip(&previous.segs) {
+                    observed.bytes = previous.bytes;
+                    observed.visibility = previous.visibility;
+                }
             }
         }
+        #[cfg(target_os = "linux")]
+        let produced_lengths = if let Some(output) = copy_output.as_ref() {
+            match output.produced_segment_lengths().await {
+                Ok(lengths) => Some(lengths),
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
         for segment in observed
             .segs
             .iter_mut()
             .filter(|segment| segment.bytes == 0 && segment.visibility.is_advertised())
         {
+            #[cfg(target_os = "linux")]
+            if let Some(lengths) = produced_lengths.as_ref() {
+                if let Some(plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::Segment(
+                    wanted,
+                )) =
+                    plurx_core::adaptive_resources::runtime::copy_vod::CopyFile::from_canonical_name(
+                        &segment.name,
+                    )
+                {
+                    if let Ok(found) = lengths.binary_search_by_key(&wanted, |(index, _)| *index) {
+                        segment.bytes = i64::try_from(lengths[found].1).unwrap_or(i64::MAX);
+                    }
+                }
+            } else if let Ok(meta) = tokio::fs::metadata(self.dir.join(&segment.name)).await {
+                segment.bytes = meta.len() as i64;
+            }
+            #[cfg(not(target_os = "linux"))]
             if let Ok(meta) = tokio::fs::metadata(self.dir.join(&segment.name)).await {
                 segment.bytes = meta.len() as i64;
             }
@@ -3083,6 +3297,7 @@ mod activity_vod_tests {
                 render_state: Some("rendering".into()),
                 position_ms: Some(12000),
                 client_runway_ms: Some(3000),
+                policy_runway_ms: None,
                 control_age_ms: Some(99),
                 producer_state: Some("held".into()),
                 producer_hold: Some("ahead".into()),

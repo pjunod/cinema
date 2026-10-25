@@ -161,7 +161,7 @@ impl TranscodeManager {
             .await?
             .ok_or("encoded plan unavailable".to_owned())
     }
-    fn encoded_output_intent(
+    pub(crate) fn encoded_output_intent(
         &self,
         request: &SessionRequest,
         encoding: &crate::vodencode::Encoding,
@@ -407,6 +407,48 @@ impl TranscodeManager {
             != Some(intent.target_node_id.as_str())
         {
             return Err(PreparationError::Fail("claimed_target_mismatch"));
+        }
+        #[cfg(target_os = "linux")]
+        if expected.is_none()
+            && intent.copy_for_burn.is_none()
+            && intent.subtitle_burn.is_none()
+            && !intent.hdr10_requested
+            && intent.grade == OutputGrade::Sdr
+            && file.dolby_vision.is_empty()
+            && self.resource_runtime.is_some()
+        {
+            // The compiler measures this exact async continuation before it
+            // is polled. Its original frame is charged with P rather than
+            // guessed from a Store wire size.
+            let frame_bytes = {
+                let future = self.produce_selected_static_job(
+                    &request,
+                    file,
+                    job,
+                    &fence,
+                    &intent,
+                    &policy_generation,
+                    &source_object_version,
+                    scratch_bytes,
+                    deadline,
+                    0,
+                );
+                std::mem::size_of_val(&future)
+            };
+            return self
+                .produce_selected_static_job(
+                    &request,
+                    file,
+                    job,
+                    &fence,
+                    &intent,
+                    &policy_generation,
+                    &source_object_version,
+                    scratch_bytes,
+                    deadline,
+                    frame_bytes,
+                )
+                .await;
         }
         if expected.is_some() {
             if !self
@@ -751,7 +793,9 @@ impl TranscodeManager {
         if !self.fragment_worker_idle(admission) {
             return Err(PreparationError::Yield("owner_busy"));
         }
-        let original_claim = job.token.as_ref()
+        let original_claim = job
+            .token
+            .as_ref()
             .ok_or(PreparationError::Fail("copy_claim_token_missing"))?;
         if fence.snapshot_for_claim(original_claim).await.is_none() {
             return Err(PreparationError::Yield("lease_lost"));

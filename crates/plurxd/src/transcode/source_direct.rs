@@ -621,12 +621,9 @@ impl TranscodeManager {
             let runtime = state.resource_runtime.as_ref().ok_or_else(|| {
                 SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
             })?;
-            let observed = Arc::clone(runtime);
-            let epoch = tokio::task::spawn_blocking(move || observed.observe_admission_capacity())
+            let epoch = runtime
+                .refresh_admission_capacity(deadline)
                 .await
-                .map_err(|_| {
-                    SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unresolved)
-                })?
                 .map_err(|_| {
                     SourceWorkerNoAdmission::refused(&assignment, SourceWorkerError::Unavailable)
                 })?;

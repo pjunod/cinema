@@ -256,7 +256,7 @@ pub(super) async fn exact_hls_context_at(
             )));
         }
         None => {
-            let opened = match state
+            let mut opened = match state
                 .transcode
                 .segment_for_publication_before(session, &init_object, deadline)
                 .await
@@ -296,29 +296,28 @@ pub(super) async fn exact_hls_context_at(
                 delivery.finish_without_body();
                 return Err(HlsInitInspectionError::invalid());
             }
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(opened.len as usize)
-                .map_err(|_| HlsInitInspectionError::unavailable())?;
             // No response body exists here — this is the playlist generator
             // reading `hvcC` for itself.
             delivery.expect_at_most(opened.len);
             let started = Instant::now();
-            let mut reader = opened.file.take(opened.len);
-            match reader.read_to_end(&mut bytes).await {
+            init = match opened
+                .file
+                .read_all_bounded(INIT_INSPECTION_LIMIT_BYTES, deadline)
+                .await
+            {
                 Ok(bytes) => {
-                    delivery.note_read(bytes as u64, started.elapsed());
+                    delivery.note_read(bytes.len() as u64, started.elapsed());
                     delivery.finish();
-                    if bytes as u64 != opened.len {
+                    if bytes.len() as u64 != opened.len {
                         return Err(HlsInitInspectionError::invalid());
                     }
+                    bytes
                 }
                 Err(error) => {
                     delivery.fail(&error);
                     return Err(HlsInitInspectionError::unavailable());
                 }
-            }
-            init = crate::vodserve::ReadyBytes::Local(bytes);
+            };
         }
     }
     // This guard precedes parser allocation and outlives all temporary track

@@ -3990,6 +3990,20 @@ fn adopt_observation_token(
 }
 
 impl ControlState {
+    /// Owner-local identity of the newest newly accepted control exchange.
+    /// Replays do not advance this tuple, and a caller must also verify its
+    /// retained snapshot and current media owner before using client facts.
+    pub(crate) fn accepted_policy_identity(&self) -> Option<(uuid::Uuid, u64, u64, Instant)> {
+        if self.owner_epoch == 0 || self.last_sequence == 0 {
+            return None;
+        }
+        Some((
+            uuid::Uuid::parse_str(self.generation.as_deref()?).ok()?,
+            self.owner_epoch,
+            self.last_sequence,
+            self.last_accepted_at?,
+        ))
+    }
     pub(crate) fn invalidate_observational_attachment(&mut self) {
         self.advance_observational_lifetime();
     }
@@ -8185,8 +8199,8 @@ impl RollingProducerIngress {
         self.notify.notify_one();
     }
 
-    fn take_blocks(state: &mut RollingProducerIngressState) -> Vec<RollingProducerIngressBlock> {
-        let mut pending = Vec::with_capacity(4 + state.flow.len());
+    fn take_blocks(state: &mut RollingProducerIngressState) -> RollingProducerIngressBlocks {
+        let mut pending = RollingProducerIngressBlocks::new();
         if let Some(exit) = state.exit.take() {
             pending.push(RollingProducerIngressBlock::Barrier(exit));
         }
@@ -8196,21 +8210,18 @@ impl RollingProducerIngress {
         if let Some(diagnostics) = state.diagnostics.take() {
             pending.push(RollingProducerIngressBlock::Barrier(diagnostics));
         }
-        pending.extend(
-            state
-                .flow
-                .drain(..)
-                .map(RollingProducerIngressBlock::Barrier),
-        );
+        for barrier in state.flow.drain(..) {
+            pending.push(RollingProducerIngressBlock::Barrier(barrier));
+        }
         if let Some(progress) = state.progress.take() {
             pending.push(RollingProducerIngressBlock::Progress(progress));
         }
-        pending.sort_by_key(RollingProducerIngressBlock::order_key);
+        pending.sort_by_order();
         pending
     }
 
     #[cfg(test)]
-    fn drain_blocks(&self) -> Vec<RollingProducerIngressBlock> {
+    fn drain_blocks(&self) -> RollingProducerIngressBlocks {
         let mut state = self
             .state
             .lock()
@@ -8530,7 +8541,13 @@ pub(crate) struct RollingControlHandle {
     /// final handle must close the actor rather than leave a self-owned task.
     #[allow(dead_code)]
     decision_transport: Arc<RollingDecisionTransport>,
+    original_actor: Arc<rolling_lifetime::OriginalRollingActorTask>,
 }
+
+mod rolling_ingress;
+mod rolling_lifetime;
+use rolling_ingress::RollingProducerIngressBlocks;
+pub(crate) use rolling_lifetime::RollingControlActorJoin;
 
 struct OwnedLocalControlRequest {
     generation: String,
@@ -8786,7 +8803,7 @@ impl RollingControlCommand {
 struct RollingControlEnvelope {
     sequence: u64,
     published_at: Instant,
-    preceding_producer: Vec<RollingProducerIngressBlock>,
+    preceding_producer: RollingProducerIngressBlocks,
     sealed_flow_barriers: usize,
     command: RollingControlCommand,
 }
@@ -9209,9 +9226,9 @@ struct RollingActorRuntime {
 }
 
 /// Publishes actor unavailability under the same transition fence used by
-/// every process signal. This local is created inside `run`, so Rust drops it
-/// before the receiver and actor parameters on return, cancellation, or
-/// unwind; `Sender::closed()` therefore cannot become externally visible
+/// every process signal. This owner covers the unpolled start latch and then
+/// becomes a local inside `run`, ahead of receiver/actor destruction on return,
+/// cancellation or unwind; `Sender::closed()` cannot become externally visible
 /// before the fail-closed retirement fence has linearized.
 struct RollingActorExitFence {
     retired: Arc<AtomicBool>,
@@ -11625,7 +11642,7 @@ impl RollingControlActor {
         }
     }
 
-    fn fold_producer_blocks_at(&mut self, now: Instant, blocks: Vec<RollingProducerIngressBlock>) {
+    fn fold_producer_blocks_at(&mut self, now: Instant, blocks: RollingProducerIngressBlocks) {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             for block in blocks {
                 self.handle_producer_block_at(now, block);
@@ -11637,11 +11654,7 @@ impl RollingControlActor {
         }
     }
 
-    fn handle_producer_blocks_at(
-        &mut self,
-        now: Instant,
-        blocks: Vec<RollingProducerIngressBlock>,
-    ) {
+    fn handle_producer_blocks_at(&mut self, now: Instant, blocks: RollingProducerIngressBlocks) {
         self.fold_producer_blocks_at(now, blocks);
         // Priority is exact: a lapsed action wins a same-instant tie with
         // running progress, so it is evaluated first. This is the live path —
@@ -13131,14 +13144,13 @@ impl RollingControlActor {
         None
     }
 
-    async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<RollingControlEnvelope>) {
-        let _exit_fence = RollingActorExitFence {
-            retired: Arc::clone(&self.retired_fence),
-            producer_transition: Arc::clone(&self.producer_transition),
-            flow_sync: Arc::clone(&self.flow_sync),
-            producer_events: Arc::clone(&self.producer_events),
-            hooks: Arc::clone(&self.hooks),
-        };
+    async fn run(
+        mut self,
+        mut receiver: tokio::sync::mpsc::Receiver<RollingControlEnvelope>,
+        exit_fence: RollingActorExitFence,
+    ) {
+        // Keep this local ahead of receiver destruction, including unwind.
+        let _exit_fence = exit_fence;
         self.hooks.actor_run_started();
         loop {
             if self.retired {
@@ -13176,7 +13188,7 @@ impl RollingControlActor {
                     // plus the remaining producer blocks through it, retain
                     // precedence. Publishers released afterward are ordered
                     // behind the loss verdict.
-                    let (preceding_commands, preceding_producer, freed_flow_capacity, lost_at) = {
+                    let (mut preceding_commands, preceding_producer, freed_flow_capacity, lost_at) = {
                         let transition = Arc::clone(&self.producer_transition);
                         let mut transition = transition
                             .lock()
@@ -13188,11 +13200,11 @@ impl RollingControlActor {
                         // publish a child across observed executor loss.
                         self.executor_loss_cutoff_pending = true;
                         transition.install_authorization = None;
-                        let mut preceding_commands =
-                            Vec::with_capacity(ROLLING_ACTOR_MAILBOX_CAPACITY);
-                        while let Ok(command) = receiver.try_recv() {
-                            preceding_commands.push(command);
-                        }
+                        // Every publication completes under this transition
+                        // fence. Snapshot the FIFO prefix length without moving
+                        // its payloads into a second heap queue. There is only
+                        // one receiver; later publishers append behind it.
+                        let preceding_commands = receiver.len();
                         let producer_events = Arc::clone(&self.producer_events);
                         let mut ingress = producer_events
                             .state
@@ -13207,7 +13219,9 @@ impl RollingControlActor {
                             rolling_now(),
                         )
                     };
-                    for command in preceding_commands {
+                    while let Some(command) = rolling_ingress::next_before_cutoff(
+                        &mut receiver, &mut preceding_commands,
+                    ).await {
                         self.handle_command(command).await;
                     }
                     {
@@ -13332,6 +13346,7 @@ impl RollingControlHandle {
         initial_kind: &'static str,
         prepublication_transcode: bool,
         hooks: Arc<dyn RollingControlHooks>,
+        application: Option<rolling_lifetime::ActorApplication>,
     ) -> (Self, RollingSessionExecutorInbox, Arc<tokio::sync::Notify>) {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
@@ -13374,9 +13389,23 @@ impl RollingControlHandle {
                 hooks: Arc::clone(&hooks),
             },
         );
-        let actor_task = tokio::spawn(actor.run(receiver));
+        let (start, registered) = tokio::sync::oneshot::channel();
+        let actor_task = tokio::spawn(rolling_lifetime::run_original_actor(
+            Some(registered),
+            Some(rolling_lifetime::OriginalRollingActorInput::new(
+                actor, receiver,
+            )),
+        ));
         hooks.actor_spawned(&actor_task);
-        drop(actor_task);
+        let original_actor = match application {
+            Some(application) => {
+                rolling_lifetime::OriginalRollingActorTask::registered_with_application(
+                    actor_task,
+                    Some(application),
+                )
+            }
+            None => rolling_lifetime::OriginalRollingActorTask::registered(actor_task),
+        };
         let handle = Self {
             sender,
             retired,
@@ -13385,7 +13414,10 @@ impl RollingControlHandle {
             flow_sync,
             producer_events,
             decision_transport,
+            original_actor,
         };
+        // The original join handle is retained before the actor first polls.
+        let _ = start.send(());
         (handle, executor_inbox, decision_notify)
     }
 
@@ -13398,7 +13430,7 @@ impl RollingControlHandle {
 
     fn spawn_with_hooks(initial_kind: &'static str, hooks: Arc<dyn RollingControlHooks>) -> Self {
         let (handle, executor_inbox, decision_notify) =
-            Self::spawn_unbound(initial_kind, false, hooks);
+            Self::spawn_unbound(initial_kind, false, hooks, None);
         let _ = handle.decision_transport.executor_observation.register();
         let executor_task = handle.decision_transport.spawn_executor(
             Arc::downgrade(&handle.decision_transport),
@@ -13429,6 +13461,14 @@ impl RollingControlHandle {
         )
     }
 
+    pub(crate) fn original_actor_join(&self) -> RollingControlActorJoin {
+        rolling_lifetime::OriginalRollingActorTask::select(&self.original_actor)
+    }
+
+    pub(crate) fn original_actor_frame_bytes() -> Option<usize> {
+        rolling_lifetime::original_actor_frame_bytes()
+    }
+
     /// [`Self::spawn_prepublication_producer`] with the test hooks.
     #[cfg(test)]
     pub(crate) fn spawn_prepublication_producer_for_test(
@@ -13449,7 +13489,28 @@ impl RollingControlHandle {
         initial_kind: &'static str,
         hooks: Arc<dyn RollingControlHooks>,
     ) -> (Self, RollingProducerExecutorRegistration) {
-        let (handle, inbox, _decision_notify) = Self::spawn_unbound(initial_kind, true, hooks);
+        Self::spawn_prepublication_producer_with_application_owner(initial_kind, hooks, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn_prepublication_producer_with_application(
+        initial_kind: &'static str,
+        application: rolling_lifetime::ActorApplication,
+    ) -> (Self, RollingProducerExecutorRegistration) {
+        Self::spawn_prepublication_producer_with_application_owner(
+            initial_kind,
+            Arc::new(NoopRollingControlHooks),
+            Some(application),
+        )
+    }
+
+    fn spawn_prepublication_producer_with_application_owner(
+        initial_kind: &'static str,
+        hooks: Arc<dyn RollingControlHooks>,
+        application: Option<rolling_lifetime::ActorApplication>,
+    ) -> (Self, RollingProducerExecutorRegistration) {
+        let (handle, inbox, _decision_notify) =
+            Self::spawn_unbound(initial_kind, true, hooks, application);
         let registration = RollingProducerExecutorRegistration {
             transport: Arc::downgrade(&handle.decision_transport),
             terminal_projection: Arc::clone(&handle.decision_transport.terminal_projection),
@@ -13491,6 +13552,7 @@ impl RollingControlHandle {
             flow_sync: Arc::new(RollingFlowSync::new()),
             producer_events,
             decision_transport,
+            original_actor: rolling_lifetime::OriginalRollingActorTask::unavailable(),
         }
     }
 

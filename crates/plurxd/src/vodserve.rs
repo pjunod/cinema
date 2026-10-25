@@ -642,6 +642,10 @@ pub struct VodActivityObservation {
     pub render_state: Option<String>,
     pub position_ms: Option<i64>,
     pub client_runway_ms: Option<i64>,
+    /// Fresh accepted client runway clamped to the server's contiguous,
+    /// materialized frontier. Missing proof is absent, never zero capacity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_runway_ms: Option<u64>,
     pub control_age_ms: Option<u64>,
     pub producer_state: Option<String>,
     pub producer_hold: Option<String>,
@@ -1153,6 +1157,8 @@ use marker_prewarm::*;
 #[path = "vod/session.rs"]
 mod session;
 pub(crate) use session::*;
+#[path = "vod/adaptive_runway.rs"]
+pub(crate) mod adaptive_runway;
 // split: end vod-session
 
 /// Everything the tasks share. `VodServe` is a thin handle over this so the
@@ -1500,7 +1506,13 @@ pub(crate) mod finite_software;
 #[path = "vod/shared.rs"]
 mod shared;
 #[cfg(target_os = "linux")]
+pub(crate) use shared::prepared_attempt_cleanup_frame_bytes;
+#[cfg(target_os = "linux")]
+pub(crate) use shared::AdaptiveBuildFailure;
+#[cfg(target_os = "linux")]
 pub(crate) use shared::PreparedAttemptCleanup;
+#[cfg(target_os = "linux")]
+pub(crate) use shared::PreparedAttemptCleanupTask;
 #[cfg(target_os = "linux")]
 pub(crate) use shared::PreparedAttemptRendition;
 // split: end vod-shared
@@ -1528,6 +1540,9 @@ pub use stream_format::StreamFormat;
 #[path = "vod/output_measurement.rs"]
 mod output_measurement;
 use output_measurement::PublishedOutputMeasurement;
+#[cfg(target_os = "linux")]
+#[path = "vod/background_artifact.rs"]
+mod background_artifact;
 #[path = "vod/copy_preparation.rs"]
 mod copy_preparation;
 #[path = "vod/preparation_storage.rs"]
@@ -1536,6 +1551,8 @@ pub(crate) mod preparation_storage;
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]
 mod retained_manifest;
+#[cfg(target_os = "linux")]
+pub(crate) use background_artifact::{StaticArtifactAdmission, StaticArtifactRun};
 // split: end vod-generation
 
 // split: begin vod-plan

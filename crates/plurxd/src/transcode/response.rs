@@ -2,7 +2,7 @@ use super::*;
 
 /// A segment, open and ready to stream.
 pub struct SegmentFile {
-    pub file: tokio::fs::File,
+    pub(crate) file: crate::vodserve::ReadyFile,
     pub len: u64,
     pub(crate) delivery: SegmentDelivery,
 }
@@ -765,6 +765,23 @@ pub struct HlsContext {
     pub frame_rate: Option<f64>,
 }
 
+impl HlsContext {
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        self.codecs
+            .capacity()
+            .checked_add(
+                self.supplemental_codecs
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )?
+            .checked_add(
+                self.codec_facts
+                    .as_ref()
+                    .map_or(Some(0), FrozenHlsCodecFacts::requested_heap_bytes)?,
+            )
+    }
+}
+
 /// Authority for SDR CODECS, separate from the legacy diagnostic string.
 /// Missing audio is not evidence of a video-only rendition.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -785,6 +802,24 @@ pub(crate) struct FrozenHlsCodecFacts {
     /// different master contract from one that does not.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     sdr_master_codecs: bool,
+}
+
+impl FrozenHlsCodecFacts {
+    fn requested_heap_bytes(&self) -> Option<usize> {
+        self.video
+            .as_ref()
+            .map_or(0, |(codec, _)| codec.capacity())
+            .checked_add(match &self.audio {
+                CodecAudioFact::ResolvedOutput(codec) => codec.capacity(),
+                _ => 0,
+            })?
+            .checked_add(self.retained_output.as_ref().map_or(Some(0), |output| {
+                output
+                    .artifact_id
+                    .capacity()
+                    .checked_add(output.output_identity.capacity())
+            })?)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

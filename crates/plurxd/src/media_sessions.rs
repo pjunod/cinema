@@ -55,6 +55,10 @@ pub(crate) const ADAPTIVE_ATTEMPT_VERSION: u16 = 1;
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
 pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control";
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
+/// Adopt carries the canonical response and recipe plus the separate Prepared
+/// preview. The aggregate is charged and checked before transport entry.
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_ACTIVATION_REQUEST_BYTES: usize = 128 * 1024;
 pub(crate) const REMOTE_START_OWNERSHIP_HEADER: &str = "x-plurx-start-ownership";
 pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
@@ -67,6 +71,8 @@ pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
 pub(crate) const PREPARED_SUCCESSOR_PLAN_NOTE: &str = "prepared_quality_handoff";
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
+#[cfg(target_os = "linux")]
+pub(crate) const ADAPTIVE_PREVIEW_BYTES: usize = 32 * 1024;
 pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
 pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
@@ -1380,6 +1386,133 @@ impl RemoteStartRequest {
     pub(crate) fn is_valid(&self) -> bool {
         remote_start_envelope_is_valid(self) && worker_session_request_is_valid(&self.request)
     }
+
+    /// Requested capacities of the selected finite software worker envelope
+    /// that the original planning coordinator retains after its HTTP waiter
+    /// returns. Unsupported nested production families return `None`; the
+    /// caller must refuse them before admitting P. This is an application
+    /// payload count, separate from Tokio/allocator-private task headers.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn requested_heap_bytes(&self) -> Option<usize> {
+        if self.retained_output.is_some()
+            || self.library_channel.is_some()
+            || self.request.continuous_media.is_some()
+            || self.request.quality_catalog.is_some()
+            || self.request.candidate_context.is_some()
+            || self.principal.local_user_id().is_none()
+        {
+            return None;
+        }
+        let mut bytes = self.incarnation_id.capacity();
+        bytes = bytes.checked_add(self.request.selected_finite_requested_heap_bytes()?)?;
+        if let Some(catalog) = &self.candidate_catalog {
+            bytes = bytes.checked_add(selected_finite_device_caps_heap_bytes(&catalog.caps)?)?;
+            bytes = bytes.checked_add(
+                catalog
+                    .candidate
+                    .planned_codec
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )?;
+            bytes = bytes.checked_add(catalog.binding.source_digest.capacity())?;
+        }
+        if let Some(caps) = &self.decoder_caps {
+            bytes = bytes.checked_add(caps.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn requested_vec_bytes<T>(values: &Vec<T>) -> Option<usize> {
+    values.capacity().checked_mul(std::mem::size_of::<T>())
+}
+
+#[cfg(target_os = "linux")]
+fn requested_string_vec_bytes(values: &Vec<String>) -> Option<usize> {
+    let mut bytes = requested_vec_bytes(values)?;
+    for value in values {
+        bytes = bytes.checked_add(value.capacity())?;
+    }
+    Some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn selected_finite_device_caps_heap_bytes(
+    caps: &plurx_core::playback::DeviceCaps,
+) -> Option<usize> {
+    let mut bytes = caps.decoder_compaction.as_ref().map_or(0, String::capacity);
+    if let Some(client) = &caps.client {
+        bytes = bytes
+            .checked_add(client.kind.capacity())?
+            .checked_add(client.build.capacity())?
+            .checked_add(client.ua.capacity())?;
+    }
+    bytes = bytes.checked_add(requested_vec_bytes(&caps.video)?)?;
+    for video in &caps.video {
+        bytes = bytes
+            .checked_add(video.codec.capacity())?
+            .checked_add(requested_string_vec_bytes(&video.profiles)?)?
+            .checked_add(requested_vec_bytes(&video.present)?)?
+            .checked_add(requested_vec_bytes(&video.dv_profiles)?)?;
+    }
+    bytes = bytes
+        .checked_add(requested_string_vec_bytes(&caps.audio)?)?
+        .checked_add(requested_vec_bytes(&caps.audio_sinks)?)?;
+    for sink in &caps.audio_sinks {
+        bytes = bytes
+            .checked_add(sink.codec.capacity())?
+            .checked_add(requested_vec_bytes(&sink.sample_rates_hz)?)?;
+    }
+    for values in [&caps.containers, &caps.transports, &caps.subtitle_overlays] {
+        bytes = bytes.checked_add(requested_string_vec_bytes(values)?)?;
+    }
+    for values in [
+        &caps.progressive_hevc_sample_entries,
+        &caps.hls_hevc_sample_entries,
+    ] {
+        if let Some(values) = values {
+            bytes = bytes.checked_add(requested_string_vec_bytes(values)?)?;
+        }
+    }
+    bytes = bytes
+        .checked_add(caps.dv_transport.as_ref().map_or(0, String::capacity))?
+        .checked_add(requested_vec_bytes(&caps.learned_limits)?)?;
+    for limit in &caps.learned_limits {
+        bytes = bytes
+            .checked_add(limit.identity.capacity())?
+            .checked_add(limit.label.capacity())?;
+    }
+    Some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+impl SessionRequest {
+    pub(crate) fn selected_finite_requested_heap_bytes(&self) -> Option<usize> {
+        if self.continuous_media.is_some()
+            || self.quality_catalog.is_some()
+            || self.candidate_context.is_some()
+        {
+            return None;
+        }
+        let mut bytes = self
+            .playback_id
+            .capacity()
+            .checked_add(self.request_id.as_ref().map_or(0, String::capacity))?
+            .checked_add(
+                self.previous_session_id
+                    .as_ref()
+                    .map_or(0, String::capacity),
+            )?
+            .checked_add(self.transport.as_ref().map_or(0, String::capacity))?;
+        if let Some(delivery) = &self.audio_delivery {
+            bytes = bytes.checked_add(delivery.requested_heap_bytes()?)?;
+        }
+        if let Some(claim) = &self.audio_claim {
+            bytes = bytes.checked_add(claim.requested_heap_bytes()?)?;
+        }
+        Some(bytes)
+    }
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
@@ -1563,7 +1696,7 @@ impl AdaptiveAttemptPrepareV1 {
             && self.recipe.incarnation_id == self.claim.key.route_incarnation_id.to_string()
             && self.recipe.principal == self.claim.binding.principal
             && self.recipe.request.request_id.as_deref()
-                == Some(self.claim.binding.key.request_id.as_str())
+                == Some(self.recipe.incarnation_id.as_str())
     }
 }
 
@@ -1575,6 +1708,9 @@ pub(crate) struct AdaptiveAttemptPreparedV1 {
     pub worker: plurx_core::store::adaptive_resource_attempts::WorkerBinding,
     /// Exact bounded canonical worker recipe used by Store Adopt.
     pub selected_recipe_json: String,
+    /// Constructed from the same dormant Rendition plan before Store Winner.
+    /// Adopt compares these exact bytes, then checks the attached plan again.
+    pub preview_json: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -1583,6 +1719,9 @@ pub(crate) struct AdaptiveAttemptPreparedV1 {
 pub(crate) struct AdaptiveAttemptAdoptV1 {
     pub version: u16,
     pub adoption: plurx_core::store::adaptive_resource_attempts::AdaptiveAdoption,
+    /// Exact Prepared preview bytes, separate from the canonical public
+    /// StartResponse persisted by Store for ordinary resolved replay.
+    pub preview_json: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -1783,6 +1922,59 @@ impl From<StartInfo> for RemoteStartResponse {
 }
 
 impl RemoteStartResponse {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adaptive_preview_requested_heap_bytes(&self) -> Option<usize> {
+        if self.retained_output.is_some() {
+            return None;
+        }
+        self.session_id
+            .capacity()
+            .checked_add(self.playlist_url.capacity())?
+            .checked_add(self.encoder.capacity())?
+            .checked_add(
+                self.audio_delivery
+                    .as_ref()
+                    .map_or(Some(0), |audio| audio.requested_heap_bytes())?,
+            )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bounded_adaptive_preview_json(&self) -> Result<String, String> {
+        if !self.is_valid()
+            || self
+                .adaptive_preview_requested_heap_bytes()
+                .is_none_or(|bytes| bytes > ADAPTIVE_PREVIEW_BYTES)
+        {
+            return Err("adaptive preview exceeds its measured object partition".into());
+        }
+        struct Bounded(Vec<u8>);
+        impl std::io::Write for Bounded {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes.len() > ADAPTIVE_PREVIEW_BYTES.saturating_sub(self.0.len()) {
+                    return Err(std::io::Error::other(
+                        "adaptive preview exceeds its wire partition",
+                    ));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(ADAPTIVE_PREVIEW_BYTES)
+            .map_err(|_| "adaptive preview allocation refused")?;
+        if bytes.capacity() > ADAPTIVE_PREVIEW_BYTES {
+            return Err("adaptive preview allocator exceeded its partition".into());
+        }
+        let mut bounded = Bounded(bytes);
+        serde_json::to_writer(&mut bounded, self)
+            .map_err(|error| format!("encoding bounded adaptive preview: {error}"))?;
+        String::from_utf8(bounded.0).map_err(|_| "adaptive preview is not UTF-8".to_owned())
+    }
+
     /// Optional bounded sidecar keeps older strict START body readers valid.
     pub(crate) fn processed_dv_header(&self) -> Option<String> {
         self.processed_dv_profile
@@ -3261,6 +3453,74 @@ impl MediaSessionCoordinator {
             return Err(PeerTransportError::InvalidResponse);
         }
         Ok(started)
+    }
+
+    /// Authenticated, bounded transport for the separate adaptive worker
+    /// protocol. A 202 or an uncertain reply is never converted into a new
+    /// attempt: callers reread the exact Store/worker status and replay the
+    /// original operation.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn adaptive_attempt_peer_request<T: Serialize>(
+        &self,
+        owner_node_id: &str,
+        path: &'static str,
+        value: &T,
+        deadline: tokio::time::Instant,
+    ) -> Result<PeerResponse, PeerTransportError> {
+        if !matches!(
+            path,
+            ADAPTIVE_ATTEMPT_PREPARE_PATH
+                | ADAPTIVE_ATTEMPT_ADOPT_PATH
+                | ADAPTIVE_ATTEMPT_CANCEL_PATH
+                | ADAPTIVE_ATTEMPT_STATUS_PATH
+        ) || tokio::time::Instant::now() >= deadline
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        struct BoundedBody(Vec<u8>);
+        impl std::io::Write for BoundedBody {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let next = self
+                    .0
+                    .len()
+                    .checked_add(bytes.len())
+                    .filter(|next| *next <= MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES)
+                    .ok_or_else(|| {
+                        std::io::Error::other("adaptive request exceeds its fixed envelope")
+                    })?;
+                if next > self.0.capacity() {
+                    return Err(std::io::Error::other(
+                        "adaptive request would grow after reservation",
+                    ));
+                }
+                self.0.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut body = BoundedBody(Vec::new());
+        body.0
+            .try_reserve_exact(MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES)
+            .map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.0.capacity() > MAX_ADAPTIVE_ATTEMPT_REQUEST_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        serde_json::to_writer(&mut body, value).map_err(|_| PeerTransportError::InvalidResponse)?;
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        self.transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                path,
+                body.0,
+                deadline,
+                MAX_START_RESPONSE_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await
     }
 
     pub(crate) async fn activate_remote(

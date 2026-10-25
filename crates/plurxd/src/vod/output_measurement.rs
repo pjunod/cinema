@@ -225,6 +225,56 @@ impl PublishedOutputMeasurement {
         member: ObservedOutputMember,
         source_version: &str,
     ) {
+        self.observe_parts(
+            &rendition.key,
+            &rendition.playlist,
+            &rendition.plan,
+            init,
+            epoch,
+            entry,
+            member,
+            source_version,
+        );
+    }
+
+    /// Static background output supplies the same immutable recipe/playlist
+    /// directly, without creating a viewer rendition or reopening a source.
+    /// The caller may invoke this only for core post-publication events.
+    #[cfg(target_os = "linux")]
+    pub(super) fn observe_static(
+        &mut self,
+        recipe_key: &str,
+        playlist: &[u8],
+        plan: &SegmentPlan,
+        init: &InitIdentity,
+        epoch: u64,
+        entry: u32,
+        member: ObservedOutputMember,
+        source_version: &str,
+    ) {
+        self.observe_parts(
+            recipe_key,
+            playlist,
+            plan,
+            init,
+            epoch,
+            entry,
+            member,
+            source_version,
+        );
+    }
+
+    fn observe_parts(
+        &mut self,
+        recipe_key: &str,
+        playlist_bytes: &[u8],
+        plan: &SegmentPlan,
+        init: &InitIdentity,
+        epoch: u64,
+        entry: u32,
+        member: ObservedOutputMember,
+        source_version: &str,
+    ) {
         let bytes = member.bytes;
         if self.refused {
             return;
@@ -253,8 +303,8 @@ impl PublishedOutputMeasurement {
         hash.update(epoch.to_le_bytes());
         for field in [
             source_version.as_bytes(),
-            rendition.key.as_bytes(),
-            &rendition.playlist,
+            recipe_key.as_bytes(),
+            playlist_bytes,
             init.muxer_init.as_bytes(),
             init.served_init.as_bytes(),
         ] {
@@ -263,11 +313,11 @@ impl PublishedOutputMeasurement {
         }
         let origin: [u8; 32] = hash.finalize().into();
         if self.observation.is_none() {
-            let Ok(playlist) = std::str::from_utf8(&rendition.playlist) else {
+            let Ok(playlist) = std::str::from_utf8(playlist_bytes) else {
                 self.refused = true;
                 return;
             };
-            if rendition.plan.len() > 8192 || !playlist.ends_with("#EXT-X-ENDLIST\n") {
+            if plan.len() > 8192 || !playlist.ends_with("#EXT-X-ENDLIST\n") {
                 self.refused = true;
                 return;
             }
@@ -276,7 +326,7 @@ impl PublishedOutputMeasurement {
                 .filter_map(|line| line.strip_prefix("#EXTINF:"))
                 .map(|duration| WireDuration::parse(duration.strip_suffix(',')?))
                 .collect();
-            let Some(durations) = durations.filter(|d| d.len() == rendition.plan.len()) else {
+            let Some(durations) = durations.filter(|d| d.len() == plan.len()) else {
                 self.refused = true;
                 return;
             };
@@ -285,8 +335,8 @@ impl PublishedOutputMeasurement {
                     nonce: *self.nonce.as_bytes(),
                     epoch,
                     source_version: source_version.to_owned(),
-                    recipe_key: rendition.key.clone(),
-                    playlist: rendition.playlist.to_vec(),
+                    recipe_key: recipe_key.to_owned(),
+                    playlist: playlist_bytes.to_vec(),
                     muxer_init: init.muxer_init.clone(),
                     served_init: init.served_init.clone(),
                 },
@@ -296,7 +346,7 @@ impl PublishedOutputMeasurement {
                 served_init: init.served_init.clone(),
                 reducer: FullOutputMeasurement::new(
                     origin,
-                    u64::from(rendition.plan.target_duration.max(1)),
+                    u64::from(plan.target_duration.max(1)),
                     &durations,
                 ),
                 complete_tail: false,

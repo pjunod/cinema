@@ -139,7 +139,7 @@ impl Drop for PrepublicationStartSettlement {
             return;
         }
         let session = self.session.take();
-        let dir = self.dir.clone();
+        let dir = std::mem::take(&mut self.dir);
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 if let Some(session) = session {

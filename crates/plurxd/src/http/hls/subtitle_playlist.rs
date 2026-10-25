@@ -169,11 +169,11 @@ pub(super) async fn subtitle_playlist_local_before(
     unreachable!("bounded subtitle playlist reclassification loop always returns")
 }
 
-async fn complete_subtitle_playlist_response(
+async fn complete_subtitle_playlist_response<V: AsRef<[u8]>>(
     state: &AppState,
     session: &str,
     index: i64,
-    video: Vec<u8>,
+    video: V,
     owner: crate::transcode::MediaResponseOwner,
     deadline: Instant,
 ) -> Result<Response, ApiError> {
@@ -212,7 +212,7 @@ async fn complete_subtitle_playlist_response(
     )
     .await
     .map_err(|_| response_publication_timeout())?;
-    let response = playlist_response(subtitle_media_playlist(&video).into_bytes());
+    let response = playlist_response(subtitle_media_playlist(video.as_ref()).into_bytes());
     state
         .transcode
         .hooks()
