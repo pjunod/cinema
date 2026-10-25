@@ -36,9 +36,11 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    // Progressive translation checks both the committed extension shape and its
-    // singleton marker before migration/admission; neither may use a stale replica.
-    ("hiqlite.rs", 50),
+    // Translation, annotations and title jobs each check the committed extension
+    // shape and singleton marker before migration/admission: six authority reads.
+    ("hiqlite.rs", 54),
+    // Two rating-cache reads and three person-owned list membership/page reads.
+    ("hiqlite_annotations.rs", 5),
     // Managed-schema bootstrap validates committed shape and the singleton marker.
     ("hiqlite_background_jobs.rs", 4),
     ("hiqlite_catalog.rs", 2),

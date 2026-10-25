@@ -33,6 +33,10 @@ use super::hiqlite::validate_sql;
 pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
     (
+        "hiqlite_annotations.rs",
+        include_str!("hiqlite_annotations.rs"),
+    ),
+    (
         "hiqlite_background_jobs.rs",
         include_str!("hiqlite_background_jobs.rs"),
     ),
@@ -113,6 +117,7 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
 /// this list feeds a separate validator below. The directory equality test
 /// makes adding a module without adding its SQL to the census impossible.
 const SQLITE_SOURCES: &[(&str, &str)] = &[
+    ("annotations.rs", include_str!("sqlite/annotations.rs")),
     ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
     (
         "background_jobs.rs",
@@ -1956,7 +1961,12 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // library_path_removal_runs_through_dyn_store executes that exact operation.
 // The path-set SELECTs are composed through the real helper above and have
 // inline two-value bindings; those checked statements add no exception.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 103;
+// 103 -> 107: annotations.rs prepares four statements separately from their
+// query_map bindings: rating rows (?1), person/item flags (?1..?2), list page
+// (?1..?4), and JSON-filtered membership (?1..?3). Each binds exactly those
+// values in the following query_map call; registering this previously omitted
+// source expands coverage without exempting any SQL or changing scanner rules.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 107;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

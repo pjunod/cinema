@@ -25,6 +25,16 @@ on other platforms. The pure selected-stream MDCV parsers now live under
 `decode_facts::mastering`; their validation algorithms are unchanged and Linux
 runtime callers keep their existing frame-parser exports. Platform compilation,
 focused Rust execution and exact committed-tree validation remain required.
+The integrated HTTPS filter passes 29 real identity/admin/transport/startup
+cases and the shared metadata policy filter passes five cases. Feature-enabled
+core census execution exposed omitted current-main annotation modules, four
+new schema authority reads, four separately bound SQLite annotation queries
+and an ambiguous test-module path. The repaired strict census passes 58 cases;
+its scan roots, rejection rules and unannotated-read ceiling are unchanged.
+First and intermediate failed runs remain diagnostic evidence. Linux-only
+planning consumers now use the shared parser directly. The exact final tree
+still requires a fresh Linux check and denied-warning Clippy run.
+
 Authenticated full qualification, the Main promotion gate and physical
 acceptance are still pending. Nothing has been deployed or enabled live.
 
