@@ -6418,6 +6418,7 @@ mod delivered_plan_note_tests {
         let (target, note) = TranscodeManager::display_target_policy(
             true,
             Some(&DisplayCaps {
+                hdr: true,
                 max_nits: Some(1600),
                 ..Default::default()
             }),

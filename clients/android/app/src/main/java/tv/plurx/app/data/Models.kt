@@ -769,7 +769,8 @@ data class EffectiveProcessingReport(
             "RpuColorConversion" to "RPU color conversion", "TargetMapping" to "target mapping",
             "CreativeTrimApplication" to "creative trims")
         val metadata = appliedOperations.mapNotNull { names[it] }.joinToString(", ")
-        return "${if (sdrProcessed) "Dolby Vision–processed SDR (BT.709 gamma 2.4, L1 only)" else "Dolby Vision–enhanced HDR10"} · FEL used: ${if (felContributed) "yes" else "no"}" +
+        val trims = if ("CreativeTrimApplication" in appliedOperations) "creative trims applied" else "L1 only"
+        return "${if (sdrProcessed) "Dolby Vision–processed SDR (BT.709 gamma 2.4, $trims)" else "Dolby Vision–enhanced HDR10"} · FEL used: ${if (felContributed) "yes" else "no"}" +
             if (metadata.isEmpty()) "" else " · Applied: $metadata"
     }
 

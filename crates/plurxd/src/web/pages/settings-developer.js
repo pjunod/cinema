@@ -698,7 +698,7 @@ function subtitleTranslationCard(){
 }
 
 function displayTargetHdr10Card(settings,readiness){
-  return setCard(`${cardHead("Display-targeted HDR10-E / SDR","Map per-shot L1 metadata to a supported display bucket. L1 only: creative trims are not applied; displays may still apply their own tone mapping.")}
+  return setCard(`${cardHead("Display-targeted HDR10-E / SDR","Map each shot to a supported display bucket with Dolby display management. Shots carry the colourist's creative trims (CM v4 L8, CM v2.9 L2) when the title has them; Playback info says L1 only for a session that had none. Displays may still apply their own tone mapping.")}
     ${togRow("dv-display-target","Display-targeted HDR10-E / SDR","Default off. New HDR10-E sessions use a supported peak; explicit SDR displays use 100-nit BT.709 gamma 2.4. Unknown HDR peaks keep the master grade; ineligible SDR titles keep ordinary tone mapping.",!!settings.dolby_vision_display_target)}
     ${devReq(readiness,"dolby_vision_display_target","dv_target_helper","Helper installed and HDR10-E enabled","Readings describe this node and never disable this switch or its Save.")}
     ${devReq(readiness,"dolby_vision_display_target","dv_target_peak","Client peak reports","Platform and viewer reports select the same bucket; the source is attribution only.")}

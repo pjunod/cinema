@@ -115,6 +115,10 @@ impl DvEffectiveProcessingReport {
                 _ => None,
             })
     }
+    /// Whether every served frame's display mapping applied the title's creative trims.
+    pub fn creative_trims_applied(&self) -> bool {
+        self.creative_trims_applied
+    }
     /// Whether the served window's source pictures were decoded on the GPU.
     pub fn gpu_decoded(&self) -> bool {
         self.gpu_decoded
@@ -149,8 +153,9 @@ impl DvEffectiveProcessingReport {
         let wire: Wire = serde_json::from_slice(bytes).ok()?;
         let operations: BTreeSet<_> = wire.applied_operations.iter().copied().collect();
         if wire.generation != generation
+            || wire.creative_trims_applied != operations.contains(&DvOperation::CreativeTrimApplication)
             || wire.creative_trims_applied
-            || operations.contains(&DvOperation::CreativeTrimApplication)
+                && !operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { .. }))
             || wire.hdr10_enhanced != (delivered == Some("hdr10"))
             || wire.sdr_processed != (delivered == Some("sdr"))
             || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
@@ -168,7 +173,7 @@ impl DvEffectiveProcessingReport {
             generation: wire.generation,
             hdr10_enhanced: wire.hdr10_enhanced,
             sdr_processed: wire.sdr_processed,
-            creative_trims_applied: false,
+            creative_trims_applied: wire.creative_trims_applied,
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
@@ -965,6 +970,10 @@ pub struct DvProcessingPlan {
     destination: DvDestination,
     graph: DvGraph,
     capability: DvCapabilityEvidence,
+    /// A completed window's frozen display target: its title mastering peak decides the CM v2.9
+    /// trim interpolation. Outside the semantic digest; the window's export policy carries it.
+    #[serde(skip)]
+    display_target: Option<DvDisplayTarget>,
 }
 impl DvProcessingPlan {
     pub fn destination(&self) -> DvDestination {
@@ -1845,6 +1854,7 @@ pub fn dv_plan_completed_window(
         )?,
     };
     Ok(DvProcessingPlan {
+        display_target: input.export_policy.display_target(),
         source: input.source,
         preferences,
         destination: input.destination,
@@ -1991,6 +2001,7 @@ fn resolve_inner(
         destination: input.destination,
         graph,
         capability: cap.clone(),
+        display_target: None,
     })))
 }
 
@@ -2720,8 +2731,8 @@ impl DvProcessingReceipt {
             generation: active_playback_generation.to_owned(),
             hdr10_enhanced: plan.destination == DvDestination::Hdr10,
             sdr_processed: plan.destination == DvDestination::Sdr,
-            // No accepted creative-trim renderer is in the production graph.
-            creative_trims_applied: false,
+            // Only when every served frame's display mapping applied creative trims.
+            creative_trims_applied: common.contains(&DvOperation::CreativeTrimApplication),
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
@@ -2851,6 +2862,20 @@ pub fn dv_receipt_completed_window(
                         matches!(operation, DvOperation::DisplayTargetMapping { .. })
                     }),
             );
+            // The frame's own RPU decides whether the display mapping applied creative trims.
+            let nits = operations.iter().find_map(|operation| match operation {
+                DvOperation::DisplayTargetMapping { nits } => Some(*nits),
+                _ => None,
+            });
+            if let Some(nits) = nits {
+                let target = plan
+                    .display_target
+                    .filter(|target| target.nits() == nits)
+                    .ok_or_else(invalid)?;
+                if target.display_management(raw)?.creative_trims() {
+                    operations.push(DvOperation::CreativeTrimApplication);
+                }
+            }
         }
         for operation in &operations {
             let value = operations_applied.entry(*operation).or_insert(0);

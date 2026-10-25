@@ -30,6 +30,11 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         let badge = PlayerView.dynamicRangeBadge(hdr: "dolby_vision", hdrFormat: "Dolby Vision Profile 7", delivered: "sdr", displayHDR: false, effectiveProcessing: report, activeGeneration: generation)
         XCTAssertEqual(badge?.renderedMark, "SDR-E")
         XCTAssertTrue(report.detail.contains("L1 only"))
+        var trimmed = report
+        trimmed.appliedOperations.insert("CreativeTrimApplication", at: 2)
+        XCTAssertTrue(trimmed.matches(generation: generation, delivered: "sdr"))
+        XCTAssertTrue(trimmed.detail.contains("BT.709 gamma 2.4, creative trims applied"))
+        XCTAssertFalse(trimmed.detail.contains("L1 only"))
     }
     func testEnhancementRequiresActiveReceiptGenerationAndKeepsFelSeparate() {
         let accepted = report()

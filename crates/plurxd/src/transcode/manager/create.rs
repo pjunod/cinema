@@ -1313,7 +1313,7 @@ impl TranscodeManager {
                     let target = target
                         .resolve_sdr_floor(minimum)
                         .map_err(|error| error.to_string())?;
-                    Ok((Some(target), Some("SDR: per-shot L1 mapped for 100-nit BT.709 gamma 2.4 limited output; rendered live (L1 only; creative trims are not applied)".into())))
+                    Ok((Some(target), Some("SDR: per-shot Dolby display mapping for 100-nit BT.709 gamma 2.4 limited output; rendered live with the title's creative trims".into())))
                 }
                 DvDisplayTargetChoice::Master { reason } => Ok((
                     None,
@@ -1364,7 +1364,7 @@ impl TranscodeManager {
                 let target = target
                     .resolve_source(source)
                     .map_err(|error| error.to_string())?;
-                Ok((Some(target), Some(format!("HDR10-E: per-shot L1 mapped for {bucket} nits; rendered live, with no retained bucket cache (L1 only; creative trims are not applied)"))))
+                Ok((Some(target), Some(format!("HDR10-E: per-shot Dolby display mapping for {bucket} nits; rendered live, with no retained bucket cache with the title's creative trims"))))
             }
             DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason()))),
         }
@@ -5415,6 +5415,7 @@ mod display_target_policy_tests {
             {"index":1,"codec_type":"audio","side_data_list":[unrelated]},
             {"index":7,"codec_type":"video","side_data_list":[record]}]});
         let display = DisplayCaps {
+            hdr: true,
             max_nits: Some(1600),
             ..Default::default()
         };

@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
   dm.dm_data.level10.list = (__typeof__(dm.dm_data.level10.list))l10p; dm.dm_data.level10.len = n10;
 
   dv_dm_frame f;
-  const char *why = dv_dm_prepare(&dm, nits, floor_nits, (enum dm_prim)prim, smast, true, &f);
+  const char *why = dv_dm_prepare(&dm, nits, floor_nits, (enum dm_prim)prim, smast, true, true, &f);
   require(why == NULL, why ? why : "prepare");
   size_t n = (size_t)w * h;
   float *pix = malloc(n * 16), *gpu_out = malloc(n * 16), *cpu_out = malloc(n * 16);

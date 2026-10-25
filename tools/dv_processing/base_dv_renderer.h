@@ -228,11 +228,12 @@ static void base_gpu_render(const AVFrame *frame, const struct base_mapping *map
   printf(",\"RpuColorConversion\",\"TargetMapping\"");
   if (dv_target.nits)
     printf(",{\"DisplayTargetMapping\":{\"nits\":%u}}", dv_target.nits);
+  if (dv_target_trims_applied()) printf(",\"CreativeTrimApplication\"");
   printf("]");
   if (diagnostic_hashes)
     printf(EXPORT_YUV10 ? ",\"yuv10_sha256\":\"%s\"" : ",\"rgb_sha256\":\"%s\"", rgb_hash);
-  printf(",\"creative_trims_applied\":false,\"render_errors\":%u,"
-         "\"production_qualified\":false}\n", errors.errors);
+  printf(",\"creative_trims_applied\":%s,\"render_errors\":%u,"
+         "\"production_qualified\":false}\n", dv_target_trims_applied() ? "true" : "false", errors.errors);
 }
 static void base_gpu_close(void) {
   pl_gpu gpu = base_context.vk->gpu;

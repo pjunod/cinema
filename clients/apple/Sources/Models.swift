@@ -985,7 +985,8 @@ struct EffectiveProcessingReport: Equatable, Codable {
                      "RpuColorConversion": "RPU color conversion", "TargetMapping": "target mapping",
                      "CreativeTrimApplication": "creative trims"]
         let metadata = appliedOperations.compactMap { names[$0] }.joined(separator: ", ")
-        return "\(sdrProcessed ? "Dolby Vision–processed SDR (BT.709 gamma 2.4, L1 only)" : "Dolby Vision–enhanced HDR10") · FEL used: \(felContributed ? "yes" : "no")"
+        let trims = appliedOperations.contains("CreativeTrimApplication") ? "creative trims applied" : "L1 only"
+        return "\(sdrProcessed ? "Dolby Vision–processed SDR (BT.709 gamma 2.4, \(trims))" : "Dolby Vision–enhanced HDR10") · FEL used: \(felContributed ? "yes" : "no")"
             + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
     }
 

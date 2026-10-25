@@ -17,7 +17,7 @@
 static void require(bool ok, const char *why) {
   if (!ok) { fprintf(stderr, "refused: %s\n", why); exit(1); }
 }
-#include "../display_target.h"   // DV_TARGET_CREATIVE_TRIMS, and dv_dm.h
+#include "../display_target.h"   // DV_TARGET_TRIMS_CM4/_CM29, and dv_dm.h
 
 typedef struct {
   DoviVdrDmData dm;
@@ -67,11 +67,18 @@ static void add_l8(rpu *r, unsigned tid, unsigned slope, unsigned offset, unsign
 
 static dv_dm_frame prep_t(const rpu *r, double nits, enum dm_prim prim, bool trims) {
   dv_dm_frame f;
-  const char *why = dv_dm_prepare(&r->dm, nits, 0.005, prim, 4000, trims, &f);
+  const char *why = dv_dm_prepare(&r->dm, nits, 0.005, prim, 4000, trims, trims, &f);
   if (why) { fprintf(stderr, "prepare refused: %s\n", why); exit(1); }
   return f;
 }
 static dv_dm_frame prep(const rpu *r, double nits, enum dm_prim prim) { return prep_t(r, nits, prim, true); }
+// as served: each family's trims as display_target.h applies them
+static dv_dm_frame prep_served(const rpu *r, double nits, enum dm_prim prim) {
+  dv_dm_frame f;
+  const char *why = dv_dm_prepare(&r->dm, nits, 0.005, prim, 4000, DV_TARGET_TRIMS_CM4, DV_TARGET_TRIMS_CM29, &f);
+  if (why) { fprintf(stderr, "prepare refused: %s\n", why); exit(1); }
+  return f;
+}
 static float *render(const dv_dm_frame *f, const float *in, int w, int h) {
   float *out = malloc((size_t)w * h * 16);
   assert(out && dv_dm_cpu_render(f, in, w, h, out));
@@ -138,21 +145,24 @@ static const DoviVdrDmData *read_rpu(const char *path, DoviRpuOpaque **out) {
   *out = raw;
   return dm;
 }
-// algo, trim and count with trims on; served output (trims off) is always the l1-only form
+// algo, trim and count with trims on; served output keeps them only for the families that apply trims
 static void check_fixture(const char *path, int algo, const char *trim, int n, double weight) {
   DoviRpuOpaque *raw; const DoviVdrDmData *dm = read_rpu(path, &raw);
   dv_dm_frame f;
-  assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, true, &f) == NULL);
+  assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, true, true, &f) == NULL);
   if (!(f.algo == algo && !strcmp(f.trim, trim) && f.trim_targets == n && fabs(f.weight - weight) < 1e-12)) {
     fprintf(stderr, "%s: trims-on selection algo %d %s %d %g differs from the Rust pin\n", path, f.algo, f.trim, f.trim_targets, f.weight);
     exit(1);
   }
-  assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, DV_TARGET_CREATIVE_TRIMS, &f) == NULL);
+  assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, DV_TARGET_TRIMS_CM4, DV_TARGET_TRIMS_CM29, &f) == NULL);
   (void)dv_target;
-  assert(f.algo == algo && !strcmp(f.trim, "l1-only") && f.trim_targets == 0 && f.weight == 0);
+  bool served = algo == 4 ? DV_TARGET_TRIMS_CM4 : DV_TARGET_TRIMS_CM29;
+  const char *served_trim = served ? trim : "l1-only";
+  assert(f.algo == algo && !strcmp(f.trim, served_trim) && f.trim_targets == (served ? n : 0) &&
+         fabs(f.weight - (served ? weight : 0)) < 1e-12);
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free(raw);
-  printf("fixture %s: cm%d-%s served cm%d-l1-only\n", path, algo, trim, algo);
+  printf("fixture %s: cm%d-%s served cm%d-%s\n", path, algo, trim, algo, served_trim);
 }
 
 int main(int argc, char **argv) {
@@ -164,6 +174,19 @@ int main(int argc, char **argv) {
   snprintf(path, sizeof(path), "%s/cm4-l8-trims.nal", argv[1]); check_fixture(path, 4, "l8-interpolated", 2, 0);
   snprintf(path, sizeof(path), "%s/cm29-l2-trims.nal", argv[1]);
   check_fixture(path, 29, "l2-exact", 2, (1800 - 2048) / 2048.0);
+  {
+    // the interpolated selections display_target.rs pins on the same bytes
+    DoviRpuOpaque *raw; const DoviVdrDmData *dm = read_rpu(path, &raw);
+    const double nits[] = {600, 1600, 2000};
+    const double pin[] = {-0.09346839266980962, -0.07994135942825827, -0.060392435898949166};
+    for (int i = 0; i < 3; i++) {
+      dv_dm_frame f;
+      assert(dv_dm_prepare(dm, nits[i], 0.005, DM_P3D65, 4000, true, true, &f) == NULL);
+      assert(f.algo == 29 && !strcmp(f.trim, "l2-interpolated") && f.trim_targets == 2 && fabs(f.weight - pin[i]) < 1e-12);
+    }
+    dovi_rpu_free_vdr_dm_data(dm);
+    dovi_rpu_free(raw);
+  }
   static const unsigned buckets[] = {100, 400, 600, 1000, 1600, 2000, 4000};
   rpu c4, c4n, c29, c29n;
   base(&c4, 0, 1600, 3500); cm4(&c4);
@@ -185,15 +208,17 @@ int main(int argc, char **argv) {
   f = prep(&c29, 1000, DM_P3D65);
   assert(f.algo == 29 && f.trim_targets == 3 && !strcmp(f.trim, "l2-exact"));
   assert(fabs(f.weight - (1800 - 2048) / 2048.0) < 1e-12);
-  f = prep(&c29, 1600, DM_P3D65);
-  assert(f.algo == 29 && !strcmp(f.trim, "l2-nearest-lower") && fabs(f.weight - (1800 - 2048) / 2048.0) < 1e-12);
+  f = prep(&c29, 1600, DM_P3D65);   // between the 1000-nit trim and neutral at the 4000-nit master, in PQ
+  assert(f.algo == 29 && !strcmp(f.trim, "l2-interpolated") && fabs(f.weight - -0.07994135942825827) < 1e-12);
   f = prep(&c29, 600, DM_P3D65);
   assert(!strcmp(f.trim, "l2-exact") && f.weight == 0);
   f = prep(&c29, 100, DM_BT709);
   assert(!strcmp(f.trim, "l2-exact") && f.weight == 0);      // raw ms_weight -1 is the default 0
   rpu hi; base(&hi, 80, 1528, 3728); add_l2(&hi, 3079, 2010, 2180, 2075, 2050, 2179, 1800);
-  f = prep(&hi, 600, DM_P3D65);
-  assert(f.algo == 29 && f.trim_targets == 1 && !strcmp(f.trim, "l1-only") && f.weight == 0);
+  f = prep(&hi, 600, DM_P3D65);    // below the lowest L2 target: that trim is held
+  assert(f.algo == 29 && f.trim_targets == 1 && !strcmp(f.trim, "l2-interpolated") && f.weight == (1800 - 2048) / 2048.0);
+  f = prep(&hi, 4000, DM_P3D65);   // at the mastering peak the trims have faded out
+  assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0);
   f = prep(&c29n, 600, DM_P3D65);
   assert(f.algo == 29 && f.trim_targets == 0 && !strcmp(f.trim, "l1-only") && f.weight == 0);
 
@@ -234,18 +259,24 @@ int main(int argc, char **argv) {
   f = prep(&one, 400, DM_P3D65);
   assert(f.c4.tr.sg == 0 && fabs(f.c4.tr.gain / 0.5 - 0.6337) < 1e-3);
 
-  // 6. served output does not apply creative trims (DV_TARGET_CREATIVE_TRIMS false): untrimmed
-  //    mapping, identical to an RPU without L2/L8, and reported as such
+  // 6. served output applies both families' trims (identical to trims on); with no trim in the RPU
+  //    it is the untrimmed mapping
   {
     int w2, h2; float *l2 = lattice(&w2, &h2);
-    dv_dm_frame s4 = prep_t(&c4, 400, DM_P3D65, DV_TARGET_CREATIVE_TRIMS), n4 = prep_t(&c4n, 400, DM_P3D65, true);
-    assert(s4.algo == 4 && s4.trim_targets == 0 && !strcmp(s4.trim, "l1-only") && s4.weight == 0);
-    float *a1 = render(&s4, l2, w2, h2), *b1 = render(&n4, l2, w2, h2);
+    assert(DV_TARGET_TRIMS_CM4 && DV_TARGET_TRIMS_CM29);
+    dv_dm_frame s4 = prep_served(&c4, 400, DM_P3D65), t4 = prep(&c4, 400, DM_P3D65);
+    assert(s4.algo == 4 && s4.trim_targets == 2 && !strcmp(s4.trim, "l8-interpolated"));
+    float *a1 = render(&s4, l2, w2, h2), *b1 = render(&t4, l2, w2, h2);
     assert(maxdiff(a1, b1, w2 * h2) == 0);
     free(a1); free(b1);
-    dv_dm_frame s29 = prep_t(&c29, 1000, DM_P3D65, DV_TARGET_CREATIVE_TRIMS), n29 = prep_t(&c29n, 1000, DM_P3D65, true);
-    assert(s29.algo == 29 && s29.trim_targets == 0 && !strcmp(s29.trim, "l1-only") && s29.weight == 0);
-    a1 = render(&s29, l2, w2, h2); b1 = render(&n29, l2, w2, h2);
+    dv_dm_frame s29 = prep_served(&c29, 1000, DM_P3D65), t29 = prep(&c29, 1000, DM_P3D65);
+    assert(s29.algo == 29 && strcmp(s29.trim, "l1-only") && s29.trim_targets == t29.trim_targets);
+    a1 = render(&s29, l2, w2, h2); b1 = render(&t29, l2, w2, h2);
+    assert(maxdiff(a1, b1, w2 * h2) == 0);
+    free(a1); free(b1);
+    dv_dm_frame s29n = prep_served(&c29n, 1000, DM_P3D65), u29 = prep_t(&c29, 1000, DM_P3D65, false);
+    assert(s29n.algo == 29 && !strcmp(s29n.trim, "l1-only") && s29n.trim_targets == 0);
+    a1 = render(&s29n, l2, w2, h2); b1 = render(&u29, l2, w2, h2);
     assert(maxdiff(a1, b1, w2 * h2) == 0);
     free(a1); free(b1); free(l2);
   }
@@ -284,7 +315,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < M; i++) { ramp[4*i] = ramp[4*i+1] = ramp[4*i+2] = 0.02f * i / (M - 1); ramp[4*i+3] = 1; }
     for (unsigned k = 0; k < sizeof(dark) / sizeof(*dark); k++) {
       rpu d; base(&d, dark[k][0], dark[k][1], dark[k][2]);
-      dv_dm_frame x = prep_t(&d, 600, DM_P3D65, DV_TARGET_CREATIVE_TRIMS); x.weight = -2;
+      dv_dm_frame x = prep_served(&d, 600, DM_P3D65); x.weight = -2;
       float *o = render(&x, ramp, M, 1);
       for (int i = 1; i < M; i++)
         if (o[4*i+1] < o[4*(i-1)+1] - 1e-5 || dm_pq_eotf(o[4*i+1]) > 1.0) {
