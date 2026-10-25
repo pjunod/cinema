@@ -1,7 +1,7 @@
 # Display management precision — shader parity and the CM v2.9 residual
 
 **Status:** open · **Owner:** Codex · **Updated:** 2026-10-25 ·
-**Branch:** `codex/cm29-residual-dm-parity` · **PR:** pending creation
+**Branch:** `codex/cm29-residual-dm-parity` · **PR:** #1284 (draft)
 
 Companion to the [display-target build ledger](DISPLAY-TARGETED-DV-BUILD.md).
 This page tracks the shader precision repair and the separate near-black
@@ -53,6 +53,11 @@ private research repository. Only a justified closed-form correction and
 source-backed conclusions belong in plurx.
 
 ## 4. Validation and decisions
+
+The committed source control build passed with `-Wall -Wextra -Werror`
+in the existing isolated dependency image. It did not execute tests. Scoped
+knowledge queries returned no reviewed coverage for these files; that is
+not proof of absent contracts.
 
 Pending. Unit suites and the ready-PR fast lane run after the one final
 adversarial review. Numerical exploration supplies model evidence during
