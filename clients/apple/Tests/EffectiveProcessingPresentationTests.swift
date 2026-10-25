@@ -30,6 +30,17 @@ final class EffectiveProcessingPresentationTests: XCTestCase {
         let badge = PlayerView.dynamicRangeBadge(hdr: "dolby_vision", hdrFormat: "Dolby Vision Profile 7", delivered: "sdr", displayHDR: false, effectiveProcessing: report, activeGeneration: generation)
         XCTAssertEqual(badge?.renderedMark, "SDR-E")
         XCTAssertTrue(report.detail.contains("L1 only"))
+        let trimmedWire = wire
+            .replacingOccurrences(of: "\"sdr_processed\":true,", with: "\"sdr_processed\":true,\"creative_trims_applied\":true,")
+            .replacingOccurrences(of: "\"TargetMapping\",", with: "\"TargetMapping\",\"CreativeTrimApplication\",")
+        let trimmed = try decoder.decode(EffectiveProcessingReport.self, from: Data(trimmedWire.utf8))
+        XCTAssertTrue(trimmed.matches(generation: generation, delivered: "sdr"))
+        XCTAssertTrue(trimmed.detail.contains("BT.709 gamma 2.4, creative trims applied"))
+        XCTAssertFalse(trimmed.detail.contains("L1 only"))
+        let partialWire = wire.replacingOccurrences(of: "\"sdr_processed\":true,", with: "\"sdr_processed\":true,\"creative_trims_partial\":true,")
+        let partial = try decoder.decode(EffectiveProcessingReport.self, from: Data(partialWire.utf8))
+        XCTAssertTrue(partial.matches(generation: generation, delivered: "sdr"))
+        XCTAssertTrue(partial.detail.contains("BT.709 gamma 2.4, creative trims on some shots"))
     }
     func testEnhancementRequiresActiveReceiptGenerationAndKeepsFelSeparate() {
         let accepted = report()

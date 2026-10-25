@@ -1975,11 +1975,9 @@ impl PrivateWindow {
                     .get("decoded_layers")
                     .and_then(serde_json::Value::as_u64)
                     != Some(1)
-                || ["el_bound", "fel_contributed", "creative_trims_applied"]
-                    .iter()
-                    .any(|field| {
-                        base.get(*field).and_then(serde_json::Value::as_bool) != Some(false)
-                    })
+                || ["el_bound", "fel_contributed"].iter().any(|field| {
+                    base.get(*field).and_then(serde_json::Value::as_bool) != Some(false)
+                })
             {
                 return Err("base completion claims unsupported operations".into());
             }
@@ -2136,16 +2134,24 @@ impl PrivateWindow {
                         DvOperation::Bt2020NclConversion | DvOperation::Main10Encoding
                     )
                 });
+                let mut trims = false;
                 if let Some(target) = self.display_target {
                     actual.push(DvOperation::DisplayTargetMapping {
                         nits: target.nits(),
                     });
+                    trims = target
+                        .display_management(&rpu)
+                        .map_err(|e| e.to_string())?
+                        .creative_trims();
+                    if trims {
+                        actual.push(DvOperation::CreativeTrimApplication);
+                    }
                 }
                 if pair.profile != Some(parsed.profile)
                     || rendered.profile != Some(parsed.profile)
                     || pair.fel_contributed != Some(false)
                     || rendered.fel_contributed != Some(false)
-                    || rendered.creative_trims_applied != Some(false)
+                    || rendered.creative_trims_applied != Some(trims)
                     || rendered.applied_operations.as_ref() != Some(&actual)
                     || rendered.polynomial_segments != Some(parsed.polynomial_segments)
                     || rendered.mmr_segments != Some(parsed.mmr_segments)
@@ -2303,7 +2309,7 @@ mod helper_decoder_tests {
         );
         (dm.curve, dm.trim_targets, dm.detail_weight)
     }
-    /// The P7 fixture carries CM v4.0 metadata; served output applies no creative trims.
+    /// The P7 fixture carries CM v4.0 metadata and no L8 trim, so its served mapping is untrimmed.
     const FIXTURE_DM: (bool, &str, usize, f64) = (true, "cm4-l1-only", 0, 0.0);
     fn other_family(curve: &str) -> &'static str {
         if curve.starts_with("cm4-") {
@@ -2835,7 +2841,7 @@ mod hdr10e_export_throughput {
         }
         let source = c_body(export, "static pl_tex dv_yuv10_source_texture(");
         assert!(source.contains("PL_FMT_UNORM, 4, 16, 16"), "{source}");
-        let queued = c_body(export, "static bool dv_yuv10_export(");
+        let queued = c_body(export, "static bool dv_yuv10_export_color(");
         assert!(queued.contains(".buf = buf"), "{queued}");
         for wait in ["pl_buf_poll", "pl_gpu_finish", "dv_yuv10_wait"] {
             assert!(!queued.contains(wait), "the export waits: {wait}");

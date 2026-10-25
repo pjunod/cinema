@@ -1494,6 +1494,32 @@ fn completed_base_window_receipt_keeps_display_mapping_and_source_operations() {
                     output: DvIntermediateDomain::TargetMappedBt2020PqRgb,
                 },
             );
+            // The receipt needs the window's frozen target (its title mastering peak decides
+            // the CM v2.9 trim interpolation), and only one of the graph's bucket.
+            use crate::scan::dv_title::*;
+            let target = |nits| match DvDisplayTarget::for_title(
+                nits,
+                Some(DvTitleStats {
+                    schema: SCHEMA,
+                    complete: true,
+                    decoded_frames: 2,
+                    valid_l1_frames: 2,
+                    missing_l1_frames: 0,
+                    invalid_l1_frames: 0,
+                    max_l1_pq: Some(4095),
+                    mastering_luminance: TitleConstant::Unknown,
+                    mastering_primaries: TitleConstant::Unknown,
+                }),
+            )
+            .expect("title")
+            {
+                DvDisplayTargetChoice::Target(target) => target,
+                DvDisplayTargetChoice::Master { .. } => panic!("target"),
+            };
+            assert!(dv_receipt_completed_window(&completed, &keys, &durations, &rpus).is_err());
+            completed.display_target = Some(target(if nits == 1000 { 1600 } else { 1000 }));
+            assert!(dv_receipt_completed_window(&completed, &keys, &durations, &rpus).is_err());
+            completed.display_target = Some(target(nits));
         }
         let receipt = dv_receipt_completed_window(&completed, &keys, &durations, &rpus)
             .expect("completed base receipt");
@@ -1752,6 +1778,24 @@ fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt() {
     );
     value["creative_trims_applied"] = true.into();
     assert!(accept(&value, Some("sdr")).is_none());
+    value["creative_trims_applied"] = false.into();
+    // all, some or none of the served frames applied trims
+    use crate::playback::enhancement::CreativeTrims;
+    assert_eq!(report.creative_trims(), CreativeTrims::None);
+    value["creative_trims_partial"] = true.into();
+    let partial = accept(&value, Some("sdr")).expect("partial trims");
+    assert_eq!(partial.creative_trims(), CreativeTrims::Partial);
+    let operations = value["applied_operations"].as_array_mut().expect("array");
+    operations.push("CreativeTrimApplication".into());
+    value["creative_trims_applied"] = true.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["creative_trims_partial"] = false.into();
+    let trimmed = accept(&value, Some("sdr")).expect("trimmed");
+    assert_eq!(trimmed.creative_trims(), CreativeTrims::All);
+    value["applied_operations"]
+        .as_array_mut()
+        .expect("array")
+        .pop();
     value["creative_trims_applied"] = false.into();
     assert!(report.sdr_processed());
     assert_eq!(report.display_target_nits(), Some(100));

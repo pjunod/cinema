@@ -1,6 +1,24 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1276 review repairs: the trims label says all, some or none of the served frames.
+[[fixes]]
+id = "android.dv-creative-trims-partial-label"
+commits = ["d3db2f0f95c58114f4b215a5f58083f708954d48"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = 'else if (creativeTrimsPartial) "creative trims on some shots"'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun sdrReceiptRequiresItsGradeAndExportOperations()"
+
+[[fixes]]
+id = "apple.dv-creative-trims-partial-label"
+commits = []
+supplements = "android.dv-creative-trims-partial-label"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = 'creativeTrimsPartial ? "creative trims on some shots"'
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testSdrReceiptRequiresItsGradeAndProducesSdrMark() throws"
+
 # PR #1271 review repairs: source/test anchors only; execution receipts remain separate.
 [[fixes]]
 id = "android.processed-sdr-candidate-identity"

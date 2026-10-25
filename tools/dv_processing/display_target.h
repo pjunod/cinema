@@ -9,11 +9,13 @@
 #include <libplacebo/shaders/custom.h>
 #include "dv_dm.h"
 
-#define DV_TARGET_METHOD "dolby-closed-form-cm4-cm29-v1"
-// Creative trims (L2/L8) are computed by dv_dm.h but not applied to served output until they are
-// accepted (playback reports creative_trims_applied:false). Rust mirrors this as
-// DISPLAY_TARGET_CREATIVE_TRIMS; changing it needs a new method identity.
-#define DV_TARGET_CREATIVE_TRIMS false
+#define DV_TARGET_METHOD "dolby-closed-form-cm4-cm29-v2"
+// Creative trims applied to served output, per family. Both CM v4 (L8) and CM v2.9 (L2) trims are
+// accepted by pixel comparison against the reference renderer on real titles (BUILD.md). Rust
+// mirrors these as DISPLAY_TARGET_CREATIVE_TRIMS_CM4 / _CM29; changing either needs a new method
+// identity. A frame that used trims reports CreativeTrimApplication.
+#define DV_TARGET_TRIMS_CM4 true
+#define DV_TARGET_TRIMS_CM29 true
 static struct {
   unsigned nits, min_1e4, title_peak;
   unsigned max_pq, avg_pq;
@@ -73,11 +75,15 @@ static inline void dv_target_metadata(const DoviVdrDmData *dm) {
   dv_target.avg_pq = l1->avg_pq;
   const char *why = dv_dm_prepare(dm, dv_target.nits, dv_target.min_1e4 / 10000.0,
                                   dv_target.sdr ? DM_BT709 : DM_P3D65, dv_target.title_peak,
-                                  DV_TARGET_CREATIVE_TRIMS, &dv_target.dm);
+                                  DV_TARGET_TRIMS_CM4, DV_TARGET_TRIMS_CM29, &dv_target.dm);
   require(why == NULL, "display-target-dm-invalid: whole-session master fallback required");
   dv_target.frame_valid = true;
 }
 
+// Whether this frame's mapping applied creative trims (an L8 or L2 trim was selected).
+static inline bool dv_target_trims_applied(void) {
+  return dv_target.nits && dv_target.frame_valid && strcmp(dv_target.dm.trim, "l1-only") != 0;
+}
 static inline pl_tex dv_target_render(pl_log log, pl_gpu gpu, pl_tex source,
                                       int frame) {
   if (!dv_target.nits) return source;

@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims) is implemented as closed-form Dolby display management on `effort/dv-closed-form-dm` (2026-10-25); playback keeps reporting `creative_trims_applied:false` / “L1 only” until E is accepted · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
+**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, 2026-10-25) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 Evidence remains bound to its recorded source.
@@ -318,10 +318,12 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   used.
 - **CM v2.9.** Rational three-anchor curve, L2 SOP in absolute PQ, IPT-PQ
   colour, MSWeight detail on intensity (and on chroma when the chroma weight
-  is non-zero). L2 selection: the trim authored for the bucket's peak, else
-  the nearest lower one; the CM v2.9 interpolation rule is not measured and
-  the frame report names the selection (`cm29-l2-exact`,
-  `cm29-l2-nearest-lower`, `cm29-l1-only`).
+  is non-zero). L2 trims: the trim authored for the bucket's peak; otherwise
+  each decoded trim field (lift, gain, gamma, chroma weight, saturation gain,
+  MS weight) linear in target PQ between the bracketing L2 targets, with
+  neutral trims at PQ 0 and at the mastering display. At or above the
+  mastering peak both families map untrimmed. The frame report names the
+  selection (`cm29-l2-exact`, `cm29-l2-interpolated`, `cm29-l1-only`).
 - **Targets.** HDR buckets: a P3-D65 display of the bucket peak inside the
   BT.2020/PQ container. SDR: a 100-nit BT.709 display. Target black is the
   fixed title minimum; trims fade at the fixed title mastering peak.
@@ -331,26 +333,51 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
   `display_target.h` calls it and prints one `display_target_frame` row per
   frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
-  `dolby-closed-form-cm4-cm29-v1`; helper graph
+  `dolby-closed-form-cm4-cm29-v2` (v1 served no trims); helper graph
   `dv-native-master-or-closed-form-dm-v1`.
-- **Accuracy (private evidence, 2026-10-25).** CM v4 equations reproduce the
-  reference on 30/30 random30 shots (median mean ΔE_ITP 0.000, max 0.055) and
-  on real P8 frames with real L8 metadata: mean ≤ 0.001 at 300–1600 nits
-  (P3) and ≤ 0.007 at 100 nits (P3 and BT.709), with a few isolated outlier
-  pixels per frame. CM v2.9 equations
-  pass 23/23 random30 shots (median 0.19); its gamut stage is approximate.
-- **Served output does not apply the trims yet.** `DV_TARGET_CREATIVE_TRIMS`
-  (helper) and `DISPLAY_TARGET_CREATIVE_TRIMS` (Rust) are false, so served
-  frames use Dolby's untrimmed mapping of L1 + L3 (`cm4-l1-only` /
-  `cm29-l1-only`, `trim_targets` 0, default MS weight), which is what the
-  report's “L1 only” says. The trim interpolation is built and tested
-  (`test_dv_dm`, the controls run with trims on); turning it on is a one-line
-  change in both places plus a new method identity.
-- **Acceptance.** Until Paul accepts E, the report keeps
-  `creative_trims_applied: false` and the indicator says "L1 only". The
-  proposed gate is pixel comparison against the reference on real frames,
-  with a physical display check (Razr or a DV TV, through a GPT prompt) as a
-  sanity pass. Paul has not yet decided.
+- **Accuracy of the equations (private evidence, 2026-10-25).** CM v4
+  reproduces the reference on 30/30 random30 shots (median mean ΔE_ITP
+  0.000, max 0.055) and on real P8 frames with real L8 metadata (mean
+  ≤ 0.001 at 300–1600 nits, ≤ 0.007 at 100 nits). CM v2.9 passes 23/23
+  random30 shots (median 0.19); its gamut stage is approximate.
+- **Served trims are on.** `DV_TARGET_TRIMS_CM4` / `DV_TARGET_TRIMS_CM29`
+  (helper) and `DISPLAY_TARGET_CREATIVE_TRIMS_CM4` / `_CM29` (Rust) are
+  true. A frame whose mapping used a trim reports `CreativeTrimApplication`.
+  The effective report's `creative_trims_applied` is true when every served
+  frame did and `creative_trims_partial` when some did; Playback info says
+  “creative trims applied”, “creative trims on some shots” or “L1 only”.
+- **Acceptance (Paul, 2026-10-25): pixel comparison against the reference
+  on real frames.** The whole helper (decode, RPU, GPU passes, 16-bit
+  export) on 4-second clips, four frames per bucket, against `cm_offline`
+  with the same RPU; mean ΔE_ITP per frame:
+
+  | Title | Family | 400 | 600 | 1000 | 1600 | 2000 |
+  |---|---|---|---|---|---|---|
+  | Little Brother | CM v4, P8 | 0.011 | | | 0.005 | |
+  | Last Breath | CM v4, P8 | 0.007 | | 0.009 | 0.009 | |
+  | Companion | CM v4, P8 | 0.009 | | master | 0.005 | |
+  | The Beekeeper | CM v4, P7 | 0.008 | | master | 0.007 | |
+  | Dumb Money | CM v2.9, P8 | | 0.27 | master | | 0.46 |
+  | Smile | CM v2.9, P7 | | 0.32 | master | | 0.34 |
+  | The Godfather Part II | CM v2.9, P7 | | 0.14–0.22 | 0.17–0.25 | | 0.19–0.28 |
+  | The Sound of Music | CM v2.9, P7 | | 0.38–0.41 | 0.34–0.36 | | 0.26–0.27 |
+
+  “master”: the bucket is the mastering peak, which the reference refuses
+  and plurx elides. 2000 nits is interpolated for the 4000-nit titles and
+  above the peak (untrimmed) for the 1000-nit ones. CM v4 frames stay ≤ 0.08 everywhere; CM v2.9 p95 is
+  ≤ 3.0 with isolated pixels up to 13 (the approximate gamut stage). The
+  untrimmed mapping served before (v1) is 4.9–14 from the reference on the
+  same CM v2.9 frames, and “nearest lower” L2 selection was 5.4 at 2000 nits
+  on Godfather II.
+- **CM v2.9 interpolation, measured.** `cm_offline` renders CM v2.9 only to
+  its stock targets (100, 600, 1000, 2000 nits), so 400 and 1600 can't be
+  referenced directly. The rule was measured by removing a trim and finding
+  the explicit trim at that target that reproduces the reference: linear in
+  target PQ reproduces it (2000 between the 1000 trim and the 4000-nit
+  master: 0.004; 600 between the 100 and 1000 trims: 0.003; 1000 between
+  the 600 trim and the master: 0.022); linear in nits does not (1.7).
+  Below the lowest target the trim fades to neutral at PQ 0 (0.019; holding
+  it is 0.74). 400 and 1600 use the same rule.
 
 ### Phase 3: SDR target
 

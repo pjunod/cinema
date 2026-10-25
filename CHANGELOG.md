@@ -42,9 +42,16 @@ bump may break compatibility and a **patch** bump never does.
   RPUs and CM v2.9 (L2 trims) otherwise, measured against the licensed reference
   renderer as a QC referee. The helper reports the family and trim selection per
   frame and the daemon checks it exactly against the raw RPU. Every targeted
-  rendition re-renders under the new method identity. Served output uses the
-  untrimmed mapping (L1 + L3) until the L2/L8 trims are accepted, so playback
-  keeps reporting `creative_trims_applied:false`.
+  rendition re-renders under the new method identity.
+- Display-targeted HDR10-E and SDR apply the colourist's creative trims: CM v4
+  L8 trims, and CM v2.9 L2 trims (the bucket's own, otherwise interpolated
+  linearly in target PQ and faded at the mastering peak, as measured on the
+  reference renderer), accepted by pixel comparison against it on real titles.
+  Playback info says “creative trims applied”, “creative trims on some
+  shots” or “L1 only” from the report (`creative_trims_applied`, new
+  `creative_trims_partial`).
+  Targeted renditions re-render under method `dolby-closed-form-cm4-cm29-v2`.
+  Apple build 275, Android versionCode 181.
 
 ### Fixed
 

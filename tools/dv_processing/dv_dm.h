@@ -100,11 +100,12 @@ static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
 }
 
 // Build the frame state from the RPU for a target of `nits` (PQ container), black `floor_nits`,
-// primaries `tprim`; `smast_nits` is the title mastering peak (L6, else 4000). With `apply_trims` false
-// the L2/L8 creative trims are not applied (neutral trims, default MS weight): Dolby's untrimmed
-// mapping of L1 (+ L3).
+// primaries `tprim`; `smast_nits` is the title mastering peak (L6, else 4000). With `cm4_trims` /
+// `cm29_trims` false that family's L8 / L2 creative trims are not applied (neutral trims, default
+// MS weight): Dolby's untrimmed mapping of L1 (+ L3).
 static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, double floor_nits,
-                                        enum dm_prim tprim, double smast_nits, bool apply_trims, dv_dm_frame *f) {
+                                        enum dm_prim tprim, double smast_nits, bool cm4_trims, bool cm29_trims,
+                                        dv_dm_frame *f) {
   memset(f, 0, sizeof(*f));
   if (!dm || !dm->dm_data.level1) return "missing L1";
   const DoviDmData *d = &dm->dm_data;
@@ -122,7 +123,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
     double q = 1.0 / 4095, e[3] = {L1[0] + L3[0], L1[1] + L3[1], L1[2] + L3[2]};
     e[0] = dm_mind(e[0], e[1] - q); e[2] = dm_maxd(e[2], e[1] + q);
     dm_cm4_trim trims[32]; double tpq[32]; enum dm_prim tpr[32]; int n = 0;
-    for (size_t i = 0; apply_trims && i < d->level8.len && n < 32; i++) {
+    for (size_t i = 0; cm4_trims && i < d->level8.len && n < 32; i++) {
       const DoviExtMetadataBlockLevel8 *x = d->level8.list[i];
       double pk = 0, mn = 0; enum dm_prim tp = DM_BT2020;
       if (!dv_dm_preset(x->target_display_index, &pk, &mn, &tp)) {
@@ -149,34 +150,61 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
       }
       tpr[n] = tp; tpq[n++] = dm_pq_oetf(pk);
     }
-    // tone trims linear in PQ; colour trims linear in display size across gamuts (mastering display = L9 gamut, title peak)
-    dm_cm4_trim tr = dm_cm4_interp_gamut(trims, tpq, tpr, n, tmax, smast, tprim, sprim);
+    // tone trims linear in PQ; colour trims linear in display size across gamuts (mastering display = L9 gamut, title peak).
+    // At or above the mastering peak the trims have faded out: the untrimmed mapping, reported as such.
+    bool applied = n > 0 && tmax < smast;
+    dm_cm4_trim tr;
+    if (applied) tr = dm_cm4_interp_gamut(trims, tpq, tpr, n, tmax, smast, tprim, sprim);
+    else memset(&tr, 0, sizeof(tr));
     dm_cm4_state s;
     if (!dm_cm4_prepare(&s, e, tmin, tmax, &tr, tprim, sprim)) return "degenerate CM4 shot";
     f->weight = 0.0;
-    f->trim_targets = n; f->trim = n ? "l8-interpolated" : "l1-only";
+    f->trim_targets = applied ? n : 0; f->trim = applied ? "l8-interpolated" : "l1-only";
     f->c4 = s;
     dv_dm_pack_cm4(f, &s);
     return NULL;
   }
-  // CM v2.9: the L2 trim authored for this target's peak (12-bit PQ match); otherwise the nearest
-  // lower L2 target (the CM 2.9 interpolation rule is not measured; recorded in the frame report).
-  // No usable L2: neutral trim with the default MS weight (as for raw ms_weight -1).
-  dm_cm29_trim tr = {0, 0, 0, 0, 0, 0}; unsigned want = (unsigned)floor(tmax * 4095 + 0.5), best = 0; int found = 0;
-  for (size_t i = 0; apply_trims && i < d->level2.len; i++) {
-    const DoviExtMetadataBlockLevel2 *x = d->level2.list[i];
-    if (x->target_max_pq > want + 1 || x->target_max_pq < best) continue;
-    best = x->target_max_pq; found = (unsigned)x->target_max_pq + 1 >= want ? 2 : 1;
-    dv_dm_sop(x->trim_slope, x->trim_offset, x->trim_power, &tr.lift, &tr.gain, &tr.gamma);
-    tr.cw = dv_dm_off(x->trim_chroma_weight, 2048); tr.sg = dv_dm_off(x->trim_saturation_gain, 2048);
-    tr.ms = dv_dm_off((unsigned)(x->ms_weight < 0 ? 2048 : x->ms_weight), 2048);
+  // CM v2.9: the L2 trim authored for this target's peak (12-bit PQ match); otherwise each decoded
+  // trim field interpolated linearly in target PQ between the bracketing L2 targets, with neutral
+  // trims at PQ 0 and at the mastering display (title peak). No usable L2, or a target at or above
+  // the mastering peak (even with an L2 authored for it): neutral trim with the default MS weight.
+  dm_cm29_trim tr = {0, 0, 0, 0, 0, 0}; unsigned want = (unsigned)floor(tmax * 4095 + 0.5); int found = 0;
+  {
+    dm_cm29_trim lo_t = tr, hi_t = tr, ex_t = tr; double lo = -1, hi = 2; bool exact = false;
+    for (size_t i = 0; cm29_trims && i < d->level2.len; i++) {
+      const DoviExtMetadataBlockLevel2 *x = d->level2.list[i];
+      dm_cm29_trim t;
+      dv_dm_sop(x->trim_slope, x->trim_offset, x->trim_power, &t.lift, &t.gain, &t.gamma);
+      t.cw = dv_dm_off(x->trim_chroma_weight, 2048); t.sg = dv_dm_off(x->trim_saturation_gain, 2048);
+      t.ms = dv_dm_off((unsigned)(x->ms_weight < 0 ? 2048 : x->ms_weight), 2048);
+      double q = dv_dm_pq12(x->target_max_pq);
+      if (!exact && (unsigned)x->target_max_pq + 1 >= want && (unsigned)x->target_max_pq <= want + 1) {
+        exact = true; ex_t = t;
+      }
+      if (q < tmax && q > lo) { lo = q; lo_t = t; }
+      if (q > tmax && q < hi) { hi = q; hi_t = t; }
+    }
+    // an L2 target between this display and the mastering peak; without one (and without a lower
+    // target) every trim has faded out and the mapping is the untrimmed one
+    bool upper = hi <= 1 && hi < smast, lower = lo >= 0;
+    if (exact && tmax < smast) { found = 2; tr = ex_t; }
+    else if (!exact && tmax < smast && (lower || upper)) {
+      if (!upper) { hi = smast; memset(&hi_t, 0, sizeof(hi_t)); }   // neutral at the mastering peak
+      if (!lower) { lo = 0; memset(&lo_t, 0, sizeof(lo_t)); }       // neutral at PQ 0
+      double w = (hi - tmax) / (hi - lo);                  // weight of the lower trim
+      w = dm_mind(dm_maxd(w, 0), 1);
+      tr.lift = w * lo_t.lift + (1 - w) * hi_t.lift; tr.gain = w * lo_t.gain + (1 - w) * hi_t.gain;
+      tr.gamma = w * lo_t.gamma + (1 - w) * hi_t.gamma; tr.cw = w * lo_t.cw + (1 - w) * hi_t.cw;
+      tr.sg = w * lo_t.sg + (1 - w) * hi_t.sg; tr.ms = w * lo_t.ms + (1 - w) * hi_t.ms;
+      found = 1;
+    }
   }
   dm_cm29_target tg = {nits, floor_nits, tprim, 0.0};
   dm_cm29_state s;
   if (!dm_cm29_prepare(&s, L1, d->level6 ? d->level6->min_display_mastering_luminance / 10000.0 : 0.005,
                        smast_nits, &tg, &tr)) return "degenerate CM2.9 shot";
   f->weight = tr.ms;
-  f->trim_targets = apply_trims ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-nearest-lower" : "l1-only");
+  f->trim_targets = found ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-interpolated" : "l1-only");
   f->c29 = s;
   dv_dm_pack_cm29(f, &s);
   return NULL;

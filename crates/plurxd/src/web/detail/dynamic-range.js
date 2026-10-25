@@ -119,7 +119,7 @@ function effectiveProcessingDetail(report){
   const names={PolynomialReshape:'RPU polynomial mapping',MmrReshape:'RPU MMR mapping',
     RpuColorConversion:'RPU color conversion',TargetMapping:'target mapping',CreativeTrimApplication:'creative trims'};
   const metadata=report.applied_operations.map(op=>names[op]).filter(Boolean).join(', ');
-  return `${report.sdr_processed?'Dolby Vision–processed SDR (BT.709 gamma 2.4, L1 only)':'Dolby Vision–enhanced HDR10'} · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
+  return `${report.sdr_processed?`Dolby Vision–processed SDR (BT.709 gamma 2.4, ${report.applied_operations.includes('CreativeTrimApplication')?'creative trims applied':report.creative_trims_partial===true?'creative trims on some shots':'L1 only'})`:'Dolby Vision–enhanced HDR10'} · FEL used: ${report.fel_contributed?'yes':'no'}${metadata?` · Applied: ${metadata}`:''}`;
 }
 function clearEffectiveProcessing(p){
   if(!p) return;

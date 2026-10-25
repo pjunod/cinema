@@ -223,6 +223,13 @@ test('SDR-E uses only the current typed 100-nit conversion report and clears on 
   p.deliveredRange='sdr'; p.effectiveProcessing={...report(),hdr10_enhanced:false,sdr_processed:true,
     applied_operations:['RpuColorConversion','TargetMapping','Bt709Gamma24Conversion',{DisplayTargetMapping:{nits:100}}]};
   assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, L1 only/);
+  p.effectiveProcessing.creative_trims_applied=true; p.effectiveProcessing.applied_operations.splice(2,0,'CreativeTrimApplication');
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, creative trims applied/);
+  assert.doesNotMatch(badge(context).aria,/L1 only/);
+  p.effectiveProcessing.creative_trims_applied=false; p.effectiveProcessing.applied_operations.splice(2,1);
+  p.effectiveProcessing.creative_trims_partial=true;
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, creative trims on some shots/);
+  delete p.effectiveProcessing.creative_trims_partial;
   p.effectiveProcessing.applied_operations.pop(); assert.equal(badge(context).arrow,'SDR');
   p.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:100}});
   context.clearEffectiveProcessing(p); assert.equal(badge(context).arrow,'SDR');

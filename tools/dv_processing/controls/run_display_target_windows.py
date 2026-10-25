@@ -159,10 +159,14 @@ def run(args):
                     source_index = round(pts * 24)
                     metadata = l1[source_index]
                     assert (trace[index]['max_pq'], trace[index]['avg_pq']) == (metadata['max_pq'], metadata['avg_pq'])
-                    assert trace[index]['method'] == 'dolby-closed-form-cm4-cm29-v1'
-                    # served output applies no creative trims (DV_TARGET_CREATIVE_TRIMS false)
-                    assert trace[index]['curve'] in ('cm4-l1-only', 'cm29-l1-only'), trace[index]
-                    assert trace[index]['trim_targets'] == 0 and trace[index]['detail_weight'] == 0, trace[index]
+                    assert trace[index]['method'] == 'dolby-closed-form-cm4-cm29-v2'
+                    # served output applies each family's creative trims (DV_TARGET_TRIMS_CM4/_CM29)
+                    curve = trace[index]['curve']
+                    assert curve in ('cm4-l1-only', 'cm4-l8-interpolated', 'cm29-l1-only',
+                                     'cm29-l2-exact', 'cm29-l2-interpolated'), trace[index]
+                    if curve.startswith('cm4-'):
+                        assert trace[index]['detail_weight'] == 0, trace[index]
+                        assert (trace[index]['trim_targets'] == 0) == (curve == 'cm4-l1-only'), trace[index]
                     actual = words(raw)
                     assert max(actual[:4096]) <= 64 + 876 * oetf(nits) + 1
                     results.append({'profile': profile, 'family': family, 'nits': nits,

@@ -757,6 +757,8 @@ data class EffectiveProcessingReport(
     val felContributed: Boolean,
     val appliedOperations: List<String>,
     val sdrProcessed: Boolean = false,
+    /** Some, but not every, served frame applied creative trims. */
+    val creativeTrimsPartial: Boolean = false,
 ) {
     val mark: String get() = if (sdrProcessed) "SDR-E" else "HDR10-E"
     fun matches(active: String?, delivered: String?): Boolean = ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) &&
@@ -769,7 +771,8 @@ data class EffectiveProcessingReport(
             "RpuColorConversion" to "RPU color conversion", "TargetMapping" to "target mapping",
             "CreativeTrimApplication" to "creative trims")
         val metadata = appliedOperations.mapNotNull { names[it] }.joinToString(", ")
-        return "${if (sdrProcessed) "Dolby Vision–processed SDR (BT.709 gamma 2.4, L1 only)" else "Dolby Vision–enhanced HDR10"} · FEL used: ${if (felContributed) "yes" else "no"}" +
+        val trims = if ("CreativeTrimApplication" in appliedOperations) "creative trims applied" else if (creativeTrimsPartial) "creative trims on some shots" else "L1 only"
+        return "${if (sdrProcessed) "Dolby Vision–processed SDR (BT.709 gamma 2.4, $trims)" else "Dolby Vision–enhanced HDR10"} · FEL used: ${if (felContributed) "yes" else "no"}" +
             if (metadata.isEmpty()) "" else " · Applied: $metadata"
     }
 
@@ -792,7 +795,7 @@ data class EffectiveProcessingReport(
                 }
             }
             return EffectiveProcessingReport(string("generation") ?: return null, boolean("hdr10_enhanced") ?: return null,
-                boolean("fel_contributed") ?: return null, names, sdr)
+                boolean("fel_contributed") ?: return null, names, sdr, boolean("creative_trims_partial") ?: false)
         }
     }
 }

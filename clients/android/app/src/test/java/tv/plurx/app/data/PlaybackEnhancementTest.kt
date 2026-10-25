@@ -100,6 +100,17 @@ class PlaybackEnhancementTest {
         assertEquals(false, report?.matches(generation, "hdr10"))
         assertEquals("SDR-E", report?.mark)
         assertEquals(true, report?.detail?.contains("L1 only"))
+        val trimmed = EffectiveProcessingReport.fromJson(json.parseToJsonElement(
+            wire.replace("\"sdr_processed\":true,", "\"sdr_processed\":true,\"creative_trims_applied\":true,")
+                .replace("\"TargetMapping\",", "\"TargetMapping\",\"CreativeTrimApplication\",")))
+        assertEquals(true, trimmed?.matches(generation, "sdr"))
+        assertEquals("SDR-E", trimmed?.mark)
+        assertEquals(true, trimmed?.detail?.contains("BT.709 gamma 2.4, creative trims applied"))
+        assertEquals(false, trimmed?.detail?.contains("L1 only"))
+        val partial = EffectiveProcessingReport.fromJson(json.parseToJsonElement(
+            wire.replace("\"sdr_processed\":true,", "\"sdr_processed\":true,\"creative_trims_partial\":true,")))
+        assertEquals(true, partial?.matches(generation, "sdr"))
+        assertEquals(true, partial?.detail?.contains("BT.709 gamma 2.4, creative trims on some shots"))
     }
 
     @Test
