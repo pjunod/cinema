@@ -81,6 +81,8 @@ class CM29NearBlackChroma(unittest.TestCase):
 
     def test_cm29_near_black_chroma_is_neutral(self):
         # saturated colours below the shot's crush (L1 min 80/4095): at most 2 x max D of chroma
+        # gain. With a 0.005-nit black they land on the black (Ib = PQ(0.005)), where the reference keeps
+        # chroma at about 2^0.94 x D(Ib) = 1.7x (it is not neutral there); only a zero black removes it.
         # gain, and none where they map to PQ 0 (a zero target black); mid-tones keep their chroma
         noise = [(0.018, 0, 0), (0, 0.018, 0), (0, 0, 0.018), (0.015, 0.008, 0)]
         for peak, black, prim in ((600, 0.005, P3), (2000, 0.005, P3), (1000, 0.005, BT2020), (100, 0.005, BT709), (1000, 0.0, P3)):
@@ -91,6 +93,8 @@ class CM29NearBlackChroma(unittest.TestCase):
                 self.assertLessEqual(ratio, 2 * dmax + 0.02, (peak, prim, rgb))
                 if ib <= 1e-9:
                     self.assertLess(ratio, 0.02, (peak, prim, rgb))
+                elif black > 0 and prim != BT709:
+                    self.assertGreater(ratio, 0.5, (peak, prim, rgb))
             cin, cout, _, _ = self.chroma(peak, black, prim, (0.50, 0.30, 0.25))
             self.assertTrue(0.3 < cout / cin < 3, (peak, prim))
 
@@ -126,7 +130,8 @@ class CM29NearBlackChroma(unittest.TestCase):
 
     def test_cm29_pq_targets_clip_at_zero_not_at_the_black(self):
         # the cube clip's floor is 0 for PQ targets (their black shapes the tone curve only) and the
-        # display black for the BT.709 SDR target
+        # display black for the BT.709 SDR target. (The PQ half also needs the gain at the black: with
+        # the old offset gain the colour came out grey at the black and would fail here too.)
         def lin(pq):
             m1, m2, c1, c2, c3 = 0.1593017578125, 78.84375, 0.8359375, 18.8515625, 18.6875
             q = min(max(pq, 0.0), 1.0) ** (1 / m2)

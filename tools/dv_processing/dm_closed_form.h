@@ -436,8 +436,9 @@ static const double DM_IPT[3][3] = {{0.4, 0.4, 0.2}, {4.4550, -4.8510, 0.3960}, 
 /* Near black (measured per stock target, CM29_CLOSED_FORM.md "Near-black chroma"): the chroma
  * scale's intensity ratio is capped at 2 (Ie = max(I, Ib/2)) and the scale is multiplied by D(Ib),
  * piecewise linear on the nodes below and 1 above the last one. D depends on the output intensity
- * only (the same for any L1, trim and chroma) and not on the target black: targets redefined with
- * a 0.005-nit black follow the black-0 rows on absolute Ib within about 0.03. HDR targets: the P3
+ * only (the same for any L1, trim and chroma) and not on the target black: HDR targets redefined
+ * with a 0.005-nit black follow the black-0 rows on absolute Ib within about 0.03, and the SDR row
+ * (measured at a 0.005-nit black) holds at a 0.0005-nit black within about 0.04. HDR targets: the P3
  * or BT.2020 row of the stock targets at 600, 1000 and 2000 nits, linear in target PQ and held
  * outside that range (BT.2020 has no usable 600-nit stock row: the 1000-nit row is used).
  * BT.709 (any peak; plurx renders BT.709 only for its 100-nit SDR target): the 100-nit SDR stock
