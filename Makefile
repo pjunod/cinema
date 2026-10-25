@@ -1595,6 +1595,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/web/hdr-display-peak.test.js
 	# The HDR display claim follows (dynamic-range: high) after boot (Linux Chrome, monitor moves).
 	@node --test tests/web/hdr-display-change.test.js
+	# Settings → Playback → Open titles in, and the plurx Player handoff (LINUX-PLAYER-PLAN M3).
+	@node --test tests/web/linux-player-handoff.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
 	@node tests/web/cluster-recovery-session.test.js
