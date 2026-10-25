@@ -1,6 +1,6 @@
 # Display-targeted Dolby Vision rendering — build plan
 
-**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, merged as 072d0f65 on 2026-10-25, not deployed) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session; CM v2.9 near-black chroma follows the reference since #1278 (deca1e1e, not deployed) · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
+**Status:** A–D and F promoted to `main` through #1271 by Paul's decision of 2026-10-24. E (creative trims): closed-form Dolby display management merged through #1275; the served CM v4 L8 and CM v2.9 L2 trims (#1276, merged as 072d0f65 on 2026-10-25, not deployed) are accepted by pixel comparison against the reference on real titles, and playback reports `creative_trims_applied` per session; CM v2.9 near-black chroma follows the reference since #1278 (deca1e1e, not deployed); at the title's target black since #1281 (b9eb0466, not deployed) · **Updated:** 2026-10-25 · **Owner:** Claude (promotion #1271 and E; took over from direct GPT/root) ·
 **Extends:** item 1 of [DV-ENHANCEMENTS-NOT-YET-BUILT.md](DV-ENHANCEMENTS-NOT-YET-BUILT.md)
 
 Evidence remains bound to its recorded source.
