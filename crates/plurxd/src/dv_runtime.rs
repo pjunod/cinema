@@ -2303,7 +2303,8 @@ mod helper_decoder_tests {
         );
         (dm.curve, dm.trim_targets, dm.detail_weight)
     }
-    const FIXTURE_DM: (bool, &str, usize, f64) = (false, "cm29-l1-only", 0, 0.0);
+    /// The P7 fixture carries CM v4.0 metadata; served output applies no creative trims.
+    const FIXTURE_DM: (bool, &str, usize, f64) = (true, "cm4-l1-only", 0, 0.0);
     fn other_family(curve: &str) -> &'static str {
         if curve.starts_with("cm4-") {
             "cm29-l1-only"
@@ -2343,11 +2344,14 @@ mod helper_decoder_tests {
         };
         assert!(row(curve, trims, weight).validate(target, raw).is_ok());
         for (curve, trims, weight) in [
+            // trims are not applied to served output, whatever the RPU carries
             ("cm4-l8-interpolated", 1, 0.0),
-            ("cm4-l1-only", 0, 0.0),
+            ("cm4-l1-only", trims + 1, weight),
+            ("cm4-l1-only", trims, 0.25),
+            // the family follows the RPU
+            ("cm29-l1-only", trims, weight),
             ("cm29-l2-exact", trims + 1, weight),
-            ("cm29-l1-only", trims, 0.25),
-            ("cm29-unknown", trims, weight),
+            ("cm4-unknown", trims, weight),
         ] {
             assert!(
                 row(curve, trims, weight).validate(target, raw).is_err(),

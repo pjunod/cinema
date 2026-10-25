@@ -52,9 +52,10 @@ static inline enum dm_prim dv_dm_l9_prim(unsigned index) {
 static inline double dv_dm_pq12(unsigned v) { return v / 4095.0; }
 static inline double dv_dm_off(unsigned raw, double centre) { return ((double)raw - centre) / centre; }
 // L2/L8 slope/offset/power -> lift/gain/gamma (inverse of dovi_tool's XML parser)
+// Nonsensical codes (gain -2, power 0) are held just inside the finite range.
 static inline void dv_dm_sop(unsigned slope, unsigned offset, unsigned power, double *L, double *G, double *Ga) {
   double A = slope / 2048.0 + 1, B = (offset - 2048.0) / 2048.0;
-  *G = A + B - 2; *L = 2 * B / (*G + 2); *Ga = 2 * (2 / (power / 2048.0 + 1) - 1);
+  *G = dm_maxd(A + B - 2, -1.99); *L = 2 * B / (*G + 2); *Ga = 2 * (2 / (dm_maxd(power, 1) / 2048.0 + 1) - 1);
 }
 
 static inline void dv_dm_put(float u[4], double a, double b, double c, double d) {
@@ -99,9 +100,11 @@ static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
 }
 
 // Build the frame state from the RPU for a target of `nits` (PQ container), black `floor_nits`,
-// primaries `tprim`; `smast_nits` is the title mastering peak (L6, else 4000).
+// primaries `tprim`; `smast_nits` is the title mastering peak (L6, else 4000). With `apply_trims` false
+// the L2/L8 creative trims are not applied (neutral trims, default MS weight): Dolby's untrimmed
+// mapping of L1 (+ L3).
 static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, double floor_nits,
-                                        enum dm_prim tprim, double smast_nits, dv_dm_frame *f) {
+                                        enum dm_prim tprim, double smast_nits, bool apply_trims, dv_dm_frame *f) {
   memset(f, 0, sizeof(*f));
   if (!dm || !dm->dm_data.level1) return "missing L1";
   const DoviDmData *d = &dm->dm_data;
@@ -119,7 +122,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
     double q = 1.0 / 4095, e[3] = {L1[0] + L3[0], L1[1] + L3[1], L1[2] + L3[2]};
     e[0] = dm_mind(e[0], e[1] - q); e[2] = dm_maxd(e[2], e[1] + q);
     dm_cm4_trim trims[32]; double tpq[32]; enum dm_prim tpr[32]; int n = 0;
-    for (size_t i = 0; i < d->level8.len && n < 32; i++) {
+    for (size_t i = 0; apply_trims && i < d->level8.len && n < 32; i++) {
       const DoviExtMetadataBlockLevel8 *x = d->level8.list[i];
       double pk = 0, mn = 0; enum dm_prim tp = DM_BT2020;
       if (!dv_dm_preset(x->target_display_index, &pk, &mn, &tp)) {
@@ -160,7 +163,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   // lower L2 target (the CM 2.9 interpolation rule is not measured; recorded in the frame report).
   // No usable L2: neutral trim with the default MS weight (as for raw ms_weight -1).
   dm_cm29_trim tr = {0, 0, 0, 0, 0, 0}; unsigned want = (unsigned)floor(tmax * 4095 + 0.5), best = 0; int found = 0;
-  for (size_t i = 0; i < d->level2.len; i++) {
+  for (size_t i = 0; apply_trims && i < d->level2.len; i++) {
     const DoviExtMetadataBlockLevel2 *x = d->level2.list[i];
     if (x->target_max_pq > want + 1 || x->target_max_pq < best) continue;
     best = x->target_max_pq; found = (unsigned)x->target_max_pq + 1 >= want ? 2 : 1;
@@ -173,7 +176,7 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
   if (!dm_cm29_prepare(&s, L1, d->level6 ? d->level6->min_display_mastering_luminance / 10000.0 : 0.005,
                        smast_nits, &tg, &tr)) return "degenerate CM2.9 shot";
   f->weight = tr.ms;
-  f->trim_targets = (int)d->level2.len; f->trim = found == 2 ? "l2-exact" : (found ? "l2-nearest-lower" : "l1-only");
+  f->trim_targets = apply_trims ? (int)d->level2.len : 0; f->trim = found == 2 ? "l2-exact" : (found ? "l2-nearest-lower" : "l1-only");
   f->c29 = s;
   dv_dm_pack_cm29(f, &s);
   return NULL;
@@ -201,7 +204,8 @@ static inline bool dv_dm_cpu_render(const dv_dm_frame *f, const float *in, int w
     double rgb[3];
     if (f->algo == 4) { o3[3 * i] = b[i]; dm_cm4_finish(&f->c4, o3 + 3 * i, rgb); }
     else dm_cm29_finish(&f->c29, &px[i], b[i], c[i], rgb);
-    out[4 * i] = (float)rgb[0]; out[4 * i + 1] = (float)rgb[1]; out[4 * i + 2] = (float)rgb[2]; out[4 * i + 3] = 1;
+    for (int c = 0; c < 3; c++) out[4 * i + c] = isnan(rgb[c]) ? 0.0f : (float)rgb[c];   // as the shader
+    out[4 * i + 3] = 1;
   }
   free(a); free(b); free(c); free(e); free(o3); free(px);
   return ok;
@@ -251,6 +255,7 @@ static const char dv_dm_glsl_common[] =
   "  float h=degrees(atan(o.z,o.y/2.0)); if(h<0.0) h+=360.0;\n"
   "  float smh=1.0, r1=0.0;\n"
   "  for(int k=0;k<6;k++){ int j=(k+1)%6; float span=mod(anc(j)-anc(k)+720.0,360.0), dd=mod(h-anc(k)+720.0,360.0);\n"
+  "   if(dd>=360.0-1e-4&&span>0.0) dd=0.0;\n"
   "   if(dd<span){ float t=dd/span; smh+=(1.0-t)*sixsat(k)+t*sixsat(j); r1+=(1.0-t)*sixhue(k)+t*sixhue(j); break; } }\n"
   "  r1*=0.5; float r2=1.0-r1*r1/2.0, T=o.y/2.0, P=o.z; o.y=2.0*smh*(T*r2-P*r1); o.z=smh*(T*r1+P*r2); }\n"
   " return o; }\n"
@@ -295,12 +300,12 @@ static const char dv_dm_body_final[] =   // pass 3: vertical, detail, finish
   "if(u[18].x<10.0){\n"
   " vec3 ic=ictcp(rgb); vec3 o=c4point(rgb);\n"
   " if(wgt>-1.0){ float D=ic.x-o.x; float r=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); o.x=o.x+r*(D-B1); }\n"
-  " color=vec4(c4finish(o),1.0);\n"
+  " vec3 res=c4finish(o); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   "} else {\n"
   " vec3 p=ipt(rgb); float I; vec2 b=c29point(p,I); float Ib=b.x, Io=b.y;\n"
   " if(wgt>-1.0){ float r1=clamp(1.0+wgt-4.0*(4.0*abs(dx1)+abs(dy1)),0.0,1.0); Ib=Ib+r1*((I-b.x)-B1);\n"
   "  if(u[17].y>0.5){ float r2=clamp(1.0+wgt-4.0*(4.0*abs(dx2)+abs(dy2)),0.0,1.0); Io=Io+r2*((I-b.y)-B2); } else Io=Ib; }\n"
-  " color=vec4(c29finish(p,Ib,Io),1.0);\n"
+  " vec3 res=c29finish(p,Ib,Io); color=vec4(mix(res,vec3(0.0),isnan(res)),1.0);\n"
   "}\n";
 
 static struct { pl_dispatch dispatch; pl_tex dtex, htex, out; } dv_dm_gpu;

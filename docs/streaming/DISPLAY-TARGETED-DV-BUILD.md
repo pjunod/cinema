@@ -143,9 +143,10 @@ byte-identical to the master render.
 
 **Eligibility per title, never per window.** A title whose scan shows
 missing L1 on any frame is not targeted at all; it gets the master render
-with the reason named. Valid L1 with max = 0 (black frames) is legitimate:
-those frames use the title's mastering peak as their input max, by one
-fixed rule. One title therefore never mixes master and targeted windows.
+with the reason named. Valid L1 with max = 0 (black frames) is legitimate.
+Phase 1 gave those frames the title's mastering peak as their input max;
+phase 2 holds black, flat and clipped anchors one 12-bit code apart, so every
+valid L1 maps. One title therefore never mixes master and targeted windows.
 
 ### Helper (phase 1, superseded on 2026-10-25 by phase 2 below)
 
@@ -338,6 +339,13 @@ evidence stay on the private `rog_hdr_dv` branch (`docs/CM4_CLOSED_FORM.md`,
   (P3) and ≤ 0.007 at 100 nits (P3 and BT.709), with a few isolated outlier
   pixels per frame. CM v2.9 equations
   pass 23/23 random30 shots (median 0.19); its gamut stage is approximate.
+- **Served output does not apply the trims yet.** `DV_TARGET_CREATIVE_TRIMS`
+  (helper) and `DISPLAY_TARGET_CREATIVE_TRIMS` (Rust) are false, so served
+  frames use Dolby's untrimmed mapping of L1 + L3 (`cm4-l1-only` /
+  `cm29-l1-only`, `trim_targets` 0, default MS weight), which is what the
+  report's “L1 only” says. The trim interpolation is built and tested
+  (`test_dv_dm`, the controls run with trims on); turning it on is a one-line
+  change in both places plus a new method identity.
 - **Acceptance.** Until Paul accepts E, the report keeps
   `creative_trims_applied: false` and the indicator says "L1 only". The
   proposed gate is pixel comparison against the reference on real frames,
@@ -373,7 +381,10 @@ cases/samples. A compile is not a run.
 - Build controls with `sh tools/dv_processing/controls/build_target_controls.sh`
   and the same four explicit dependency/output arguments as the helper build.
 - Phase 2 (2026-10-25) replaced the phase 1 controls. Run
-  `"$CONTROL_BIN/test_dv_dm"`: family and trim selection from the RPU, every
+  `"$CONTROL_BIN/test_dv_dm" tools/dv_processing/controls/tags/p7-frame0.nal`:
+  the retained P7 fixture through the real parser gives the selection the Rust
+  tests pin (C and Rust agree on the same bytes); family and trim selection
+  from the RPU, black/flat/clipped L1 and nonsensical trim codes, every
   bucket finite and inside the target, monotone neutral grey axis, L1
   sensitivity, trims that act at their target and fade out at the mastering
   peak, pinned golden values of the model. Then run

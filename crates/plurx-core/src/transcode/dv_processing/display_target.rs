@@ -31,6 +31,13 @@ pub struct DvDisplayManagement {
     pub trim_targets: usize,
     pub detail_weight: f64,
 }
+/// Whether served output applies the L2/L8 creative trims (helper `DV_TARGET_CREATIVE_TRIMS`).
+/// False until the trims are accepted; playback reports `creative_trims_applied:false`. Changing it
+/// needs a new `DISPLAY_TARGET_METHOD`.
+pub const DISPLAY_TARGET_CREATIVE_TRIMS: bool = false;
+/// The helper uses at most this many resolvable L8 trims per frame (`dv_dm.h`); the parser itself
+/// accepts at most five L8 blocks per RPU.
+const DM_MAX_L8_TRIMS: usize = 32;
 /// L8 target display indices the helper resolves without an L10 (`dv_dm_preset`).
 const DM_PRESET_TARGETS: [u8; 7] = [1, 27, 28, 37, 38, 48, 49];
 
@@ -145,6 +152,14 @@ impl DvDisplayTarget {
     /// CM v2.9. CM v4 uses every L8 whose target display is a preset or is described by an L10;
     /// CM v2.9 uses the L2 authored for the bucket peak, else the nearest lower one.
     pub fn display_management(self, raw: &[u8]) -> Result<DvDisplayManagement, DvContractError> {
+        self.display_management_with(raw, DISPLAY_TARGET_CREATIVE_TRIMS)
+    }
+    /// As [`Self::display_management`], with creative trims applied or not.
+    pub fn display_management_with(
+        self,
+        raw: &[u8],
+        trims: bool,
+    ) -> Result<DvDisplayManagement, DvContractError> {
         use dolby_vision::rpu::{dovi_rpu::DoviRpu, extension_metadata::blocks::ExtMetadataBlock};
         let invalid = || DvContractError::Invalid("display-target RPU unparseable");
         let rpu = DoviRpu::parse_unspec62_nalu(raw).map_err(|_| invalid())?;
@@ -157,6 +172,14 @@ impl DvDisplayTarget {
             })
             .collect();
         if dm.get_block(254).is_some() || !l8.is_empty() {
+            if !trims {
+                return Ok(DvDisplayManagement {
+                    cm4: true,
+                    curve: "cm4-l1-only",
+                    trim_targets: 0,
+                    detail_weight: 0.0,
+                });
+            }
             let described = |index: u8| {
                 dm.level_blocks_iter(10).any(|block| {
                     matches!(block, ExtMetadataBlock::Level10(x) if x.target_display_index == index)
@@ -165,7 +188,8 @@ impl DvDisplayTarget {
             let used = l8
                 .iter()
                 .filter(|index| DM_PRESET_TARGETS.contains(index) || described(**index))
-                .count();
+                .count()
+                .min(DM_MAX_L8_TRIMS);
             return Ok(DvDisplayManagement {
                 cm4: true,
                 curve: if used > 0 {
@@ -174,6 +198,14 @@ impl DvDisplayTarget {
                     "cm4-l1-only"
                 },
                 trim_targets: used,
+                detail_weight: 0.0,
+            });
+        }
+        if !trims {
+            return Ok(DvDisplayManagement {
+                cm4: false,
+                curve: "cm29-l1-only",
+                trim_targets: 0,
                 detail_weight: 0.0,
             });
         }
@@ -443,7 +475,9 @@ mod tests {
             DvDisplayTargetChoice::Master { .. } => panic!("target"),
         };
         let check = |raw: &[u8], nits: u32, expected: (bool, &str, usize, f64)| {
-            let dm = target(nits).display_management(raw).expect("selection");
+            let dm = target(nits)
+                .display_management_with(raw, true)
+                .expect("selection");
             assert_eq!(
                 (dm.cm4, dm.curve, dm.trim_targets, dm.detail_weight),
                 expected,
@@ -486,6 +520,17 @@ mod tests {
             1000,
             (true, "cm4-l1-only", 0, 0.0),
         );
+        // Served output: creative trims are not applied, whatever the RPU carries.
+        for (raw, cm4) in [(&cm29, false), (&build(true, vec![l8(48)]), true)] {
+            let dm = target(1000)
+                .display_management(raw)
+                .expect("served selection");
+            let curve = if cm4 { "cm4-l1-only" } else { "cm29-l1-only" };
+            assert_eq!(
+                (dm.cm4, dm.curve, dm.trim_targets, dm.detail_weight),
+                (cm4, curve, 0, 0.0)
+            );
+        }
     }
     fn stats() -> DvTitleStats {
         DvTitleStats {

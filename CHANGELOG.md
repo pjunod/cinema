@@ -42,8 +42,9 @@ bump may break compatibility and a **patch** bump never does.
   RPUs and CM v2.9 (L2 trims) otherwise, measured against the licensed reference
   renderer as a QC referee. The helper reports the family and trim selection per
   frame and the daemon checks it exactly against the raw RPU. Every targeted
-  rendition re-renders under the new method identity. Playback still reports
-  `creative_trims_applied:false` until the trims are accepted.
+  rendition re-renders under the new method identity. Served output uses the
+  untrimmed mapping (L1 + L3) until the L2/L8 trims are accepted, so playback
+  keeps reporting `creative_trims_applied:false`.
 
 ### Fixed
 

@@ -11,6 +11,6 @@ placebo_flags=$(PKG_CONFIG_PATH="$2" pkg-config --cflags --libs libplacebo)
 "$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror -I"$3/include" \
     "$source_dir/dm_shader_control.c" -o "$4/dm_shader_control" $placebo_flags -lm
 "$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror -I"$3/include" \
-    "$source_dir/test_dv_dm.c" -o "$4/test_dv_dm" $placebo_flags -lm
+    "$source_dir/test_dv_dm.c" "$3/lib/libdovi.a" -o "$4/test_dv_dm" $placebo_flags -lm -lpthread -ldl
 "$CC" $CFLAGS -std=c11 -Wall -Wextra -Werror \
     "$source_dir/make_movie.c" -o "$4/make_movie" $ffmpeg_flags -lm -lpthread -ldl

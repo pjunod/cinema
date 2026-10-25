@@ -10,6 +10,10 @@
 #include "dv_dm.h"
 
 #define DV_TARGET_METHOD "dolby-closed-form-cm4-cm29-v1"
+// Creative trims (L2/L8) are computed by dv_dm.h but not applied to served output until they are
+// accepted (playback reports creative_trims_applied:false). Rust mirrors this as
+// DISPLAY_TARGET_CREATIVE_TRIMS; changing it needs a new method identity.
+#define DV_TARGET_CREATIVE_TRIMS false
 static struct {
   unsigned nits, min_1e4, title_peak;
   unsigned max_pq, avg_pq;
@@ -57,7 +61,7 @@ static inline const char *dv_target_policy_name(void) {
 }
 // Per frame: validate L1 and prepare the shot's display-management state from the whole RPU.
 // HDR buckets map to a P3-D65 display inside the BT.2020/PQ container; the SDR bucket to BT.709.
-// Target black is the fixed title minimum; trims fade to zero at the fixed title mastering peak.
+// Target black is the fixed title minimum; the mastering display is the L9 gamut at the fixed title peak.
 static inline void dv_target_metadata(const DoviVdrDmData *dm) {
   if (!dv_target.nits) return;
   dv_target.frame_valid = false;
@@ -68,7 +72,8 @@ static inline void dv_target_metadata(const DoviVdrDmData *dm) {
   dv_target.max_pq = l1->max_pq;
   dv_target.avg_pq = l1->avg_pq;
   const char *why = dv_dm_prepare(dm, dv_target.nits, dv_target.min_1e4 / 10000.0,
-                                  dv_target.sdr ? DM_BT709 : DM_P3D65, dv_target.title_peak, &dv_target.dm);
+                                  dv_target.sdr ? DM_BT709 : DM_P3D65, dv_target.title_peak,
+                                  DV_TARGET_CREATIVE_TRIMS, &dv_target.dm);
   require(why == NULL, "display-target-dm-invalid: whole-session master fallback required");
   dv_target.frame_valid = true;
 }

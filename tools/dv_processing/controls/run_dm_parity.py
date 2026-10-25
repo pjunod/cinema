@@ -83,4 +83,13 @@ l2 3079 2010 2180 2075 2050 2179 512
 for tgt in ("600 0 1 4000", "1000 0 1 4000", "100 0.005 2 4000", "2000 0 0 4000"):
     ok &= run('cm29_' + tgt.split()[0] + '_p' + tgt.split()[2], cm29 + 'target ' + tgt + '\n', frames[2], W, H)
     ok &= run('cm29_syn_' + tgt.split()[0] + '_p' + tgt.split()[2], cm29 + 'target ' + tgt + '\n', syn, W, H, True)
+# CM v2.9 without chroma weight (single detail plane) and with the default MS weight (raw -1)
+cm29b = cm29.replace('2020 2030 512', '2048 2030 65535', 1).replace('2048 2294 512', '2048 2294 65535', 1).replace('2050 2179 512', '2048 2179 65535', 1)
+for tgt in ("1000 0 1 4000", "100 0.005 2 4000"):
+    ok &= run('cm29b_' + tgt.split()[0] + '_p' + tgt.split()[2], cm29b + 'target ' + tgt + '\n', frames[2], W, H)
+# a black frame (L1 0,0,0) maps instead of refusing
+black = 'l1 0 0 0\nl6 50 4000\n'
+ok &= run('cm29_black_1000_p1', black + 'target 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)
+ok &= run('cm4_black_1000_p1', black + 'l254\ntarget 1000 0 1 4000\n', np.zeros((H, W, 3)), W, H)
 print('PASS' if ok else 'FAIL')
+sys.exit(0 if ok else 1)

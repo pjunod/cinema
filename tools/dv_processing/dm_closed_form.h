@@ -324,7 +324,12 @@ DM_STATIC int dm_cm4_prepare(dm_cm4_state *s, const double l1[3], double tmin, d
   memset(s, 0, sizeof(*s));
   if (trim) s->tr = *trim;
   s->Tmin = tmin; s->Tmax = tmax;
-  s->SMin = l1[0]; s->SMid = l1[1]; s->SMax = dm_mind(l1[2] + s->tr.hc / 2, 1.0);
+  /* anchors held one 12-bit code apart inside [0,1] (as measured on real titles), also after the
+   * highlight-clipping shift, so black, flat and clipped frames stay mappable */
+  const double q = 1.0 / 4095;
+  s->SMid = dm_mind(dm_maxd(l1[1], q), 1 - q);
+  s->SMin = dm_mind(l1[0], s->SMid - q);
+  s->SMax = dm_maxd(dm_mind(l1[2] + s->tr.hc / 2, 1.0), s->SMid + q);
   if (!(s->SMin < s->SMid && s->SMid < s->SMax && tmin < tmax)) return 0;
   double TM = dm_cm4_tmid(s->SMin, s->SMid, s->SMax, tmin, tmax);
   s->TMid = TM;
@@ -437,7 +442,9 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   memset(s, 0, sizeof(*s));
   if (trim) s->tr = *trim;
   s->tg = *tg;
-  double crush = l1[0], mid = l1[1], clip = l1[2];
+  /* black and flat frames: crush and clip held one 12-bit code apart inside [0,1] */
+  const double q = 1.0 / 4095;
+  double crush = dm_mind(dm_maxd(l1[0], 0.0), 1 - q), mid = l1[1], clip = dm_maxd(dm_mind(l1[2], 1.0), crush + q);
   double Sm = dm_pq_nits(smin), SM = dm_pq_nits(spk), Tm = dm_pq_nits(tg->min_nits), TM = dm_pq_nits(tg->peak_nits);
   if (!(clip > crush && SM > Sm && TM > Tm)) return 0;
   double ratio = dm_mind(1.0, sqrt((TM + Tm) / (SM + Sm)));

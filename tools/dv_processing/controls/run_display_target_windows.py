@@ -160,7 +160,9 @@ def run(args):
                     metadata = l1[source_index]
                     assert (trace[index]['max_pq'], trace[index]['avg_pq']) == (metadata['max_pq'], metadata['avg_pq'])
                     assert trace[index]['method'] == 'dolby-closed-form-cm4-cm29-v1'
-                    assert trace[index]['curve'].split('-')[0] in ('cm4', 'cm29'), trace[index]
+                    # served output applies no creative trims (DV_TARGET_CREATIVE_TRIMS false)
+                    assert trace[index]['curve'] in ('cm4-l1-only', 'cm29-l1-only'), trace[index]
+                    assert trace[index]['trim_targets'] == 0 and trace[index]['detail_weight'] == 0, trace[index]
                     actual = words(raw)
                     assert max(actual[:4096]) <= 64 + 876 * oetf(nits) + 1
                     results.append({'profile': profile, 'family': family, 'nits': nits,

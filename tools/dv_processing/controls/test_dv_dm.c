@@ -11,7 +11,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <libdovi/rpu_parser.h>
-#include "../dv_dm.h"
+static void require(bool ok, const char *why) {
+  if (!ok) { fprintf(stderr, "refused: %s\n", why); exit(1); }
+}
+#include "../display_target.h"   // DV_TARGET_CREATIVE_TRIMS, and dv_dm.h
 
 typedef struct {
   DoviVdrDmData dm;
@@ -59,12 +62,13 @@ static void add_l8(rpu *r, unsigned tid, unsigned slope, unsigned offset, unsign
   r->dm.dm_data.level8.len = n + 1;
 }
 
-static dv_dm_frame prep(const rpu *r, double nits, enum dm_prim prim) {
+static dv_dm_frame prep_t(const rpu *r, double nits, enum dm_prim prim, bool trims) {
   dv_dm_frame f;
-  const char *why = dv_dm_prepare(&r->dm, nits, 0.005, prim, 4000, &f);
+  const char *why = dv_dm_prepare(&r->dm, nits, 0.005, prim, 4000, trims, &f);
   if (why) { fprintf(stderr, "prepare refused: %s\n", why); exit(1); }
   return f;
 }
+static dv_dm_frame prep(const rpu *r, double nits, enum dm_prim prim) { return prep_t(r, nits, prim, true); }
 static float *render(const dv_dm_frame *f, const float *in, int w, int h) {
   float *out = malloc((size_t)w * h * 16);
   assert(out && dv_dm_cpu_render(f, in, w, h, out));
@@ -89,7 +93,8 @@ static double maxdiff(const float *a, const float *b, int n) {
   return d;
 }
 
-static void check_range(const char *name, const dv_dm_frame *f, double nits) {
+// level 2: range, neutral, monotone, not flat; 1: range, neutral, monotone; 0: range only
+static void check_range(const char *name, const dv_dm_frame *f, double nits, int level) {
   const double top = dm_pq_oetf(nits) + 1.0 / 1023;
   // grey axis, detail stage off: pointwise curve, monotone and neutral
   dv_dm_frame point = *f; point.weight = -2;
@@ -100,11 +105,11 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits) {
       double v = o[4*i+c];
       if (!(isfinite(v) && v >= -1e-6 && v <= top)) { fprintf(stderr, "%s grey %d c%d = %g (top %g)\n", name, i, c, v, top); exit(1); }
     }
-    if (fabs(o[4*i] - o[4*i+1]) > 2e-4 || fabs(o[4*i+1] - o[4*i+2]) > 2e-4) { fprintf(stderr, "%s grey %d not neutral\n", name, i); exit(1); }
+    if (level >= 1 && (fabs(o[4*i] - o[4*i+1]) > 2e-4 || fabs(o[4*i+1] - o[4*i+2]) > 2e-4)) { fprintf(stderr, "%s grey %d not neutral\n", name, i); exit(1); }
     // monotone to 1e-5 PQ (0.01 of a 10-bit code: float noise at the black clamp)
-    if (i && o[4*i+1] < o[4*(i-1)+1] - 1e-5) { fprintf(stderr, "%s grey not monotone at %d\n", name, i); exit(1); }
+    if (level >= 1 && i && o[4*i+1] < o[4*(i-1)+1] - 1e-5) { fprintf(stderr, "%s grey not monotone at %d\n", name, i); exit(1); }
   }
-  if (!(o[4*(N-1)+1] > o[4*(N/2)+1] && o[4*(N/2)+1] > o[1])) { fprintf(stderr, "%s grey axis flat\n", name); exit(1); }
+  if (level >= 2 && !(o[4*(N-1)+1] > o[4*(N/2)+1] && o[4*(N/2)+1] > o[1])) { fprintf(stderr, "%s grey axis flat\n", name); exit(1); }
   free(g); free(o);
   // colour lattice with the production detail stage
   int w, h; float *l = lattice(&w, &h), *lo = render(f, l, w, h);
@@ -115,7 +120,28 @@ static void check_range(const char *name, const dv_dm_frame *f, double nits) {
   free(l); free(lo);
 }
 
-int main(void) {
+// The retained P7 fixture (controls/tags/p7-frame0.nal) through the real parser: the same
+// selection the Rust tests pin (FIXTURE_DM in dv_runtime.rs), so the C and Rust family rules are
+// checked on identical bytes.
+static void check_fixture(const char *path) {
+  FILE *fp = fopen(path, "rb"); assert(fp);
+  static uint8_t buf[1 << 16]; size_t len = fread(buf, 1, sizeof(buf), fp); fclose(fp);
+  assert(len > 0 && len < sizeof(buf));
+  DoviRpuOpaque *raw = dovi_parse_unspec62_nalu(buf, len);
+  assert(raw && !dovi_rpu_get_error(raw));
+  const DoviVdrDmData *dm = dovi_rpu_get_vdr_dm_data(raw);
+  assert(dm);
+  dv_dm_frame f;
+  assert(dv_dm_prepare(dm, 1000, 0.005, DM_P3D65, 4000, DV_TARGET_CREATIVE_TRIMS, &f) == NULL);
+  (void)dv_target;
+  assert(f.algo == 4 && !strcmp(f.trim, "l1-only") && f.trim_targets == 0 && f.weight == 0);
+  dovi_rpu_free_vdr_dm_data(dm);
+  dovi_rpu_free(raw);
+  printf("fixture %s: cm4-l1-only\n", path);
+}
+
+int main(int argc, char **argv) {
+  if (argc > 1) check_fixture(argv[1]);
   static const unsigned buckets[] = {100, 400, 600, 1000, 1600, 2000, 4000};
   rpu c4, c4n, c29, c29n;
   base(&c4, 0, 1600, 3500); cm4(&c4);
@@ -156,7 +182,7 @@ int main(void) {
     for (unsigned b = 0; b < sizeof(buckets) / sizeof(*buckets); b++) {
       char name[64]; snprintf(name, sizeof(name), "%s@%u", names[k], buckets[b]);
       dv_dm_frame x = prep(all[k], buckets[b], buckets[b] == 100 ? DM_BT709 : DM_P3D65);
-      check_range(name, &x, buckets[b]);
+      check_range(name, &x, buckets[b], 2);
     }
 
   // 3. identical pixels, different L1: different output
@@ -186,15 +212,57 @@ int main(void) {
   f = prep(&one, 400, DM_P3D65);
   assert(f.c4.tr.sg == 0 && fabs(f.c4.tr.gain / 0.5 - 0.6337) < 1e-3);
 
-  // 6. pinned golden values of the model (BT.2020/PQ out for a PQ 0.75 grey and a saturated red).
+  // 6. served output does not apply creative trims (DV_TARGET_CREATIVE_TRIMS false): untrimmed
+  //    mapping, identical to an RPU without L2/L8, and reported as such
+  {
+    int w2, h2; float *l2 = lattice(&w2, &h2);
+    dv_dm_frame s4 = prep_t(&c4, 400, DM_P3D65, DV_TARGET_CREATIVE_TRIMS), n4 = prep_t(&c4n, 400, DM_P3D65, true);
+    assert(s4.algo == 4 && s4.trim_targets == 0 && !strcmp(s4.trim, "l1-only") && s4.weight == 0);
+    float *a1 = render(&s4, l2, w2, h2), *b1 = render(&n4, l2, w2, h2);
+    assert(maxdiff(a1, b1, w2 * h2) == 0);
+    free(a1); free(b1);
+    dv_dm_frame s29 = prep_t(&c29, 1000, DM_P3D65, DV_TARGET_CREATIVE_TRIMS), n29 = prep_t(&c29n, 1000, DM_P3D65, true);
+    assert(s29.algo == 29 && s29.trim_targets == 0 && !strcmp(s29.trim, "l1-only") && s29.weight == 0);
+    a1 = render(&s29, l2, w2, h2); b1 = render(&n29, l2, w2, h2);
+    assert(maxdiff(a1, b1, w2 * h2) == 0);
+    free(a1); free(b1); free(l2);
+  }
+
+  // 7. black, flat, clipped and nonsensical metadata still map (finite, in range) instead of refusing
+  {
+    static const unsigned l1s[][3] = {{0, 0, 0}, {1000, 1000, 1000}, {4095, 4095, 4095}, {0, 0, 4095}, {0, 4095, 4095},
+                                      {62, 62, 63}, {4094, 4095, 4095}};
+    for (unsigned k = 0; k < sizeof(l1s) / sizeof(*l1s); k++)
+      for (int fam = 0; fam < 2; fam++)
+        for (int b = 0; b < 3; b++) {
+          static const unsigned nb[3] = {100, 600, 4000};
+          rpu d; base(&d, l1s[k][0], l1s[k][1], l1s[k][2]);
+          if (fam) {
+            cm4(&d);
+            if (l1s[k][1] >= 4000) d.l3.avg_pq_offset = 2048 + 100;   // avg + L3 beyond the top code
+            add_l8(&d, 48, 2048, 2048, 2048, 2048, 2048, 128);
+            d.l8[0].clip_trim = 0;                                    // most negative highlight clipping
+            add_l8(&d, 1, 0, 0, 0, 0, 4095, 255);                     // slope/offset/power codes 0
+          } else {
+            add_l2(&d, 2081, 0, 0, 0, 4095, 4095, 4095);
+          }
+          char name[64]; snprintf(name, sizeof(name), "degenerate%u-%s@%u", k, fam ? "cm4" : "cm29", nb[b]);
+          dv_dm_frame x = prep(&d, nb[b], nb[b] == 100 ? DM_BT709 : DM_P3D65);
+          check_range(name, &x, nb[b], 0);                          // nonsensical trims: range only
+          x = prep_t(&d, nb[b], nb[b] == 100 ? DM_BT709 : DM_P3D65, false);
+          check_range(name, &x, nb[b], 0);   // untrimmed: range (a black frame's curve is flat at black)
+        }
+  }
+
+  // 8. pinned golden values of the model (BT.2020/PQ out for a PQ 0.75 grey and a skin-like orange).
   // They lock the closed form against silent drift; they are model outputs, not vendor measurements.
-  float probe[8] = {0.75f, 0.75f, 0.75f, 1, 0.70f, 0.25f, 0.15f, 1};
+  float probe[8] = {0.75f, 0.75f, 0.75f, 1, 0.62f, 0.45f, 0.38f, 1};
   const struct { const rpu *r; unsigned nits; enum dm_prim prim; double g[6]; } golden[] = {
-    {&c4, 1000, DM_P3D65, {0.5987818, 0.5987818, 0.5987818, 0.5338017, 0.2809092, 0.1723030}},
-    {&c4, 400, DM_P3D65, {0.6024639, 0.6024639, 0.6024639, 0.5333900, 0.2804991, 0.1103325}},
-    {&c4, 100, DM_BT709, {0.5080784, 0.5080784, 0.5080784, 0.4620758, 0.2713923, 0.1767924}},
-    {&c29, 1000, DM_P3D65, {0.6817431, 0.6817437, 0.6817428, 0.6950256, 0.4095575, 0.1703391}},
-    {&c29, 100, DM_BT709, {0.4840483, 0.4840527, 0.4840463, 0.4620758, 0.2713923, 0.1767924}},
+    {&c4, 1000, DM_P3D65, {0.5987818, 0.5987818, 0.5987818, 0.4802569, 0.3451082, 0.2869328}},
+    {&c4, 400, DM_P3D65, {0.6024639, 0.6024639, 0.6024639, 0.5226588, 0.3718402, 0.3081956}},
+    {&c4, 100, DM_BT709, {0.5080784, 0.5080784, 0.5080784, 0.4660859, 0.3247151, 0.2794885}},
+    {&c29, 1000, DM_P3D65, {0.6817431, 0.6817437, 0.6817428, 0.6097828, 0.4371203, 0.3670094}},
+    {&c29, 100, DM_BT709, {0.4840483, 0.4840527, 0.4840463, 0.4678349, 0.3426540, 0.2857033}},
   };
   int bad = 0;
   for (unsigned k = 0; k < sizeof(golden) / sizeof(*golden); k++) {
