@@ -7583,3 +7583,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
 source_anchor = "peak_source = peak?.source,"
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "fun peakWireIsExplicitAndSnapshotDoesNotFollowLaterPreferences()"
+
+[[fixes]]
+id = "claude.web-hdr-display-claim-follows-browser"
+commits = ["f97e0bbed618b875959b3a31e06a11720d115016", "36f9d46d77152c2cfdf5a54138e9249500d501e6"]
+source = "crates/plurxd/src/web/player/decode-tiers.js"
+source_anchor = "function watchDisplayDynamicRange(){"
+test = "tests/web/hdr-display-change.test.js"
+test_anchor = "test(\"a display that turns HDR after boot is claimed for the next session\""
