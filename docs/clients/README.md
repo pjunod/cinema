@@ -11,6 +11,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | File | Answers | |
 |---|---|---|
 | [HDR-DISPLAY-PEAK.md](HDR-DISPLAY-PEAK.md) | Android/TV platform reports, browser peak choices, session boundaries and the synthetic PQ comparison; physical qualification pending. | open |
+| [LINUX-PLAYER-PLAN.md](LINUX-PLAYER-PLAN.md) | How Dolby Vision plays on Linux: a web handoff to plurx Player, an mpv launcher, the closed-form mapping in a private libplacebo, and the milestones; web setting (M3) and launcher (M4) built against fakes, server handoff in progress. | open |
 | [FRAME-DROP-RECORDER.md](FRAME-DROP-RECORDER.md) | Automatic web incident capture, bounds, privacy, retrieval and attribution limits; production acceptance pending. | built |
 | [AVATAR-WEB-PLAYBACK-STATUS.md](AVATAR-WEB-PLAYBACK-STATUS.md) | Avatar Safari presentation faults, FEL encoder-selection root cause, physical evidence and review state. | open |
 | [Apple TV library row clipping](../apple-builds/1245-tvos-library-row-clipping.md) | Complete movie/show posters and metadata fit while browsing; the preamble scrolls and compact tools retain Back/Down focus. Physical Apple TV acceptance pending. | built |
