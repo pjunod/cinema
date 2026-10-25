@@ -1,7 +1,7 @@
 # Display management precision — shader parity and the CM v2.9 residual
 
-**Status:** open · **Owner:** Codex · **Updated:** 2026-10-25 ·
-**Branch:** `codex/cm29-residual-dm-parity` · **PR:** #1284 (draft)
+**Status:** done (precision repair and candidate disposition) · **Owner:** Codex · **Updated:** 2026-10-25 ·
+**Branch:** `codex/cm29-residual-dm-parity` · **PR:** #1284 (authoritative landing state)
 
 Companion to the [display-target build ledger](DISPLAY-TARGETED-DV-BUILD.md).
 This page tracks the shader precision repair and the separate near-black
@@ -12,9 +12,9 @@ physical display acceptance remains in the build ledger.
 
 | Work | State | Remaining |
 |---|---|---|
-| PQ shader precision | Implemented, awaiting review | Independent adversarial review; focused regressions; llvmpipe and NVIDIA parity; fast lane; merge |
-| CM v2.9 near-black residual | Affine candidate rejected; title screen finishing | Preserve private measurements and document the negative result; no production model change |
-| PR ownership | Codex owns implementation and merge | Keep the draft description current through landing |
+| PQ shader precision | Reviewed; metadata controls and both-driver parity passed | PR #1284 records the current fast-lane result and landing state |
+| CM v2.9 near-black residual | Affine candidate rejected; no production correction | Reference operation remains unidentified; private study records the rejected hypothesis |
+| PR ownership | Codex owns implementation and merge | Current head, checks and landing are recorded in PR #1284 |
 
 No deployment or service restart is part of this work. Paul owns deployment.
 The near-black experiment may close with a documented rejection: a correction
@@ -72,8 +72,11 @@ magnitude is 0.000582 / 0.000676, versus reference neutral chroma of only
 0.124 to 0.450. A through-origin fit preserves neutrals but improves clean
 held-out mean error by less than 0.4%. These results reject the proposed
 affine correction; they do not identify the remaining reference operation.
-The title screen supplies further evidence, not authority to ship an
-unexplained table. No CM v2.9 model change is included in this PR.
+The expensive title screen was bounded after the neutral failure: no
+four-title or Smile dark-band acceptance is claimed. Reference generation
+completed; any optional first-title diagnostic is retained privately. Those
+acceptance checks would be mandatory for a future shipping candidate. They
+are unnecessary to reject this one. No CM v2.9 model change is included.
 Reference output, metadata and fitted private research artifacts stay in the
 private research repository. Only a justified closed-form correction and
 source-backed conclusions belong in plurx.
@@ -90,10 +93,41 @@ The independent adversarial agent reviewed source `4dd956372` against
 assessed the measured synthetic residual and approved the guarded channel
 acceptance extension. No tests were executed by the reviewer.
 
-Pending. Unit suites and the ready-PR fast lane run after the one final
-adversarial review. Numerical exploration supplies model evidence during
-development. The parity controller accepts optional case names after the three required
-arguments so failed cases can be rerun individually. Unknown names fail.
-Failed checks are rerun individually; unrelated passing suites
-are retained. Final source pins, commands, results and review disposition
-will be recorded here before landing.
+The production shader source is unchanged after the initial review; its
+SHA-256 is `4718021964d300d692e648d3685989cb4ba8fb9c373d551232e6de3d0c293a87`.
+Committed source was archived without Git state or credentials to the
+isolated control workspace. Both driver manifests were selected explicitly.
+
+| Driver | Frame set | Cases rendered | Max real dE_ITP | Max real channel PQ error | Max synthetic dE_ITP |
+|---|---|---|---|---|---|
+| llvmpipe | Last Breath | 29 | 0.0375 | 3.59e-5 | 0.4411 |
+| llvmpipe | Sound of Music | 29 | 0.0424 | 3.64e-5 | 0.4411 |
+| NVIDIA | Last Breath | 29 | 0.0118 | 6.60e-5 | 0.1246 |
+| NVIDIA | Sound of Music | 29 | 0.0152 | 6.60e-5 | 0.1246 |
+
+The original channel-PQ rule passed all NVIDIA cases. The only software
+Vulkan failure on each frame set was `cm4_syn_2000_p0`: cyan input
+`(0,0.875,0.875)` yielded a red-channel discrepancy of 0.06922 PQ but only
+0.12847 nit, or 6.424e-5 of the actual 2000-nit target peak. Its dE mean was
+0.0009 and maximum 0.1287. The bounded channel allowance accepts that small
+near-black light discrepancy while retaining the original PQ acceptance for
+other channels. It does not assert a blanket 1e-4 linear-light bound.
+
+Only those two failed cases were rendered again after the reviewed
+controller change; both passed. The actual new predicate and domain guard
+were also applied to all 116 retained output rasters: no invalid output or
+synthetic channel failure. The remaining successful GPU cases were retained.
+`test_dv_dm tools/dv_processing/controls/tags` passed. Named selection uses:
+
+```bash
+python3 tools/dv_processing/controls/run_dm_parity.py \
+  "$CONTROL" "$SCRATCH" "$FRAMES" cm4_syn_2000_p0  # Rerun this case only.
+```
+
+The main fast lane runs the five precision/tolerance regressions in
+[the source-extracted test](../../tests/operations/test_dv_dm_pq_precision.py).
+Its current-head result and any failed-method-only rerun are recorded in
+PR #1284; merge requires green checks. No throughput benchmark or physical
+display acceptance is claimed. The display-management method stays v4:
+the double equations and creative mapping are unchanged, and measured
+real-case differences remain within the existing precision contract.
