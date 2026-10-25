@@ -6,7 +6,7 @@ use crate::scan::dv_title::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub const DISPLAY_TARGET_METHOD: &str = "annex-b2-rgb-fixed-floor-no-expansion-linear-edge-v1";
+pub const DISPLAY_TARGET_METHOD: &str = "dolby-closed-form-cm4-cm29-v1";
 pub const DISPLAY_TARGET_BUCKETS: [u32; 6] = [400, 600, 1000, 1600, 2000, 4000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -21,6 +21,25 @@ pub struct DvDisplayTarget {
     resolved_primaries: Option<[u16; 8]>,
     title_stats_sha256: [u8; 32],
 }
+
+/// Closed-form Dolby display management selected per frame (helper `dv_dm.h`): what its
+/// `display_target_frame` row must report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DvDisplayManagement {
+    pub cm4: bool,
+    pub curve: &'static str,
+    pub trim_targets: usize,
+    pub detail_weight: f64,
+}
+/// Whether served output applies the L2/L8 creative trims (helper `DV_TARGET_CREATIVE_TRIMS`).
+/// False until the trims are accepted; playback reports `creative_trims_applied:false`. Changing it
+/// needs a new `DISPLAY_TARGET_METHOD`.
+pub const DISPLAY_TARGET_CREATIVE_TRIMS: bool = false;
+/// The helper uses at most this many resolvable L8 trims per frame (`dv_dm.h`); the parser itself
+/// accepts at most five L8 blocks per RPU.
+const DM_MAX_L8_TRIMS: usize = 32;
+/// L8 target display indices the helper resolves without an L10 (`dv_dm_preset`).
+const DM_PRESET_TARGETS: [u8; 7] = [1, 27, 28, 37, 38, 48, 49];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DvDisplayTargetChoice {
@@ -127,6 +146,100 @@ impl DvDisplayTarget {
             return Err(invalid());
         }
         Ok((l1.max_pq, l1.avg_pq))
+    }
+    /// The exact display-management selection the helper (`dv_dm.h`) must report for this RPU at
+    /// this bucket: CM v4 when the RPU carries CM v4.0 metadata (L254) or L8 trims, otherwise
+    /// CM v2.9. CM v4 uses every L8 whose target display is a preset or is described by an L10;
+    /// CM v2.9 uses the L2 authored for the bucket peak, else the nearest lower one.
+    pub fn display_management(self, raw: &[u8]) -> Result<DvDisplayManagement, DvContractError> {
+        self.display_management_with(raw, DISPLAY_TARGET_CREATIVE_TRIMS)
+    }
+    /// As [`Self::display_management`], with creative trims applied or not.
+    pub fn display_management_with(
+        self,
+        raw: &[u8],
+        trims: bool,
+    ) -> Result<DvDisplayManagement, DvContractError> {
+        use dolby_vision::rpu::{dovi_rpu::DoviRpu, extension_metadata::blocks::ExtMetadataBlock};
+        let invalid = || DvContractError::Invalid("display-target RPU unparseable");
+        let rpu = DoviRpu::parse_unspec62_nalu(raw).map_err(|_| invalid())?;
+        let dm = rpu.vdr_dm_data.as_ref().ok_or_else(invalid)?;
+        let l8: Vec<u8> = dm
+            .level_blocks_iter(8)
+            .filter_map(|block| match block {
+                ExtMetadataBlock::Level8(x) => Some(x.target_display_index),
+                _ => None,
+            })
+            .collect();
+        if dm.get_block(254).is_some() || !l8.is_empty() {
+            if !trims {
+                return Ok(DvDisplayManagement {
+                    cm4: true,
+                    curve: "cm4-l1-only",
+                    trim_targets: 0,
+                    detail_weight: 0.0,
+                });
+            }
+            let described = |index: u8| {
+                dm.level_blocks_iter(10).any(|block| {
+                    matches!(block, ExtMetadataBlock::Level10(x) if x.target_display_index == index)
+                })
+            };
+            let used = l8
+                .iter()
+                .filter(|index| DM_PRESET_TARGETS.contains(index) || described(**index))
+                .count()
+                .min(DM_MAX_L8_TRIMS);
+            return Ok(DvDisplayManagement {
+                cm4: true,
+                curve: if used > 0 {
+                    "cm4-l8-interpolated"
+                } else {
+                    "cm4-l1-only"
+                },
+                trim_targets: used,
+                detail_weight: 0.0,
+            });
+        }
+        if !trims {
+            return Ok(DvDisplayManagement {
+                cm4: false,
+                curve: "cm29-l1-only",
+                trim_targets: 0,
+                detail_weight: 0.0,
+            });
+        }
+        let want = (pq_code_f64(f64::from(self.nits)) * 4095.0 + 0.5).floor() as u32;
+        let (mut best, mut found, mut weight) = (0u32, 0u8, 0.0);
+        let mut l2_trims = 0;
+        for block in dm.level_blocks_iter(2) {
+            let ExtMetadataBlock::Level2(x) = block else {
+                continue;
+            };
+            l2_trims += 1;
+            let target = u32::from(x.target_max_pq);
+            if target > want + 1 || target < best {
+                continue;
+            }
+            best = target;
+            found = if target + 1 >= want { 2 } else { 1 };
+            let ms = if x.ms_weight < 0 {
+                2048
+            } else {
+                i32::from(x.ms_weight)
+            };
+            weight = f64::from(ms - 2048) / 2048.0;
+        }
+        Ok(DvDisplayManagement {
+            cm4: false,
+            curve: match found {
+                2 => "cm29-l2-exact",
+                1 => "cm29-l2-nearest-lower",
+                _ => "cm29-l1-only",
+            },
+            trim_targets: l2_trims,
+            detail_weight: weight,
+        })
     }
     pub fn mastering(self) -> MasteringLuminance {
         self.mastering
@@ -277,6 +390,12 @@ pub struct DvSourceMastering {
     pub min_1e4_nits: u32,
 }
 
+/// ST 2084 inverse EOTF of absolute nits (the helper's `dm_pq_oetf`).
+fn pq_code_f64(nits: f64) -> f64 {
+    let p = (nits / 10000.0).powf(2610.0 / 16384.0);
+    ((3424.0 / 4096.0 + 2413.0 / 128.0 * p) / (1.0 + 2392.0 / 128.0 * p)).powf(2523.0 / 32.0)
+}
+
 fn pq_nits(code: u16) -> f64 {
     let p = (f64::from(code) / 4095.0).powf(32.0 / 2523.0);
     10000.0
@@ -313,6 +432,135 @@ fn l9_primaries(value: MasteringPrimaries) -> Result<[u16; 8], DvContractError> 
 mod tests {
     use super::*;
     use crate::scan::dv_title::SCHEMA;
+
+    /// The selection the helper must report, from synthetic RPUs built on a retained fixture.
+    #[test]
+    fn display_management_selection_follows_the_raw_rpu_exactly() {
+        use dolby_vision::rpu::dovi_rpu::DoviRpu;
+        use dolby_vision::rpu::extension_metadata::blocks::{
+            ExtMetadataBlock, ExtMetadataBlockLevel10, ExtMetadataBlockLevel2,
+            ExtMetadataBlockLevel8,
+        };
+        use dolby_vision::rpu::extension_metadata::{CmV40DmData, DmData};
+        let fixture = include_bytes!("../../../tests/fixtures/dv-runtime/p8-piecewise.nal");
+        let build = |cm4: bool, blocks: Vec<ExtMetadataBlock>| {
+            let mut rpu = DoviRpu::parse_unspec62_nalu(fixture).expect("fixture");
+            let dm = rpu.vdr_dm_data.as_mut().expect("display metadata");
+            dm.remove_metadata_level(2);
+            dm.remove_metadata_level(8);
+            dm.remove_metadata_level(10);
+            dm.cmv40_metadata = cm4.then(|| DmData::V40(CmV40DmData::new_with_l254_402()));
+            for block in blocks {
+                dm.add_metadata_block(block).expect("block");
+            }
+            rpu.modified = true;
+            rpu.write_hevc_unspec62_nalu().expect("RPU")
+        };
+        let l2 = |target_max_pq, ms_weight| {
+            ExtMetadataBlock::Level2(ExtMetadataBlockLevel2 {
+                target_max_pq,
+                ms_weight,
+                ..Default::default()
+            })
+        };
+        let l8 = |target_display_index| {
+            ExtMetadataBlock::Level8(ExtMetadataBlockLevel8 {
+                length: 13,
+                target_display_index,
+                ..Default::default()
+            })
+        };
+        let target = |nits| match DvDisplayTarget::for_title(nits, Some(stats())).expect("bucket") {
+            DvDisplayTargetChoice::Target(target) => target,
+            DvDisplayTargetChoice::Master { .. } => panic!("target"),
+        };
+        let check = |raw: &[u8], nits: u32, expected: (bool, &str, usize, f64)| {
+            let dm = target(nits)
+                .display_management_with(raw, true)
+                .expect("selection");
+            assert_eq!(
+                (dm.cm4, dm.curve, dm.trim_targets, dm.detail_weight),
+                expected,
+                "{nits}"
+            );
+        };
+        // CM v2.9: exact 12-bit match, nearest lower, none at or below; raw ms_weight -1 is 0.
+        let cm29 = build(false, vec![l2(2081, -1), l2(3079, 1800)]);
+        let weight = (1800.0 - 2048.0) / 2048.0;
+        check(&cm29, 1000, (false, "cm29-l2-exact", 2, weight));
+        check(&cm29, 1600, (false, "cm29-l2-nearest-lower", 2, weight));
+        check(&cm29, 600, (false, "cm29-l2-nearest-lower", 2, 0.0));
+        check(
+            &build(false, vec![l2(3079, 1800)]),
+            600,
+            (false, "cm29-l1-only", 1, 0.0),
+        );
+        check(&build(false, vec![]), 1000, (false, "cm29-l1-only", 0, 0.0));
+        // CM v4: L254 alone selects CM v4; an L8 needs a preset target or an L10 describing it.
+        check(&build(true, vec![]), 1000, (true, "cm4-l1-only", 0, 0.0));
+        check(
+            &build(true, vec![l8(48), l8(99)]),
+            1000,
+            (true, "cm4-l8-interpolated", 1, 0.0),
+        );
+        let described = ExtMetadataBlock::Level10(ExtMetadataBlockLevel10 {
+            length: 5,
+            target_display_index: 99,
+            target_max_pq: 2851,
+            target_primary_index: 0,
+            ..Default::default()
+        });
+        check(
+            &build(true, vec![l8(48), l8(99), described.clone()]),
+            1000,
+            (true, "cm4-l8-interpolated", 2, 0.0),
+        );
+        check(
+            &build(true, vec![l8(99)]),
+            1000,
+            (true, "cm4-l1-only", 0, 0.0),
+        );
+        // Committed fixtures with trims, read by the C control (controls/test_dv_dm.c) through the
+        // real parser, so the C and Rust selections are compared on identical bytes. Regenerate
+        // with PLURX_WRITE_DM_FIXTURES=1 only when the fixture definition changes.
+        let cm4_trims = build(true, vec![l8(48), l8(99), described]);
+        for (name, raw, expected) in [
+            (
+                "cm4-l8-trims.nal",
+                &cm4_trims,
+                (true, "cm4-l8-interpolated", 2, 0.0),
+            ),
+            (
+                "cm29-l2-trims.nal",
+                &cm29,
+                (false, "cm29-l2-exact", 2, weight),
+            ),
+        ] {
+            check(raw, 1000, expected);
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/dv_processing/controls/tags")
+                .join(name);
+            if std::env::var_os("PLURX_WRITE_DM_FIXTURES").is_some() {
+                std::fs::write(&path, raw).expect("write fixture");
+            }
+            assert_eq!(
+                &std::fs::read(&path).expect("committed fixture"),
+                raw,
+                "{name}"
+            );
+        }
+        // Served output: creative trims are not applied, whatever the RPU carries.
+        for (raw, cm4) in [(&cm29, false), (&build(true, vec![l8(48)]), true)] {
+            let dm = target(1000)
+                .display_management(raw)
+                .expect("served selection");
+            let curve = if cm4 { "cm4-l1-only" } else { "cm29-l1-only" };
+            assert_eq!(
+                (dm.cm4, dm.curve, dm.trim_targets, dm.detail_weight),
+                (cm4, curve, 0, 0.0)
+            );
+        }
+    }
     fn stats() -> DvTitleStats {
         DvTitleStats {
             schema: SCHEMA,

@@ -85,7 +85,7 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 fn renderer_source_identity() -> String {
-    let inputs: [(&str, &[u8]); 13] = [
+    let inputs: [(&str, &[u8]); 15] = [
         (
             "base_dv_renderer.h",
             include_bytes!("../../../tools/dv_processing/base_dv_renderer.h"),
@@ -93,6 +93,14 @@ fn renderer_source_identity() -> String {
         (
             "display_target.h",
             include_bytes!("../../../tools/dv_processing/display_target.h"),
+        ),
+        (
+            "dm_closed_form.h",
+            include_bytes!("../../../tools/dv_processing/dm_closed_form.h"),
+        ),
+        (
+            "dv_dm.h",
+            include_bytes!("../../../tools/dv_processing/dv_dm.h"),
         ),
         (
             "dv_metadata.h",
@@ -264,7 +272,7 @@ impl ToolSet {
             let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             if manifest.schema != 1
                 || manifest.source_sha256 != renderer_source_identity()
-                || manifest.graph != "dv-native-master-or-annex-b2-rgb-v1"
+                || manifest.graph != "dv-native-master-or-closed-form-dm-v1"
                 || manifest.abi.get("libplacebo") != Some(&374)
                 || !["avcodec", "avformat", "avutil"]
                     .iter()
@@ -1690,6 +1698,8 @@ struct DisplayTargetRow {
     max0_fallback: bool,
     title_min_1e4: u32,
     title_peak: u32,
+    trim_targets: usize,
+    detail_weight: f64,
 }
 #[cfg(target_os = "linux")]
 impl DisplayTargetRow {
@@ -1700,20 +1710,18 @@ impl DisplayTargetRow {
     ) -> Result<(), String> {
         use plurx_core::transcode::dv_processing::DISPLAY_TARGET_METHOD;
         let (max, avg) = target.validate_rpu(raw).map_err(|e| e.to_string())?;
+        // Family, trim selection and detail weight follow exactly from the raw RPU and bucket.
+        let dm = target.display_management(raw).map_err(|e| e.to_string())?;
+        let dm_ok = self.curve == dm.curve
+            && self.trim_targets == dm.trim_targets
+            && (self.detail_weight - dm.detail_weight).abs() <= 1e-4;
         if self.nits != target.nits()
             || self.method != DISPLAY_TARGET_METHOD
             || self.title_min_1e4 != target.mastering().min_1e4_nits
             || self.title_peak != target.mastering().max_nits
             || (self.max_pq, self.avg_pq) != (max, avg)
             || self.max0_fallback != (max == 0)
-            || !matches!(
-                self.curve.as_str(),
-                "annex-b2-rgb"
-                    | "no-expansion"
-                    | "degenerate-average-linear"
-                    | "degenerate-adaptation-linear"
-                    | "nonfinite-or-nonmonotone-fit-linear"
-            )
+            || !dm_ok
         {
             return Err("display target trace differs from requested policy or raw L1".into());
         }
@@ -2281,6 +2289,77 @@ mod helper_decoder_tests {
     use super::helper_decoder;
     use plurx_core::transcode::DecodeBackend;
 
+    /// The retained P7 fixture's display-management selection, pinned so a parser or selection
+    /// change cannot silently move it.
+    fn fixture_dm(
+        target: plurx_core::transcode::dv_processing::DvDisplayTarget,
+        raw: &[u8],
+    ) -> (&'static str, usize, f64) {
+        let dm = target.display_management(raw).expect("fixture RPU parses");
+        assert_eq!(
+            (dm.cm4, dm.curve, dm.trim_targets, dm.detail_weight),
+            FIXTURE_DM,
+            "fixture selection moved"
+        );
+        (dm.curve, dm.trim_targets, dm.detail_weight)
+    }
+    /// The P7 fixture carries CM v4.0 metadata; served output applies no creative trims.
+    const FIXTURE_DM: (bool, &str, usize, f64) = (true, "cm4-l1-only", 0, 0.0);
+    fn other_family(curve: &str) -> &'static str {
+        if curve.starts_with("cm4-") {
+            "cm29-l1-only"
+        } else {
+            "cm4-l1-only"
+        }
+    }
+
+    #[test]
+    fn display_target_trace_requires_the_family_and_trims_of_the_raw_rpu() {
+        use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
+        let stats = DvTitleStats {
+            schema: SCHEMA,
+            complete: true,
+            decoded_frames: 1,
+            valid_l1_frames: 1,
+            missing_l1_frames: 0,
+            invalid_l1_frames: 0,
+            max_l1_pq: Some(4095),
+            mastering_luminance: TitleConstant::Unknown,
+            mastering_primaries: TitleConstant::Unknown,
+        };
+        let DvDisplayTargetChoice::Target(target) =
+            DvDisplayTarget::for_title(1000, Some(stats)).expect("title")
+        else {
+            panic!("target");
+        };
+        let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
+        let (max, avg) = target.validate_rpu(raw).expect("retained L1");
+        let (curve, trims, weight) = fixture_dm(target, raw);
+        let row = |curve: &str, trims: usize, weight: f64| {
+            serde_json::from_value::<super::DisplayTargetRow>(serde_json::json!({
+                "frame":0,"nits":1000,"method":DISPLAY_TARGET_METHOD,"curve":curve,
+                "max_pq":max,"avg_pq":avg,"max0_fallback":max==0,"title_min_1e4":50,
+                "title_peak":4000,"trim_targets":trims,"detail_weight":weight}))
+            .expect("trace")
+        };
+        assert!(row(curve, trims, weight).validate(target, raw).is_ok());
+        for (curve, trims, weight) in [
+            // trims are not applied to served output, whatever the RPU carries
+            ("cm4-l8-interpolated", 1, 0.0),
+            ("cm4-l1-only", trims + 1, weight),
+            ("cm4-l1-only", trims, 0.25),
+            // the family follows the RPU
+            ("cm29-l1-only", trims, weight),
+            ("cm29-l2-exact", trims + 1, weight),
+            ("cm4-unknown", trims, weight),
+        ] {
+            assert!(
+                row(curve, trims, weight).validate(target, raw).is_err(),
+                "{curve}"
+            );
+        }
+    }
+
     #[test]
     fn display_target_trace_binds_exact_bucket_endpoints_and_raw_l1() {
         use plurx_core::{scan::dv_title::*, transcode::dv_processing::*};
@@ -2304,10 +2383,12 @@ mod helper_decoder_tests {
         let (max, avg) = target
             .validate_rpu(raw)
             .expect("retained P7 fixture has valid L1 for the target title");
+        let (curve, trims, weight) = fixture_dm(target, raw);
         let valid = serde_json::json!({
             "frame":0, "nits":1600, "method":DISPLAY_TARGET_METHOD,
-            "curve":"annex-b2-rgb", "max_pq":max, "avg_pq":avg,
+            "curve":curve, "max_pq":max, "avg_pq":avg,
             "max0_fallback":max == 0, "title_min_1e4":50, "title_peak":4000,
+            "trim_targets":trims, "detail_weight":weight,
         });
         let parse = |row| {
             serde_json::from_value::<super::DisplayTargetRow>(row)
@@ -2323,7 +2404,10 @@ mod helper_decoder_tests {
             ("avg_pq", serde_json::json!(avg ^ 1)),
             ("max0_fallback", serde_json::json!(max != 0)),
             ("method", serde_json::json!("libplacebo-st2094-10")),
-            ("curve", serde_json::json!("unknown")),
+            ("curve", serde_json::json!("annex-b2-rgb")),
+            ("curve", serde_json::json!(other_family(curve))),
+            ("trim_targets", serde_json::json!(trims + 1)),
+            ("detail_weight", serde_json::json!(1.5)),
         ] {
             let mut forged = valid.clone();
             forged[field] = value;
@@ -2360,9 +2444,10 @@ mod helper_decoder_tests {
         assert_eq!(target.endpoint_args(), ["17", "4000"]);
         let raw = include_bytes!("../../../tools/dv_processing/controls/tags/p7-frame0.nal");
         let (max, avg) = target.validate_rpu(raw).expect("retained L1");
+        let (curve, trims, weight) = fixture_dm(target, raw);
         let mut row = serde_json::json!({"frame":0,"nits":1600,"method":DISPLAY_TARGET_METHOD,
-            "curve":"annex-b2-rgb","max_pq":max,"avg_pq":avg,"max0_fallback":max==0,
-            "title_min_1e4":17,"title_peak":4000});
+            "curve":curve,"max_pq":max,"avg_pq":avg,"max0_fallback":max==0,
+            "title_min_1e4":17,"title_peak":4000,"trim_targets":trims,"detail_weight":weight});
         let parse = |row| serde_json::from_value::<super::DisplayTargetRow>(row).expect("trace");
         assert!(parse(row.clone()).validate(target, raw).is_ok());
         row["title_min_1e4"] = 50.into();

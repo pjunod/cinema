@@ -1,5 +1,8 @@
 """Post-review real helper controls: complete title scan, per-frame target,
 raw-L1 response, exact overlap hashes, and actual Rust-policy master elision.
+Phase 2 (closed-form display management): each frame trace names the
+display-management family and the raw L1 it used; pixel accuracy of the
+equations is checked by test_dv_dm and run_dm_parity.py, not here.
 
 Requires explicitly compiled source-bound binaries (native Linux, no emulation).
 No root/device actions; the operator supplies a task-owned output directory and
@@ -15,8 +18,12 @@ from pathlib import Path
 import subprocess
 import sys
 
-from annex_b2 import from_l1, oetf
-from compare_display_target import yuv_reference
+
+
+def oetf(nits):
+    m1, m2, c1, c2, c3 = 2610 / 16384, 2523 / 32, 3424 / 4096, 2413 / 128, 2392 / 128
+    p = (nits / 10000) ** m1
+    return ((c1 + c2 * p) / (1 + c3 * p)) ** m2
 
 
 def sha(path):
@@ -152,16 +159,14 @@ def run(args):
                     source_index = round(pts * 24)
                     metadata = l1[source_index]
                     assert (trace[index]['max_pq'], trace[index]['avg_pq']) == (metadata['max_pq'], metadata['avg_pq'])
-                    curve = from_l1(metadata['max_pq'], metadata['avg_pq'], nits)
-                    native = words(master_rgb[family][pts])
-                    reference = yuv_reference([tuple(curve.pq(v / 65535) for v in native[i:i+3])
-                                               for i in range(0, len(native), 3)])
+                    assert trace[index]['method'] == 'dolby-closed-form-cm4-cm29-v1'
+                    # served output applies no creative trims (DV_TARGET_CREATIVE_TRIMS false)
+                    assert trace[index]['curve'] in ('cm4-l1-only', 'cm29-l1-only'), trace[index]
+                    assert trace[index]['trim_targets'] == 0 and trace[index]['detail_weight'] == 0, trace[index]
                     actual = words(raw)
-                    maximum = max(abs(a-b) for a, b in zip(actual, reference, strict=True))
-                    assert maximum <= 2, (profile, family, nits, pts, maximum)
                     assert max(actual[:4096]) <= 64 + 876 * oetf(nits) + 1
                     results.append({'profile': profile, 'family': family, 'nits': nits,
-                                    'pts': str(pts), 'max_error_codes': maximum, 'samples': len(actual)})
+                                    'pts': str(pts), 'curve': trace[index]['curve'], 'samples': len(actual)})
                 if family == 'high':
                     overlap, _ = render(sources[family], profile, choice, '1/8', '3/8',
                                          f'p{profile}-overlap-{nits}')
