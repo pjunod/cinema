@@ -2299,6 +2299,7 @@ test("display targeting remains editable with unavailable or unmet advice",()=>{
       assert.match(html,new RegExp(`TOG:dv-display-target\\|[^|]*\\|[^|]*\\|checked=${enabled}`));
       assert.match(html,/FOOT:saveDisplayTargetHdr10/);
       assert.match(html,/creative trims \(CM v4 L8, CM v2\.9 L2\)/);
+      assert.match(html,/every shot, some shots or none/);
       assert.match(html,/Pre-encodes and retained VOD stay master-only/);
     }
   }

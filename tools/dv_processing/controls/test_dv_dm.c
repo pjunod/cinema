@@ -72,6 +72,13 @@ static dv_dm_frame prep_t(const rpu *r, double nits, enum dm_prim prim, bool tri
   return f;
 }
 static dv_dm_frame prep(const rpu *r, double nits, enum dm_prim prim) { return prep_t(r, nits, prim, true); }
+// trims on, for a title mastered at `smast` nits
+static dv_dm_frame prep_m(const rpu *r, double nits, enum dm_prim prim, double smast) {
+  dv_dm_frame f;
+  const char *why = dv_dm_prepare(&r->dm, nits, 0.005, prim, smast, true, true, &f);
+  if (why) { fprintf(stderr, "prepare refused: %s\n", why); exit(1); }
+  return f;
+}
 // as served: each family's trims as display_target.h applies them
 static dv_dm_frame prep_served(const rpu *r, double nits, enum dm_prim prim) {
   dv_dm_frame f;
@@ -208,6 +215,12 @@ int main(int argc, char **argv) {
   f = prep(&c29, 1000, DM_P3D65);
   assert(f.algo == 29 && f.trim_targets == 3 && !strcmp(f.trim, "l2-exact"));
   assert(fabs(f.weight - (1800 - 2048) / 2048.0) < 1e-12);
+  {
+    dv_dm_frame g = prep_m(&c4, 1000, DM_P3D65, 1000);   // CM v4 at the mastering peak: faded out
+    assert(g.algo == 4 && !strcmp(g.trim, "l1-only") && g.trim_targets == 0);
+    g = prep_m(&c4, 600, DM_P3D65, 1000);
+    assert(g.algo == 4 && !strcmp(g.trim, "l8-interpolated") && g.trim_targets == 2);
+  }
   f = prep(&c29, 1600, DM_P3D65);   // between the 1000-nit trim and neutral at the 4000-nit master, in PQ
   assert(f.algo == 29 && !strcmp(f.trim, "l2-interpolated") && fabs(f.weight - -0.07994135942825827) < 1e-12);
   f = prep(&c29, 600, DM_P3D65);
@@ -215,10 +228,22 @@ int main(int argc, char **argv) {
   f = prep(&c29, 100, DM_BT709);
   assert(!strcmp(f.trim, "l2-exact") && f.weight == 0);      // raw ms_weight -1 is the default 0
   rpu hi; base(&hi, 80, 1528, 3728); add_l2(&hi, 3079, 2010, 2180, 2075, 2050, 2179, 1800);
-  f = prep(&hi, 600, DM_P3D65);    // below the lowest L2 target: that trim is held
-  assert(f.algo == 29 && f.trim_targets == 1 && !strcmp(f.trim, "l2-interpolated") && f.weight == (1800 - 2048) / 2048.0);
+  f = prep(&hi, 600, DM_P3D65);    // below the lowest L2 target: faded towards neutral at PQ 0
+  assert(f.algo == 29 && f.trim_targets == 1 && !strcmp(f.trim, "l2-interpolated") &&
+         fabs(f.weight - -0.1121395094623157) < 1e-12);
   f = prep(&hi, 4000, DM_P3D65);   // at the mastering peak the trims have faded out
   assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0);
+  // a title mastered at 1000 nits (display_target.rs pins the same): the 100-nit trim fades to
+  // neutral at 1000; the 3079 trim lies above PQ(1000), so at 600 nothing is left to interpolate
+  f = prep_m(&hi, 600, DM_P3D65, 1000);
+  assert(f.algo == 29 && !strcmp(f.trim, "l1-only") && f.weight == 0 && f.trim_targets == 1);
+  {
+    rpu low; base(&low, 80, 1528, 3728); add_l2(&low, 2081, 2010, 2180, 2075, 2050, 2179, 1800);
+    f = prep_m(&low, 600, DM_P3D65, 1000);
+    assert(f.algo == 29 && !strcmp(f.trim, "l2-interpolated") && fabs(f.weight - -0.02760024702986694) < 1e-12);
+    f = prep_m(&low, 600, DM_P3D65, 4000);   // the same trim fades over a longer span on a 4000-nit master
+    assert(!strcmp(f.trim, "l2-interpolated") && f.weight < -0.06);
+  }
   f = prep(&c29n, 600, DM_P3D65);
   assert(f.algo == 29 && f.trim_targets == 0 && !strcmp(f.trim, "l1-only") && f.weight == 0);
 

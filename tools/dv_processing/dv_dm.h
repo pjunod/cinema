@@ -150,20 +150,24 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
       }
       tpr[n] = tp; tpq[n++] = dm_pq_oetf(pk);
     }
-    // tone trims linear in PQ; colour trims linear in display size across gamuts (mastering display = L9 gamut, title peak)
-    dm_cm4_trim tr = dm_cm4_interp_gamut(trims, tpq, tpr, n, tmax, smast, tprim, sprim);
+    // tone trims linear in PQ; colour trims linear in display size across gamuts (mastering display = L9 gamut, title peak).
+    // At or above the mastering peak the trims have faded out: the untrimmed mapping, reported as such.
+    bool applied = n > 0 && tmax < smast;
+    dm_cm4_trim tr;
+    if (applied) tr = dm_cm4_interp_gamut(trims, tpq, tpr, n, tmax, smast, tprim, sprim);
+    else memset(&tr, 0, sizeof(tr));
     dm_cm4_state s;
     if (!dm_cm4_prepare(&s, e, tmin, tmax, &tr, tprim, sprim)) return "degenerate CM4 shot";
     f->weight = 0.0;
-    f->trim_targets = n; f->trim = n ? "l8-interpolated" : "l1-only";
+    f->trim_targets = applied ? n : 0; f->trim = applied ? "l8-interpolated" : "l1-only";
     f->c4 = s;
     dv_dm_pack_cm4(f, &s);
     return NULL;
   }
   // CM v2.9: the L2 trim authored for this target's peak (12-bit PQ match); otherwise each decoded
-  // trim field interpolated linearly in target PQ between the bracketing L2 targets, held below
-  // the lowest and faded to neutral at the mastering display (title peak). No usable L2, or a
-  // target at or above the mastering peak: neutral trim with the default MS weight.
+  // trim field interpolated linearly in target PQ between the bracketing L2 targets, with neutral
+  // trims at PQ 0 and at the mastering display (title peak). No usable L2, or a target at or above
+  // the mastering peak: neutral trim with the default MS weight.
   dm_cm29_trim tr = {0, 0, 0, 0, 0, 0}; unsigned want = (unsigned)floor(tmax * 4095 + 0.5); int found = 0;
   {
     dm_cm29_trim lo_t = tr, hi_t = tr; double lo = -1, hi = 2; bool exact = false;
@@ -180,12 +184,14 @@ static inline const char *dv_dm_prepare(const DoviVdrDmData *dm, double nits, do
       if (q < tmax && q > lo) { lo = q; lo_t = t; }
       if (q > tmax && q < hi) { hi = q; hi_t = t; }
     }
+    // an L2 target between this display and the mastering peak; without one (and without a lower
+    // target) every trim has faded out and the mapping is the untrimmed one
+    bool upper = hi <= 1 && hi < smast, lower = lo >= 0;
     if (exact) found = 2;
-    else if (tmax < smast && (lo >= 0 || hi <= 1)) {
-      // upper endpoint: the next L2 target below the mastering peak, else neutral at the mastering peak
-      if (!(hi <= 1 && hi < smast)) { hi = smast; memset(&hi_t, 0, sizeof(hi_t)); }
-      double w = lo < 0 ? 0 : (hi - tmax) / (hi - lo);   // weight of the lower trim
-      if (lo < 0) lo_t = hi_t;                             // below the lowest target: hold it
+    else if (tmax < smast && (lower || upper)) {
+      if (!upper) { hi = smast; memset(&hi_t, 0, sizeof(hi_t)); }   // neutral at the mastering peak
+      if (!lower) { lo = 0; memset(&lo_t, 0, sizeof(lo_t)); }       // neutral at PQ 0
+      double w = (hi - tmax) / (hi - lo);                  // weight of the lower trim
       w = dm_mind(dm_maxd(w, 0), 1);
       tr.lift = w * lo_t.lift + (1 - w) * hi_t.lift; tr.gain = w * lo_t.gain + (1 - w) * hi_t.gain;
       tr.gamma = w * lo_t.gamma + (1 - w) * hi_t.gamma; tr.cw = w * lo_t.cw + (1 - w) * hi_t.cw;

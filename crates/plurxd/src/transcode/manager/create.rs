@@ -1313,7 +1313,7 @@ impl TranscodeManager {
                     let target = target
                         .resolve_sdr_floor(minimum)
                         .map_err(|error| error.to_string())?;
-                    Ok((Some(target), Some("SDR: per-shot Dolby display mapping for 100-nit BT.709 gamma 2.4 limited output; rendered live with the title's creative trims".into())))
+                    Ok((Some(target), Some("SDR: per-shot Dolby display mapping for 100-nit BT.709 gamma 2.4 limited output; rendered live, with the title's creative trims where its RPU carries them".into())))
                 }
                 DvDisplayTargetChoice::Master { reason } => Ok((
                     None,
@@ -1364,7 +1364,7 @@ impl TranscodeManager {
                 let target = target
                     .resolve_source(source)
                     .map_err(|error| error.to_string())?;
-                Ok((Some(target), Some(format!("HDR10-E: per-shot Dolby display mapping for {bucket} nits; rendered live, with no retained bucket cache with the title's creative trims"))))
+                Ok((Some(target), Some(format!("HDR10-E: per-shot Dolby display mapping for {bucket} nits; rendered live with the title's creative trims where its RPU carries them, and no retained bucket cache"))))
             }
             DvDisplayTargetChoice::Master { reason } => Ok((None, Some(reason.reason()))),
         }

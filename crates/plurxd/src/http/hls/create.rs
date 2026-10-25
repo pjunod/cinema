@@ -1544,12 +1544,12 @@ pub(super) fn session_enhancement(
                 (Some(report), _) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: report.fel_contributed(),
                     display_target: report.display_target_nits(),
-                    creative_trims: report.creative_trims_applied(),
+                    creative_trims: report.creative_trims(),
                 },
                 (None, Some(fel)) => EnhancementRoute::ProcessedHdr10 {
                     fel_contributed: fel,
                     display_target: None,
-                    creative_trims: false,
+                    creative_trims: plurx_core::playback::enhancement::CreativeTrims::None,
                 },
                 (None, None) => EnhancementRoute::Hdr10Base,
             },
@@ -1557,7 +1557,7 @@ pub(super) fn session_enhancement(
                 Some(report) => EnhancementRoute::ProcessedSdr {
                     fel_contributed: report.fel_contributed(),
                     display_target: report.display_target_nits(),
-                    creative_trims: report.creative_trims_applied(),
+                    creative_trims: report.creative_trims(),
                 },
                 None => EnhancementRoute::ToneMappedSdr,
             },

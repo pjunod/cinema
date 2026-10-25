@@ -1779,6 +1779,24 @@ fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt() {
     value["creative_trims_applied"] = true.into();
     assert!(accept(&value, Some("sdr")).is_none());
     value["creative_trims_applied"] = false.into();
+    // all, some or none of the served frames applied trims
+    use crate::playback::enhancement::CreativeTrims;
+    assert_eq!(report.creative_trims(), CreativeTrims::None);
+    value["creative_trims_partial"] = true.into();
+    let partial = accept(&value, Some("sdr")).expect("partial trims");
+    assert_eq!(partial.creative_trims(), CreativeTrims::Partial);
+    let operations = value["applied_operations"].as_array_mut().expect("array");
+    operations.push("CreativeTrimApplication".into());
+    value["creative_trims_applied"] = true.into();
+    assert!(accept(&value, Some("sdr")).is_none());
+    value["creative_trims_partial"] = false.into();
+    let trimmed = accept(&value, Some("sdr")).expect("trimmed");
+    assert_eq!(trimmed.creative_trims(), CreativeTrims::All);
+    value["applied_operations"]
+        .as_array_mut()
+        .expect("array")
+        .pop();
+    value["creative_trims_applied"] = false.into();
     assert!(report.sdr_processed());
     assert_eq!(report.display_target_nits(), Some(100));
     assert!(accept(&value, Some("hdr10")).is_none());

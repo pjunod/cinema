@@ -143,9 +143,9 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
   require(dm->signal_eotf == 65535 && dm->signal_full_range_flag == 1,
           "PQ full-range reconstructed control representation");
   dv_target_metadata(dm);
-  // This master-domain reconstruction does not target a display. L2/L8 display
-  // trims remain unapplied and are exported in the original RPU for a later
-  // P8.1 display mapper. HDR10 output explicitly reports that limitation.
+  // Without a display target this master-domain reconstruction maps no display:
+  // L2/L8 trims stay unapplied and are exported in the original RPU for a later
+  // P8.1 display mapper. With a target, display_target.h applies them.
   // Display metadata (L2/L8 trims, L3/L4, L9 primaries, L10, L11, L254,
   // L255) is carried unapplied by this master reconstruction and exported in
   // the original RPU: any version is accepted.
@@ -284,10 +284,10 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
            "\"parser_error\":false,\"bl_depth\":10,\"el_depth\":10,\"vdr_depth\":12,"
            "\"mapping_source\":\"validated_decoder_metadata\",\"mapping_segments\":%d,"
            "\"polynomial_segments\":%d,\"mmr_segments\":%d,\"nlq_method\":\"LINEAR_DZ\","
-           "\"creative_l2_count\":%zu,\"creative_l8_count\":%zu,\"creative_trims_applied\":false}\n",
+           "\"creative_l2_count\":%zu,\"creative_l8_count\":%zu,\"creative_trims_applied\":%s}\n",
            size, decoded.polynomial_segments + decoded.mmr_segments,
            decoded.polynomial_segments, decoded.mmr_segments,
-           dm->dm_data.level2.len, dm->dm_data.level8.len);
+           dm->dm_data.level2.len, dm->dm_data.level8.len, dv_target_trims_applied() ? "true" : "false");
   if (observations && !frame)
     printf("{\"kind\":\"parsed_rpu\",\"bytes\":%zu,\"profile\":7,\"el_type\":"
            "\"FEL\","
@@ -295,8 +295,8 @@ static void map_fel_rpu(const AVFrame *frame, const uint8_t *bytes, size_t size,
            "depth\":12,"
            "\"mapping_segments\":1,\"nlq_method\":\"LINEAR_DZ\",\"creative_l2_"
            "count\":%zu,"
-           "\"creative_l8_count\":%zu,\"creative_trims_applied\":false}\n",
-           size, dm->dm_data.level2.len, dm->dm_data.level8.len);
+           "\"creative_l8_count\":%zu,\"creative_trims_applied\":%s}\n",
+           size, dm->dm_data.level2.len, dm->dm_data.level8.len, dv_target_trims_applied() ? "true" : "false");
   dovi_rpu_free_vdr_dm_data(dm);
   dovi_rpu_free_data_mapping(mapping);
   dovi_rpu_free_header(header);

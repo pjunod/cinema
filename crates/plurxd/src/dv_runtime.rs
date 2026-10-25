@@ -1975,11 +1975,9 @@ impl PrivateWindow {
                     .get("decoded_layers")
                     .and_then(serde_json::Value::as_u64)
                     != Some(1)
-                || ["el_bound", "fel_contributed", "creative_trims_applied"]
-                    .iter()
-                    .any(|field| {
-                        base.get(*field).and_then(serde_json::Value::as_bool) != Some(false)
-                    })
+                || ["el_bound", "fel_contributed"].iter().any(|field| {
+                    base.get(*field).and_then(serde_json::Value::as_bool) != Some(false)
+                })
             {
                 return Err("base completion claims unsupported operations".into());
             }

@@ -972,6 +972,8 @@ struct EffectiveProcessingReport: Equatable, Codable {
     var mark: String { sdrProcessed ? "SDR-E" : "HDR10-E" }
     var felContributed: Bool
     var appliedOperations: [String]
+    /// Some, but not every, served frame applied creative trims.
+    var creativeTrimsPartial: Bool = false
 
     func matches(generation active: String?, delivered: String?) -> Bool {
         ((hdr10Enhanced && !sdrProcessed && delivered == "hdr10") || (!hdr10Enhanced && sdrProcessed && delivered == "sdr" && appliedOperations.contains("Bt709Gamma24Conversion") && appliedOperations.contains("DisplayTargetMapping:100"))) && active == generation
@@ -985,7 +987,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
                      "RpuColorConversion": "RPU color conversion", "TargetMapping": "target mapping",
                      "CreativeTrimApplication": "creative trims"]
         let metadata = appliedOperations.compactMap { names[$0] }.joined(separator: ", ")
-        let trims = appliedOperations.contains("CreativeTrimApplication") ? "creative trims applied" : "L1 only"
+        let trims = appliedOperations.contains("CreativeTrimApplication") ? "creative trims applied" : creativeTrimsPartial ? "creative trims on some shots" : "L1 only"
         return "\(sdrProcessed ? "Dolby Vision–processed SDR (BT.709 gamma 2.4, \(trims))" : "Dolby Vision–enhanced HDR10") · FEL used: \(felContributed ? "yes" : "no")"
             + (metadata.isEmpty ? "" : " · Applied: \(metadata)")
     }
@@ -1004,7 +1006,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
             name = "DisplayTargetMapping:\(nits)"
         }
     }
-    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations }
+    private enum CodingKeys: String, CodingKey { case generation, hdr10Enhanced, sdrProcessed, felContributed, appliedOperations, creativeTrimsPartial }
     init(from decoder: Decoder) throws {
         let values = try? decoder.container(keyedBy: CodingKeys.self)
         generation = (try? values?.decode(String.self, forKey: .generation)) ?? ""
@@ -1013,6 +1015,7 @@ struct EffectiveProcessingReport: Equatable, Codable {
         sdrProcessed = ((try? values?.decode(Bool.self, forKey: .sdrProcessed)) == true) && (try? values?.decode(Bool.self, forKey: .hdr10Enhanced)) == false && (try? values?.decode(Bool.self, forKey: .felContributed)) != nil
         felContributed = (try? values?.decode(Bool.self, forKey: .felContributed)) ?? false
         appliedOperations = (try? values?.decode([WireOperation].self, forKey: .appliedOperations).map(\.name)) ?? []
+        creativeTrimsPartial = (try? values?.decode(Bool.self, forKey: .creativeTrimsPartial)) == true
         if appliedOperations.contains(where: { $0.hasPrefix("DisplayTargetMapping:") && ($0 == "DisplayTargetMapping:100") != sdrProcessed }) { appliedOperations = [] }
     }
 

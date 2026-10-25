@@ -1132,7 +1132,7 @@ int main(int argc, char **argv) {
   if (base_only)
     printf("{\"kind\":\"base_processing_complete\",\"profile\":%d,"
            "\"frames\":%d,\"decoded_layers\":1,\"el_bound\":false,"
-           "\"fel_contributed\":false,\"creative_trims_applied\":false,"
+           "\"fel_contributed\":false,"
            "\"production_qualified\":false}\n", source_profile, emitted);
   need(fflush(stdout) == 0, "observations flush");
   return 0;

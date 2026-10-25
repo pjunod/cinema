@@ -91,6 +91,9 @@ pub struct DvEffectiveProcessingReport {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sdr_processed: bool,
     creative_trims_applied: bool,
+    /// Some, but not every, served frame's display mapping applied creative trims.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    creative_trims_partial: bool,
     fel_contributed: bool,
     applied_operations: Vec<DvOperation>,
     /// The source pictures were decoded on the GPU (VA-API). Omitted when
@@ -119,6 +122,15 @@ impl DvEffectiveProcessingReport {
     pub fn creative_trims_applied(&self) -> bool {
         self.creative_trims_applied
     }
+    /// How many served frames' display mappings applied the title's creative trims.
+    pub fn creative_trims(&self) -> crate::playback::enhancement::CreativeTrims {
+        use crate::playback::enhancement::CreativeTrims;
+        match (self.creative_trims_applied, self.creative_trims_partial) {
+            (true, _) => CreativeTrims::All,
+            (false, true) => CreativeTrims::Partial,
+            (false, false) => CreativeTrims::None,
+        }
+    }
     /// Whether the served window's source pictures were decoded on the GPU.
     pub fn gpu_decoded(&self) -> bool {
         self.gpu_decoded
@@ -139,6 +151,8 @@ impl DvEffectiveProcessingReport {
             sdr_processed: bool,
             #[serde(default)]
             creative_trims_applied: bool,
+            #[serde(default)]
+            creative_trims_partial: bool,
             fel_contributed: bool,
             applied_operations: Vec<DvOperation>,
             #[serde(default)]
@@ -154,8 +168,9 @@ impl DvEffectiveProcessingReport {
         let operations: BTreeSet<_> = wire.applied_operations.iter().copied().collect();
         if wire.generation != generation
             || wire.creative_trims_applied != operations.contains(&DvOperation::CreativeTrimApplication)
-            || wire.creative_trims_applied
+            || (wire.creative_trims_applied || wire.creative_trims_partial)
                 && !operations.iter().any(|op| matches!(op, DvOperation::DisplayTargetMapping { .. }))
+            || wire.creative_trims_applied && wire.creative_trims_partial
             || wire.hdr10_enhanced != (delivered == Some("hdr10"))
             || wire.sdr_processed != (delivered == Some("sdr"))
             || wire.sdr_processed && (!operations.contains(&DvOperation::Bt709Gamma24Conversion) || !operations.contains(&DvOperation::DisplayTargetMapping { nits: 100 }))
@@ -174,6 +189,7 @@ impl DvEffectiveProcessingReport {
             hdr10_enhanced: wire.hdr10_enhanced,
             sdr_processed: wire.sdr_processed,
             creative_trims_applied: wire.creative_trims_applied,
+            creative_trims_partial: wire.creative_trims_partial,
             fel_contributed: wire.fel_contributed,
             applied_operations: wire.applied_operations,
             gpu_decoded: wire.gpu_decoded,
@@ -2721,6 +2737,11 @@ impl DvProcessingReceipt {
         for frame in &self.served_frames[1..] {
             common.retain(|operation| frame.applied_operations.contains(operation));
         }
+        let trimmed = self.served_frames.iter().any(|frame| {
+            frame
+                .applied_operations
+                .contains(&DvOperation::CreativeTrimApplication)
+        });
         let fel_contributed = self.served_frames.iter().all(|frame| {
             frame.el_bound
                 && frame
@@ -2731,8 +2752,11 @@ impl DvProcessingReceipt {
             generation: active_playback_generation.to_owned(),
             hdr10_enhanced: plan.destination == DvDestination::Hdr10,
             sdr_processed: plan.destination == DvDestination::Sdr,
-            // Only when every served frame's display mapping applied creative trims.
+            // Only when every served frame's display mapping applied creative trims; "partial"
+            // when some did.
             creative_trims_applied: common.contains(&DvOperation::CreativeTrimApplication),
+            creative_trims_partial: trimmed
+                && !common.contains(&DvOperation::CreativeTrimApplication),
             fel_contributed,
             applied_operations: common.into_iter().collect(),
             gpu_decoded: self.decoder != DecodeBackend::Software,
