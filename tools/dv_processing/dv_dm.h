@@ -19,7 +19,7 @@
 #include "dm_closed_form.h"
 
 #define DV_DM_METHOD_CM4 "dolby-cm4-closed-form-v1"
-#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v1"
+#define DV_DM_METHOD_CM29 "dolby-cm29-closed-form-v2"
 
 enum { DV_DM_U = 24 };   // vec4 uniforms
 typedef struct {
@@ -93,6 +93,9 @@ static inline void dv_dm_pack_cm29(dv_dm_frame *f, const dm_cm29_state *s) {
   dv_dm_put(f->u[1], s->Tm, s->TM, s->tg.min_nits, s->tg.peak_nits);
   dv_dm_put(f->u[2], s->tr.lift, s->tr.gain, s->tr.gamma, s->tr.cw);
   dv_dm_put(f->u[3], s->tr.sg, f->weight, s->tg.floor_pq, s->tg.prim != DM_BT2020);
+  // near-black chroma gain: 23 node values in u[4..9] (row-major), its offset in u[9].w
+  for (int i = 0; i < DM_CM29_DARK_N; i++) f->u[4 + i / 4][i % 4] = (float)s->dark[i];
+  f->u[9][3] = (float)s->dark_off;
   dv_dm_rows(f->u + 11, s->to_t);
   dv_dm_rows(f->u + 14, s->from_t);
   bool sop_on = s->tr.lift != 0 || s->tr.gain != 0 || s->tr.gamma != 0;
@@ -298,9 +301,15 @@ static const char dv_dm_glsl_common[] =
   "vec3 ipt(vec3 rgb){ vec3 lms=max(pq_eotf3(rgb)*H2L_T,vec3(0.0)); return pq_oetf3(lms)*IPT_T; }\n"
   "vec2 c29point(vec3 p, out float I){ I=p.x; float C=length(p.yz); float Ib=c29sop(c29curve(I));\n"
   " float Io=u[17].y>0.5 ? c29sop(c29curve(I+0.5*u[2].w*C)) : Ib; return vec2(Ib,Io); }\n"
+  "const float DKI[23]=float[23](0.000,0.002,0.004,0.006,0.008,0.010,0.012,0.014,0.016,0.018,0.020,0.022,\n"
+  " 0.024,0.026,0.028,0.030,0.035,0.040,0.050,0.060,0.080,0.100,0.150);\n"
+  "float c29dk(int i){ return u[4+i/4][i%4]; }\n"
+  "float c29dark(float Ib){ float x=Ib-u[9].w; if(x<=0.0) return c29dk(0);\n"
+  " for(int k=1;k<23;k++){ if(x<DKI[k]){ float t=(x-DKI[k-1])/(DKI[k]-DKI[k-1]); return mix(c29dk(k-1),c29dk(k),t); } }\n"
+  " return 1.0; }\n"
   "vec3 c29finish(vec3 p, float Ib, float Io){\n"
-  " Ib=max(Ib,0.0); Io=max(Io,0.0); float I=p.x;\n"
-  " float sc=pow(Ib/max(I,1e-6),0.9385)*exp(-0.3246*(Ib-I))*(1.0+0.5*u[3].x);\n"
+  " Ib=max(Ib,0.0); Io=max(Io,0.0); float I=p.x; float Ie=max(max(I,0.5*Ib),1e-6);\n"
+  " float sc=pow(Ib/Ie,0.9385)*exp(-0.3246*(Ib-Ie))*(1.0+0.5*u[3].x)*c29dark(Ib);\n"
   " vec3 o=vec3(Io,p.y*sc,p.z*sc); vec3 lmsp=clamp(o*IPTI_T,0.0,1.0); vec3 lin=pq_eotf3(lmsp)*HL2R_T;\n"
   " float tmin=u[1].z,tpk=u[1].w; vec3 res;\n"
   " if(u[3].w>0.5){ vec3 lt=clamp(mrow(u[11],u[12],u[13],lin),vec3(tmin),vec3(tpk)); lin=mrow(u[14],u[15],u[16],lt); res=pq_oetf3(clamp(lin,0.0,tpk)); }\n"

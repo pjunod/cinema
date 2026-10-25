@@ -423,6 +423,7 @@ typedef struct {
   double a, b, c, n, Tm, TM, xs0;           /* rational curve */
   dm_cm29_trim tr; dm_cm29_target tg;
   double rgb2lms[3][3], lms2rgb[3][3], ipt2lms[3][3], to_t[3][3], from_t[3][3];
+  double dark[23], dark_off;                /* near-black chroma gain D for this target (see below) */
 } dm_cm29_state;
 
 typedef struct { double ipt[3], C, I, Ib, Io; } dm_cm29_pix;
@@ -432,6 +433,29 @@ static const double DM_HPE[3][3] = {{0.4002, 0.7075, -0.0807}, {-0.2280, 1.1500,
 static const double DM_IPT[3][3] = {{0.4, 0.4, 0.2}, {4.4550, -4.8510, 0.3960}, {0.8056, 0.3572, -1.1628}};
 #define DM_CM29_CHROMA_A 0.9385
 #define DM_CM29_CHROMA_B 0.3246
+/* Near black (measured per stock target, CM29_CLOSED_FORM.md "Near-black chroma"): the chroma
+ * scale's intensity ratio is capped at 2 (Ie = max(I, Ib/2)) and the scale is multiplied by
+ * D(Ib - dark_off), piecewise linear on the nodes below and 1 above the last one. D depends on the
+ * output intensity only (the same for any L1, trim and chroma). HDR targets: the P3 or BT.2020 row
+ * of the stock targets at 600, 1000 and 2000 nits, linear in target PQ and held outside that range
+ * (BT.2020 has no usable 600-nit stock row: the 1000-nit row is used), measured with a target
+ * black of 0 and applied above the target black (dark_off = Tm). BT.709: the 100-nit SDR stock
+ * target, measured with a 0.005-nit black (dark_off = Tm - PQ(0.005)). */
+#define DM_CM29_DARK_N 23
+static const double DM_CM29_DARK_IO[DM_CM29_DARK_N] = {
+  0.000, 0.002, 0.004, 0.006, 0.008, 0.010, 0.012, 0.014, 0.016, 0.018, 0.020, 0.022,
+  0.024, 0.026, 0.028, 0.030, 0.035, 0.040, 0.050, 0.060, 0.080, 0.100, 0.150};
+static const double DM_CM29_DARK_PEAK[3] = {600, 1000, 2000};
+static const double DM_CM29_DARK_P3[3][DM_CM29_DARK_N] = {
+  {0.000, 0.149, 0.304, 0.466, 0.623, 0.790, 0.861, 0.879, 0.899, 0.930, 0.977, 1.016, 1.035, 1.038, 1.035, 1.031, 1.030, 1.023, 1.011, 1.004, 1.000, 0.999, 1.000},
+  {0.000, 0.139, 0.282, 0.427, 0.576, 0.730, 0.843, 0.872, 0.889, 0.912, 0.943, 0.990, 1.029, 1.042, 1.044, 1.040, 1.037, 1.032, 1.020, 1.010, 1.004, 1.001, 1.000},
+  {0.000, 0.126, 0.256, 0.389, 0.523, 0.662, 0.802, 0.864, 0.880, 0.897, 0.919, 0.947, 0.990, 1.028, 1.045, 1.050, 1.043, 1.042, 1.033, 1.021, 1.009, 1.005, 1.000}};
+static const double DM_CM29_DARK_2020[3][DM_CM29_DARK_N] = {
+  {0.000, 0.154, 0.309, 0.464, 0.618, 0.775, 0.906, 0.963, 0.991, 1.034, 1.054, 1.055, 1.047, 1.040, 1.035, 1.030, 1.020, 1.015, 1.010, 1.006, 1.003, 1.002, 1.000},
+  {0.000, 0.154, 0.309, 0.464, 0.618, 0.775, 0.906, 0.963, 0.991, 1.034, 1.054, 1.055, 1.047, 1.040, 1.035, 1.030, 1.020, 1.015, 1.010, 1.006, 1.003, 1.002, 1.000},
+  {0.000, 0.140, 0.283, 0.427, 0.567, 0.711, 0.853, 0.945, 0.978, 1.004, 1.042, 1.061, 1.063, 1.057, 1.049, 1.044, 1.032, 1.024, 1.016, 1.012, 1.008, 1.006, 1.000}};
+static const double DM_CM29_DARK_709[DM_CM29_DARK_N] = {
+  0.000, 0.006, 0.011, 0.017, 0.022, 0.028, 0.034, 0.039, 0.094, 0.295, 0.496, 0.683, 0.788, 0.836, 0.894, 0.940, 0.991, 1.003, 1.001, 0.996, 0.993, 0.994, 1.000};
 
 DM_STATIC double dm_pq_nits(double n) { return n > 0 ? dm_pq_oetf(n) : 0.0; }
 DM_STATIC int dm_solve3(double A[3][3], const double b[3], double x[3]) {
@@ -477,7 +501,28 @@ DM_STATIC int dm_cm29_prepare(dm_cm29_state *s, const double l1[3], double smin,
   double xyz2lms[3][3]; memcpy(xyz2lms, DM_HPE, sizeof(xyz2lms));
   dm_mat_mul(xyz2lms, DM_M2020_XYZ, s->rgb2lms); dm_mat_inv(s->rgb2lms, s->lms2rgb); dm_mat_inv(DM_IPT, s->ipt2lms);
   dm_conv(DM_BT2020, tg->prim, s->to_t); dm_conv(tg->prim, DM_BT2020, s->from_t);
+  if (tg->prim == DM_BT709) {
+    memcpy(s->dark, DM_CM29_DARK_709, sizeof(s->dark)); s->dark_off = Tm - dm_pq_oetf(0.005);
+  } else {
+    const double (*rows)[DM_CM29_DARK_N] = tg->prim == DM_BT2020 ? DM_CM29_DARK_2020 : DM_CM29_DARK_P3;
+    double p0 = dm_pq_oetf(DM_CM29_DARK_PEAK[0]), p1 = dm_pq_oetf(DM_CM29_DARK_PEAK[1]), p2 = dm_pq_oetf(DM_CM29_DARK_PEAK[2]);
+    int k = TM <= p1 ? 0 : 1; double lo = k ? p1 : p0, hi = k ? p2 : p1;
+    double t = dm_clampd((TM - lo) / (hi - lo), 0.0, 1.0);
+    for (int i = 0; i < DM_CM29_DARK_N; i++) s->dark[i] = (1 - t) * rows[k][i] + t * rows[k + 1][i];
+    s->dark_off = Tm;
+  }
   return 1;
+}
+/* near-black chroma gain D at output intensity Ib */
+DM_STATIC double dm_cm29_dark(const dm_cm29_state *s, double Ib) {
+  double x = Ib - s->dark_off;
+  if (x <= 0) return s->dark[0];
+  for (int i = 1; i < DM_CM29_DARK_N; i++)
+    if (x < DM_CM29_DARK_IO[i]) {
+      double t = (x - DM_CM29_DARK_IO[i - 1]) / (DM_CM29_DARK_IO[i] - DM_CM29_DARK_IO[i - 1]);
+      return (1 - t) * s->dark[i - 1] + t * s->dark[i];
+    }
+  return 1.0;
 }
 DM_STATIC double dm_cm29_curve(const dm_cm29_state *s, double x) {
   double xn = pow(dm_maxd(x, 0.0), s->n);
@@ -504,7 +549,8 @@ DM_STATIC void dm_cm29_pixel_pre(const dm_cm29_state *s, const double rgb[3], dm
 /* after the spatial stage (Ib, Io possibly replaced): chroma scale, back to RGB, target-cube clip */
 DM_STATIC void dm_cm29_finish(const dm_cm29_state *s, const dm_cm29_pix *p, double Ib, double Io, double rgb[3]) {
   Ib = dm_maxd(Ib, 0.0); Io = dm_maxd(Io, 0.0);
-  double sc = pow(Ib / dm_maxd(p->I, 1e-6), DM_CM29_CHROMA_A) * exp(-DM_CM29_CHROMA_B * (Ib - p->I)) * (1 + 0.5 * s->tr.sg);
+  double Ie = dm_maxd(dm_maxd(p->I, 0.5 * Ib), 1e-6);
+  double sc = pow(Ib / Ie, DM_CM29_CHROMA_A) * exp(-DM_CM29_CHROMA_B * (Ib - Ie)) * (1 + 0.5 * s->tr.sg) * dm_cm29_dark(s, Ib);
   double o[3] = {Io, p->ipt[1] * sc, p->ipt[2] * sc}, lmsp[3], lms[3], lin[3], lt[3];
   dm_mat_vec(s->ipt2lms, o, lmsp);
   for (int i = 0; i < 3; i++) lms[i] = dm_pq_eotf(dm_clampd(lmsp[i], 0.0, 1.0));

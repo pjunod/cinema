@@ -333,13 +333,20 @@ evidence stay on the private `rog_hdr_dv` branch (its `CM4_CLOSED_FORM.md` and
   vertical Gaussian / derivative-of-Gaussian detail; finish and gamut clip).
   `display_target.h` calls it and prints one `display_target_frame` row per
   frame (`curve`, `trim_targets`, `detail_weight`). Method identity:
-  `dolby-closed-form-cm4-cm29-v2` (v1 served no trims); helper graph
+  `dolby-closed-form-cm4-cm29-v3` (v1 served no trims; v2 had no CM v2.9
+  near-black chroma gain); helper graph
   `dv-native-master-or-closed-form-dm-v1`.
 - **Accuracy of the equations (private evidence, 2026-10-25).** CM v4
   reproduces the reference on 30/30 random30 shots (median mean ΔE_ITP
   0.000, max 0.055) and on real P8 frames with real L8 metadata (mean
   ≤ 0.001 at 300–1600 nits, ≤ 0.007 at 100 nits). CM v2.9 passes 23/23
-  random30 shots (median 0.19); its gamut stage is approximate.
+  random30 shots (median 0.19); its gamut stage is approximate. Near black,
+  CM v2.9 caps the chroma scale's intensity ratio at 2 and applies a measured
+  gain D (output intensity above the target black), tabulated per stock target
+  in `dm_closed_form.h` (CM29_CLOSED_FORM.md, "Near-black chroma"). On real
+  frames this takes p99.9 ΔE_ITP from 5–17 to about 1–4. The P3 gamut stage
+  itself is a minor share of the real-title error (at most 0.16 mean; fewer
+  than 0.02 % of pixels leave P3).
 - **Served trims are on.** `DV_TARGET_TRIMS_CM4` / `DV_TARGET_TRIMS_CM29`
   (helper) and `DISPLAY_TARGET_CREATIVE_TRIMS_CM4` / `_CM29` (Rust) are
   true. A frame whose mapping used a trim reports `CreativeTrimApplication`.
