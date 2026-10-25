@@ -3,7 +3,7 @@
 //! status flag, or a response DTO. The only constructor consumes the move-only
 //! core parser completion after the runtime has joined that original task.
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::process::fixed_probe::{
@@ -20,7 +20,6 @@ pub(in crate::adaptive_resources) struct FixedProbeKnownClosed {
     source_member: Uuid,
     output: Result<(String, DecodeFacts), DecodeFactError>,
     executable: PathBuf,
-    configured_locator: String,
     source_object_version: String,
     executable_object_version: String,
     executable_sha256: String,
@@ -47,7 +46,6 @@ pub(in crate::adaptive_resources) struct FixedProbeReportData {
     /// process, image and source close capability.
     pub output: Result<(String, DecodeFacts), DecodeFactError>,
     pub executable: PathBuf,
-    pub configured_locator: String,
     pub source_object_version: String,
     pub executable_object_version: String,
     pub executable_sha256: String,
@@ -70,14 +68,8 @@ impl FixedProbeNativeClosure {
     pub(in crate::adaptive_resources) fn document_identity(&self) -> ProcessIdentity {
         self.document_root.identity()
     }
-    pub(in crate::adaptive_resources) fn version_close_operation_id(&self) -> Uuid {
-        self.version_root.close_operation_id()
-    }
     pub(in crate::adaptive_resources) fn document_close_operation_id(&self) -> Uuid {
         self.document_root.close_operation_id()
-    }
-    pub(in crate::adaptive_resources) fn image_object_version(&self) -> &str {
-        self.image_closed.original_object_version()
     }
 
     /// P's probe-task closed fact. Only the joined original closure can call
@@ -169,14 +161,15 @@ impl FixedProbeKnownClosed {
     /// collector independently rechecks its held source File after FFprobe.
     pub(in crate::adaptive_resources) fn from_joined_original(
         native: AdmittedProbeCompletion,
-        version_root_member: Uuid,
-        document_root_member: Uuid,
-        source_member: Uuid,
-        version_close_operation_id: Uuid,
-        document_close_operation_id: Uuid,
-        planned_locator: &str,
+        plan: &v2::FixedProbeDiscoverTaskV1,
         observed_source_object_version: &str,
     ) -> io::Result<Self> {
+        let version_root_member = plan.version_root_member_id.uuid();
+        let document_root_member = plan.document_root_member_id.uuid();
+        let source_member = plan.source_member_id.uuid();
+        let version_close_operation_id = plan.version_close_operation_id.uuid();
+        let document_close_operation_id = plan.document_close_operation_id.uuid();
+        let planned_locator = plan.configured_locator.as_str();
         if !cfg!(target_os = "linux")
             || version_root_member.is_nil()
             || document_root_member.is_nil()
@@ -206,7 +199,7 @@ impl FixedProbeKnownClosed {
         let (
             output,
             executable,
-            configured_locator,
+            _configured_locator,
             source_object_version,
             executable_object_version,
             executable_sha256,
@@ -221,7 +214,6 @@ impl FixedProbeKnownClosed {
             source_member,
             output,
             executable,
-            configured_locator,
             source_object_version,
             executable_object_version,
             executable_sha256,
@@ -232,40 +224,12 @@ impl FixedProbeKnownClosed {
         })
     }
 
-    pub(in crate::adaptive_resources) fn version_root_member(&self) -> Uuid {
-        self.version_root_member
-    }
-    pub(in crate::adaptive_resources) fn document_root_member(&self) -> Uuid {
-        self.document_root_member
-    }
-    pub(in crate::adaptive_resources) fn source_member(&self) -> Uuid {
-        self.source_member
-    }
-    pub(in crate::adaptive_resources) fn executable(&self) -> &Path {
-        &self.executable
-    }
-    pub(in crate::adaptive_resources) fn configured_locator(&self) -> &str {
-        &self.configured_locator
-    }
-    pub(in crate::adaptive_resources) fn source_object_version(&self) -> &str {
-        &self.source_object_version
-    }
-    pub(in crate::adaptive_resources) fn executable_object_version(&self) -> &str {
-        &self.executable_object_version
-    }
-    pub(in crate::adaptive_resources) fn executable_sha256(&self) -> &str {
-        &self.executable_sha256
-    }
-    pub(in crate::adaptive_resources) fn build_digest(&self) -> &str {
-        &self.build_digest
-    }
     pub(in crate::adaptive_resources) fn split(
         self,
     ) -> (FixedProbeReportData, FixedProbeNativeClosure) {
         let report = FixedProbeReportData {
             output: self.output,
             executable: self.executable,
-            configured_locator: self.configured_locator,
             source_object_version: self.source_object_version,
             executable_object_version: self.executable_object_version,
             executable_sha256: self.executable_sha256,
@@ -280,5 +244,146 @@ impl FixedProbeKnownClosed {
             image_closed: self.image_closed,
         };
         (report, closure)
+    }
+}
+
+/// One-shot absence of planning root/task acquisition in the original sealed
+/// graph. The separate SourceCell may still own its original parent File;
+/// this witness authorizes only its original cleanup, not a final P refund.
+#[must_use]
+pub(in crate::adaptive_resources) struct FixedPlanningNoTaskGraph {
+    binding: crate::adaptive_resources::ReservationBinding,
+    generation: Uuid,
+    members: [Uuid; 6],
+    source_member: v2::Id,
+    holder_id: v2::Id,
+    copies: [v2::SourceCopy; 2],
+    operation_id: v2::Id,
+}
+impl FixedPlanningNoTaskGraph {
+    pub(in crate::adaptive_resources) fn matches(
+        &self,
+        binding: crate::adaptive_resources::ReservationBinding,
+        generation: Uuid,
+        members: [Uuid; 6],
+    ) -> bool {
+        self.binding == binding && self.generation == generation && self.members == members
+    }
+    pub(in crate::adaptive_resources) fn source_member(&self) -> Uuid {
+        self.source_member.uuid()
+    }
+    pub(in crate::adaptive_resources) fn operation_id(&self) -> v2::Id {
+        self.operation_id
+    }
+    pub(in crate::adaptive_resources) fn source_matches(
+        &self,
+        source: &v2::FixedProbeDiscoverSourceV1,
+    ) -> bool {
+        let v2::SourceRecovery::LocalSourceHandlesV1 {
+            graph_id,
+            owner_id,
+            filesystem_domain,
+        } = &source.recovery;
+        source.member_id == self.source_member
+            && source.holder_id == self.holder_id
+            && graph_id.uuid() == self.generation
+            && *owner_id == source.filesystem_domain.daemon_owner_id
+            && filesystem_domain == &source.filesystem_domain
+            && matches!(self.copies[0].owner,
+                v2::CopyOwner::DaemonSourceCell { owner_id: held_owner, graph_id: held_graph, member_id }
+                    if held_owner == *owner_id && held_graph == *graph_id && member_id == source.member_id)
+            && source.planned_copies.as_slice() == self.copies
+    }
+    pub(in crate::adaptive_resources) fn source_fact(
+        &self,
+        parent: v2::CopyClosed,
+    ) -> v2::ClosedFact {
+        v2::ClosedFact::FixedProbeDiscoverSourceV1 {
+            holder_id: self.holder_id,
+            copies: vec![
+                parent,
+                v2::CopyClosed::ProvenNeverAcquired {
+                    copy: self.copies[1].clone(),
+                    operation_id: self.operation_id,
+                },
+            ],
+        }
+    }
+    pub(in crate::adaptive_resources) fn parent_copy(&self) -> &v2::SourceCopy {
+        &self.copies[0]
+    }
+}
+
+impl super::SealedPhysicalGraph {
+    /// Only original sealed custody may mint this absence witness. Runtime
+    /// separately consumes its retained, unpolled task inputs; a snapshot or
+    /// caller-supplied status flag cannot replace either proof.
+    pub(in crate::adaptive_resources) async fn try_fixed_planning_no_task_graph(
+        &self,
+        members: [Uuid; 6],
+        source: &v2::FixedProbeDiscoverSourceV1,
+        operation_id: Uuid,
+    ) -> io::Result<FixedPlanningNoTaskGraph> {
+        let mut native = self.custody.members.lock().await;
+        let v2::SourceRecovery::LocalSourceHandlesV1 {
+            graph_id,
+            owner_id,
+            filesystem_domain,
+        } = &source.recovery;
+        let [parent, child] = source.planned_copies.as_slice() else {
+            return Err(io::Error::other(
+                "planning source copy inventory is incomplete",
+            ));
+        };
+        if !cfg!(target_os = "linux")
+            || !self
+                .custody
+                .sealed
+                .load(std::sync::atomic::Ordering::Acquire)
+            || native.acquired
+            || native.uncertain_launch
+            || native.unaudited_handoff
+            || native.receipt_issued
+            || native.finite_process_closed
+            || native.copy_process_closed
+            || !native.roots.is_empty()
+            || !native.writers.is_empty()
+            || !native.source_files.is_empty()
+            || native.joined_writers != 0
+            || native.abandoned_writers != 0
+            || members.iter().any(Uuid::is_nil)
+            || members
+                .iter()
+                .enumerate()
+                .any(|(index, member)| members[..index].contains(member))
+            || members.contains(&source.member_id.uuid())
+            || operation_id.is_nil()
+            || graph_id.uuid() != self.custody.identity.generation
+            || owner_id.uuid() != self.custody.identity.process_instance
+            || *owner_id != source.filesystem_domain.daemon_owner_id
+            || filesystem_domain != &source.filesystem_domain
+            || !matches!(parent.owner, v2::CopyOwner::DaemonSourceCell { owner_id: held_owner, graph_id: held_graph, member_id }
+                if held_owner == *owner_id && held_graph == *graph_id && member_id == source.member_id)
+            || parent.parent_copy_id.is_some()
+            || !matches!(child.owner, v2::CopyOwner::OwnedRoot { graph_id: held_graph, root_member_id }
+                if held_graph == *graph_id && root_member_id.uuid() == members[1])
+            || child.parent_copy_id != Some(parent.copy_id)
+            || parent.copy_id == child.copy_id
+        {
+            return Err(io::Error::other(
+                "original planning no-task inventory is incomplete",
+            ));
+        }
+        let operation_id = v2::Id::new(operation_id).map_err(io::Error::other)?;
+        native.receipt_issued = true;
+        Ok(FixedPlanningNoTaskGraph {
+            binding: self.custody.binding,
+            generation: self.custody.identity.generation,
+            members,
+            source_member: source.member_id,
+            holder_id: source.holder_id,
+            copies: [parent.clone(), child.clone()],
+            operation_id,
+        })
     }
 }

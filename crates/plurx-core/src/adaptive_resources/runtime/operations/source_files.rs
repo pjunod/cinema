@@ -219,13 +219,11 @@ pub(super) struct InheritedSource {
     pub acknowledged: bool,
     pub verified_sha256: Option<[u8; 32]>,
     pub verified_elf: bool,
-    pub verified_sha256_cached: bool,
 }
 
 /// Audit-only source child observation after the original P document process
 /// has positively closed. No descriptor or File alias leaves the SourceCell.
 pub(in crate::adaptive_resources::runtime) struct FixedProbeChildObservation {
-    pub acquisition_id: v2::Id,
     pub observation_id: Uuid,
     pub envelope: v2::Envelope,
     pub acknowledged: bool,
@@ -236,6 +234,9 @@ struct SourceResult {
     direct_open_error: Option<std::io::ErrorKind>,
     verified_sha256: Option<[u8; 32]>,
     verified_elf: bool,
+    // Instrumentation for the cache regressions; production authority is
+    // the retained File identity and VerifiedExecutableCache entry itself.
+    #[cfg(test)]
     verified_sha256_cached: bool,
 }
 enum SourceOpenPlan {
@@ -424,6 +425,7 @@ impl SourceCell {
                     direct_open_error: None,
                     verified_sha256: None,
                     verified_elf: false,
+                    #[cfg(test)]
                     verified_sha256_cached: false,
                 };
             }
@@ -503,6 +505,7 @@ fn open_scanner_source(
         direct_open_error: None,
         verified_sha256: None,
         verified_elf: false,
+        #[cfg(test)]
         verified_sha256_cached: false,
     };
     if spec.expected_sha256.is_some()
@@ -537,8 +540,8 @@ fn open_scanner_source(
     let actual_s1 = SourceIdentity::from_metadata(&metadata).render_s1();
     result.observed = Some(v2::SourceObserved {
         version: 1,
-        holder_id: holder_id,
-        member_id: member_id,
+        holder_id,
+        member_id,
         copies: planned_copies,
         native_object: v2::NativeObject {
             file_type: v2::FileType::Regular,
@@ -549,13 +552,13 @@ fn open_scanner_source(
                 value: metadata.ino(),
             },
             mount_id: bootstrap::native::steps::mount_id(file),
-            filesystem_domain: filesystem_domain,
+            filesystem_domain,
         },
         access: v2::SourceAccess::ReadOnlyRegular,
         source_association: v2::SourceAssociation {
-            media_file_id: media_file_id,
+            media_file_id,
             object_version: actual_s1,
-            recipe_source_binding: recipe_source_binding,
+            recipe_source_binding,
         },
     });
     result
@@ -572,6 +575,7 @@ fn open_source_with_cache(
         direct_open_error: None,
         verified_sha256: None,
         verified_elf: false,
+        #[cfg(test)]
         verified_sha256_cached: false,
     };
     // No source path is opened unless the exact current domain is observed in
@@ -616,7 +620,10 @@ fn open_source_with_cache(
         if cached_executable_matches(file, before, &expected, cache) {
             result.verified_sha256 = Some(expected);
             result.verified_elf = true;
-            result.verified_sha256_cached = true;
+            #[cfg(test)]
+            {
+                result.verified_sha256_cached = true;
+            }
         } else {
             let mut hasher = Sha256::new();
             let mut buffer = [0u8; 64 * 1024];
@@ -881,44 +888,6 @@ impl NodeResourceRuntime {
         Ok((lease, length, object_version))
     }
 
-    /// Return P's one retained source alias and the S1 observed from that
-    /// same original File under the source book lock, before marking the
-    /// lease issued. No pathname reopen or raw descriptor leaves the book.
-    pub(in crate::adaptive_resources::runtime) async fn open_prepared_probe_source(
-        &self,
-        owner: &OwnedPreparation,
-        index: usize,
-        member: Uuid,
-        deadline: Instant,
-    ) -> Result<(RetainedSourceLease, u64, String), OperationError> {
-        self.acquire_prepared_source(owner, index, member, deadline)
-            .await?;
-        self.validate_preparation(owner)?;
-        let mut bundle = owner.state.lock().await;
-        if !bundle.installed {
-            return Err(OperationError::State);
-        }
-        let role = bundle.roles.get_mut(index).ok_or(OperationError::State)?;
-        let source = role.sources.get_mut(&member).ok_or(OperationError::State)?;
-        if role.refunded
-            || !matches!(role.phase, Phase::AcquisitionPossible | Phase::Sealed)
-            || source.lease_issued
-        {
-            return Err(OperationError::State);
-        }
-        let (length, object_version) = source.probe_observed_identity()?;
-        let file = source
-            .result
-            .as_ref()
-            .and_then(|result| result.file.as_ref())
-            .ok_or(OperationError::State)?;
-        let lease = RetainedSourceLease {
-            file: Arc::clone(file),
-        };
-        source.lease_issued = true;
-        Ok((lease, length, object_version))
-    }
-
     /// Runs source prepare/arm/open/observe and durable observation, without
     /// exporting the retained File through a lease.
     pub(in crate::adaptive_resources::runtime) async fn acquire_prepared_source(
@@ -1092,6 +1061,26 @@ pub(in crate::adaptive_resources::runtime::operations) fn finite_unregistered_cl
     })
 }
 
+/// The retained original source spec and an unarmed missing SourceCell are
+/// checked by the runtime while holding the sealed bundle. No open worker ever
+/// owned this slot; both copy dispositions are absence audits under that proof.
+#[cfg(target_os = "linux")]
+pub(super) fn fixed_probe_unregistered_no_task_closed_fact(
+    plan: &v2::MemberPlan,
+    proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+) -> Result<v2::ClosedFact, OperationError> {
+    let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = plan else {
+        return Err(OperationError::State);
+    };
+    if !proof.source_matches(source) {
+        return Err(OperationError::State);
+    }
+    Ok(proof.source_fact(v2::CopyClosed::ProvenNeverAcquired {
+        copy: proof.parent_copy().clone(),
+        operation_id: proof.operation_id(),
+    }))
+}
+
 impl SourceCell {
     /// Recheck the SAME retained native file against its durably observed S1
     /// identity. A pathname lookup cannot substitute another object here.
@@ -1163,7 +1152,6 @@ impl SourceCell {
         }
         let inherited = self.inherited_source_inner(closure.document_member(), true)?;
         Ok(FixedProbeChildObservation {
-            acquisition_id: inherited.acquisition_id,
             observation_id: inherited.observation_id,
             envelope: inherited.envelope,
             acknowledged: inherited.acknowledged,
@@ -1312,7 +1300,6 @@ impl SourceCell {
             acknowledged: self.root_observed_committed,
             verified_sha256: result.verified_sha256,
             verified_elf: result.verified_elf,
-            verified_sha256_cached: result.verified_sha256_cached,
         })
     }
 
@@ -1640,6 +1627,7 @@ impl SourceCell {
         matches!(&self.parent_close, ParentCloseState::Closed)
     }
 
+    #[cfg(test)]
     pub(super) fn parent_close_operation_id(&self) -> Uuid {
         self.parent_close_operation_id
     }
@@ -1816,6 +1804,104 @@ impl SourceCell {
             holder_id: plan.holder_id,
             copies,
         })
+    }
+
+    /// Validate the immutable source selection against the original sealed
+    /// no-task graph. This says nothing about whether its parent open ran.
+    #[cfg(target_os = "linux")]
+    fn fixed_probe_no_task_plan(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+    ) -> Result<(), OperationError> {
+        let v2::MemberPlan::FixedProbeDiscoverSourceV1 { source, .. } = &self.plan else {
+            return Err(OperationError::State);
+        };
+        if !proof.source_matches(source)
+            || self.lease_issued
+            || self.failed_join
+            || self.root_observed_committed
+            || self.selected_root_member.is_some()
+            || self.pending_root.is_some()
+            || self
+                .result
+                .as_ref()
+                .and_then(|result| result.observed.as_ref())
+                .is_some_and(|observed| {
+                    observed.copies.as_slice() != std::slice::from_ref(proof.parent_copy())
+                        || observed.member_id != source.member_id
+                        || observed.holder_id != source.holder_id
+                })
+        {
+            return Err(OperationError::State);
+        }
+        Ok(())
+    }
+
+    /// Join only the already registered opener, then close only its original
+    /// File. Never enter a fresh open merely to obtain cleanup evidence.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn close_fixed_probe_parent_before_task(
+        &mut self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+    ) -> Result<(), OperationError> {
+        self.fixed_probe_no_task_plan(proof)?;
+        if !matches!(self.parent_close, ParentCloseState::NotStarted) {
+            return self.close_parent_inner(false, false).await;
+        }
+        self.join_registered().await?;
+        if self.spec.is_some() {
+            return if self.result.is_none() {
+                Ok(())
+            } else {
+                Err(OperationError::State)
+            };
+        }
+        let result = self.result.as_ref().ok_or(OperationError::State)?;
+        if result.file.is_none() {
+            return if result.observed.is_none() {
+                Ok(())
+            } else {
+                Err(OperationError::State)
+            };
+        }
+        self.close_parent_inner(false, false).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn fixed_probe_no_task_closed_fact(
+        &self,
+        proof: &crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph,
+    ) -> Result<v2::ClosedFact, OperationError> {
+        self.fixed_probe_no_task_plan(proof)?;
+        if self.pending.is_some() {
+            return Err(OperationError::State);
+        }
+        let parent = if self.parent_closed()
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|result| result.file.is_none())
+        {
+            v2::CopyClosed::ActualOwnedClose {
+                copy: proof.parent_copy().clone(),
+                operation_id: v2::Id::new(self.parent_close_operation_id)?,
+            }
+        } else if matches!(self.parent_close, ParentCloseState::NotStarted)
+            && (self.spec.is_some() && self.result.is_none()
+                || self.spec.is_none()
+                    && self
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.file.is_none() && result.observed.is_none()))
+        {
+            v2::CopyClosed::ProvenNeverAcquired {
+                copy: proof.parent_copy().clone(),
+                operation_id: proof.operation_id(),
+            }
+        } else {
+            return Err(OperationError::State);
+        };
+        Ok(proof.source_fact(parent))
     }
 
     /// The original P task has joined and dropped its held-source aliases.

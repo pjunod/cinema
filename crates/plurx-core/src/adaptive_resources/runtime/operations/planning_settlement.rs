@@ -1,5 +1,7 @@
 //! Positive settlement of the planning role P (roles[0]) after its original
-//! probe and engine tasks have joined. Thinker decision t_054582a2#497.
+//! probe and engine tasks have joined, or their original inputs prove neither
+//! task entered and the original source parent is closed/never acquired.
+//! Thinker decision t_054582a2#497.
 //!
 //! Every closed fact is minted by a method on the consumed native closure,
 //! from IDs bound when each owner was opened. Roots and task observations
@@ -10,7 +12,8 @@
 use super::planning_tasks::{PlanningNativeState, PlanningObservation, PlanningTasks};
 use super::*;
 use crate::adaptive_resources::physical_graph::{
-    fixed_engine::FixedEngineNativeClosure, fixed_probe::FixedProbeNativeClosure,
+    fixed_engine::FixedEngineNativeClosure,
+    fixed_probe::{FixedPlanningNoTaskGraph, FixedProbeNativeClosure},
 };
 use crate::resource_custody::{ClosedMemberFact, MemberKind, PhysicalTypedSettlement};
 use bootstrap::btree_requested_upper_bound;
@@ -20,12 +23,24 @@ const UNCERTAIN_HOLD: &str = "planning native task uncertain";
 const ROOT_EVIDENCE: &str = "original fixed planning root waited; session absent, \
     bounded pipes and pidfd closed under the joined P task";
 
-/// Consumes both original native closures. Only `finish_planning_native`
-/// constructs it, after the journal facts were derived from these closures.
+/// Consumes the joined native closures or the original no-task graph witness.
+/// Only `finish_planning_native` constructs it after matching source closure
+/// and seven typed facts have been checked under the original bundle lock.
 pub(in crate::adaptive_resources) struct PlanningNativeClosure {
     binding: ReservationBinding,
-    _probe: FixedProbeNativeClosure,
-    _engine: FixedEngineNativeClosure,
+    _evidence: PlanningNativeEvidence,
+}
+// These accounted original payloads are consumed immediately by the receipt
+// constructor; keep them inline instead of adding an uncharged Box allocation.
+#[allow(clippy::large_enum_variant)]
+enum PlanningNativeEvidence {
+    Joined {
+        _probe: FixedProbeNativeClosure,
+        _engine: FixedEngineNativeClosure,
+    },
+    NeverEntered {
+        _graph: FixedPlanningNoTaskGraph,
+    },
 }
 impl PlanningNativeClosure {
     pub(in crate::adaptive_resources) fn into_binding(self) -> ReservationBinding {
@@ -39,6 +54,14 @@ impl PlanningNativeClosure {
 pub(in crate::adaptive_resources::runtime) fn planning_retained_structural_bytes() -> Option<u64> {
     use std::mem::size_of;
     let arc = 2 * size_of::<usize>();
+    // Arc's two counters impose word alignment even on a one-byte flag;
+    // include trailing layout padding in the actual requested allocation.
+    let flag_arc = std::alloc::Layout::new::<[usize; 2]>()
+        .extend(std::alloc::Layout::new::<std::sync::atomic::AtomicBool>())
+        .ok()?
+        .0
+        .pad_to_align()
+        .size();
     let bytes = size_of::<AsyncMutex<Bundle>>()
         .checked_add(arc)?
         .checked_add(MAX_PLANNING_BUNDLE_SLOTS.checked_mul(size_of::<OwnedRole>())?)?
@@ -59,7 +82,7 @@ pub(in crate::adaptive_resources::runtime) fn planning_retained_structural_bytes
         .checked_add(physical_graph::empty_graph_structural_bytes()?)?
         .checked_add(size_of::<super::super::planning_probe::MetadataReleaseState>())?
         .checked_add(arc)?
-        .checked_add(2usize.checked_mul(size_of::<std::sync::atomic::AtomicBool>() + arc)?)?
+        .checked_add(2usize.checked_mul(flag_arc)?)?
         .checked_add(super::super::finite_lifetime::requested_heap_bytes()?)?
         .checked_add(size_of::<PhysicalTypedSettlement>())?
         .checked_add(size_of::<v2::MemberDisposition>())?
@@ -98,6 +121,20 @@ impl NodeResourceRuntime {
         deadline: Instant,
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
+        let installed = tokio::time::timeout_at(deadline.into(), owner.state.lock())
+            .await
+            .map_err(lock_error)?
+            .installed;
+        if !installed {
+            // A dropped owner may never have polled prepare_inputs. Resolve
+            // the SAME accepted command; no fresh admission or source open.
+            tokio::time::timeout_at(
+                deadline.into(),
+                self.acknowledge_planning_preparation_for_cleanup(owner),
+            )
+            .await
+            .map_err(lock_error)??;
+        }
         {
             let mut bundle = tokio::time::timeout_at(deadline.into(), owner.state.lock())
                 .await
@@ -132,14 +169,27 @@ impl NodeResourceRuntime {
                         .await?;
                     return Err(OperationError::State);
                 }
-                // Pending joins belong to collect_planning_tasks; a
-                // never-entered P has no positive closure yet (Phase B).
-                PlanningNativeState::NotEntered
-                | PlanningNativeState::Pending
-                | PlanningNativeState::Incomplete => return Err(OperationError::State),
+                PlanningNativeState::NotEntered => {
+                    if let Err(error) = self
+                        .close_never_entered_planning_members(bundle_id, role, deadline)
+                        .await
+                    {
+                        if matches!(error, OperationError::Deadline) {
+                            return Err(error);
+                        }
+                        self.hold_uncertain_planning(bundle_id, role, deadline)
+                            .await?;
+                        return Err(error);
+                    }
+                }
+                PlanningNativeState::Pending | PlanningNativeState::Incomplete => {
+                    return Err(OperationError::State)
+                }
             }
-            self.observe_planning_members(bundle_id, role, deadline)
-                .await?;
+            if state == PlanningNativeState::Joined {
+                self.observe_planning_members(bundle_id, role, deadline)
+                    .await?;
+            }
         }
         // seal_role takes the bundle lock itself.
         let needs_seal = {
@@ -167,6 +217,120 @@ impl NodeResourceRuntime {
             .await
             .map_err(lock_error)?;
         self.settle_planning_role(&mut bundle, deadline).await
+    }
+
+    /// Phase B retains the original pure inputs until the original graph
+    /// positively fences all task/root entry. Its SourceCell is separate from
+    /// graph-native inventory: join/close only that already registered owner.
+    async fn close_never_entered_planning_members(
+        &self,
+        bundle_id: Uuid,
+        role: &mut OwnedRole,
+        deadline: Instant,
+    ) -> Result<(), OperationError> {
+        let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
+        let members = tasks.never_entered_members()?;
+        let source_member = tasks.source_member;
+        if !role.invoked.is_empty()
+            || role.sources.len() > 1
+            || role.sources.keys().any(|member| *member != source_member)
+            || !role.roots.is_empty()
+            || !role.drains.is_empty()
+            || !role.closed_drains.is_empty()
+            || !role.scratch.is_empty()
+            || !role.bootstrap.is_empty()
+            || role.finite_vod.is_some()
+            || role.copy_vod.is_some()
+            || role.retirement.is_some()
+            || role.response_budget.is_some()
+            || role.finite_app.is_some()
+            || role.planning_metadata.is_some()
+            || role.pending_finite_close.is_some()
+            || role
+                .armed
+                .iter()
+                .any(|member| *member != source_member && !members.contains(member))
+            || (role.sources.contains_key(&source_member) == tasks.source_spec_retained())
+            || (!role.sources.contains_key(&source_member) && role.armed.contains(&source_member))
+        {
+            return Err(OperationError::State);
+        }
+        if let Some(transition) = role.transition.as_mut() {
+            if !matches!(transition.effect, Effect::Arm(member) if member == source_member || members.contains(&member))
+                && !matches!(transition.effect, Effect::Source(member) if member == source_member)
+                && transition.effect != Effect::Seal
+            {
+                return Err(OperationError::State);
+            }
+            if transition.operation.pending.is_none()
+                && !matches!(transition.operation.result, Some(Ok(_)))
+            {
+                transition.operation.retry(&self.journal, deadline)?;
+            }
+            self.finish_transition(bundle_id, role).await?;
+        }
+        self.close_retained_entry(role.binding)?;
+        if let Some(graph) = role.graph.take() {
+            role.sealed = Some(graph.seal());
+        }
+        let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
+        if tasks.never_entered.is_none() {
+            let source = role
+                .typed_members
+                .as_ref()
+                .and_then(|plans| {
+                    plans.iter().find_map(|plan| match plan {
+                        v2::MemberPlan::FixedProbeDiscoverSourceV1 { slot, source }
+                            if slot.member_id.uuid() == source_member =>
+                        {
+                            Some(source)
+                        }
+                        _ => None,
+                    })
+                })
+                .ok_or(OperationError::State)?;
+            let graph = role.sealed.as_ref().ok_or(OperationError::State)?;
+            let proof = tokio::time::timeout_at(
+                deadline.into(),
+                graph.try_fixed_planning_no_task_graph(
+                    members,
+                    source,
+                    tasks.settlement_operation_id,
+                ),
+            )
+            .await
+            .map_err(lock_error)??;
+            if proof.source_member() != source_member
+                || !proof.matches(
+                    role.binding,
+                    role.handle
+                        .as_ref()
+                        .ok_or(OperationError::State)?
+                        .graph_id(),
+                    members,
+                )
+            {
+                return Err(OperationError::State);
+            }
+            let tasks = role.planning_tasks.as_mut().ok_or(OperationError::State)?;
+            tasks.never_entered = Some(proof);
+            tasks.consume_never_entered_inputs();
+        }
+        let proof = role
+            .planning_tasks
+            .as_ref()
+            .and_then(|tasks| tasks.never_entered.as_ref())
+            .ok_or(OperationError::State)?;
+        if let Some(source) = role.sources.get_mut(&source_member) {
+            tokio::time::timeout_at(
+                deadline.into(),
+                source.close_fixed_probe_parent_before_task(proof),
+            )
+            .await
+            .map_err(lock_error)??;
+            source.fixed_probe_no_task_closed_fact(proof)?;
+        }
+        Ok(())
     }
 
     async fn resume_planning_settlement(
@@ -197,6 +361,9 @@ impl NodeResourceRuntime {
         role: &mut OwnedRole,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        // Uncertainty can arise before either collector enters, including
+        // retained source closure. Keep ledger and durable Hold consistent.
+        self.retain_planning_uncertainty(role.binding)?;
         if role.transition.is_some() {
             if role
                 .transition
@@ -432,8 +599,8 @@ impl NodeResourceRuntime {
     }
 
     /// Steps j-n under one bundle lock: recheck, assert the structural
-    /// survivor set, build all facts, then move both closures into the one
-    /// typed settlement and refund P on its committed acknowledgement.
+    /// survivor set, build all facts, then move original native evidence into
+    /// the one typed settlement and refund P on its committed acknowledgement.
     async fn settle_planning_role(
         &self,
         bundle: &mut Bundle,
@@ -455,24 +622,38 @@ impl NodeResourceRuntime {
                 .resume_planning_settlement(bundle_id, &mut bundle.roles[0], deadline)
                 .await;
         }
-        // j. Every P member is durably observed; nothing native remains
-        // outside the two retained closures.
+        // j. Every P member is either durably observed and closed, or its
+        // never-acquired disposition follows from the original input/graph
+        // witness. Source parents have their own actual close/absence facts.
         {
             let role = &bundle.roles[0];
             let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
-            let source = role
-                .sources
-                .get(&tasks.source_member)
-                .ok_or(OperationError::State)?;
+            let never_entered = tasks.never_entered.as_ref();
+            let source = role.sources.get(&tasks.source_member);
+            let native_ok = if let Some(proof) = never_entered {
+                proof.matches(
+                    role.binding,
+                    role.handle
+                        .as_ref()
+                        .ok_or(OperationError::State)?
+                        .graph_id(),
+                    tasks.never_entered_members()?,
+                ) && role.invoked.is_empty()
+                    && (source.is_some() != tasks.source_spec_retained())
+                    && (source.is_some() || !role.armed.contains(&tasks.source_member))
+            } else {
+                tasks.native_state() == PlanningNativeState::Joined
+                    && tasks.root_observations.iter().all(|o| o.committed)
+                    && tasks.probe_task_observation.committed
+                    && tasks.engine_task_observation.committed
+                    && source.is_some_and(source_files::SourceCell::parent_closed)
+            };
             if role.transition.is_some()
                 || role.pending_finite_close.is_some()
                 || role.graph.is_some()
                 || !matches!(role.phase, Phase::Sealed | Phase::UnknownHeld)
                 || role.handle.is_none()
-                || tasks.native_state() != PlanningNativeState::Joined
-                || !tasks.root_observations.iter().all(|o| o.committed)
-                || !tasks.probe_task_observation.committed
-                || !tasks.engine_task_observation.committed
+                || !native_ok
                 || !role.roots.is_empty()
                 || !role.drains.is_empty()
                 || !role.scratch.is_empty()
@@ -483,8 +664,7 @@ impl NodeResourceRuntime {
                 || role.response_budget.is_some()
                 || role.finite_app.is_some()
                 || role.planning_metadata.is_some()
-                || role.sources.len() != 1
-                || !source.parent_closed()
+                || role.sources.len() != usize::from(source.is_some())
             {
                 return Err(OperationError::State);
             }
@@ -515,14 +695,33 @@ impl NodeResourceRuntime {
         let settlement = {
             let role = &bundle.roles[0];
             let tasks = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
-            let probe = tasks.probe_closed.as_ref().ok_or(OperationError::State)?;
-            let engine = tasks.engine_closed.as_ref().ok_or(OperationError::State)?;
+            let never_entered = tasks.never_entered.as_ref();
+            let probe = tasks.probe_closed.as_ref();
+            let engine = tasks.engine_closed.as_ref();
             let operation_id = v2::Id::new(tasks.settlement_operation_id)?;
-            let source_fact = role
-                .sources
-                .get(&tasks.source_member)
-                .ok_or(OperationError::State)?
-                .fixed_probe_closed_fact(probe)?;
+            let source_plan = role
+                .typed_members
+                .as_ref()
+                .and_then(|plans| {
+                    plans
+                        .iter()
+                        .find(|plan| plan.member_id() == tasks.source_member)
+                })
+                .ok_or(OperationError::State)?;
+            let source_fact = if let Some(proof) = never_entered {
+                match role.sources.get(&tasks.source_member) {
+                    Some(source) => source.fixed_probe_no_task_closed_fact(proof)?,
+                    None => source_files::fixed_probe_unregistered_no_task_closed_fact(
+                        source_plan,
+                        proof,
+                    )?,
+                }
+            } else {
+                role.sources
+                    .get(&tasks.source_member)
+                    .ok_or(OperationError::State)?
+                    .fixed_probe_closed_fact(probe.ok_or(OperationError::State)?)?
+            };
             let planned = role.typed_members.as_ref().ok_or(OperationError::State)?;
             if planned.len() != 7 {
                 return Err(OperationError::State);
@@ -532,9 +731,43 @@ impl NodeResourceRuntime {
             for plan in planned {
                 let fact = match plan {
                     v2::MemberPlan::LegacyV1 { planned }
+                        if never_entered.is_some()
+                            && planned.kind == MemberKind::Root
+                            && planned.adapter == Adapter::ProcessRoot =>
+                    {
+                        let members = tasks.never_entered_members()?;
+                        if ![members[0], members[1], members[3], members[4]]
+                            .contains(&planned.member_id)
+                        {
+                            return Err(OperationError::State);
+                        }
+                        v2::ClosedFact::LegacyNeverAcquiredV1 {
+                            planned: planned.clone(),
+                            operation_id,
+                        }
+                    }
+                    v2::MemberPlan::FixedProbeDiscoverTaskV1 { task, .. }
+                        if never_entered.is_some() && *task == tasks.probe_plan =>
+                    {
+                        v2::ClosedFact::FixedProbeDiscoverTaskNeverAcquiredV1 {
+                            task: task.clone(),
+                            operation_id,
+                        }
+                    }
+                    v2::MemberPlan::FixedPlanningEngineTaskV1 { task, .. }
+                        if never_entered.is_some() && *task == tasks.engine_plan =>
+                    {
+                        v2::ClosedFact::FixedPlanningEngineTaskNeverAcquiredV1 {
+                            task: task.clone(),
+                            operation_id,
+                        }
+                    }
+                    v2::MemberPlan::LegacyV1 { planned }
                         if planned.kind == MemberKind::Root
                             && planned.adapter == Adapter::ProcessRoot =>
                     {
+                        let probe = probe.ok_or(OperationError::State)?;
+                        let engine = engine.ok_or(OperationError::State)?;
                         let identity = if planned.member_id == probe.version_member() {
                             probe.version_identity()
                         } else if planned.member_id == probe.document_member() {
@@ -568,12 +801,17 @@ impl NodeResourceRuntime {
                     v2::MemberPlan::FixedProbeDiscoverTaskV1 { task, .. }
                         if *task == tasks.probe_plan =>
                     {
-                        probe.closed_fact(task, operation_id)?
+                        probe
+                            .ok_or(OperationError::State)?
+                            .closed_fact(task, operation_id)?
                     }
                     v2::MemberPlan::FixedPlanningEngineTaskV1 { task, .. }
-                        if task == engine.task() && *task == tasks.engine_plan =>
+                        if engine.is_some_and(|engine| task == engine.task())
+                            && *task == tasks.engine_plan =>
                     {
-                        engine.closed_fact(operation_id)?
+                        engine
+                            .ok_or(OperationError::State)?
+                            .closed_fact(operation_id)?
                     }
                     _ => return Err(OperationError::State),
                 };
@@ -591,25 +829,32 @@ impl NodeResourceRuntime {
             }
         };
 
-        // m. No await or fallible work between consuming the closures and
+        // m. No await or fallible work between consuming native evidence and
         // retaining the exact command in this role's transition.
         bundle.prepare.result = None;
         let role = &mut bundle.roles[0];
         let operation_id = settlement.operation_id.uuid();
         let tasks = role.planning_tasks.as_mut().expect("validated P tasks");
-        let probe = tasks.probe_closed.take().expect("validated probe closure");
-        let engine = tasks
-            .engine_closed
-            .take()
-            .expect("validated engine closure");
+        let evidence = if let Some(graph) = tasks.never_entered.take() {
+            PlanningNativeEvidence::NeverEntered { _graph: graph }
+        } else {
+            PlanningNativeEvidence::Joined {
+                _probe: tasks.probe_closed.take().expect("validated probe closure"),
+                _engine: tasks
+                    .engine_closed
+                    .take()
+                    .expect("validated engine closure"),
+            }
+        };
         let receipt = PhysicalCloseReceipt::from_planning_native(PlanningNativeClosure {
             binding: role.binding,
-            _probe: probe,
-            _engine: engine,
+            _evidence: evidence,
         });
         role.planning_tasks = None;
         role.sources.clear();
-        role.members.clear();
+        // M's survivor sum excludes P's dynamic manifest backing. clear()
+        // would retain that allocation after either joined or no-task refund.
+        role.members = Vec::new();
         role.typed_members = None;
         role.armed.clear();
         role.invoked.clear();

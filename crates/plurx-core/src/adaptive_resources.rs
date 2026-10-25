@@ -258,9 +258,10 @@ impl PhysicalCloseReceipt {
             _recovered_r: None,
         }
     }
-    /// Consumes BOTH original planning closures (probe roots/images/pipes,
-    /// engine roots/files/pipes/hash buffer). Only P's settlement path, after
-    /// deriving its journal facts from the same closures, constructs this.
+    /// Consumes either both joined original planning closures, or the original
+    /// sealed no-task graph witness after its SourceCell positively closed or
+    /// proved no acquisition. P's settlement path checks the same seven facts
+    /// and M survivor bound before constructing this receipt.
     #[cfg(target_os = "linux")]
     fn from_planning_native(closure: runtime::PlanningNativeClosure) -> Self {
         Self {

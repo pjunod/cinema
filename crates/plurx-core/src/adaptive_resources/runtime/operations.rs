@@ -792,6 +792,56 @@ impl NodeResourceRuntime {
     ) -> Result<(), OperationError> {
         self.validate_preparation(owner)?;
         let mut bundle = owner.state.lock().await;
+        self.acknowledge_preparation_bundle(&mut bundle).await?;
+        let eligibility = if Instant::now() >= deadline {
+            Err(OperationError::Deadline)
+        } else {
+            self.eligible(&bundle)
+        };
+        if let Err(error) = eligibility {
+            #[cfg(target_os = "linux")]
+            if bundle
+                .roles
+                .iter()
+                .any(|role| role.planning_tasks.is_some() || role.planning_metadata.is_some())
+            {
+                return Err(error);
+            }
+            // A late commit never bypasses current cap epoch/drain. Cancel each
+            // intact Prepared member durably; cancellation midway retains the
+            // exact pending transition and every unrefunded role.
+            self.cancel_bundle(&mut bundle, deadline).await?;
+            return Err(error);
+        }
+        if bundle.roles.iter().any(|role| role.refunded) {
+            return Err(OperationError::State);
+        }
+        Ok(())
+    }
+
+    /// Resolve/acknowledge the original accepted prepare for cleanup only.
+    /// No eligibility check, generic cancellation or native launch is granted.
+    #[cfg(target_os = "linux")]
+    pub(in crate::adaptive_resources::runtime) async fn acknowledge_planning_preparation_for_cleanup(
+        &self,
+        owner: &OwnedPreparation,
+    ) -> Result<(), OperationError> {
+        self.validate_preparation(owner)?;
+        let mut bundle = owner.state.lock().await;
+        if !bundle
+            .roles
+            .iter()
+            .any(|role| role.planning_tasks.is_some() || role.planning_metadata.is_some())
+        {
+            return Err(OperationError::State);
+        }
+        self.acknowledge_preparation_bundle(&mut bundle).await
+    }
+
+    async fn acknowledge_preparation_bundle(
+        &self,
+        bundle: &mut Bundle,
+    ) -> Result<(), OperationError> {
         if !bundle.installed {
             let prepared = match bundle.prepare.resolve().await {
                 Ok(OperationResult::Prepared(prepared)) => prepared,
@@ -799,6 +849,16 @@ impl NodeResourceRuntime {
                 Err(OperationError::Custody(error))
                     if error.certainty != CommitCertainty::Unknown =>
                 {
+                    // Original planning inputs/application allocations still
+                    // exist even when journal preparation rolled back. Never
+                    // partially refund P before discovering M's owner.
+                    #[cfg(target_os = "linux")]
+                    if bundle.roles.iter().any(|role| {
+                        role.planning_tasks.is_some() || role.planning_metadata.is_some()
+                    }) {
+                        bundle.prepare.acknowledge(&self.journal)?;
+                        return Err(error.into());
+                    }
                     let id = bundle.id;
                     for role in &mut bundle.roles {
                         refund(&self.ledger, id, role)?;
@@ -834,21 +894,6 @@ impl NodeResourceRuntime {
             bundle.installed = true;
         }
         bundle.prepare.acknowledge(&self.journal)?;
-        let eligibility = if Instant::now() >= deadline {
-            Err(OperationError::Deadline)
-        } else {
-            self.eligible(&bundle)
-        };
-        if let Err(error) = eligibility {
-            // A late commit never bypasses current cap epoch/drain. Cancel each
-            // intact Prepared member durably; cancellation midway retains the
-            // exact pending transition and every unrefunded role.
-            self.cancel_bundle(&mut bundle, deadline).await?;
-            return Err(error);
-        }
-        if bundle.roles.iter().any(|role| role.refunded) {
-            return Err(OperationError::State);
-        }
         Ok(())
     }
 
@@ -1098,16 +1143,19 @@ impl NodeResourceRuntime {
         bundle: &mut Bundle,
         deadline: Instant,
     ) -> Result<(), OperationError> {
+        // Preflight the entire bundle before touching P. Both original task
+        // inputs and M application owners require their own close boundary.
+        #[cfg(target_os = "linux")]
+        if bundle
+            .roles
+            .iter()
+            .any(|role| role.planning_tasks.is_some() || role.planning_metadata.is_some())
+        {
+            return Err(OperationError::State);
+        }
         for role in &mut bundle.roles {
             if role.refunded {
                 continue;
-            }
-            // M's original book/metadata allocations are application owners,
-            // even if no native object was acquired. Their exact finalizer
-            // destroys the bundle before refund; generic cancellation cannot.
-            #[cfg(target_os = "linux")]
-            if role.planning_metadata.is_some() {
-                return Err(OperationError::State);
             }
             if role.transition.is_none() {
                 if role.phase != Phase::Prepared {
@@ -1496,6 +1544,10 @@ fn refund(
 ) -> Result<(), OperationError> {
     if role.refunded {
         return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if role.planning_tasks.is_some() || role.planning_metadata.is_some() {
+        return Err(OperationError::State);
     }
     if role
         .receipt

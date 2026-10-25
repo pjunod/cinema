@@ -50,10 +50,12 @@ pub(super) struct PlanningTasks {
     pub(super) settlement_operation_id: Uuid,
     pub(super) unknown: bool,
     pub(super) entered: bool,
+    pub(super) never_entered:
+        Option<crate::adaptive_resources::physical_graph::fixed_probe::FixedPlanningNoTaskGraph>,
 }
 
-/// Settlement-relevant summary of the original P tasks. Only `Joined` may
-/// lead to a positive close; `Uncertain` is held and never refunded.
+/// Settlement-relevant summary of the original P tasks. Joined native owners
+/// or strict retained never-entered inputs may close; uncertainty stays held.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum PlanningNativeState {
     NotEntered,
@@ -68,6 +70,50 @@ pub(super) enum PlanningNativeState {
     Incomplete,
 }
 impl PlanningTasks {
+    /// The retained pure inputs, rather than a task status flag, prove that
+    /// neither original collector was handed its source/image/native work.
+    pub(super) fn never_entered_members(&self) -> Result<[Uuid; 6], OperationError> {
+        if self.entered
+            || self.unknown
+            || self.probe.is_some()
+            || self.engine.is_some()
+            || self.probe_failure.is_some()
+            || self.engine_failure.is_some()
+            || self.probe_report.is_some()
+            || self.engine_report.is_some()
+            || self.probe_closed.is_some()
+            || self.engine_closed.is_some()
+            || self.probe_observed.is_some()
+            || self.engine_observed.is_some()
+            || self.source.is_some()
+            || self.observed_source.is_some()
+            || self
+                .root_observations
+                .iter()
+                .any(|observation| observation.committed)
+            || self.probe_task_observation.committed
+            || self.engine_task_observation.committed
+            || (self.never_entered.is_none() != self.inputs.is_some())
+        {
+            return Err(OperationError::State);
+        }
+        Ok([
+            self.probe_plan.version_root_member_id.uuid(),
+            self.probe_plan.document_root_member_id.uuid(),
+            self.probe_plan.member_id.uuid(),
+            self.engine_plan.version_root_member_id.uuid(),
+            self.engine_plan.dependency_root_member_id.uuid(),
+            self.engine_plan.member_id.uuid(),
+        ])
+    }
+    pub(super) fn consume_never_entered_inputs(&mut self) {
+        // The graph witness is already retained; this pure request cannot be
+        // moved to an original task after its acquisition entry was sealed.
+        self.inputs = None;
+    }
+    pub(super) fn source_spec_retained(&self) -> bool {
+        self.source_spec.is_some()
+    }
     pub(super) fn native_state(&self) -> PlanningNativeState {
         if self.unknown || self.probe_failure.is_some() || self.engine_failure.is_some() {
             PlanningNativeState::Uncertain
@@ -169,8 +215,14 @@ pub(in crate::adaptive_resources::runtime) fn planning_task_frame_bytes() -> Opt
         .checked_add(std::mem::size_of_val(&original_engine_task(None, None)))
 }
 
+pub(in crate::adaptive_resources::runtime) type PlanningOwnerFences = (
+    Arc<super::super::planning_probe::MetadataReleaseState>,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
+
 impl NodeResourceRuntime {
-    fn retain_planning_uncertainty(
+    pub(super) fn retain_planning_uncertainty(
         &self,
         binding: ReservationBinding,
     ) -> Result<(), OperationError> {
@@ -225,9 +277,13 @@ impl NodeResourceRuntime {
                     .original_tasks_pending
                     .checked_add(usize::from(tasks.probe.is_some()))?
                     .checked_add(usize::from(tasks.engine.is_some()))?;
-                counts.uncertain_native_owners = counts
-                    .uncertain_native_owners
-                    .checked_add(usize::from(tasks.unknown || tasks.engine_failure.is_some()))?;
+                counts.uncertain_native_owners =
+                    counts.uncertain_native_owners.checked_add(usize::from(
+                        native.phase == Phase::UnknownHeld
+                            || tasks.unknown
+                            || tasks.probe_failure.is_some()
+                            || tasks.engine_failure.is_some(),
+                    ))?;
             }
         }
         Some(counts)
@@ -282,6 +338,7 @@ impl NodeResourceRuntime {
             engine_closed: None,
             unknown: false,
             entered: false,
+            never_entered: None,
         });
         Ok(())
     }
@@ -289,14 +346,7 @@ impl NodeResourceRuntime {
     pub(in crate::adaptive_resources::runtime) fn planning_owner_fences(
         &self,
         owner: &OwnedPreparation,
-    ) -> Result<
-        (
-            Arc<super::super::planning_probe::MetadataReleaseState>,
-            Arc<std::sync::atomic::AtomicBool>,
-            Arc<std::sync::atomic::AtomicBool>,
-        ),
-        OperationError,
-    > {
+    ) -> Result<PlanningOwnerFences, OperationError> {
         let bundle = owner.state.try_lock().map_err(|_| OperationError::State)?;
         let release = Arc::clone(
             &bundle
@@ -324,6 +374,9 @@ impl NodeResourceRuntime {
                 .get_mut(0)
                 .and_then(|role| role.planning_tasks.as_mut())
                 .ok_or(OperationError::State)?;
+            if task.never_entered.is_some() {
+                return Err(OperationError::State);
+            }
             (task.source_member, task.source_spec.take())
         };
         // There is no cancellation point between removing the pending spec,
@@ -365,7 +418,7 @@ impl NodeResourceRuntime {
             .load(std::sync::atomic::Ordering::Acquire);
         let role = &mut bundle.roles[0];
         let task = role.planning_tasks.as_ref().ok_or(OperationError::State)?;
-        if (task.unknown || cleanup_requested) && !task.entered {
+        if task.never_entered.is_some() || (task.unknown || cleanup_requested) && !task.entered {
             return Err(OperationError::State);
         }
         let members = [
@@ -464,14 +517,12 @@ impl NodeResourceRuntime {
                     return Err(OperationError::State);
                 }
             };
+            if task.probe_plan.source_member_id.uuid() != task.source_member {
+                return Err(OperationError::State);
+            }
             let known = FixedProbeKnownClosed::from_joined_original(
                 native,
-                task.probe_plan.version_root_member_id.uuid(),
-                task.probe_plan.document_root_member_id.uuid(),
-                task.source_member,
-                task.probe_plan.version_close_operation_id.uuid(),
-                task.probe_plan.document_close_operation_id.uuid(),
-                &task.probe_plan.configured_locator,
+                &task.probe_plan,
                 task.observed_source
                     .as_deref()
                     .ok_or(OperationError::State)?,
