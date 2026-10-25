@@ -13,6 +13,14 @@ This document owns Apple runner preference, outage detection and installation.
 | Primary | `gha-maca-apple-01` | M4 MacBook Air, `10.42.5.115` | `githubrunner` | Unverified; offline at the 2026-10-23 inspection |
 | Backup | `gha-macb-apple-01` | M3 Max MacBook Pro | `operator` | Verified 2026-10-23: Xcode 27.1, `27A9275` |
 
+DerivedData cache keys and restore prefixes include the Xcode build and both
+mobile SDK versions. A different toolchain starts cold; its cache is saved only
+after success. The Effort Apple compile budget is 45 minutes because it also
+builds both macOS tray architectures before generic iOS and tvOS simulators.
+Run 5877 exhausted the old 10-minute budget during the first iOS cold build;
+that failure establishes neither iOS nor tvOS compilation. Full CI and main
+promotion retain their separate 60/120-minute Apple budgets.
+
 The workflow and health-command pin is Xcode **27.1**, build **27A9275**.
 The verified backup has iphoneos SDK **27.1**, appletvos SDK **27.0**, and
 XcodeGen **2.46.0**. Full promotion still requires the existing iOS 26.5 /
@@ -30,11 +38,12 @@ Apple jobs require `self-hosted`, `macOS`, `ARM64`, `lab`, `apple`, and
 installation and runner prerequisites. Keep the unverified primary excluded
 from that label until its toolchain and installed health command are checked.
 The primary also carries `primary`, and the backup carries `backup`.
-Forgejo matches labels; those last two labels describe the roles and do not
-make its scheduler prefer one runner. The
+Apple workflows additionally require `xcode-27.1`. Only the backup currently
+provides that label; the primary must complete its Xcode upgrade before it
+can receive the label and resume Apple jobs. Forgejo matches labels; the role
+labels do not make its scheduler prefer one runner. The
 [standby controller](../../deploy/apple-runner/plurx-apple-standby) enforces
-preference by starting the backup daemon only during an outage. Apple jobs
-continue to request the common label set.
+preference by starting the backup daemon only during an outage. Apple jobs request the common labels plus the exact toolchain label.
 
 The controller probes the primary over existing `pjunod` SSH access, with
 strict host-key verification and no interactive authentication. The

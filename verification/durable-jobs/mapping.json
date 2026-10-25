@@ -55,67 +55,67 @@
       },
       {
         "anchor": "    reprobe_files_with_publication(&PublicationStore::unfenced(store), files).await",
-        "sha256": "a4d2026a38407432fb20267b1e86b828bc607c36a0349783876713839183608b",
+        "sha256": "4481742720ad1d8d52529b41c7984846bd1c9bb47aeb8afc9e66ffdfa9b0a83c",
         "source": "crates/plurx-core/src/scan/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/scan/mod.rs:485"
       },
       {
         "anchor": "pub trait BackgroundJobStore: Send + Sync {",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue protocol trait"
       },
       {
         "anchor": "pub struct JobToken {",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 queue token schema"
       },
       {
         "anchor": "impl<T: QueueSql> BackgroundJobStore for T {",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "proposal \u00a74.1 shared queue adapter"
       },
       {
         "anchor": "            || self.now_ms.saturating_sub(self.dispatched_at_ms) >= CLAIM_RESOLUTION_WINDOW_MS",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:1495"
       },
       {
         "anchor": "        if request.fence.is_none()",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3465"
       },
       {
         "anchor": "            if token.lease_expires_ms <= request.now_ms {",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:3497"
       },
       {
         "anchor": "  AND (state = 'queued' OR (state = 'running' AND lease_expires_ms <= json_extract($1, '$.now_ms')))",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:532"
       },
       {
         "anchor": "    AND job.lease_expires_ms > now_ms AND job.state = 'running'",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:630"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/background_jobs.rs:636"
       },
       {
         "anchor": "pub const MAX_RETAINED_JOBS: usize = 10_000;",
-        "sha256": "e3a56a46f2be83fc55c80a7dc928d072f4f6978e1e82ba337bb255b4cac3f78b",
+        "sha256": "7bb1c42721ee8d7cf0c70fd0bac18f50a9c798b6206921b416b0d4af6525c038",
         "source": "crates/plurx-core/src/store/background_jobs.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/background_jobs.rs:50"
       },
@@ -241,13 +241,13 @@
       },
       {
         "anchor": "pub(super) const REPLICATED_STORE_TIMEOUT: &str = \"replicated store operation timed out\";",
-        "sha256": "6976e5fdce4c2b376514658e37aaecbe89e6bbed4b975011ddc36d2dfd1125ca",
+        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "M2 Hiqlite replicated timeout classification"
       },
       {
         "anchor": "                        super::background_jobs::RETENTION_SCHEMA",
-        "sha256": "6976e5fdce4c2b376514658e37aaecbe89e6bbed4b975011ddc36d2dfd1125ca",
+        "sha256": "36f4705cca7350ef833c2c11a6702e83ef28772b25228dbea57fb7cf7add3abc",
         "source": "crates/plurx-core/src/store/hiqlite.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/hiqlite.rs:3585"
       },
@@ -409,37 +409,37 @@
       },
       {
         "anchor": "async fn with_fenced_conn<T, F>",
-        "sha256": "83e579fdf95902feffe8427abea0a08f1edef962c42d244c1fc284e65c612112",
+        "sha256": "1cb1ebcb64b9657738872caf87d9227c43bc002b9285a2a050f46e3e9bebc716",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "proposal \u00a74.1 SQLite fenced transaction"
       },
       {
         "anchor": "            let execution_time_ms = std::time::SystemTime::now()",
-        "sha256": "83e579fdf95902feffe8427abea0a08f1edef962c42d244c1fc284e65c612112",
+        "sha256": "1cb1ebcb64b9657738872caf87d9227c43bc002b9285a2a050f46e3e9bebc716",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1973"
       },
       {
         "anchor": "                && replacement.expires_at_unix_ms > lease.expires_at_unix_ms",
-        "sha256": "83e579fdf95902feffe8427abea0a08f1edef962c42d244c1fc284e65c612112",
+        "sha256": "1cb1ebcb64b9657738872caf87d9227c43bc002b9285a2a050f46e3e9bebc716",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1984"
       },
       {
         "anchor": "                    AND expires_at_ms = ?5 AND expires_at_ms > ?8",
-        "sha256": "83e579fdf95902feffe8427abea0a08f1edef962c42d244c1fc284e65c612112",
+        "sha256": "1cb1ebcb64b9657738872caf87d9227c43bc002b9285a2a050f46e3e9bebc716",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:1996"
       },
       {
         "anchor": "                        AND held.expires_at_ms >= job.lease_expires_ms))",
-        "sha256": "83e579fdf95902feffe8427abea0a08f1edef962c42d244c1fc284e65c612112",
+        "sha256": "1cb1ebcb64b9657738872caf87d9227c43bc002b9285a2a050f46e3e9bebc716",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a72 citation crates/plurx-core/src/store/sqlite/mod.rs:2008"
       },
       {
         "anchor": "    super::background_jobs::RETENTION_SCHEMA,",
-        "sha256": "83e579fdf95902feffe8427abea0a08f1edef962c42d244c1fc284e65c612112",
+        "sha256": "1cb1ebcb64b9657738872caf87d9227c43bc002b9285a2a050f46e3e9bebc716",
         "source": "crates/plurx-core/src/store/sqlite/mod.rs",
         "table": "review \u00a73 citation crates/plurx-core/src/store/sqlite/mod.rs:1255"
       },
@@ -451,7 +451,7 @@
       },
       {
         "anchor": "#[path = \"store_contract/formal_publication.rs\"]\nmod formal_publication;",
-        "sha256": "6671d43feb4c8e0fcec672d888d66a1e8405028daf135d120fc405d9b88cb537",
+        "sha256": "abb90a74cb26703d089f8707fc051912724bf5d6dddf3531abaf3559e05dafaf",
         "source": "crates/plurx-core/tests/store_contract.rs",
         "table": "M2 conformance parent module registration"
       },
@@ -505,7 +505,7 @@
       },
       {
         "anchor": "struct JobFence",
-        "sha256": "2f35b5600e9d404d05f6f9436e4e41a3efc7b90f222623438e2a4ee8bf4a2394",
+        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55",
         "source": "crates/plurxd/src/background_jobs.rs",
         "table": "proposal \u00a74.1 runtime fence"
       },
@@ -571,13 +571,13 @@
       },
       {
         "anchor": "pub async fn produce(",
-        "sha256": "81df82b9fc9c93898825c9374a40105d8f4dd4d13d88b335489c08f42e926ec5",
+        "sha256": "c540287f2200b6c663d4a3673236ea790a889b3f0ae2aeb4719b49612632339c",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 artifact producer caller"
       },
       {
         "anchor": "            true\n        } else if let Some(fence) = publication_fence {\n            PublicationStore::fenced(self.store.as_ref(), fence.clone())",
-        "sha256": "81df82b9fc9c93898825c9374a40105d8f4dd4d13d88b335489c08f42e926ec5",
+        "sha256": "c540287f2200b6c663d4a3673236ea790a889b3f0ae2aeb4719b49612632339c",
         "source": "crates/plurxd/src/transcode/manager/produce.rs",
         "table": "review \u00a73 citation crates/plurxd/src/transcode/manager/produce.rs:2083"
       },
@@ -615,10 +615,40 @@
         "table": "daemon retry settlement delegates to the shared worker-control helper",
         "source": "crates/plurxd/src/background_jobs.rs",
         "anchor": "pub(crate) use plurx_worker_control::retry_policy::retry_delay_ms;",
-        "sha256": "2f35b5600e9d404d05f6f9436e4e41a3efc7b90f222623438e2a4ee8bf4a2394"
+        "sha256": "9a2c28cb31f52395b0e767e2967cd6df5bed63c1a3d17c28e3299b05e4182d55"
+      },
+      {
+        "anchor": " job.state='running' AND job.kind='dv_title_scan' AND job.payload_version=1",
+        "sha256": "19be04dbdf64b7c63febc13af44065527ce4b8d27b4e8e504dbc2919e8b92891",
+        "source": "crates/plurx-core/src/store/dv_title_jobs.rs",
+        "table": "DV extension exclusion: publication remains kind-specific"
+      },
+      {
+        "anchor": "CREATE TRIGGER IF NOT EXISTS dv_title_jobs_probe_published",
+        "sha256": "3c292386047fc4e6d1945e1f14c9ddcf626e73076726c6fc3e9c68c6c7b20c7d",
+        "source": "crates/plurx-core/src/store/dv_title_jobs.sql",
+        "table": "DV extension isolation: installed trigger side effects"
+      },
+      {
+        "anchor": "pub(crate) fn version(shape: &[(String, String)]) -> Result<Option<i64>, StoreError> {",
+        "sha256": "fa313937dc51f19f934d69fd82785cab9b520c253c40b066e7c0f9e2af74fa06",
+        "source": "crates/plurx-core/src/store/dv_title_jobs_schema.rs",
+        "table": "DV extension isolation: exact installed schema verification"
+      },
+      {
+        "anchor": "async fn title_publication_is_atomic_idempotent_and_never_self_enqueues() {",
+        "sha256": "dc7a6b0f7f2dbc53335f9c4056dc35e19219ad8c440cbf806ce18c860c1df8bd",
+        "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
+        "table": "DV excluded runtime example: atomic idempotent publication"
+      },
+      {
+        "anchor": "async fn title_manual_cancel_wins_publication_and_does_not_become_scheduler_yield() {",
+        "sha256": "dc7a6b0f7f2dbc53335f9c4056dc35e19219ad8c440cbf806ce18c860c1df8bd",
+        "source": "crates/plurx-core/tests/store_contract/dv_title_jobs.rs",
+        "table": "DV excluded runtime example: cancellation rejects stale publication"
       }
     ],
-    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed. Source-pin refresh at 12dcb179c: the daemon now re-exports and calls the shared worker-control retry_delay_ms helper, whose module export and implementation are pinned below. The core worker-control dependency is test-only and is recorded as package-test closure, not a runtime premise. These legacy models continue to abstract the numeric retry schedule as an input; the new source pins do not claim that either model proves the helper arithmetic. Only source hashes for the changed lockfile/daemon file and these directly related dependency/helper inputs are refreshed; model/configuration identities and prior review provenance remain unchanged."
+    "review_basis": "Author/source correspondence covers 97 unique anchors against the integrated source contract. Independent Fable 5.1 implementation review t_9e6136d9 completed on 88f73b08c with CHANGES_REQUESTED F1/F2. Coordinator fixes narrow the recovery placeholder claim and correct the extraction-test regex; review disposition and qualification receipts are maintained with PR1241. The review itself is not runtime evidence or a refinement theorem. Astra (gpt-6-astra) reviewed PR1255 source drift at e5b4caf45: budget registration, fragment-index pins and capacity checks preserve selected library bind-before-work and fenced publication. Budgeted artifact uploads preserve domain-only producer publication classification. All seven affected anchors remain unique; model and configuration semantics are unchanged. This scoped source review is not execution evidence or a refinement theorem. PR1263 source refresh: the SQLite source adds only a cfg(test) transaction-control bridge and the queue-fence source adds only conformance tests; their mapped production bodies are unchanged. The unchanged library processing/completion helpers remain mapped in library_work.rs; domain acquisition and binding moved to library_work/env.rs, while work_library_queue calls the shared library_driver interpreter. Fable 5.1 FINAL-REVIEW at c37c4d610 inspected that extraction and preserved cleanup order; its conditional verdict and R1 retirement boundary remain unresolved by this metadata refresh. No model/configuration semantics or execution evidence changes are claimed. Source-pin refresh at 12dcb179c: the daemon now re-exports and calls the shared worker-control retry_delay_ms helper, whose module export and implementation are pinned below. The core worker-control dependency is test-only and is recorded as package-test closure, not a runtime premise. These legacy models continue to abstract the numeric retry schedule as an input; the new source pins do not claim that either model proves the helper arithmetic. Only source hashes for the changed lockfile/daemon file and these directly related dependency/helper inputs are refreshed; model/configuration identities and prior review provenance remain unchanged. Codex reviewed the DV-title integration at 4b359f7923c47a1e8715e826a9b6581a08f60e05 against 1f30b4791476acb5d290c2f8e6ed38d07051f31d; all six drifted files matched the previously recorded hashes at that base. The selected library_scan/metadata_refresh claim CAS, stable binding, exact renewal/cancellation, fence/revision counters, reservation/receipt transitions and insert_item_fenced transaction guards are unchanged. New enqueue/claim predicates apply only to dv_title_scan. Added title SQL triggers and schema installation were reviewed for isolation: title job/waiter invalidation is kind-scoped, ordinary file publication creates or invalidates title demand within its existing transaction, and title publication has its own kind guard. New dependency anchors record that isolation and existing runtime-example definitions, not modeled DV guarantees. Title source generations, JSON attachment, scheduling/preemption, replay/retry and publication through publish_dv_title_job are outside this finite model. See CONTRACT.md for the scoped review; no model/config changes or new execution/qualification evidence are claimed."
   },
   "configs": {
     "baseline.cfg": {

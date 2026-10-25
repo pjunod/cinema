@@ -1312,6 +1312,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::subtitle_translation_schema::SCHEMA,
     // v113: item ratings and per-person item lists (watchlist, favorites).
     super::library_annotations_schema::SCHEMA,
+    // v114: source-revision title acquisition, independent of ordinary probes.
+    super::dv_title_jobs::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1850,6 +1852,7 @@ impl SqliteStore {
         super::subtitle_managed_schema::verify_sqlite(conn)?;
         super::subtitle_translation_schema::verify_sqlite(conn)?;
         super::library_annotations_schema::verify_sqlite(conn)?;
+        super::dv_title_jobs_schema::verify_sqlite(conn)?;
 
         // First startup: mint the permanent instance id.
         let existing: Option<String> = conn

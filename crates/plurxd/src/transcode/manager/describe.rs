@@ -41,7 +41,7 @@ impl TranscodeManager {
                 encoder: encoding.map_or("vod", |encoding| encoding.delivered_encoder_label()),
                 grade: encoding.map_or_else(
                     || super::manager_candidates::copy_candidate_grade(&facts.file),
-                    |encoding| encoding.options.pipeline.output_grade(),
+                    |encoding| encoding.delivered_output_grade(),
                 ),
                 vod: true,
                 control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,

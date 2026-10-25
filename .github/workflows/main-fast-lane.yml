@@ -529,6 +529,7 @@ jobs:
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
           grep -Fxq "Xcode 27.1" <<< "$xcode_version"
           grep -Fxq "Build version 27A9275" <<< "$xcode_version"
           xcrun --find swift
@@ -557,11 +558,11 @@ jobs:
         uses: https://data.forgejo.org/actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: clients/apple/build/DerivedData
-          key: main-fast-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**') }}
+          key: main-fast-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**') }}
           restore-keys: |
-            main-fast-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
-            effort-apple-dd-
-            apple-dd-
+            main-fast-apple-dd-xcode-27A9275-ios27.1-tvos27.0-${{ hashFiles('clients/apple/project.yml') }}-
+            effort-apple-dd-xcode-27A9275-ios27.1-tvos27.0-
+            apple-dd-xcode-27A9275-ios27.1-tvos27.0-
       - name: Compile iOS and tvOS without running simulator tests
         if: needs.scope.outputs.apple == 'true'
         run: make apple-build

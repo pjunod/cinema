@@ -1521,8 +1521,8 @@ pub fn vod_completed_reconstructed_pipe_args(
     // with what the helper produced; the encoder writes its VUI and the
     // sample entry's colr from these frame properties.
     let mut filter = format!(
-        "setparams=range=tv:color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
-        grid.numerator, grid.denominator,
+        "setparams=range=tv:color_primaries={}:color_trc={}:colorspace={},format={pixel_format},settb=expr=1/{},setpts=N*{}+{origin}",
+        output.input_contract().primaries(), output.input_contract().transfer(), output.input_contract().matrix(), grid.numerator, grid.denominator,
     );
     if output.encoder() == super::Encoder::Vaapi {
         filter.push_str(",hwupload=extra_hw_frames=4");
@@ -1621,6 +1621,9 @@ pub fn vod_completed_reconstructed_pipe_args(
     if plan.options().input_has_audio {
         let at = args.len().saturating_sub(1);
         args.splice(at..at, ["-threads:a".into(), "1".into()]);
+    }
+    if output.codec_contract().grade() == super::OutputGrade::Sdr {
+        super::encoder::normalize_reconstructed_sdr_args(&mut args);
     }
     Ok(args)
 }
@@ -2076,6 +2079,18 @@ mod tests {
         // Reconstructed: the RGB video input replaces the source decoder and
         // its offset; the source soundtrack keeps the ordinary held origin.
         assert_eq!(offsets(&reconstructed), ["-1.500000"]);
+        let positive = vod_reconstructed_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            grid,
+            0.25,
+            "/dev/fd/3",
+            "/dev/fd/4",
+            super::VodSourceClock::ReportedOrigin(125_000),
+        )
+        .expect("positive common source origin");
+        assert_eq!(offsets(&positive), ["-0.125000"]);
         let zero = vod_reconstructed_pipe_args(
             &source,
             &plan,

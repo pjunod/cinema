@@ -261,6 +261,12 @@ impl TranscodeManager {
     /// Bounded VOD identities for the cluster-only activity snapshot. These
     /// are already complete delivery facts, unlike historical live-session
     /// candidates, and never consult the removed presentation engine.
+    pub(crate) async fn display_target_usage(
+        &self,
+    ) -> (usize, std::collections::BTreeMap<u32, Option<u64>>) {
+        self.vod.display_target_usage().await
+    }
+
     pub(crate) async fn vod_delivery_infos_bounded(
         &self,
         limit: usize,

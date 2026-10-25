@@ -917,7 +917,7 @@ impl TranscodeManager {
                     });
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
-                let grade = encoding.options.pipeline.output_grade();
+                let grade = encoding.delivered_output_grade();
                 let file = encoded_vod_presentation_file(
                     facts.file,
                     height,

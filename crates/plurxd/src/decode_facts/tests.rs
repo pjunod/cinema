@@ -3095,3 +3095,157 @@ fn legacy_video_ordinals_preserve_the_command_builders_exact_mapping() {
     assert_eq!(absolute_video_ordinal(&json, 1), Some(7));
     assert_eq!(absolute_video_ordinal(&json, 2), None);
 }
+
+#[test]
+fn source_frame_projection_is_bounded_selected_and_separate_from_raw_streams() {
+    let raw = ProbeProjection::SourceDocument.arguments();
+    assert!(raw.iter().any(|arg| arg == "-show_streams"));
+    assert!(!raw
+        .iter()
+        .any(|arg| arg == "-show_frames" || arg == "-select_streams" || arg == "-read_intervals"));
+    let frames = ProbeProjection::SourceFrames(7).arguments();
+    assert!(frames
+        .windows(2)
+        .any(|pair| pair == ["-select_streams", "7"]));
+    assert!(frames
+        .windows(2)
+        .any(|pair| pair == ["-read_intervals", "%+#3"]));
+    assert!(frames.windows(2).any(|pair| pair == ["-threads", "1"]));
+    assert!(!frames.iter().any(|arg| arg == "-show_streams"));
+    assert!(ProbeProjection::SourceFrames(7).output_limit() <= MAX_PROBE_STDOUT_BYTES);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn source_frame_sidecar_keeps_raw_audio_and_refuses_changed_source_probe_or_stream() {
+    let root = crate::test_tempdir().expect("frame sidecar");
+    let path = root.path().join("ffprobe-frame-sidecar");
+    let raw = serde_json::json!({"streams":[
+        {"index":7,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":64,"height":64,
+         "avg_frame_rate":"24/1","r_frame_rate":"24/1","field_order":"progressive"},
+        {"index":9,"codec_type":"audio","codec_name":"aac"}],"format":{"format_name":"matroska"}});
+    let frames = serde_json::json!({"frames":[{"stream_index":7,"side_data_list":[{"side_data_type":"Mastering display metadata","min_luminance":"1/10000"}]}]});
+    let script = format!(
+        r###"#!/bin/sh
+if test "$1" = "-version"; then echo 'ffprobe version frame-sidecar'; exit 0; fi
+cat /dev/fd/3 >/dev/null || exit 91
+case " $* " in
+ *" -show_frames "*) printf '%s\n' '{frames}' ;;
+ *) printf '%s\n' '{raw}' ;;
+esac
+"###
+    );
+    executable(&path, &script);
+    let probe = DecodeProbeIdentity::discover_fixture(path.to_str().expect("path"))
+        .await
+        .expect("identity");
+    let media = root.path().join("source.bin");
+    std::fs::write(&media, b"held source").expect("source");
+    let handle = Arc::new(std::fs::File::open(&media).expect("held file"));
+    let cache = Arc::new(DecodeFactCache::new());
+    let prepared = cache
+        .probe_source_document(
+            &probe,
+            DecodeFactSource::isolated(Arc::clone(&handle)),
+            None,
+            ProbeStreamSelection::LegacyVideoOrdinal(0),
+            Duration::from_secs(5),
+            None,
+        )
+        .await
+        .expect("raw observation");
+    let raw_before = prepared.document.clone();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&raw_before).expect("raw")["streams"]
+            .as_array()
+            .expect("streams")
+            .len(),
+        2
+    );
+    assert!(matches!(
+        cache.source_frame_probe(
+            &probe,
+            DecodeFactSource::isolated(Arc::clone(&handle)),
+            None,
+            &prepared,
+            8
+        ),
+        Err(DecodeFactError::InvalidFacts(_))
+    ));
+    let frame_probe = cache
+        .source_frame_probe(
+            &probe,
+            DecodeFactSource::isolated(Arc::clone(&handle)),
+            None,
+            &prepared,
+            7,
+        )
+        .expect("selected sidecar");
+    assert_eq!(
+        crate::vodencode::dv_runtime::held_source_minimum(
+            Ok(Some(50)),
+            Some(frame_probe.as_ref()),
+            None
+        )
+        .await
+        .expect("stream floor"),
+        Some(50)
+    );
+    assert!(
+        frame_probe.document.get().is_none(),
+        "known stream floor never samples frames"
+    );
+    assert_eq!(
+        crate::vodencode::dv_runtime::held_source_minimum(
+            Ok(None),
+            Some(frame_probe.as_ref()),
+            None
+        )
+        .await
+        .expect("real held frame minimum without xy"),
+        Some(1)
+    );
+    assert_eq!(
+        frame_probe.document(None).await.expect("frame observation"),
+        &frames
+    );
+    assert_eq!(prepared.document, raw_before, "raw document unchanged");
+    assert_eq!(
+        cache
+            .entries
+            .lock()
+            .await
+            .get(&prepared.key)
+            .expect("decoder cache retained")
+            .input_video_stream(),
+        7
+    );
+    let replacement = cache
+        .source_frame_probe(
+            &probe,
+            DecodeFactSource::isolated(Arc::clone(&handle)),
+            None,
+            &prepared,
+            7,
+        )
+        .expect("new lazy sidecar");
+    std::fs::write(&media, b"source changed before lazy frame observation").expect("change");
+    assert!(matches!(
+        replacement.document(None).await,
+        Err(DecodeFactError::SourceChanged)
+    ));
+    let changed_probe = cache
+        .source_frame_probe(
+            &probe,
+            DecodeFactSource::isolated(handle),
+            None,
+            &prepared,
+            7,
+        )
+        .expect("probe-bound sidecar");
+    executable(&path, &(script + "# changed parser image\n"));
+    assert!(matches!(
+        changed_probe.document(None).await,
+        Err(DecodeFactError::ProbeChanged)
+    ));
+}

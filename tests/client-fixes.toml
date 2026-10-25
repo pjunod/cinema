@@ -1,6 +1,51 @@
 version = 1
 enforce_after = "e8a910f"
 
+# PR #1276 review repairs: the trims label says all, some or none of the served frames.
+[[fixes]]
+id = "android.dv-creative-trims-partial-label"
+commits = ["d3db2f0f95c58114f4b215a5f58083f708954d48"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = 'else if (creativeTrimsPartial) "creative trims on some shots"'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun sdrReceiptRequiresItsGradeAndExportOperations()"
+
+[[fixes]]
+id = "apple.dv-creative-trims-partial-label"
+commits = []
+supplements = "android.dv-creative-trims-partial-label"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = 'creativeTrimsPartial ? "creative trims on some shots"'
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testSdrReceiptRequiresItsGradeAndProducesSdrMark() throws"
+
+# PR #1271 review repairs: source/test anchors only; execution receipts remain separate.
+[[fixes]]
+id = "android.processed-sdr-candidate-identity"
+commits = ["0e1e4224dfa0fce7cdca9a192d145dfd79d226c1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = 'grade !in listOf("sdr", "hdr10") || processed_hdr10 &&'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "processedSdrIdentityIsAdmittedOnlyForEncodedHevcCandidates"
+
+[[fixes]]
+id = "apple.processed-sdr-candidate-identity"
+commits = []
+supplements = "android.processed-sdr-candidate-identity"
+source = "clients/apple/Sources/Models.swift"
+source_anchor = 'processedHdr10 != true || (route == "encode" && plannedCodec == "hevc")'
+test = "clients/apple/Tests/AutoPreparedCandidateBindingTests.swift"
+test_anchor = "testProcessedSdrIdentityResolvesAutoWhileInvalidRouteCodecAndGradeDoNot"
+
+# PR #1274: restore the portrait iPhone guide despite the legacy schedule preference.
+[[fixes]]
+id = "apple.iphone-live-guide-grid"
+commits = ["0eec6b8e1e9eb6380a122c101aa7f7602dc52ef6"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".frame(width: geometry.size.width, height: headerHeight, alignment: .topLeading)"
+test = "clients/apple/UITests/LibraryRowsNavigationTests.swift"
+test_anchor = "testPortraitLiveGuideShowsMultipleChannelsDespiteLegacySchedulePreference"
+
 # PR #1265: physical Select commits the native tvOS timeline preview.
 [[fixes]]
 id = "apple.tv-timeline-native-select"
@@ -7495,3 +7540,46 @@ source = "clients/apple/Sources/LibraryView.swift"
 source_anchor = "Keep the preamble in the results scroll."
 test = "clients/apple/UITests/TVNavigationTests.swift"
 test_anchor = "testShowRowsKeepWholeCardsVisibleAtExtraLargeSize"
+
+
+# Direct-GPT DV client corrective commits: source/test anchors only.
+# Execution evidence remains bound to its recorded source.
+[[fixes]]
+id = "direct-gpt.dv-sdr-creative-trim-report"
+commits = ["4135eedb6d863eb1fa4a17c1e456618053f56f9e"]
+source = "crates/plurx-core/src/transcode/dv_processing.rs"
+source_anchor = "|| wire.creative_trims_applied"
+test = "crates/plurx-core/src/transcode/dv_processing/tests.rs"
+test_anchor = "fn sdr_owner_report_requires_its_grade_target_and_conversion_receipt()"
+
+[[fixes]]
+id = "direct-gpt.dv-sdr-client-receipt"
+commits = ["de82d36e7af11900a2dc9fe796d806ac34a629bd"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "!hdr10Enhanced && sdrProcessed && delivered == \"sdr\""
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun sdrReceiptRequiresItsGradeAndExportOperations()"
+
+[[fixes]]
+id = "direct-gpt.dv-typed-display-target-android"
+commits = ["9cec95b5b752b2df355e479c37a2bcac322562ef"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Models.kt"
+source_anchor = "\"DisplayTargetMapping:$nits\""
+test = "clients/android/app/src/test/java/tv/plurx/app/data/PlaybackEnhancementTest.kt"
+test_anchor = "fun displayTargetOperationObjectRetainsTheCurrentReport()"
+
+[[fixes]]
+id = "direct-gpt.dv-typed-display-target-apple"
+commits = ["696bc531f50c5c6b4d5b89d4ce5549a190eaa0e5"]
+source = "clients/apple/Sources/Models.swift"
+source_anchor = "if appliedOperations.contains(where: { $0.hasPrefix(\"DisplayTargetMapping:\")"
+test = "clients/apple/Tests/EffectiveProcessingPresentationTests.swift"
+test_anchor = "func testDisplayTargetOperationObjectRetainsCurrentReport() throws"
+
+[[fixes]]
+id = "direct-gpt.android-display-peak-provenance"
+commits = ["8be9a51a87e5308b20272ce9bda202513a8142bf"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "peak_source = peak?.source,"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun peakWireIsExplicitAndSnapshotDoesNotFollowLaterPreferences()"

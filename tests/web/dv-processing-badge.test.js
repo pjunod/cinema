@@ -205,3 +205,32 @@ test('a prepared successor adopts the enhancement on its action, null when absen
   gated.clearEffectiveProcessing(gated.PLAYER);
   assert.deepEqual(pills(gated),[],'FEL/RPU wait for a current effective_processing report');
 });
+
+
+test('current display-target mapping operation objects retain the accepted HDR10 report',()=>{
+  const context=setup();
+  context.PLAYER.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:1600}});
+  assert.equal(badge(context).arrow,'HDR10-E');
+  for(const operation of [{DisplayTargetMapping:{nits:100}}, {DisplayTargetMapping:{nits:'1600'}}, {DisplayTargetMapping:{nits:1600,other:1}}]) {
+    context.PLAYER.effectiveProcessing.applied_operations=[operation];
+    assert.equal(context.playerEffectiveProcessing(context.PLAYER),null);
+  }
+});
+
+
+test('SDR-E uses only the current typed 100-nit conversion report and clears on seek',()=>{
+  const context=setup(); const p=context.PLAYER;
+  p.deliveredRange='sdr'; p.effectiveProcessing={...report(),hdr10_enhanced:false,sdr_processed:true,
+    applied_operations:['RpuColorConversion','TargetMapping','Bt709Gamma24Conversion',{DisplayTargetMapping:{nits:100}}]};
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, L1 only/);
+  p.effectiveProcessing.creative_trims_applied=true; p.effectiveProcessing.applied_operations.splice(2,0,'CreativeTrimApplication');
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, creative trims applied/);
+  assert.doesNotMatch(badge(context).aria,/L1 only/);
+  p.effectiveProcessing.creative_trims_applied=false; p.effectiveProcessing.applied_operations.splice(2,1);
+  p.effectiveProcessing.creative_trims_partial=true;
+  assert.equal(badge(context).arrow,'SDR-E'); assert.match(badge(context).aria,/BT.709 gamma 2.4, creative trims on some shots/);
+  delete p.effectiveProcessing.creative_trims_partial;
+  p.effectiveProcessing.applied_operations.pop(); assert.equal(badge(context).arrow,'SDR');
+  p.effectiveProcessing.applied_operations.push({DisplayTargetMapping:{nits:100}});
+  context.clearEffectiveProcessing(p); assert.equal(badge(context).arrow,'SDR');
+});

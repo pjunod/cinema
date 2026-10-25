@@ -2398,6 +2398,7 @@ pub struct SettingsDto {
     pub dolby_vision_convert: bool,
     /// Requested preferences, default off; neither reports effective processing.
     pub dolby_vision_hdr_processing: bool,
+    pub dolby_vision_display_target: bool,
     pub dolby_vision_fel_reencode: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
@@ -2889,6 +2890,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::DV_CONVERT).as_deref(),
             true,
         ),
+        dolby_vision_display_target: plurx_core::store::stored_switch(
+            setting(keys::DV_DISPLAY_TARGET).as_deref(),
+            false,
+        ),
         dolby_vision_hdr_processing: plurx_core::store::stored_switch(
             setting(keys::DV_HDR_PROCESSING).as_deref(),
             false,
@@ -3185,6 +3190,7 @@ pub struct UpdateSettings {
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub dolby_vision_hdr_processing: Option<bool>,
+    pub dolby_vision_display_target: Option<bool>,
     pub dolby_vision_fel_reencode: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
@@ -3360,6 +3366,7 @@ impl UpdateSettings {
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.dolby_vision_hdr_processing.is_some()
+            || self.dolby_vision_display_target.is_some()
             || self.dolby_vision_fel_reencode.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
@@ -4392,6 +4399,12 @@ pub async fn update_settings(
     }
     // Persist requested preferences even while backend qualification is missing.
     // Runtime routing remains unchanged until a qualified implementation lands.
+    if let Some(on) = req.dolby_vision_display_target {
+        state
+            .store
+            .put_setting(keys::DV_DISPLAY_TARGET, if on { "1" } else { "0" })
+            .await?;
+    }
     if let Some(on) = req.dolby_vision_hdr_processing {
         state
             .store

@@ -44,6 +44,7 @@ const esc = (value) => String(value)
 let failures = 0, started = 0, finished = 0;
 const QUEUE = [];
 function test(name, run) { QUEUE.push({ name, run }); }
+const TEST_FILTER = process.env.SETTINGS_TEST_FILTER;
 
 test("media support warning remains prominent for a working encoder with missing required Metal", () => {
   const render = new Function("esc", `${shippedSource("ffmpegSupportWarning")}\nreturn ffmpegSupportWarning;`)(esc);
@@ -208,11 +209,22 @@ test("node transcoder save binds the request to the displayed node and preserves
   assert.equal(button.disabled,false);
 });
 async function main() {
+  // Test registrations continue below this call site; let the script finish
+  // loading before deciding which names to run.
+  await Promise.resolve();
+  const filters = TEST_FILTER ? TEST_FILTER.split("|") : [];
+  let matched = 0;
   for (const { name, run } of QUEUE) {
+    if (TEST_FILTER && !filters.some((part) => name.includes(part))) continue;
+    matched += 1;
     started += 1;
     try { await run(); process.stdout.write(`PASS ${name}\n`); }
     catch (error) { failures += 1; process.stderr.write(`FAIL ${name}\n${error && error.stack}\n`); }
     finished += 1;
+  }
+  if (TEST_FILTER && matched === 0) {
+    process.stderr.write(`No settings tests matched SETTINGS_TEST_FILTER=${TEST_FILTER}\n`);
+    failures += 1;
   }
 }
 
@@ -683,6 +695,7 @@ function developerPanels(){
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
       shippedSource("dolbyVisionHdrProcessingCard"), shippedSource("dolbyVisionFelReencodeCard"),
+      shippedSource("displayTargetHdr10Card"),
       shippedSource("sdrMasterCodecsCard"),
       // The main-merge defects build (2026-10-04): complete-output
       // preparation and rolling retention arrived with their Developer cards.
@@ -722,7 +735,7 @@ function developerPanels(){
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
       "const SERVER={cluster_enabled:true}, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
       shippedSource("settingsClusterEnabled"),
-      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
+      "const hdrDisplayPeakCard=()=>'',langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',subtitleStorePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'',analysisSummaryCard=()=>'';",
       // `directedChangeRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
       shippedSource("directedChangeRows"),
@@ -2201,6 +2214,7 @@ test("DV preferences stay independent and editable with unmet or unavailable rea
 
 test("DV preference saves roundtrip either choice and preserve advisory failures", async () => {
   for(const [name,cardName,field,id] of [
+    ["saveDisplayTargetHdr10","displayTargetHdr10Card","dolby_vision_display_target","dv-display-target"],
     ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
     ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
   ]) {
@@ -2208,7 +2222,7 @@ test("DV preference saves roundtrip either choice and preserve advisory failures
       const writes=[],nodes={[id]:{checked:false},[`${id}-error`]:{textContent:""},[`${id}-card`]:{outerHTML:""}};
       let reject=false;
       const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
-        `${shippedSource(name)} return ${name};`)(
+        `${shippedSource(name)}\nreturn ${name};`)(
         {getElementById:key=>{assert.ok(key in nodes);return nodes[key];}},
         async(path,request)=>{assert.equal(request.method,"PUT");writes.push([path,request.body]);if(reject)throw new Error("Write failed");return {...request.body,dolby_vision_convert:false};},
         value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings[field]}`;},readiness,()=>{});
@@ -2229,6 +2243,7 @@ test("DV preference saves roundtrip either choice and preserve advisory failures
 
 test("DV preference responses preserve newer edits and replacement cards", async () => {
   for(const [name,cardName,field,id] of [
+    ["saveDisplayTargetHdr10","displayTargetHdr10Card","dolby_vision_display_target","dv-display-target"],
     ["saveDolbyVisionHdrProcessing","dolbyVisionHdrProcessingCard","dolby_vision_hdr_processing","dv-hdr-processing"],
     ["saveDolbyVisionFelReencode","dolbyVisionFelReencodeCard","dolby_vision_fel_reencode","dv-fel-reencode"]
   ]) {
@@ -2239,7 +2254,7 @@ test("DV preference responses preserve newer edits and replacement cards", async
       let resolve,requested,cached;
       const pending=new Promise(done=>{resolve=done;});
       const save=new Function("document","api","cacheSettings",cardName,"DEVELOPER_READINESS","toast",
-        `${shippedSource(name)} return ${name};`)(
+        `${shippedSource(name)}\nreturn ${name};`)(
         {getElementById:key=>nodes[key]},
         (_path,request)=>{requested=request.body;return pending;},
         value=>{cached=value;return value;},()=>"saved:true",{},()=>{});
@@ -2274,4 +2289,19 @@ test("Mac processing exposes every independent implemented graph while preservin
   assert.equal(requirements.find(row=>row.id==="subtitle_burns").title,"SDR, HDR10 and HLG subtitle burns");
   assert.match(requirements.find(row=>row.id==="deinterlace").detail,/HDR interlaced sources keep the existing processing path/);
   assert.doesNotMatch(html,/Dolby Vision, HLG, burns and interlaced sources retain their existing routes/);
+});
+
+test("display targeting remains editable with unavailable or unmet advice",()=>{
+  const panels=developerPanels();
+  for(const readiness of [{unavailable:"offline"},{items:[{id:"dolby_vision_display_target",requirements:[{id:"dv_target_helper",status:"unmet",evidence:"helper absent"}]}]}]){
+    for(const enabled of [false,true]){
+      const html=panels.developerPanel({dolby_vision_display_target:enabled},readiness);
+      assert.match(html,new RegExp(`TOG:dv-display-target\\|[^|]*\\|[^|]*\\|checked=${enabled}`));
+      assert.match(html,/FOOT:saveDisplayTargetHdr10/);
+      assert.match(html,/creative trims \(CM v4 L8, CM v2\.9 L2\)/);
+      assert.match(html,/every shot, some shots or none/);
+      assert.match(html,/Pre-encodes and retained VOD stay master-only/);
+    }
+  }
+  assert.doesNotMatch(shippedSource("displayTargetHdr10Card"),/disabled/);
 });
