@@ -5,6 +5,7 @@ only GLSL builtins/literals to float C; this catches cancellation returning
 when the shader source changes. Actual shader compilation and driver parity
 remain the job of controls/run_dm_parity.py.
 """
+import ast
 import ctypes
 import json
 import math
@@ -96,6 +97,35 @@ class ShaderPQPrecision(unittest.TestCase):
             actual = self.lib.pq_eotf_ext(code)
             self.assertTrue(math.isfinite(actual))
             self.assertAlmostEqual(actual / expected, 1, delta=1e-4)
+
+
+class SyntheticChannelTolerance(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Extract the production scalar/array predicate without executing the
+        # controller CLI or needing NumPy, a GPU or private media.
+        script = ROOT / "tools/dv_processing/controls/run_dm_parity.py"
+        tree = ast.parse(script.read_text())
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "synthetic_channel_ok")
+        namespace = {}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(script), "exec"), namespace)
+        cls.match = staticmethod(namespace["synthetic_channel_ok"])
+
+    def test_synthetic_channel_tolerance_bounds_near_zero_light_error(self):
+        self.assertTrue(self.match(0.06922, 0, 0.128, 0, 2000))
+        self.assertFalse(self.match(0.06922, 0, 0.128, 0, 100))
+        self.assertFalse(self.match(0.06922, 0, 0.2, 0, 2000))
+        # Retain original well-conditioned PQ acceptance; a blanket linear
+        # bound would add an unrelated new restriction on bright channels.
+        self.assertTrue(self.match(0.42515, 0.42218, 40, 38.667, 2000))
+
+    def test_synthetic_channel_tolerance_rejects_invalid_outputs(self):
+        for bad in (-1, 1.2, math.inf, -math.inf, math.nan):
+            with self.subTest(bad=bad):
+                # Clipped EOTF/dE can hide invalid values. The predicate must
+                # reject them even when the supplied light difference is zero.
+                self.assertFalse(self.match(bad, 0, 0, 0, 2000))
+                self.assertFalse(self.match(0, bad, 0, 0, 2000))
 
 
 if __name__ == "__main__":

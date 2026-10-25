@@ -40,7 +40,15 @@ denominator clamps. GLSL provides no native `log1p` or `expm1`.
 
 The double reference and display-management model are unchanged. Method
 identity remains unchanged if final measurement confirms numerical precision
-only. No parity threshold has been changed.
+only. All real-case limits and synthetic dE limits are unchanged. The synthetic
+channel acceptance is extended to permit either the original error below
+0.05 PQ or a linear-light error below 1e-4 of the actual target peak, per
+channel. This measures a bounded near-black light discrepancy where PQ is
+poorly conditioned; it is not proof that all accepted error is rounding.
+The per-channel alternative preserves the original bright-channel acceptance
+instead of imposing a new blanket linear-light restriction. Both output
+rasters must be finite and in [0,1] before any acceptance calculation;
+otherwise EOTF clipping could hide an invalid output.
 
 ## 3. Near-black model — evidence before a correction
 
@@ -76,6 +84,11 @@ The committed source control build passed with `-Wall -Wextra -Werror`
 in the existing isolated dependency image. It did not execute tests. Scoped
 knowledge queries returned no reviewed coverage for these files; that is
 not proof of absent contracts.
+
+The independent adversarial agent reviewed source `4dd956372` against
+`9bcfa9ca1` and found no merge-blocking source issues. The same review
+assessed the measured synthetic residual and approved the guarded channel
+acceptance extension. No tests were executed by the reviewer.
 
 Pending. Unit suites and the ready-PR fast lane run after the one final
 adversarial review. Numerical exploration supplies model evidence during
